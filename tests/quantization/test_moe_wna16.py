@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.moe_wna16 import (
     MoeWNA16Config,
     MoeWNA16Method,
 )
+from vllm.platforms import current_platform
 
 
 def test_map_wna16_backend_supports_triton():
@@ -108,7 +109,11 @@ def test_wna16_oracle_rejects_incompatible_quant_structures(
     assert expected in reason
 
 
-def test_compressed_tensors_weights_are_transposed_for_triton():
+def test_compressed_tensors_nfirst_weights_pass_through_for_triton():
+    """CT provides N-first [E, N, K_packed] int32; Triton expects N-first uint8.
+
+    No transpose needed — just a view from int32 to uint8.
+    """
     quant_config = QuantizationArgs(
         num_bits=4,
         type=QuantizationType.INT,
@@ -117,10 +122,11 @@ def test_compressed_tensors_weights_are_transposed_for_triton():
         dynamic=False,
         group_size=32,
     )
-    w13 = torch.arange(16, dtype=torch.int32).reshape(1, 2, 8)
-    w2 = torch.arange(12, dtype=torch.int32).reshape(1, 2, 6)
-    w13_scale = torch.arange(32, dtype=torch.float16).reshape(1, 4, 8)
-    w2_scale = torch.arange(18, dtype=torch.float16).reshape(1, 3, 6)
+    # N-first layout: [E, N, K_packed]
+    w13 = torch.arange(16, dtype=torch.int32).reshape(1, 8, 2)
+    w2 = torch.arange(12, dtype=torch.int32).reshape(1, 6, 2)
+    w13_scale = torch.arange(32, dtype=torch.float16).reshape(1, 8, 4)
+    w2_scale = torch.arange(18, dtype=torch.float16).reshape(1, 6, 3)
 
     converted = convert_to_wna16_moe_kernel_format(
         backend=WNA16MoEBackend.TRITON,
@@ -134,10 +140,10 @@ def test_compressed_tensors_weights_are_transposed_for_triton():
     )
 
     assert converted is not None
-    assert torch.equal(converted[0], w13.transpose(1, 2).contiguous().view(torch.uint8))
-    assert torch.equal(converted[1], w2.transpose(1, 2).contiguous().view(torch.uint8))
-    assert torch.equal(converted[2], w13_scale.transpose(1, 2).contiguous())
-    assert torch.equal(converted[3], w2_scale.transpose(1, 2).contiguous())
+    assert torch.equal(converted[0], w13.contiguous().view(torch.uint8))
+    assert torch.equal(converted[1], w2.contiguous().view(torch.uint8))
+    assert torch.equal(converted[2], w13_scale)
+    assert torch.equal(converted[3], w2_scale)
 
 
 def test_moe_wna16_setup_forwards_selected_backend(monkeypatch):
@@ -203,3 +209,112 @@ def test_moe_wna16_uses_humming_quant_config(monkeypatch):
     )
 
     assert method.get_fused_moe_quant_config(layer) is quant_config
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Compressed-tensors Humming WNA16 MoE requires CUDA",
+)
+@pytest.mark.parametrize("num_bits", [3, 5, 6, 7])
+def test_compressed_tensors_wna16_moe_create_weights_uses_ceil_packed_shapes(
+    num_bits,
+):
+    pytest.importorskip("humming")
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+        CompressedTensorsWNA16MoEMethod,
+    )
+
+    quant_args = QuantizationArgs(
+        num_bits=num_bits,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.GROUP,
+        symmetric=True,
+        dynamic=False,
+        group_size=128,
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=2,
+        hidden_dim=256,
+        intermediate_size=512,
+    )
+    moe_config.moe_backend = "humming"
+    method = CompressedTensorsWNA16MoEMethod(quant_args, None, moe_config)
+    layer = torch.nn.Module()
+
+    method.create_weights(
+        layer,
+        num_experts=2,
+        hidden_size=256,
+        intermediate_size_per_partition=512,
+        params_dtype=torch.float16,
+        intermediate_size_full=512,
+    )
+
+    packed_hidden = (256 * num_bits + 31) // 32
+    packed_intermediate = (512 * num_bits + 31) // 32
+    assert method.wna16_backend == WNA16MoEBackend.HUMMING
+    assert layer.w13_weight_packed.shape == (2, 1024, packed_hidden)
+    assert layer.w2_weight_packed.shape == (2, 256, packed_intermediate)
+    assert layer.w13_weight_scale.shape == (2, 1024, 2)
+    assert layer.w2_weight_scale.shape == (2, 256, 4)
+    assert layer.w13_weight_packed.dtype is torch.int32
+    assert layer.w2_weight_scale.dtype is torch.float16
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Compressed-tensors Humming WNA16 MoE requires CUDA",
+)
+def test_compressed_tensors_wna16_moe_converts_and_sets_up_humming_kernel():
+    pytest.importorskip("humming")
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+        CompressedTensorsWNA16MoEMethod,
+    )
+
+    quant_args = QuantizationArgs(
+        num_bits=3,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.GROUP,
+        symmetric=True,
+        dynamic=False,
+        group_size=128,
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=2,
+        hidden_dim=256,
+        intermediate_size=512,
+    )
+    moe_config.moe_backend = "humming"
+    method = CompressedTensorsWNA16MoEMethod(quant_args, None, moe_config)
+    layer = torch.nn.Module()
+    layer.moe_config = moe_config
+    layer.params_dtype = torch.bfloat16
+    layer.layer_name = "test.humming_moe"
+    layer._expert_routing_tables = lambda: (None, None, None)
+
+    method.create_weights(
+        layer,
+        num_experts=2,
+        hidden_size=256,
+        intermediate_size_per_partition=512,
+        intermediate_size_full=512,
+        params_dtype=torch.bfloat16,
+    )
+    layer.cuda()
+    for parameter in layer.parameters():
+        parameter.data.zero_()
+
+    method.process_weights_after_loading(layer)
+
+    assert method.wna16_backend == WNA16MoEBackend.HUMMING
+    assert method.moe_kernel is not None
+    assert set(layer.weight_schemas) == {"w13", "w2"}
+    assert set(layer.humming_configs) == {"w13", "w2"}
+    assert not hasattr(layer, "w13_weight_packed")
+    assert not hasattr(layer, "w2_weight_packed")
+    assert layer.w13_weight.dtype is torch.int32
+    assert layer.w2_weight.dtype is torch.int32

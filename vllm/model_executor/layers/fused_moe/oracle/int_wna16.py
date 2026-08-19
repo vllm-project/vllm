@@ -1104,9 +1104,21 @@ def _humming_wna16_weight_schema(
             "desc_act": quant_config.desc_act,
             "sym": quant_config.is_sym,
         }
+    if isinstance(quant_config, QuantizationArgs):
+        quant_type = getattr(quant_config.type, "value", quant_config.type)
+        quant_strategy = getattr(quant_config.strategy, "value", quant_config.strategy)
+        return {
+            "quant_method": "compressed-tensors",
+            "format": "pack-quantized",
+            "type": str(quant_type),
+            "num_bits": quant_config.num_bits,
+            "strategy": str(quant_strategy),
+            "group_size": quant_config.group_size,
+            "symmetric": quant_config.symmetric,
+        }
     raise TypeError(
-        "Humming WNA16 checkpoint schema requires AutoAWQConfig or "
-        "AutoGPTQConfig, "
+        "Humming WNA16 checkpoint schema requires AutoAWQConfig, "
+        "AutoGPTQConfig or QuantizationArgs, "
         f"got {type(quant_config).__name__}."
     )
 
@@ -1528,6 +1540,17 @@ def convert_to_wna16_moe_kernel_format(
             if w13_g_idx is None or w2_g_idx is None:
                 raise ValueError("GPTQ Marlin MoE requires g_idx tensors.")
 
+            # CT loads in N-first format; transpose to K-first for Marlin.
+            if isinstance(quant_config, QuantizationArgs):
+                w13 = w13.transpose(1, 2).contiguous()
+                w2 = w2.transpose(1, 2).contiguous()
+                w13_scale = w13_scale.transpose(1, 2).contiguous()
+                w2_scale = w2_scale.transpose(1, 2).contiguous()
+                if w13_qzeros is not None:
+                    w13_qzeros = w13_qzeros.transpose(1, 2).contiguous()
+                if w2_qzeros is not None:
+                    w2_qzeros = w2_qzeros.transpose(1, 2).contiguous()
+
             return _process_weights_marlin(
                 layer,
                 input_dtype,
@@ -1547,6 +1570,16 @@ def convert_to_wna16_moe_kernel_format(
                 w2_bias,
             )
     elif backend == WNA16MoEBackend.CPU:
+        # CT loads in N-first format; CPU handler expects K-first.
+        if isinstance(quant_config, QuantizationArgs):
+            w13 = w13.transpose(1, 2).contiguous()
+            w2 = w2.transpose(1, 2).contiguous()
+            w13_scale = w13_scale.transpose(1, 2).contiguous()
+            w2_scale = w2_scale.transpose(1, 2).contiguous()
+            if w13_qzeros is not None:
+                w13_qzeros = w13_qzeros.transpose(1, 2).contiguous()
+            if w2_qzeros is not None:
+                w2_qzeros = w2_qzeros.transpose(1, 2).contiguous()
         return _process_weights_cpu(
             quant_config,
             w13,
@@ -1573,6 +1606,12 @@ def convert_to_wna16_moe_kernel_format(
         )
     elif backend == WNA16MoEBackend.XPU:
         assert quant_config is not None
+        # CT loads in N-first format; XPU handler expects K-first.
+        if isinstance(quant_config, QuantizationArgs):
+            w13 = w13.transpose(1, 2).contiguous()
+            w2 = w2.transpose(1, 2).contiguous()
+            w13_scale = w13_scale.transpose(1, 2).contiguous()
+            w2_scale = w2_scale.transpose(1, 2).contiguous()
         (
             w13_xpu,
             w2_xpu,
@@ -1619,6 +1658,16 @@ def convert_to_wna16_moe_kernel_format(
                 w13_qzeros,
                 w2_qzeros,
             )
+        # CT loads in N-first format; emulation handler expects K-first.
+        if isinstance(quant_config, QuantizationArgs):
+            w13 = w13.transpose(1, 2).contiguous()
+            w2 = w2.transpose(1, 2).contiguous()
+            w13_scale = w13_scale.transpose(1, 2).contiguous()
+            w2_scale = w2_scale.transpose(1, 2).contiguous()
+            if w13_qzeros is not None:
+                w13_qzeros = w13_qzeros.transpose(1, 2).contiguous()
+            if w2_qzeros is not None:
+                w2_qzeros = w2_qzeros.transpose(1, 2).contiguous()
         return _process_weights_emulation_gptq(
             w13,
             w2,
@@ -1628,41 +1677,26 @@ def convert_to_wna16_moe_kernel_format(
             w2_qzeros,
         )
     elif backend == WNA16MoEBackend.TRITON:
-        # Two possible input layouts depending on the quantization source:
+        # Three possible input layouts:
         #
-        # MoeWNA16 (uint8):              (E, N_out, K // bit8_pack)  — N-first
-        #   → just view as uint8 (no-op)
-        #
-        # AutoGPTQ/compressed-tensors (int32, K-first):
-        #   (E, K // pack32, N_out)
-        #   → transpose to N-first, then view as uint8 to get
-        #     (E, N_out, K // bit8_pack)  [int32 = 4 bytes → 4 uint8s]
-        #   Scales: (E, K // gs, N_out) → transpose → (E, N_out, K // gs)
+        # MoeWNA16 (uint8, N-first):  (E, N_out, K // bit8_pack) → view as-is
+        # CT (int32, N-first):        (E, N_out, K // pack32)    → view as uint8
+        # AutoGPTQ (int32, K-first):  (E, K // pack32, N_out)    → transpose,
+        #                                                           view as uint8
         from vllm.model_executor.layers.quantization.auto_gptq import (
             AutoGPTQConfig,
         )
 
-        if isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
-            # These integrations build in K-first format even when the Triton
-            # backend is selected. Transpose to N-first first.
+        if isinstance(quant_config, AutoGPTQConfig):
+            # GPTQ: K-first int32 → transpose to N-first, view as uint8
             w13_uint8 = w13.transpose(1, 2).contiguous().view(torch.uint8)
             w2_uint8 = w2.transpose(1, 2).contiguous().view(torch.uint8)
             w13_scale = w13_scale.transpose(1, 2).contiguous()
             w2_scale = w2_scale.transpose(1, 2).contiguous()
-            # Zero points from compressed-tensors checkpoints are K-first int32
+            # Zero points from GPTQ checkpoints are K-first int32
             # with 8 int4 ZPs packed per element: shape (E, K//gs, N//8).
             # fused_moe_kernel_gptq_awq expects N-first uint8 with 2 int4 ZPs
-            # per byte: shape (E, N//2, K//gs), indexed as
-            # (offs_bn // 2) * stride_bzn + offs_k_group * stride_bzk.
-            # Conversion steps:
-            #   (E, K//gs, N//8) int32
-            #   → transpose(1,2) → (E, N//8, K//gs) int32
-            #   → view(uint8)    → (E, N//8, K//gs*4)  [each int32 → 4 bytes]
-            #   → reshape(…,4)   → (E, N//8, K//gs, 4) [isolate byte index]
-            #   → permute(0,1,3,2) → (E, N//8, 4, K//gs) [byte index before K]
-            #   → reshape         → (E, N//2, K//gs)   [kernel expected layout]
-            # After this, element [e, offs_bn//2, k_group] is the uint8 byte
-            # holding the two int4 ZPs for output channels offs_bn and offs_bn+1.
+            # per byte: shape (E, N//2, K//gs).
             if w13_qzeros is not None:
                 E13, Kg13, Np13 = w13_qzeros.shape
                 w13_qzeros = (
@@ -1685,8 +1719,12 @@ def convert_to_wna16_moe_kernel_format(
                     .reshape(E2, Np2 * 4, Kg2)
                     .contiguous()
                 )
+        elif isinstance(quant_config, QuantizationArgs):
+            # CT: already N-first int32, reinterpret as uint8
+            w13_uint8 = w13.contiguous().view(torch.uint8)
+            w2_uint8 = w2.contiguous().view(torch.uint8)
         else:
-            # MoeWNA16 uses N-first uint8 weights and scales.
+            # MoeWNA16: N-first uint8 weights and scales.
             w13_uint8 = w13.view(torch.uint8)
             w2_uint8 = w2.view(torch.uint8)
         return (

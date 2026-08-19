@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+from fractions import Fraction
 from typing import Any
 
 import torch
@@ -40,7 +42,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    ScaleDesc,
     kInt4Static32GroupScale,
     kInt4StaticGroupScale,
     kInt8StaticGroupScale,
@@ -64,7 +68,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         # Extract properties from weight_quant
         self.symmetric = weight_quant.symmetric
         self.num_bits = weight_quant.num_bits
-        self.packed_factor = 32 // weight_quant.num_bits
+        self.packed_factor = Fraction(32, weight_quant.num_bits)
         self.strategy = weight_quant.strategy
         self.group_size = weight_quant.group_size
         self.actorder = weight_quant.actorder
@@ -82,11 +86,16 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             else:
                 scale = kInt4StaticGroupScale
         elif self.num_bits == 8:
-            assert self.group_size == -1
             scale = kInt8StaticGroupScale
         else:
-            raise ValueError(
-                "CompressedTensorsWNA16MoEMethod only supports int4 and int8 now."
+            scale = ScaleDesc(
+                dtype=torch.float16,
+                static=True,
+                group_shape=(
+                    GroupShape.PER_CHANNEL
+                    if self.group_size == -1
+                    else GroupShape(row=1, col=self.group_size)
+                ),
             )
 
         weight_key = QuantKey(self.quant_type, scale, symmetric=self.symmetric)
@@ -110,7 +119,10 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             WNA16MoEBackend.MARLIN,
             WNA16MoEBackend.BATCHED_MARLIN,
         ]
-        self.is_transposed = self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM
+        # CT checkpoints always load in N-first format [E, N, K_packed].
+        # Backend-specific transposition is handled in
+        # convert_to_wna16_moe_kernel_format.
+        self.is_transposed = False
 
         if self.is_marlin:
             assert check_moe_marlin_supports_config(
@@ -123,8 +135,13 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             # grouped actorder isn't supported by this kernel
             assert weight_quant.actorder != "group"
 
+            assert self.symmetric, "Only symmetric quantization is supported for MoE"
+
             # Non-Marlin WNA16 always uses bf16/fp16 inputs
             self.input_dtype = torch.bfloat16
+
+    def _packed_dim(self, dim: int) -> int:
+        return math.ceil(dim * self.num_bits / 32)
 
     def get_weight_shape(
         self,
@@ -135,11 +152,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         num_groups_w2: int | None = None,
         num_groups_w13: int | None = None,
     ) -> tuple[int, int, int]:
-        """
-        Get the shape of the weight based on the weight name, number of experts
-        hidden size, intermediate size per partition, number of groups for w2,
-        and number of groups for w13. Pass in num_groups_w2 and num_groups_w13
-        for weight scales/zero_points.
+        """Return N-first buffer shape for the given weight/scale/zp tensor.
+
+        All CT MoE weights are allocated in the checkpoint's native N-first
+        layout ``[E, N, K_packed]``. Backend-specific transposition (e.g. to
+        Marlin's K-first layout) is deferred to
+        ``convert_to_wna16_moe_kernel_format``.
         """
         if weight_name in ("w13_scale", "w13_zp"):
             assert num_groups_w13 is not None, (
@@ -150,66 +168,24 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 "num_groups_w2 must be provided for weight scales/zero_points"
             )
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
-        shape_map = {
-            "w13_weight": {
-                "Flashinfer": (
-                    num_experts,
-                    w13_num_shards * intermediate_size_per_partition,
-                    hidden_size // self.packed_factor,
-                ),
-                "Marlin": (
-                    num_experts,
-                    hidden_size // self.packed_factor,
-                    w13_num_shards * intermediate_size_per_partition,
-                ),
-            },
-            "w13_scale": {
-                "Flashinfer": (
-                    num_experts,
-                    w13_num_shards * intermediate_size_per_partition,
-                    num_groups_w13,
-                ),
-                "Marlin": (
-                    num_experts,
-                    num_groups_w13,
-                    w13_num_shards * intermediate_size_per_partition,
-                ),
-            },
-            "w13_zp": {
-                "Marlin": (
-                    num_experts,
-                    num_groups_w13,
-                    w13_num_shards
-                    * intermediate_size_per_partition
-                    // self.packed_factor,
-                ),
-            },
-            "w2_weight": {
-                "Flashinfer": (
-                    num_experts,
-                    hidden_size,
-                    intermediate_size_per_partition // self.packed_factor,
-                ),
-                "Marlin": (
-                    num_experts,
-                    intermediate_size_per_partition // self.packed_factor,
-                    hidden_size,
-                ),
-            },
-            "w2_scale": {
-                "Flashinfer": (num_experts, hidden_size, num_groups_w2),
-                "Marlin": (num_experts, num_groups_w2, hidden_size),
-            },
-            "w2_zp": {
-                "Marlin": (
-                    num_experts,
-                    num_groups_w2,
-                    hidden_size // self.packed_factor,
-                ),
-            },
+        w13_n = w13_num_shards * intermediate_size_per_partition
+        shape_map: dict[str, tuple[int, int, int]] = {
+            "w13_weight": (num_experts, w13_n, self._packed_dim(hidden_size)),
+            "w13_scale": (num_experts, w13_n, num_groups_w13),
+            "w13_zp": (num_experts, self._packed_dim(w13_n), num_groups_w13),
+            "w2_weight": (
+                num_experts,
+                hidden_size,
+                self._packed_dim(intermediate_size_per_partition),
+            ),
+            "w2_scale": (num_experts, hidden_size, num_groups_w2),
+            "w2_zp": (
+                num_experts,
+                self._packed_dim(hidden_size),
+                num_groups_w2,
+            ),
         }
-        backend_key = "Marlin" if self.is_transposed else "Flashinfer"
-        return shape_map[weight_name][backend_key]
+        return shape_map[weight_name]
 
     @staticmethod
     def _w2_scale_sharding(
@@ -245,11 +221,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     ):
         intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
 
-        # Will transpose the loaded weight along the
-        # intermediate and hidden dim sizes. Will
-        # shard for TP along the transposed dims
         extra_weight_attrs.update(
-            {"is_transposed": self.is_transposed, "quant_method": self.strategy}
+            {"is_transposed": False, "quant_method": self.strategy}
         )
 
         w13_weight = torch.nn.Parameter(
@@ -484,6 +457,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.wna16_backend,
             routing_tables=layer._expert_routing_tables(),
             **marlin_args,
         )
@@ -587,6 +561,17 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        if self.wna16_backend == WNA16MoEBackend.HUMMING:
+            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+                get_humming_moe_quant_config,
+            )
+
+            return get_humming_moe_quant_config(
+                layer,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            )
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
