@@ -16,6 +16,7 @@ from tests.quantization.utils import is_quant_method_supported
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.model import ModelConfig
 from vllm.model_executor.kernels.linear import (
+    FlashInferCuteDslNvFp4W4A16LinearKernel,
     HummingNvFp4LinearKernel,
     MarlinNvFp4LinearKernel,
 )
@@ -524,10 +525,19 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
 
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
-    [("auto", MarlinNvFp4LinearKernel), ("humming", HummingNvFp4LinearKernel)],
+    [
+        ("auto", MarlinNvFp4LinearKernel),
+        ("humming", HummingNvFp4LinearKernel),
+        ("flashinfer_cutedsl", FlashInferCuteDslNvFp4W4A16LinearKernel),
+    ],
 )
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
+    if linear_backend != "auto":
+        is_supported, reason = kernel_cls.is_supported()
+        if not is_supported:
+            pytest.skip(reason)
+
     vllm_config = VllmConfig()
     vllm_config.kernel_config.linear_backend = linear_backend
     with set_current_vllm_config(vllm_config):

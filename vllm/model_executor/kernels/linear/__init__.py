@@ -267,6 +267,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     },
     "flashinfer_cutedsl": {
         FlashInferCuteDslNvFp4LinearKernel,
+        FlashInferCuteDslNvFp4W4A16LinearKernel,
         FlashInferCutedslMxfp8LinearKernel,
     },
     "flashinfer_trtllm": {
@@ -526,6 +527,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferCuteDslNvFp4LinearKernel,
+        FlashInferCuteDslNvFp4W4A16LinearKernel,
         FlashInferCutlassNvFp4LinearKernel,
         FlashInferB12xNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
@@ -1014,6 +1016,8 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         MarlinNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
     )
+    # Weight-only GEMM. Must not run for W4A4 (activation-quantized) NVFP4.
+    a16_only_kernels = (FlashInferCuteDslNvFp4W4A16LinearKernel,)
 
     # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
     # batch-invariant CUTLASS implementation when available, otherwise fall
@@ -1050,18 +1054,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
             )
             force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto" and use_a16:
-        _cc = current_platform.get_device_capability()
-        if _cc is not None:
-            compute_capability = _cc.to_int()
-        # Weight-only: prefer FlashInfer CuTe-DSL W4A16 on SM100/103,
-        # otherwise Marlin.
-        cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
-            compute_capability
-        )
-        if compute_capability in (100, 103) and cutedsl_ok:
-            force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
-        else:
-            force_kernel = MarlinNvFp4LinearKernel
+        force_kernel = MarlinNvFp4LinearKernel
 
     if force_kernel is not None:
         if use_a16 and force_kernel not in a16_kernels:
@@ -1080,6 +1073,8 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     possible = list(_POSSIBLE_NVFP4_KERNELS.get(platform, []))
     if use_a16:
         possible = [kernel for kernel in possible if kernel in a16_kernels]
+    else:
+        possible = [kernel for kernel in possible if kernel not in a16_only_kernels]
 
     # Apply --linear-backend filtering when set.
     possible = _resolve_backend_kernels(possible, "NVFP4")
