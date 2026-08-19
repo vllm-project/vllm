@@ -848,7 +848,7 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
-def test_flashinfer_native_prefill_with_sinks():
+def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
     if not (
         current_platform.is_cuda() and current_platform.is_device_capability_family(120)
     ):
