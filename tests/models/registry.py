@@ -1250,6 +1250,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
         "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
+    # TODO: Change repo id once pertinent archs are public.
+    "NemotronH_Omni_Reasoning_V3": _HfExamplesInfo(
+        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
+    ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
         trust_remote_code=True,
@@ -1678,6 +1682,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
         trust_remote_code=True,
+    ),
+    "DeepseekV32MTPModel": _HfExamplesInfo(
+        "nvidia/DeepSeek-V3.2-NVFP4",
+        speculative_model="nvidia/DeepSeek-V3.2-NVFP4",
+        is_available_online=False,
     ),
     "DeepSeekV4MTPModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash",
