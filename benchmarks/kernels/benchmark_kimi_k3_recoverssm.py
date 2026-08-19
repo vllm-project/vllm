@@ -109,11 +109,12 @@ class Inputs:
         tp_size: int,
         verify_config: KernelConfig = DEFAULT_VERIFY_CONFIG,
         recover_config: KernelConfig = DEFAULT_RECOVER_CONFIG,
+        boundary_token: int | None = None,
     ) -> None:
         h = local_num_heads(tp_size)
         d = KIMI_K3_HEAD_DIM
         tokens = batch * spec_query_len
-        slots = batch + 1
+        slots = 3 * batch + 1
         dtype = torch.bfloat16
         device = "cuda"
         self.batch = batch
@@ -121,6 +122,7 @@ class Inputs:
         self.h = h
         self.verify_config = verify_config
         self.recover_config = recover_config
+        self.boundary_token = boundary_token
         self.mixed_qkv_source = torch.randn(
             tokens, 3 * h * d, device=device, dtype=dtype
         )
@@ -132,6 +134,16 @@ class Inputs:
             0, tokens + 1, spec_query_len, device=device, dtype=torch.int32
         )
         self.state_indices = torch.arange(1, batch + 1, device=device, dtype=torch.int32)
+        self.block_table = torch.stack(
+            (
+                torch.arange(batch + 1, 2 * batch + 1, device=device, dtype=torch.int32),
+                torch.arange(2 * batch + 1, 3 * batch + 1, device=device, dtype=torch.int32),
+            ),
+            dim=1,
+        )
+        self.num_computed_tokens = torch.zeros(batch, device=device, dtype=torch.int32)
+        if boundary_token:
+            self.num_computed_tokens.fill_(spec_query_len - boundary_token)
         self.accepted = torch.ones(batch, device=device, dtype=torch.int32)
         self.weights = torch.randn(3 * h * d, CONV_WIDTH, device=device, dtype=dtype)
         self.bias = torch.randn(3 * h * d, device=device, dtype=dtype)
@@ -203,6 +215,11 @@ class Inputs:
             self.accepted,
             self.state_indices,
             self.query_start_loc,
+            block_table=self.block_table if self.boundary_token is not None else None,
+            num_computed_tokens=(
+                self.num_computed_tokens if self.boundary_token is not None else None
+            ),
+            mamba_block_size=self.t if self.boundary_token is not None else None,
             value_block_size=self.recover_config.value_slice,
             num_warps=self.recover_config.num_warps,
         )
@@ -231,9 +248,12 @@ def _compile_warmup_worker(
     tp_size: int,
     verify_config: KernelConfig,
     recover_config: KernelConfig,
+    boundary_token: int | None,
     mode: str,
 ) -> None:
-    inputs = Inputs(batch, spec_query_len, tp_size, verify_config, recover_config)
+    inputs = Inputs(
+        batch, spec_query_len, tp_size, verify_config, recover_config, boundary_token
+    )
     inputs.warm_projection_output()
     if mode == "verify":
         inputs.verify()
@@ -249,6 +269,7 @@ def compile_warmup(
     tp_size: int,
     verify_configs: tuple[KernelConfig, ...],
     recover_configs: tuple[KernelConfig, ...],
+    boundary_token: int | None,
     workers: int,
 ) -> None:
     if workers <= 0:
@@ -272,6 +293,7 @@ def compile_warmup(
                 tp_size,
                 verify_config,
                 recover_config,
+                boundary_token,
                 mode,
             )
             for batch, verify_config, recover_config, mode in jobs
@@ -333,6 +355,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verify-num-warps", default="4")
     parser.add_argument("--recover-value-slices", default="16")
     parser.add_argument("--recover-num-warps", default="1")
+    parser.add_argument("--boundary-token", nargs="?", const=0, default=None, type=int)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--compile-workers", type=int, default=4)
@@ -364,12 +387,15 @@ def main() -> None:
     )
     if any(value < 0 or value > spec_query_len for value in accepted_tokens):
         raise ValueError("accepted tokens must be in [0, T]")
+    if args.boundary_token is not None and not 0 <= args.boundary_token <= spec_query_len:
+        raise ValueError("boundary token must be in [0, T]")
     l2_flush = torch.empty(L2_FLUSH_FLOATS, device="cuda", dtype=torch.float32)
     print(
         f"RecoverSSM benchmark: heads={local_num_heads(args.tp_size)}, "
         f"head_dim={KIMI_K3_HEAD_DIM}, T={spec_query_len}, batches={batch_sizes}, "
         f"accepted={accepted_tokens}, verify={verify_configs}, "
-        f"recover={recover_configs}, device={torch.cuda.get_device_name()}"
+        f"recover={recover_configs}, boundary_token={args.boundary_token}, "
+        f"device={torch.cuda.get_device_name()}"
     )
     compile_warmup(
         batch_sizes,
@@ -378,6 +404,7 @@ def main() -> None:
         args.tp_size,
         verify_configs,
         recover_configs,
+        args.boundary_token,
         min(args.compile_workers, len(batch_sizes) * (len(verify_configs) + len(recover_configs))),
     )
     for batch in batch_sizes:
@@ -407,6 +434,7 @@ def main() -> None:
                 spec_query_len,
                 args.tp_size,
                 recover_config=recover_config,
+                boundary_token=args.boundary_token,
             )
             for accepted in accepted_tokens:
                 commit_graph = capture_graph(
@@ -418,7 +446,8 @@ def main() -> None:
                     commit_graph,
                     tag=(
                         f"commit batch={batch} accepted={accepted} "
-                        f"BV={recover_config.value_slice} warps={recover_config.num_warps}"
+                        f"boundary={args.boundary_token} BV={recover_config.value_slice} "
+                        f"warps={recover_config.num_warps}"
                     ),
                     targets=(
                         "_prepare_commit_plan_kernel",

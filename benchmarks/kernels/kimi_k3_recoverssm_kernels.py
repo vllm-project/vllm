@@ -510,7 +510,14 @@ def _commit_kda_state_kernel(
         other=0.0,
     ).to(tl.float32)
     state = initial_state
-    boundary_state = initial_state
+    if ALIGN_MODE:
+        boundary_ptrs = (
+            state_ptr
+            + boundary_state_idx * state_block_stride
+            + pid_h * stride_state_head
+            + offs_v[:, None] * stride_state_v
+            + offs_k[None, :] * stride_state_k
+        )
 
     for token_offset in range(commit_len):
         correction_ptr = (
@@ -544,25 +551,8 @@ def _commit_kda_state_kernel(
         update = correction[:, None] * normalized_k[None, :]
         state = state * decay[None, :] + update
         if ALIGN_MODE:
-            boundary_state = tl.where(
-                token_offset == boundary_recovery_len - 1,
-                state,
-                boundary_state,
-            )
-
-    if ALIGN_MODE:
-        boundary_ptrs = (
-            state_ptr
-            + boundary_state_idx * state_block_stride
-            + pid_h * stride_state_head
-            + offs_v[:, None] * stride_state_v
-            + offs_k[None, :] * stride_state_k
-        )
-        tl.store(
-            boundary_ptrs,
-            boundary_state,
-            mask=mask_state & (boundary_state_idx > null_block_id),
-        )
+            if token_offset == boundary_recovery_len - 1:
+                tl.store(boundary_ptrs, state)
 
     final_ptrs = (
         state_ptr
