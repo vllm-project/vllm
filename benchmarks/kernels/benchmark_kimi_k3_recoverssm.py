@@ -91,8 +91,15 @@ class KernelConfig:
     num_warps: int
 
 
+@dataclass(frozen=True)
+class ConvConfig:
+    channel_slice: int
+    num_warps: int
+
+
 DEFAULT_VERIFY_CONFIG = KernelConfig(32, 4)
 DEFAULT_RECOVER_CONFIG = KernelConfig(16, 1)
+DEFAULT_CONV_CONFIG = ConvConfig(256, 4)
 
 
 def local_num_heads(tp_size: int) -> int:
@@ -109,6 +116,7 @@ class Inputs:
         tp_size: int,
         verify_config: KernelConfig = DEFAULT_VERIFY_CONFIG,
         recover_config: KernelConfig = DEFAULT_RECOVER_CONFIG,
+        conv_config: ConvConfig = DEFAULT_CONV_CONFIG,
         boundary_token: int | None = None,
         use_pdl: bool = False,
     ) -> None:
@@ -123,6 +131,7 @@ class Inputs:
         self.h = h
         self.verify_config = verify_config
         self.recover_config = recover_config
+        self.conv_config = conv_config
         self.boundary_token = boundary_token
         self.use_pdl = use_pdl
         self.mixed_qkv_source = torch.randn(
@@ -224,6 +233,8 @@ class Inputs:
             mamba_block_size=self.t if self.boundary_token is not None else None,
             value_block_size=self.recover_config.value_slice,
             num_warps=self.recover_config.num_warps,
+            conv_block_d=self.conv_config.channel_slice,
+            conv_num_warps=self.conv_config.num_warps,
             use_pdl=self.use_pdl,
         )
 
@@ -251,12 +262,20 @@ def _compile_warmup_worker(
     tp_size: int,
     verify_config: KernelConfig,
     recover_config: KernelConfig,
+    conv_config: ConvConfig,
     boundary_token: int | None,
     use_pdl: bool,
     mode: str,
 ) -> None:
     inputs = Inputs(
-        batch, spec_query_len, tp_size, verify_config, recover_config, boundary_token, use_pdl
+        batch,
+        spec_query_len,
+        tp_size,
+        verify_config=verify_config,
+        recover_config=recover_config,
+        conv_config=conv_config,
+        boundary_token=boundary_token,
+        use_pdl=use_pdl,
     )
     inputs.warm_projection_output()
     if mode == "verify":
@@ -273,6 +292,7 @@ def compile_warmup(
     tp_size: int,
     verify_configs: tuple[KernelConfig, ...],
     recover_configs: tuple[KernelConfig, ...],
+    conv_configs: tuple[ConvConfig, ...],
     boundary_token: int | None,
     use_pdl: bool,
     workers: int,
@@ -280,11 +300,13 @@ def compile_warmup(
     if workers <= 0:
         return
     jobs = [
-        (batch, config, DEFAULT_RECOVER_CONFIG, "verify")
+        (batch, config, DEFAULT_RECOVER_CONFIG, DEFAULT_CONV_CONFIG, "verify")
         for batch, config in product(batch_sizes, verify_configs)
     ] + [
-        (batch, DEFAULT_VERIFY_CONFIG, config, "recover")
-        for batch, config in product(batch_sizes, recover_configs)
+        (batch, DEFAULT_VERIFY_CONFIG, recover_config, conv_config, "recover")
+        for batch, recover_config, conv_config in product(
+            batch_sizes, recover_configs, conv_configs
+        )
     ]
     print(f"compile warmup: {len(jobs)} configurations across {workers} processes")
     context = mp.get_context("spawn")
@@ -298,11 +320,12 @@ def compile_warmup(
                 tp_size,
                 verify_config,
                 recover_config,
+                conv_config,
                 boundary_token,
                 use_pdl,
                 mode,
             )
-            for batch, verify_config, recover_config, mode in jobs
+            for batch, verify_config, recover_config, conv_config, mode in jobs
         ]
         for future in futures:
             future.result()
@@ -361,6 +384,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verify-num-warps", default="4")
     parser.add_argument("--recover-value-slices", default="16")
     parser.add_argument("--recover-num-warps", default="1")
+    parser.add_argument("--conv-channel-slices", default="256")
+    parser.add_argument("--conv-num-warps", default="4")
     parser.add_argument("--boundary-token", nargs="?", const=0, default=None, type=int)
     parser.add_argument("--pdl", action="store_true")
     parser.add_argument("--warmup", type=int, default=20)
@@ -379,6 +404,18 @@ def parse_kernel_configs(value_slices: str, num_warps: str) -> tuple[KernelConfi
     return tuple(KernelConfig(value, warps) for value, warps in product(values, warps))
 
 
+def parse_conv_configs(
+    channel_slices: str, num_warps: str
+) -> tuple[ConvConfig, ...]:
+    values = tuple(int(value) for value in channel_slices.split(","))
+    warps = tuple(int(value) for value in num_warps.split(","))
+    if any(value <= 0 or value & (value - 1) for value in values):
+        raise ValueError("conv channel slices must be positive powers of two")
+    if any(value <= 0 for value in warps):
+        raise ValueError("conv num_warps must be positive")
+    return tuple(ConvConfig(value, warps) for value, warps in product(values, warps))
+
+
 def main() -> None:
     args = parse_args()
     spec_query_len = args.num_speculative_tokens + 1
@@ -392,6 +429,9 @@ def main() -> None:
     recover_configs = parse_kernel_configs(
         args.recover_value_slices, args.recover_num_warps
     )
+    conv_configs = parse_conv_configs(
+        args.conv_channel_slices, args.conv_num_warps
+    )
     if any(value < 0 or value > spec_query_len for value in accepted_tokens):
         raise ValueError("accepted tokens must be in [0, T]")
     if args.boundary_token is not None and not 0 <= args.boundary_token <= spec_query_len:
@@ -401,7 +441,8 @@ def main() -> None:
         f"RecoverSSM benchmark: heads={local_num_heads(args.tp_size)}, "
         f"head_dim={KIMI_K3_HEAD_DIM}, T={spec_query_len}, batches={batch_sizes}, "
         f"accepted={accepted_tokens}, verify={verify_configs}, "
-        f"recover={recover_configs}, boundary_token={args.boundary_token}, pdl={args.pdl}, "
+        f"recover={recover_configs}, conv={conv_configs}, "
+        f"boundary_token={args.boundary_token}, pdl={args.pdl}, "
         f"device={torch.cuda.get_device_name()}"
     )
     compile_warmup(
@@ -411,9 +452,14 @@ def main() -> None:
         args.tp_size,
         verify_configs,
         recover_configs,
+        conv_configs,
         args.boundary_token,
         args.pdl,
-        min(args.compile_workers, len(batch_sizes) * (len(verify_configs) + len(recover_configs))),
+        min(
+            args.compile_workers,
+            len(batch_sizes)
+            * (len(verify_configs) + len(recover_configs) * len(conv_configs)),
+        ),
     )
     for batch in batch_sizes:
         for verify_config in verify_configs:
@@ -437,35 +483,40 @@ def main() -> None:
                 iters=args.iters,
             )
         for recover_config in recover_configs:
-            inputs = Inputs(
-                batch,
-                spec_query_len,
-                args.tp_size,
-                recover_config=recover_config,
-                boundary_token=args.boundary_token,
-                use_pdl=args.pdl,
-            )
-            for accepted in accepted_tokens:
-                commit_graph = capture_graph(
-                    lambda accepted=accepted: inputs.commit(accepted),
-                    inputs.reset_commit,
-                    l2_flush,
+            for conv_config in conv_configs:
+                inputs = Inputs(
+                    batch,
+                    spec_query_len,
+                    args.tp_size,
+                    recover_config=recover_config,
+                    conv_config=conv_config,
+                    boundary_token=args.boundary_token,
+                    use_pdl=args.pdl,
                 )
-                measure_graph(
-                    commit_graph,
-                    tag=(
-                        f"commit batch={batch} accepted={accepted} "
-                        f"boundary={args.boundary_token} BV={recover_config.value_slice} "
-                        f"warps={recover_config.num_warps}"
-                    ),
-                    targets=(
-                        "_prepare_commit_plan_kernel",
-                        "_compact_conv_state_kernel",
-                        "_commit_kda_state_kernel",
-                    ),
-                    warmup=args.warmup,
-                    iters=args.iters,
-                )
+                for accepted in accepted_tokens:
+                    commit_graph = capture_graph(
+                        lambda accepted=accepted: inputs.commit(accepted),
+                        inputs.reset_commit,
+                        l2_flush,
+                    )
+                    measure_graph(
+                        commit_graph,
+                        tag=(
+                            f"commit batch={batch} accepted={accepted} "
+                            f"boundary={args.boundary_token} "
+                            f"BV={recover_config.value_slice} "
+                            f"warps={recover_config.num_warps} "
+                            f"CB={conv_config.channel_slice} "
+                            f"conv_warps={conv_config.num_warps}"
+                        ),
+                        targets=(
+                            "_prepare_commit_plan_kernel",
+                            "_compact_conv_state_kernel",
+                            "_commit_kda_state_kernel",
+                        ),
+                        warmup=args.warmup,
+                        iters=args.iters,
+                    )
 
 
 if __name__ == "__main__":

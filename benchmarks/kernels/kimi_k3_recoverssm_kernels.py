@@ -910,6 +910,8 @@ class KDARecoverSSMCommitContext:
         mamba_block_size: int | None = None,
         value_block_size: int = 16,
         num_warps: int = 1,
+        conv_block_d: int = 256,
+        conv_num_warps: int = 4,
         use_pdl: bool = False,
     ) -> None:
         """Fold accepted KDA and convolution inputs into every layer."""
@@ -939,6 +941,10 @@ class KDARecoverSSMCommitContext:
             raise ValueError("KDA RecoverSSM value block size must be a power of two")
         if num_warps <= 0:
             raise ValueError("KDA RecoverSSM num_warps must be positive")
+        if conv_block_d <= 0 or conv_block_d & (conv_block_d - 1):
+            raise ValueError("KDA RecoverSSM conv block size must be a power of two")
+        if conv_num_warps <= 0:
+            raise ValueError("KDA RecoverSSM conv num_warps must be positive")
         device = self.checkpoints[0].device
         if (
             any(
@@ -1044,7 +1050,11 @@ class KDARecoverSSMCommitContext:
             num_warps=num_warps,
             num_stages=2,
         )
-        _compact_conv_state_kernel[(triton.cdiv(conv_dim, 256), batch, num_layers)](
+        _compact_conv_state_kernel[(
+            triton.cdiv(conv_dim, conv_block_d),
+            batch,
+            num_layers,
+        )](
             conv_ref,
             self.conv_state_base_addrs,
             self.conv_state_block_strides,
@@ -1059,10 +1069,10 @@ class KDARecoverSSMCommitContext:
             conv_dim,
             self.conv_history_len,
             state_indices.stride(0),
-            BLOCK_D=256,
+            BLOCK_D=conv_block_d,
             BLOCK_HISTORY=block_history,
             ALIGN_MODE=block_table is not None,
-            num_warps=4,
+            num_warps=conv_num_warps,
             launch_pdl=use_pdl,
         )
 
