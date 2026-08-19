@@ -27,16 +27,30 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from generated_content import fill_markers  # noqa: E402
 
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+
 
 def mock_if_no_torch(mock_module: str, mock: MagicMock):
-    if not importlib.util.find_spec("torch"):
+    if not HAS_TORCH:
         sys.modules[mock_module] = mock
+
+
+class PydanticMagicMock(MagicMock):
+    """`MagicMock` that's able to generate pydantic-core schemas."""
+
+    def __init__(self, *args, **kwargs):
+        name = kwargs.get("name")
+        super().__init__(*args, **kwargs)
+        self.__spec__ = ModuleSpec(name, None)
+
+    def __get_pydantic_core_schema__(self, source_type, handler):
+        return core_schema.any_schema()
 
 
 # Mock custom op code
 class MockCustomOp:
     @staticmethod
-    def register(name):
+    def register(*args, **kwargs):
         def decorator(cls):
             return cls
 
@@ -45,7 +59,7 @@ class MockCustomOp:
 
 class MockPluggableLayer:
     @staticmethod
-    def register(name):
+    def register(*args, **kwargs):
         def decorator(cls):
             return cls
 
@@ -69,8 +83,16 @@ with open(ROOT_DIR / "requirements/test/cuda.txt") as f:
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
 
-# Make torch.nn.Parameter safe to inherit from
-mock_if_no_torch("torch.nn", MagicMock(Parameter=object))
+# Real class because a `MagicMock` base conflicts with `ABCMeta`
+class MockModule:
+    pass
+
+
+# Make torch.nn.Parameter and torch.nn.Module safe to inherit from.
+# `import torch.nn` resolves the attribute on `torch`, so mock both.
+mock_nn = MagicMock(Parameter=object, Module=MockModule)
+mock_if_no_torch("torch.nn", mock_nn)
+mock_if_no_torch("torch", PydanticMagicMock(name="torch", nn=mock_nn))
 
 
 # Mock torch.library.infer_schema for vllm.ir.ops.IrOpInplaceOverload.__init__
@@ -96,18 +118,6 @@ mock_if_no_torch(
     "torch.library",
     MagicMock(infer_schema=lambda fn, **k: f"(Tensor x) -> {get_outputs(fn)}"),
 )
-
-
-class PydanticMagicMock(MagicMock):
-    """`MagicMock` that's able to generate pydantic-core schemas."""
-
-    def __init__(self, *args, **kwargs):
-        name = kwargs.get("name")
-        super().__init__(*args, **kwargs)
-        self.__spec__ = ModuleSpec(name, None)
-
-    def __get_pydantic_core_schema__(self, source_type, handler):
-        return core_schema.any_schema()
 
 
 def auto_mock(module_name: str, attr: str, max_mocks: int = 100):

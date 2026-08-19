@@ -220,7 +220,7 @@ class VideoBackend(VideoLoader):
         frame_recovery: bool = False,
         *,
         backend: VideoDecoderBackend = "opencv",
-        **kwargs,
+        **kwargs: Any,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """Load sampled frames from raw video bytes.
 
