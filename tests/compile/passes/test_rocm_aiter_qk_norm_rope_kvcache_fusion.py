@@ -42,7 +42,13 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-pytestmark = pytest.mark.skip_global_cleanup
+pytestmark = [
+    pytest.mark.skip_global_cleanup,
+    pytest.mark.skipif(
+        not current_platform.is_rocm(),
+        reason="ROCm/AITER-only fusion test",
+    ),
+]
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 FP8_DTYPE = current_platform.fp8_dtype()
