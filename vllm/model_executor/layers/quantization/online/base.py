@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEMethodBase,
     RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -32,6 +33,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineMoEMethod,
     Fp8PtpcOnlineLinearMethod,
     Fp8PtpcOnlineMoEMethod,
+    OnlineLinearBase,
 )
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
@@ -223,8 +225,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
             self.quantized_layers[prefix] = (source, str(spec), None)
             cls = target[2]
             if isinstance(layer, RoutedExperts):
-                return cls(layer=layer)
-            return cls()
+                assert issubclass(cls, FusedMoEMethodBase)
+                return cls(moe=layer.moe_config)
+            assert issubclass(cls, OnlineLinearBase)
+            linear_method_cls = cast(type[OnlineLinearBase], cls)
+            return linear_method_cls()
 
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
