@@ -17,12 +17,18 @@ DSpark, against 0.839 for that checkpoint's trained confidence head).
 
 A per-position logistic maps margin to acceptance probability::
 
-    p_k = sigmoid(weight[k] * margin + bias[k])
+    p_k = sigmoid(weight * margin + bias[k])
 
-Two parameters per draft position, fit by Newton-IRLS from sufficient statistics
-accumulated on device. Observations are never stored: each is folded straight
-into a symmetric 2x2 information matrix and a 2-vector gradient per position, so
-the entire learning state is a few dozen floats regardless of traffic.
+One slope shared across draft positions and an intercept per position, fit by
+Newton-IRLS from sufficient statistics accumulated on device. Sharing the slope
+is what makes the deep positions usable: they see too few observations per round
+to fit two parameters, but an intercept alone is well determined, and the slope
+-- how decisively margin maps to acceptance -- has no reason to vary with depth.
+Steps are damped in proportion to the observations behind them, so a position
+the drafts rarely reach drifts slowly rather than lurching. Observations are
+never stored: each is folded straight into an arrowhead information matrix and
+its score, so the entire learning state is a few dozen floats regardless of
+traffic.
 """
 
 import os
@@ -53,6 +59,7 @@ _MAX_MARGIN = 40.0
 def _accumulate_kernel(
     info_ptr,
     grad_ptr,
+    totals_ptr,
     idx_mapping_ptr,
     num_sampled_ptr,
     num_rejected_ptr,
@@ -97,21 +104,27 @@ def _accumulate_kernel(
     w = pred * (1.0 - pred) * mask
     resid = (label - pred) * mask
 
-    # Weighted normal-equation pieces for this round, subscripted by position in
-    # the design row x = [margin, 1]: the information matrix XtWX, which being
-    # symmetric is kept as its upper triangle, and the score Xt(y - p).
-    xtwx_00 = tl.sum(w * margin * margin, axis=0)
+    # Weighted normal-equation pieces for the design row x = [margin, e_k]: the
+    # information matrix XtWX and the score Xt(y - p). The slope is shared across
+    # positions, so XtWX is an arrowhead whose slope-slope entry sum(w*margin^2)
+    # and slope score sum(resid*margin) are single totals; only the coupling
+    # sum(w*margin), the intercept block sum(w), and the intercept score
+    # sum(resid) are per position. Keeping those two as scalars rather than per
+    # position is what lets _refit_kernel skip the per-position 2x2 solves.
     xtwx_01 = tl.sum(w * margin, axis=0)
     xtwx_11 = tl.sum(w, axis=0)
-    xtr_0 = tl.sum(resid * margin, axis=0)
     xtr_1 = tl.sum(resid, axis=0)
     count = tl.sum(mask, axis=0)
-    tl.store(info_ptr + step * 3 + 0, tl.load(info_ptr + step * 3 + 0) + xtwx_00)
-    tl.store(info_ptr + step * 3 + 1, tl.load(info_ptr + step * 3 + 1) + xtwx_01)
-    tl.store(info_ptr + step * 3 + 2, tl.load(info_ptr + step * 3 + 2) + xtwx_11)
-    tl.store(grad_ptr + step * 2 + 0, tl.load(grad_ptr + step * 2 + 0) + xtr_0)
-    tl.store(grad_ptr + step * 2 + 1, tl.load(grad_ptr + step * 2 + 1) + xtr_1)
+    # This program owns position `step`, so these are plain read-modify-writes.
+    tl.store(info_ptr + step * 2 + 0, tl.load(info_ptr + step * 2 + 0) + xtwx_01)
+    tl.store(info_ptr + step * 2 + 1, tl.load(info_ptr + step * 2 + 1) + xtwx_11)
+    tl.store(grad_ptr + step, tl.load(grad_ptr + step) + xtr_1)
     tl.store(counts_ptr + step, tl.load(counts_ptr + step) + count)
+    # The totals are shared by every program, so they need real atomics. Their
+    # summation order varies between runs, which perturbs the coefficients in the
+    # last bits only; ranks are reconciled by the all-reduce in `step` either way.
+    tl.atomic_add(totals_ptr + 0, tl.sum(w * margin * margin, axis=0), sem="relaxed")
+    tl.atomic_add(totals_ptr + 1, tl.sum(resid * margin, axis=0), sem="relaxed")
 
 
 @triton.jit
@@ -121,76 +134,76 @@ def _refit_kernel(
     info_ptr,
     info_row_stride,
     grad_ptr,
-    grad_row_stride,
+    totals_ptr,
     counts_ptr,
     NUM_SPECULATIVE_STEPS: tl.constexpr,
     L2: tl.constexpr,
-    MIN_ROUND: tl.constexpr,
-    MIN_INTERCEPT: tl.constexpr,
-    POOL_SLOPE: tl.constexpr,
+    DAMPING: tl.constexpr,
     INV_TP: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    """One Newton-IRLS step for a shared slope and per-position intercepts.
+
+    The design row is x = [margin, e_k], so XtWX is an arrowhead: a dense first
+    row and column for the slope over a diagonal intercept block. Eliminating the
+    intercept rows (a Schur complement) collapses it to a scalar equation for the
+    slope, which is why no matrix solve appears below.
+
+    Each step is damped by n / (n + DAMPING), the fraction of a full Newton step
+    a parameter with n observations is allowed to take. A full step is only
+    justified where the local quadratic is accurate, which it is not on a few
+    dozen samples; undamped, such a round can throw a coefficient far past the
+    optimum and take many rounds to walk back.
+    """
     k = tl.arange(0, BLOCK)
     mask = k < NUM_SPECULATIVE_STEPS
 
-    # Upper triangle of XtWX as packed by _accumulate_kernel: with design row
-    # x = [margin, 1] and IRLS weight w = p(1-p), that is
-    # [[sum w*margin*margin, sum w*margin], [sum w*margin, sum w]].
-    a = tl.load(info_ptr + k * info_row_stride + 0, mask=mask, other=0.0) + L2
-    b = tl.load(info_ptr + k * info_row_stride + 1, mask=mask, other=0.0)
-    c = tl.load(info_ptr + k * info_row_stride + 2, mask=mask, other=0.0) + L2
-    g0 = tl.load(grad_ptr + k * grad_row_stride + 0, mask=mask, other=0.0)
-    g1 = tl.load(grad_ptr + k * grad_row_stride + 1, mask=mask, other=0.0)
+    # Per position: the slope/intercept coupling sum(w*margin) and the intercept
+    # block sum(w), plus the intercept score sum(y - p).
+    b = tl.load(info_ptr + k * info_row_stride + 0, mask=mask, other=0.0)
+    c = tl.load(info_ptr + k * info_row_stride + 1, mask=mask, other=0.0) + L2
+    g1 = tl.load(grad_ptr + k, mask=mask, other=0.0)
     n = tl.load(counts_ptr + k, mask=mask, other=0.0)
+    # Shared by every position: the slope's own information and score. The ridge
+    # lands once on the slope and once per intercept, which is the L2 penalty for
+    # the NUM_SPECULATIVE_STEPS + 1 parameters actually being fit.
+    a = tl.load(totals_ptr + 0) + L2
+    g0 = tl.load(totals_ptr + 1)
+
     w = tl.load(coef_ptr + k, mask=mask, other=0.0)
     bias = tl.load(coef_ptr + coef_stride + k, mask=mask, other=0.0)
 
-    # Closed-form 2x2 inverse: A^-1 = 1/det * [[c, -b], [-b, a]].
-    det = a * c - b * b
-    step_w_k = (c * g0 - b * g1) / det
-    step_b_k = (a * g1 - b * g0) / det
+    # Profiling the intercepts out of the arrowhead leaves
+    #     step_w = (g0 - sum_k b_k*g1_k/c_k) / (a - sum_k b_k^2/c_k),
+    # the slope's Newton step once each position's intercept has absorbed what it
+    # can. Every position contributes in proportion to its own information, so a
+    # data-poor position barely moves the slope while still receiving it -- which
+    # is what gives the deep positions a usable slope at all: they see too few
+    # observations per round to fit two parameters, but an intercept alone is
+    # well determined. The ridge keeps c_k >= L2, and Cauchy-Schwarz gives
+    # b_k^2 <= a_k*c_k, so the denominator is >= L2 and never degenerate.
+    shrink = tl.where(mask, b * b / c, 0.0)
+    coupling = tl.where(mask, b * g1 / c, 0.0)
+    den = a - tl.sum(shrink, axis=0)
+    step_w = (g0 - tl.sum(coupling, axis=0)) / den
 
-    if POOL_SLOPE:
-        # One slope shared by every position, intercepts still per position:
-        # design row x = [margin, e_k]. The Newton system goes block-diagonal ->
-        # arrowhead, and eliminating the intercept rows leaves
-        #     step_w = sum(omega_k * step_w_k) / sum(omega_k),
-        # with omega_k = det_k / c_k the Schur complement of the intercept block,
-        # i.e. the slope's Fisher information once the intercept is profiled out.
-        # So the pooled slope is an inverse-variance weighted average and a
-        # data-poor position contributes almost nothing while still receiving the
-        # consensus. This is what lets the deep positions have a usable slope:
-        # they see too few observations per round to fit two parameters, but an
-        # intercept alone is well determined.
-        omega = det / c
-        usable = mask & (tl.abs(det) > 1e-12) & (c > 1e-12)
-        usable &= (step_w_k == step_w_k) & (omega == omega) & (omega > 0.0)
-        omega = tl.where(usable, omega, 0.0)
-        den = tl.sum(omega, axis=0)
-        step_w = tl.sum(omega * tl.where(usable, step_w_k, 0.0), axis=0) / den
-        # The slope now learns from every position, so it is gated on the round's
-        # total sample count rather than any single position's.
-        total_n = tl.sum(tl.where(mask, n, 0.0), axis=0)
-        w_ok = (den > 1e-12) & (step_w == step_w) & (total_n >= MIN_ROUND)
-        w_now = tl.sum(tl.where(k == 0, w, 0.0), axis=0)  # shared: read once
-        w_ok &= w_now + step_w >= 0.0
-        step_w = tl.where(w_ok, step_w, 0.0)
-        new_w = tl.where(mask, w_now + step_w, 0.0)
-        # Intercept conditioned on the pooled slope. Algebraically identical to
-        # the unpooled form when step_w == step_w_k, so only the slope it is
-        # conditioned on changes. One parameter needs far less data than two,
-        # hence the lower gate.
-        step_b = (g1 - b * step_w) / c
-        b_ok = mask & (c > 1e-12) & (step_b == step_b) & (n >= MIN_INTERCEPT)
-        new_b = tl.where(b_ok, bias + step_b, bias)
-    else:
-        ok = (tl.abs(det) > 1e-12) & (n >= MIN_ROUND)
-        # Mask out NaNs and steps that would drive the weight negative.
-        ok &= (step_w_k == step_w_k) & (step_b_k == step_b_k) & (w + step_w_k >= 0.0)
-        new_w = tl.where(ok, w + step_w_k, w)
-        new_b = tl.where(ok, bias + step_b_k, bias)
+    # The slope learns from every position, so it is damped by the round's total
+    # sample count rather than any single position's.
+    total_n = tl.sum(tl.where(mask, n, 0.0), axis=0)
+    step_w = step_w * total_n / (total_n + DAMPING)
+    w_now = tl.sum(tl.where(k == 0, w, 0.0), axis=0)  # shared: read once
+    # Mask out NaNs and steps that would drive the slope negative.
+    w_ok = (step_w == step_w) & (w_now + step_w >= 0.0)
+    step_w = tl.where(w_ok, step_w, 0.0)
+    new_w = tl.where(mask, w_now + step_w, 0.0)
 
+    # Intercept conditioned on the pooled slope, damped by its own count: a
+    # position nobody reached this round has n = 0 and so holds still.
+    step_b = (g1 - b * step_w) / c * n / (n + DAMPING)
+    new_b = tl.where(mask & (step_b == step_b), bias + step_b, bias)
+
+    # The slope is shared, but it is stored once per position so that `predict`
+    # can index weight and bias by draft step alike.
     tl.store(coef_ptr + k, new_w * INV_TP, mask=mask)
     tl.store(coef_ptr + coef_stride + k, new_b * INV_TP, mask=mask)
 
@@ -198,10 +211,9 @@ def _refit_kernel(
     # what lets the estimator track workload drift.
     tl.store(info_ptr + k * info_row_stride + 0, 0.0, mask=mask)
     tl.store(info_ptr + k * info_row_stride + 1, 0.0, mask=mask)
-    tl.store(info_ptr + k * info_row_stride + 2, 0.0, mask=mask)
-    tl.store(grad_ptr + k * grad_row_stride + 0, 0.0, mask=mask)
-    tl.store(grad_ptr + k * grad_row_stride + 1, 0.0, mask=mask)
+    tl.store(grad_ptr + k, 0.0, mask=mask)
     tl.store(counts_ptr + k, 0.0, mask=mask)
+    tl.store(totals_ptr + tl.arange(0, 2), tl.zeros((2,), tl.float32))
 
 
 @triton.jit
@@ -306,18 +318,13 @@ class OnlineAcceptanceEstimator:
     )
     # After warmup, refit every this many steps, accumulating samples in between.
     REFIT_INTERVAL = 100
-    # A draft position with fewer collected samples than this skips fitting to avoid
-    # fitting to noise. With a pooled slope this gates the shared slope on the
-    # round's total across positions.
-    MIN_ROUND_OBSERVATIONS = 50
-    # Per-position gate for the intercept when the slope is pooled. One free
-    # parameter needs far less data than two, and the deep positions that matter
-    # most here see only a few dozen observations per round.
-    MIN_INTERCEPT_OBSERVATIONS = 10
-    # Share one slope across positions, fitting only per-position intercepts.
-    # Set to 0 to restore an independent 2-parameter fit per position.
-    POOL_SLOPE = bool(int(os.getenv("VLLM_ACCEPTANCE_ESTIMATOR_POOL_SLOPE", "1")))
-    # Ridge on the 2x2 solve.
+    # Newton steps are damped by n / (n + DAMPING_OBSERVATIONS), so a round
+    # carrying this many observations moves a parameter half of a full step. It
+    # replaces a hard minimum-sample gate: a data-poor position keeps learning,
+    # just slowly, instead of freezing until it crosses a threshold. Lower values
+    # track a drifting workload faster, higher ones are steadier on thin data.
+    DAMPING_OBSERVATIONS = 50.0
+    # Ridge on the Newton solve.
     L2 = 1e-3
     # Log per-position sample counts and calibration gap at every refit. Costs a
     # device sync per refit, so it is off unless explicitly asked for.
@@ -362,14 +369,20 @@ class OnlineAcceptanceEstimator:
         )
 
         # Per-round Newton-IRLS statistics, cleared after each refit. With design
-        # row x = [margin, 1], info accumulates w*x*x^T and grad (y - p)*x. The
-        # former is symmetric, so only its upper triangle [00, 01, 11] is kept.
+        # row x = [margin, e_k], info accumulates w*x*x^T and grad (y - p)*x.
+        # Sharing one slope across positions makes that an arrowhead matrix, so
+        # only the coupling sum(w*margin) and the intercept block sum(w) are
+        # per position, alongside the intercept score sum(y - p).
         self.info = torch.zeros(
-            num_speculative_steps, 3, dtype=torch.float32, device=device
-        )
-        self.grad = torch.zeros(
             num_speculative_steps, 2, dtype=torch.float32, device=device
         )
+        self.grad = torch.zeros(
+            num_speculative_steps, dtype=torch.float32, device=device
+        )
+        # The arrowhead's shared entries: the slope's own information
+        # sum(w*margin^2) and its score sum((y - p)*margin), summed over every
+        # position rather than kept per position.
+        self.totals = torch.zeros(2, dtype=torch.float32, device=device)
         # Per-round observation counts, zeroed after each refit. the cumulative
         # tally decides when the estimate is trustworthy enough to trim on.
         self.counts = torch.zeros(
@@ -392,6 +405,7 @@ class OnlineAcceptanceEstimator:
         _accumulate_kernel[(self.num_speculative_steps,)](
             self.info,
             self.grad,
+            self.totals,
             idx_mapping,
             num_sampled,
             num_rejected,
@@ -410,13 +424,13 @@ class OnlineAcceptanceEstimator:
         self._steps_since_refit = 0
 
         if self.DEBUG_CALIBRATION:
-            # grad[:, 1] accumulates sum(label - pred) over the round and counts
+            # grad accumulates sum(label - pred) over the round and counts
             # accumulates the number of observations, so their ratio is the
             # signed calibration gap: positive means the round under-predicted
             # acceptance, negative means it over-predicted. Both are already on
             # hand, so the diagnostic needs no extra accumulator.
             n = self.counts.tolist()
-            gap = (self.grad[:, 1] / self.counts.clamp(min=1.0)).tolist()
+            gap = (self.grad / self.counts.clamp(min=1.0)).tolist()
             w = self.coefficients[0].tolist()
             b = self.coefficients[1].tolist()
             logger.info(
@@ -424,7 +438,7 @@ class OnlineAcceptanceEstimator:
                 self._refits,
                 " | ".join(
                     f"k{k}: n={n[k]:.0f} gap={gap[k]:+.3f} w={w[k]:.3f} b={b[k]:.2f}"
-                    + ("" if n[k] >= self.MIN_ROUND_OBSERVATIONS else " STARVED")
+                    f" damp={n[k] / (n[k] + self.DAMPING_OBSERVATIONS):.2f}"
                     for k in range(self.num_speculative_steps)
                 ),
             )
@@ -437,13 +451,11 @@ class OnlineAcceptanceEstimator:
             self.info,
             self.info.stride(0),
             self.grad,
-            self.grad.stride(0),
+            self.totals,
             self.counts,
             NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
             L2=self.L2,
-            MIN_ROUND=self.MIN_ROUND_OBSERVATIONS,
-            MIN_INTERCEPT=self.MIN_INTERCEPT_OBSERVATIONS,
-            POOL_SLOPE=self.POOL_SLOPE,
+            DAMPING=self.DAMPING_OBSERVATIONS,
             INV_TP=1.0 / self._tp_size,
             BLOCK=triton.next_power_of_2(self.num_speculative_steps),
         )
