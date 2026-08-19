@@ -3,6 +3,9 @@ ARG PYTHON_VERSION=3.12
 ARG TORCH_VERSION=2.12.0+rocm7.14.0
 ARG TORCHVISION_VERSION=0.27.0+rocm7.14.0
 ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0
+ARG TRITON_BRANCH="f0b55c07da61c71775bef6d1a15ebf846430ac75" # release/internal/3.7.x as of 08/13
+ARG TRITON_BASE="0263a6a6203cf27c441c57a6c808ea87ffb8f654" # commit torch's triton pin was built from
+ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.19"
@@ -120,7 +123,7 @@ RUN rm -f "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack+.kpack" \
          "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack-.kpack"
 
 RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
-ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi:$PYTHONPATH
+ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi
 
 # TheRock runtime fixes
 RUN if [ -f "${SITE_PACKAGES}/rocm_sdk/__init__.py" ]; then \
@@ -179,6 +182,25 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
 ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
+
+
+###
+### Triton Build
+###
+FROM base AS build_triton
+ARG TRITON_BRANCH
+ARG TRITON_BASE
+ARG TRITON_REPO
+RUN git clone ${TRITON_REPO}
+# Build at TRITON_BASE with TRITON_BRANCH applied as a patch, so setup.py stamps
+# the wheel with the sha torch pins rather than a sha torch never saw.
+RUN cd triton \
+    && git checkout ${TRITON_BASE} \
+    && git format-patch --no-signature -o /patches ${TRITON_BASE}..${TRITON_BRANCH} \
+    && git apply /patches/*.patch \
+    && if [ ! -f setup.py ]; then cd python; fi \
+    && python3 setup.py bdist_wheel --dist-dir=dist \
+    && mkdir -p /app/install && cp dist/*.whl /app/install
 
 
 ###
@@ -246,6 +268,8 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 # only includes dependencies used by wheel release pipeline
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
@@ -253,6 +277,8 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 
 FROM base AS debs
 RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
@@ -261,8 +287,39 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
 FROM base AS final
+# Other wheels first, while torch still matches the triton it pins -- breaking
+# that pin early makes pip pull a CUDA torch from PyPI. Ours goes in last.
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip install /install/*.whl
+    pip install $(ls /install/*.whl | grep -v '/triton-') \
+    && pip install --no-deps --force-reinstall /install/triton-*.whl \
+    # Point torch's pin at the triton we built. Left unsatisfied, downstream
+    # resolvers "repair" it by pulling a CUDA torch from PyPI.
+    && TRITON_VERSION=$(python3 -c "from importlib.metadata import version; print(version('triton'))") \
+    && sed -i "s/^Requires-Dist: triton==.*/Requires-Dist: triton==${TRITON_VERSION}/" \
+        ${SITE_PACKAGES}/torch-*.dist-info/METADATA \
+    # Editing METADATA stales its RECORD hash; restamp so wheel verifiers pass.
+    && python3 -c "\
+import base64, glob, hashlib, os, pathlib;\
+md = glob.glob('${SITE_PACKAGES}/torch-*.dist-info/METADATA')[0];\
+rec = os.path.join(os.path.dirname(md), 'RECORD');\
+raw = pathlib.Path(md).read_bytes();\
+digest = base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).rstrip(b'=').decode();\
+key = os.path.basename(os.path.dirname(md)) + '/METADATA';\
+lines = pathlib.Path(rec).read_text().splitlines();\
+out = [f'{key},sha256={digest},{len(raw)}' if l.split(',')[0] == key else l for l in lines];\
+pathlib.Path(rec).write_text('\n'.join(out) + '\n')" \
+    && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
+    # Pin the ROCm stack for downstream resolvers to consume via -c; a transitive
+    # torch dep otherwise resolves to the CUDA build on PyPI. Use pip list, not
+    # pip freeze: freeze reports locally-installed wheels as `name @ file://...`,
+    # which a constraints file rejects.
+    && pip list --format=freeze \
+        | grep -E '^(torch|triton|torchaudio|torchvision)==' > /etc/rocm-constraints.txt \
+    && echo "ROCm constraints:" && cat /etc/rocm-constraints.txt \
+    && test "$(wc -l < /etc/rocm-constraints.txt)" -eq 4 \
+    && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')" \
+    && python3 -c "import triton; print(f'triton={triton.__version__}')" \
+    && pip list 2>/dev/null | grep -iE '^(torch|triton) '
 
 ARG BASE_IMAGE
 ARG PYTHON_VERSION
@@ -272,6 +329,9 @@ ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
 ARG PYTORCH_ROCM_ARCH
 ARG AITER_ROCM_ARCH
+ARG TRITON_BRANCH
+ARG TRITON_BASE
+ARG TRITON_REPO
 ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
@@ -284,8 +344,16 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "TORCHVISION_VERSION: ${TORCHVISION_VERSION}" >> /app/versions.txt \
     && echo "PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH}" >> /app/versions.txt \
     && echo "AITER_ROCM_ARCH: ${AITER_ROCM_ARCH}" >> /app/versions.txt \
+    && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
+    && echo "TRITON_BASE: ${TRITON_BASE}" >> /app/versions.txt \
+    && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
-    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
+    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
+    # Fingerprint our triton so Dockerfile.rocm can prove it survived the build.
+    && echo "TRITON_VERSION: $(pip show triton | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
+    && echo "TRITON_SHA256: $(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \
+        -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)" \
+        >> /app/versions.txt
