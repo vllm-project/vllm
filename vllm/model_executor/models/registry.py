@@ -1004,9 +1004,10 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         # hardware-isolated ``vllm.models.<name>`` layout) live outside
         # ``vllm/model_executor/models``. Resolve the module spec directly
         # so the file-hash cache stays warm for them.
+        model_path: Path | None = None
         if self.module_name.startswith("vllm.model_executor.models."):
             model_path = Path(__file__).parent / f"{self.module_name.split('.')[-1]}.py"
-        else:
+        if model_path is None or not model_path.exists():
             try:
                 spec = importlib.util.find_spec(self.module_name)
             except (ImportError, ValueError):
