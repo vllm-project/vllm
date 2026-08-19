@@ -279,7 +279,7 @@ class PaddleOCRVLMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
