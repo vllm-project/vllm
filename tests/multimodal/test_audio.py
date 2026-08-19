@@ -744,6 +744,31 @@ class TestAudioChunking:
         # from start_idx, so the quietest scanned window starts at 19200.
         assert split_idx == 19200
 
+    def test_find_split_point_scans_final_window(self):
+        """The last full window must be scanned, even when the search region
+        length is an exact multiple of the window size.
+
+        Regression test: with ``range(0, len - window, window)`` the final
+        window that ends exactly at the region boundary was skipped, so silence
+        located there was missed and the split fell back to a louder point.
+        """
+        from vllm.multimodal.audio import find_split_point
+
+        window = 1600
+        # Search region spans exactly three windows.
+        segment = np.ones(3 * window, dtype=np.float32)
+        # Put the only silence in the final window [2 * window, 3 * window).
+        segment[2 * window : 3 * window] = 0.0
+
+        split_idx = find_split_point(
+            wav=segment,
+            start_idx=0,
+            end_idx=3 * window,
+            min_energy_window=window,
+        )
+
+        assert split_idx == 2 * window
+
     def test_split_audio_rejects_multi_channel(self):
         """Chunking is mono-only; stereo must fail loudly rather than silently.
 
