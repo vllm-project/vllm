@@ -26,6 +26,33 @@ logger = init_logger(__name__)
 
 KiB = 1024
 MiB = 1024 * 1024
+
+# Opt-in ceiling via VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB. Only applied for
+# same-node TP=2. Caps allocations if the env is set too high.
+CUSTOM_ALLREDUCE_MAX_SIZE_MB_LIMIT = 256
+
+
+def resolve_custom_allreduce_max_size(
+    default_max_size: int,
+    world_size: int,
+    same_node: bool,
+    override_mb: int | None,
+) -> tuple[int, bool]:
+    """Return ``(max_size_bytes, applied)``.
+
+    The override is ignored unless this is a same-node two-GPU group, matching
+    the only topology we have HTTP evidence for.
+    """
+    if override_mb is None:
+        return default_max_size, False
+    if override_mb < 1 or override_mb > CUSTOM_ALLREDUCE_MAX_SIZE_MB_LIMIT:
+        raise ValueError(
+            "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB must be between 1 and "
+            f"{CUSTOM_ALLREDUCE_MAX_SIZE_MB_LIMIT}, got {override_mb}."
+        )
+    if not same_node or world_size != 2:
+        return default_max_size, False
+    return override_mb * MiB, True
 # Max size for each world size in case symmetric memory is available
 # For different SM architectures
 CUSTOM_ALL_REDUCE_MAX_SIZES = {

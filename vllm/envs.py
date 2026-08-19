@@ -261,6 +261,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
+    VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB: int | None = None
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -1858,6 +1859,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0"))
+    ),
+    # Opt-in custom all-reduce size ceiling in MiB (integer 1..256).
+    # Unset keeps the 8 MiB constructor default. Applied only for same-node
+    # TP=2; other topologies ignore the env. This *sets* the ceiling (it can
+    # lower as well as raise). CUSTOM is used when inp_size < max_size
+    # (strictly less). Raising max_size grows *two* same-node buffers
+    # (sync metadata scratch + eager IPC copy buffer), so 128 MiB is about
+    # +232 MiB/GPU and 256 MiB about +488 MiB/GPU vs the 8 MiB default.
+    "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB": lambda: (
+        int(v) if (v := os.getenv("VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB")) else None
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(

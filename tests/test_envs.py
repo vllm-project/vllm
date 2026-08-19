@@ -38,9 +38,21 @@ def test_nixl_side_channel_host_is_not_compile_factor(
 
 
 def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_API_KEY", "sk-super-secret")
+    monkeypatch.setenv("VLLM_API_KEY", "***")
 
     assert "VLLM_API_KEY" not in envs.compile_factors()
+
+
+def test_custom_allreduce_max_size_mb_parse(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB", raising=False)
+    assert envs.VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB is None
+    monkeypatch.setenv("VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB", "8")
+    assert envs.VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB == 8
+    monkeypatch.setenv("VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB", "128")
+    assert envs.VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB == 128
+    monkeypatch.setenv("VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB", "not-an-int")
+    with pytest.raises(ValueError):
+        _ = envs.VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB
 
 
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
