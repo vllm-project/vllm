@@ -117,6 +117,7 @@ def mock_vllm_config_producer():
     config.parallel_config.tensor_parallel_size = 1
     config.parallel_config.pipeline_parallel_size = 1
     config.parallel_config.data_parallel_size = 1
+    config.parallel_config.data_parallel_index = 0
     config.ec_transfer_config = Mock()
     config.ec_transfer_config.is_ec_producer = True
     config.ec_transfer_config.is_ec_consumer = False
@@ -135,6 +136,7 @@ def mock_vllm_config_consumer():
     config.parallel_config.tensor_parallel_size = 1
     config.parallel_config.pipeline_parallel_size = 1
     config.parallel_config.data_parallel_size = 1
+    config.parallel_config.data_parallel_index = 0
     config.ec_transfer_config = Mock()
     config.ec_transfer_config.is_ec_producer = False
     config.ec_transfer_config.is_ec_consumer = True
@@ -209,14 +211,46 @@ class TestECMooncakeConnectorValidation:
             )
             connector.shutdown()
 
-    def test_rejects_data_parallel(self, mock_vllm_config_consumer):
-        """One control channel per instance cannot address a replica."""
-        mock_vllm_config_consumer.parallel_config.data_parallel_size = 2
+    def test_replicated_consumer_addresses_its_own_block(
+        self, mock_vllm_config_consumer
+    ):
+        """Each replica owns a distinct block of control ports.
+
+        Replicas run their own schedulers and control channels, so sharing a
+        port would collide at bind time and cross-subscribe their event
+        channels. The block is derived from `data_parallel_index` because a
+        non-MoE replica is reconfigured to look like DP=1, which resets
+        `data_parallel_rank`.
+        """
+        cfg = mock_vllm_config_consumer
+        cfg.parallel_config.tensor_parallel_size = 2
+        cfg.parallel_config.data_parallel_size = 3
+        cfg.parallel_config.data_parallel_index = 2
+        # What a non-MoE replica actually looks like: reconfigured to DP=1, so
+        # `data_parallel_rank` no longer identifies it but the index still does.
+        cfg.parallel_config.data_parallel_rank = 0
+        cfg.ec_transfer_config.ec_connector_extra_config = {
+            "mooncake_protocol": "tcp",
+            "reservation_zmq_port": 19500,
+        }
+        with patch_ec_mooncake_deps():
+            connector = ECMooncakeConnector(cfg, ECConnectorRole.SCHEDULER)
+            try:
+                # Replica 2 of a TP=2 consumer starts after two 2-port blocks.
+                assert connector._control_port_offset == 4
+                assert connector._reservation_zmq_addr == "tcp://127.0.0.1:19504"
+            finally:
+                connector.shutdown()
+
+    def test_rejects_replicated_producer(self, mock_vllm_config_producer):
+        """A producer holds one copy of each output, so replicating it only
+        duplicates the push."""
+        mock_vllm_config_producer.parallel_config.data_parallel_size = 2
         with (
             patch_ec_mooncake_deps(),
-            pytest.raises(ValueError, match="data parallelism"),
+            pytest.raises(ValueError, match="data_parallel_size=1"),
         ):
-            ECMooncakeConnector(mock_vllm_config_consumer, ECConnectorRole.SCHEDULER)
+            ECMooncakeConnector(mock_vllm_config_producer, ECConnectorRole.SCHEDULER)
 
 
 class TestECMooncakeWorkerMetadataAggregation:

@@ -625,9 +625,10 @@ class ECMooncakeConnector(ECConnectorBase):
     - ``consumer_buffer_pool_size`` (consumer, optional): Bytes reserved for a
       long-lived registered CUDA receive arena (default ``ec_buffer_size``).
     - ``reservation_zmq_port`` (consumer worker, required): Exposes registered
-      receive addresses over ZMQ. Tensor-parallel rank ``r`` of the first
-      pipeline stage listens on ``port + r``, and rank 0 reports the whole set,
-      so a producer only needs the first address.
+      receive addresses over ZMQ. Replica ``d`` of the first pipeline stage owns
+      the block starting at ``port + d * tensor_parallel_size``; tensor-parallel
+      rank ``r`` in that block listens on ``block + r``, and rank 0 reports the
+      whole block, so a producer only needs the block's first address.
     - ``reservation_zmq_addr`` (consumer scheduler, required): Address of the
       consumer control channel. Defaults to ``tcp://127.0.0.1:<port>``.
     - ``transfer_max_workers`` (optional): Maximum concurrent Mooncake transfer
@@ -639,13 +640,25 @@ class ECMooncakeConnector(ECConnectorBase):
     - ``consumer_metrics_log_interval`` (optional): Seconds between aggregated
       consumer lifecycle logs (default ``10``; ``0`` disables them).
 
-    Parallelism: consumers may use tensor and pipeline parallelism. Only the
-    first pipeline stage holds encoder outputs, and each tensor-parallel rank
-    there gathers from its own cache, so every rank exposes a control channel
-    and the producer writes into all of them concurrently from one registered
-    source. That costs bandwidth but not latency, and avoids the second hop a
-    receive-then-broadcast would add. Producers must be unsharded, and data
-    parallelism is unsupported on either side.
+    Parallelism: consumers may use tensor, pipeline and data parallelism.
+    Producers must be unsharded and unreplicated: one copy of each encoder
+    output is held and addressed directly, so splitting the producer would only
+    duplicate the push.
+
+    Only the first pipeline stage holds encoder outputs, and each tensor-parallel
+    rank there gathers from its own cache, so every rank exposes a control
+    channel and the producer writes into all of them concurrently from one
+    registered source. That costs bandwidth but not latency, and avoids the
+    second hop a receive-then-broadcast would add.
+
+    Data parallelism additionally requires the caller to route both halves of a
+    request to the same replica, because a push has to land where the request
+    will run. The proxy is the only component that knows which replica it picked:
+    it names the replica to the consumer (``X-data-parallel-rank``) and passes
+    that replica's control address to the producer. Getting this wrong is loud
+    rather than silent -- the replica that runs the request never sees its
+    embedding and gives up after ``push_wait_timeout_s`` -- but it is the
+    caller's responsibility, not something this connector can detect.
     """
 
     def __init__(self, vllm_config: VllmConfig, role: ECConnectorRole):
@@ -657,17 +670,12 @@ class ECMooncakeConnector(ECConnectorBase):
             ) from _MOONCAKE_IMPORT_ERROR
 
         parallel_config = vllm_config.parallel_config
-        if parallel_config.data_parallel_size > 1:
-            raise ValueError(
-                "ECMooncakeConnector does not support data parallelism yet: the "
-                "consumer exposes one control channel per instance, so a push "
-                "cannot be routed to the replica that will run the request."
-            )
         ec_cfg_early = vllm_config.ec_transfer_config
         assert ec_cfg_early is not None
         if ec_cfg_early.is_ec_producer:
             # The producer holds one copy of each encoder output and addresses
-            # consumers directly; sharding it would only duplicate the push.
+            # consumers directly; sharding or replicating it would only
+            # duplicate the push.
             if parallel_config.tensor_parallel_size > 1:
                 raise ValueError(
                     "ECMooncakeConnector producers require tensor_parallel_size=1."
@@ -676,6 +684,21 @@ class ECMooncakeConnector(ECConnectorBase):
                 raise ValueError(
                     "ECMooncakeConnector producers do not support pipeline parallelism."
                 )
+            if parallel_config.data_parallel_size > 1:
+                raise ValueError(
+                    "ECMooncakeConnector producers require data_parallel_size=1."
+                )
+
+        # Each data-parallel replica runs its own scheduler and its own control
+        # channels, so their ports must not overlap. `data_parallel_index` is the
+        # only field that identifies the replica in both cases: a non-MoE replica
+        # is reconfigured to look like DP=1, which resets `data_parallel_rank`
+        # and `data_parallel_size`. Deriving the offset from the config rather
+        # than from a process group keeps the scheduler, which has no groups, in
+        # agreement with its workers.
+        self._control_port_offset = (
+            parallel_config.data_parallel_index * parallel_config.tensor_parallel_size
+        )
 
         self._role = role
         ec_cfg = vllm_config.ec_transfer_config
@@ -692,7 +715,8 @@ class ECMooncakeConnector(ECConnectorBase):
             self._reservation_zmq_addr is None
             and self._reservation_zmq_port is not None
         ):
-            self._reservation_zmq_addr = f"tcp://127.0.0.1:{self._reservation_zmq_port}"
+            base = self._reservation_zmq_port + self._control_port_offset
+            self._reservation_zmq_addr = f"tcp://127.0.0.1:{base}"
         self._registered_capacity = int(self._ec_cfg.ec_buffer_size)
         if self._registered_capacity <= 0:
             raise ValueError("ECMooncakeConnector requires ec_buffer_size > 0.")
@@ -893,18 +917,17 @@ class ECMooncakeConnector(ECConnectorBase):
             raise RuntimeError(
                 "Mooncake push mode requires a registered consumer buffer pool."
             )
+        base_port = self._reservation_zmq_port + self._control_port_offset
         self._control_server = ECMooncakeControlServer(
             "0.0.0.0",
-            self._reservation_zmq_port + self._tp_rank,
+            base_port + self._tp_rank,
             self._reserve_push_destination,
             self._push_status,
             self._complete_push,
             self._cancel_push,
             self._expire_push_reservations,
             self._consumer_metrics_log_interval,
-            peer_ports=[
-                self._reservation_zmq_port + rank for rank in range(self._tp_size)
-            ],
+            peer_ports=[base_port + rank for rank in range(self._tp_size)],
             device=self._consumer_pool.device,
         )
         self._control_server.start()
