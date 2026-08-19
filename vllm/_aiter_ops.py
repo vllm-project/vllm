@@ -1541,6 +1541,55 @@ def _triton_rotary_embedding_fake(
     return
 
 
+def _asm_rotary_embedding_impl(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    # Modifies query and key in-place via aiter's asm cached rope kernel.
+    from aiter.ops.rope import rope_cached_positions_2c_fwd_inplace
+
+    num_tokens = positions.numel()
+    rotate_style = 0 if is_neox else 1
+
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+    cos = cos.reshape(-1, 1, 1, rotary_dim // 2)
+    sin = sin.reshape(-1, 1, 1, rotary_dim // 2)
+
+    query = query.view(1, num_tokens, -1, head_size)
+    key = key.view(1, num_tokens, -1, head_size)
+    query_ = query[..., :rotary_dim]
+    key_ = key[..., :rotary_dim]
+    positions = positions.view(*query.shape[:2])
+
+    rope_cached_positions_2c_fwd_inplace(
+        query_,
+        key_,
+        cos,
+        sin,
+        positions,
+        rotate_style,
+        reuse_freqs_front_part=True,
+        nope_first=False,
+    )
+
+
+def _asm_rotary_embedding_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    return
+
+
 def _rocm_aiter_fp8_attn_impl(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1695,6 +1744,7 @@ class rocm_aiter_ops:
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+    _ASM_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_MLA_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -1725,6 +1775,7 @@ class rocm_aiter_ops:
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+        cls._ASM_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_MLA_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
@@ -1950,6 +2001,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_rotary_embed_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_ROTARY_EMBED
+
+    @classmethod
+    @if_aiter_supported
+    def is_asm_rotary_embed_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._ASM_ROTARY_EMBED
 
     @classmethod
     @if_aiter_supported
@@ -2246,6 +2302,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_asm_rotary_embedding",
+                op_func=_asm_rotary_embedding_impl,
+                mutates_args=["query", "key"],  # These tensors are modified in-place
+                fake_impl=_asm_rotary_embedding_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_fused_allreduce_rmsnorm",
                 op_func=_rocm_aiter_fused_allreduce_rmsnorm_impl,
                 fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_fake,
@@ -2319,6 +2382,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_triton_rotary_embedding_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
+
+    @staticmethod
+    def get_asm_rotary_embedding_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_asm_rotary_embedding.default
 
     @staticmethod
     def get_fused_allreduce_rmsnorm_op() -> OpOverload:

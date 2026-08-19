@@ -623,3 +623,51 @@ def test_rocm_aiter_rms_norm_then_group_fp8_quant_e2e(dtype):
         max_rel=1.0,
         max_fail_rate=0.01,
     )
+
+
+def test_rocm_aiter_asm_mla_rope_forward_hip_vs_native(monkeypatch):
+    """asm forward_hip matches forward_native for a DeepSeek-style MLA rope.
+
+    Guards the opt-in VLLM_ROCM_USE_AITER_MLA_ROPE path
+    (DeepseekScalingRotaryEmbedding.forward_hip -> aiter asm cached rope)
+    against the PyTorch-native reference on a yarn-scaled, gptj-style config.
+    """
+    require_aiter()
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.rotary_embedding import (
+        DeepseekScalingRotaryEmbedding,
+    )
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MLA_ROPE", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    if not rocm_aiter_ops.is_asm_rotary_embed_enabled():
+        pytest.skip("asm MLA rope not enabled on this hardware")
+
+    head_size = 64
+    rotary_dim = 64
+    num_tokens = 8
+    num_heads = 4
+    max_pos = 128
+    dtype = torch.bfloat16
+
+    rope = DeepseekScalingRotaryEmbedding(
+        head_size,
+        rotary_dim,
+        max_pos,
+        base=10000,
+        is_neox_style=False,
+        scaling_factor=8.0,
+        dtype=dtype,
+    )
+
+    positions = torch.randint(0, max_pos, (num_tokens,), dtype=torch.long)
+    query = torch.randn(num_tokens, num_heads, head_size, dtype=dtype)
+    key = torch.randn(num_tokens, num_heads, head_size, dtype=dtype)
+
+    ref_q, ref_k = rope.forward_native(positions, query.clone(), key.clone())
+    out_q, out_k = rope.forward_hip(positions, query.clone(), key.clone())
+
+    torch.testing.assert_close(out_q.float(), ref_q.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(out_k.float(), ref_k.float(), rtol=2e-2, atol=2e-2)
