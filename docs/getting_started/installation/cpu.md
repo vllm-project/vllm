@@ -241,6 +241,9 @@ export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/rel
 uv pip install "vllm[zen]" --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --index-strategy first-index --torch-backend cpu
 ```
 
+!!! warning
+    `zentorch` is not supported with vLLM 0.27.0 and 0.27.1.
+
 vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, look for the platform-selection line in the server's startup logs:
 
 ```bash
