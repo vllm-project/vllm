@@ -14,12 +14,12 @@ from typing import TYPE_CHECKING, TypeVar
 import regex as re
 import torch
 from cachetools import LRUCache
+from transformers import MistralCommonBackend
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.tokenizers.mistral import MistralTokenizer, mistral_common_tekkenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
@@ -318,12 +318,13 @@ def maybe_wrap_mistral_common_tokenizer(tokenizer: TokenizerLike) -> TokenizerLi
     ``MistralTokenizer`` exposes the vocabulary and conversion helpers the
     backends already support for ``tokenizer_mode="mistral"``.
 
-    Tokenizers that are already a ``MistralTokenizer``, and non-Mistral
-    tokenizers, are returned unchanged.
+    This covers both tokenizer engines a ``MistralCommonBackend`` can carry --
+    tekken (Mistral-Nemo, Codestral) and SentencePiece (Mistral-7B-v0.1,
+    Mixtral-8x7B-v0.1) -- because both fail the same way unwrapped.
+
+    Any other tokenizer is returned unchanged.
     """
-    if not is_mistral_tokenizer(tokenizer) and (
-        mistral_common_tekkenizer(tokenizer) is not None
-    ):
+    if isinstance(tokenizer, MistralCommonBackend):
         return MistralTokenizer(tokenizer)
     return tokenizer
 

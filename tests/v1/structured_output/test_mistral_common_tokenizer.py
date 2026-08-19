@@ -14,6 +14,9 @@ backend failed on it in its own way:
 * ``outlines`` called ``tokenizer.convert_tokens_to_string()`` while building
   its reduced vocabulary, which raises ``NotImplementedError``.
 
+This affects both tokenizer engines a ``MistralCommonBackend`` can carry: tekken
+(Mistral-Nemo) and SentencePiece (Mistral-7B-v0.1).
+
 Both backends are built lazily on the first structured-output request, so this
 surfaced as an HTTP 500 while plain completions kept working.
 """
@@ -25,17 +28,22 @@ from vllm.v1.structured_output.backend_outlines import OutlinesBackend
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
-# A tekken-backed Mistral repo that transformers loads via MistralCommonBackend.
-TOKENIZER = "mistralai/Mistral-Nemo-Instruct-2407"
+# Mistral repos transformers loads via MistralCommonBackend, one per engine.
+TEKKEN_TOKENIZER = "mistralai/Mistral-Nemo-Instruct-2407"
+SPM_TOKENIZER = "mistralai/Mistral-7B-Instruct-v0.1"
 JSON_SCHEMA = '{"type": "object", "properties": {"x": {"type": "integer"}}}'
 
 
-@pytest.fixture(scope="module")
-def mistral_common_tokenizer():
+@pytest.fixture(
+    scope="module",
+    params=[TEKKEN_TOKENIZER, SPM_TOKENIZER],
+    ids=["tekken", "sentencepiece"],
+)
+def mistral_common_tokenizer(request):
     transformers_mistral = pytest.importorskip(
         "transformers.tokenization_mistral_common"
     )
-    return transformers_mistral.MistralCommonBackend.from_pretrained(TOKENIZER)
+    return transformers_mistral.MistralCommonBackend.from_pretrained(request.param)
 
 
 @pytest.mark.parametrize(
