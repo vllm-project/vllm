@@ -2675,6 +2675,24 @@ class EngineArgs:
                     self.max_num_batched_tokens,
                 )
 
+            # Hybrid models (GDN/Mamba) allocate massive intermediate
+            # tensors during chunked prefill. A large batch size also
+            # inflates the CUDA-graph pool. We lower the default to
+            # prevent silent OOMs and context window shrinkage.
+            if model_config.is_hybrid:
+                safe_hybrid_limit = 2048
+                if self.max_num_batched_tokens > safe_hybrid_limit:
+                    logger.warning(
+                        "Hybrid model detected. Reducing "
+                        "max_num_batched_tokens from %d to "
+                        "%d to prevent OOM and save KV "
+                        "cache space. To override, set "
+                        "--max-num-batched-tokens.",
+                        self.max_num_batched_tokens,
+                        safe_hybrid_limit,
+                    )
+                    self.max_num_batched_tokens = safe_hybrid_limit
+
             # For multimodal prefix-LM models (e.g., Gemma 4) that disable
             # chunked MM input, a single multimodal item must fit in one batch.
             # Raise the floor to accommodate the largest per-item token count.

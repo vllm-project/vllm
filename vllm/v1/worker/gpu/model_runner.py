@@ -671,8 +671,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        should_skip_attn = not self.model_config.is_hybrid
         hidden_states, sample_hidden_states = self._dummy_run(
-            self.max_num_tokens, skip_attn=True, is_profile=True
+            self.max_num_tokens, skip_attn=should_skip_attn, is_profile=True
         )
 
         # Only run sampler/pooler on last PP rank (non-last ranks return None).
