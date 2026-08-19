@@ -662,12 +662,14 @@ def test_rocm_aiter_asm_mla_rope_forward_hip_vs_native(monkeypatch):
         dtype=dtype,
     )
 
-    positions = torch.randint(0, max_pos, (num_tokens,), dtype=torch.long)
-    query = torch.randn(num_tokens, num_heads, head_size, dtype=dtype)
-    key = torch.randn(num_tokens, num_heads, head_size, dtype=dtype)
+    rope = rope.cuda()
+    positions = torch.randint(0, max_pos, (num_tokens,), dtype=torch.long).cuda()
+    query = torch.randn(num_tokens, num_heads, head_size, dtype=dtype).cuda()
+    key = torch.randn(num_tokens, num_heads, head_size, dtype=dtype).cuda()
 
     ref_q, ref_k = rope.forward_native(positions, query.clone(), key.clone())
     out_q, out_k = rope.forward_hip(positions, query.clone(), key.clone())
 
+    assert ref_k is not None and out_k is not None
     torch.testing.assert_close(out_q.float(), ref_q.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(out_k.float(), ref_k.float(), rtol=2e-2, atol=2e-2)
