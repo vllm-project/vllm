@@ -22,6 +22,7 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseTritonImpl,
     minimax_m3_rebase_slots_to_page16,
+    minimax_m3_use_aiter_sparse_pa,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -1687,6 +1688,11 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
         "is_shuffle_kv_cache_enabled",
         lambda: True,
     )
+    monkeypatch.setattr(
+        sparse_attn_mod, "get_current_vllm_config_or_none", lambda: None
+    )
+
+    assert minimax_m3_use_aiter_sparse_pa(1) is True
 
     backend = sparse_attn_mod.MiniMaxM3SparseBackend
     assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
