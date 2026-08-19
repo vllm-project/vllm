@@ -1304,6 +1304,38 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
     assert scheduler.schedule().num_scheduled_tokens == {"0": 10, "1": 4}
 
 
+@pytest.mark.parametrize(
+    ("num_requests", "num_tokens", "expected"),
+    [
+        (2, 8, {"0": 8, "1": 8}),
+        (5, 1, {"0": 1, "1": 1, "2": 1, "3": 1}),
+    ],
+)
+def test_dspark_uses_separate_draft_input_budget(
+    tmp_path, monkeypatch, num_requests, num_tokens, expected
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        max_num_seqs=16,
+        max_num_batched_tokens=16,
+        num_speculative_tokens=4,
+        parallel_drafting=True,
+        skip_tokenizer_init=True,
+    )
+    speculative_config = scheduler.vllm_config.speculative_config
+    assert speculative_config is not None
+    speculative_config.method = "dspark"
+
+    for request in create_requests(num_requests=num_requests, num_tokens=num_tokens):
+        scheduler.add_request(request)
+
+    assert scheduler.schedule().num_scheduled_tokens == expected
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
