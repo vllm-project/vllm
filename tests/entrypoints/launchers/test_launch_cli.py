@@ -388,7 +388,6 @@ def _manifest(**changes: object) -> SnapshotManifest:
     manifest = SnapshotManifest(
         schema_version=1,
         boundary="post-engine-init-pre-http-bind",
-        complete=True,
         created_at="2026-08-06T00:00:00Z",
         artifact_bytes=8,
         source_revision="source-sha",
@@ -411,7 +410,6 @@ def _manifest(**changes: object) -> SnapshotManifest:
         environment=(("VLLM_USE_V1", "1"),),
         process_tree=(100, 101),
         cuda_holders=(101,),
-        socket_inventory=(),
         oracle_token_ids=(12095,),
         oracle_text=" Paris",
         oracle_sampled_token_logprob=-0.125,
@@ -421,13 +419,62 @@ def _manifest(**changes: object) -> SnapshotManifest:
     )
 
 
+def _runtime_identity(**changes: object) -> Any:
+    identity_type = snapshot_controller.SnapshotRuntimeIdentity
+    fields = identity_type.model_fields.keys()
+    payload = _manifest().model_dump(mode="python", include=fields)
+    return identity_type.model_validate({**payload, **changes}, strict=True)
+
+
+def test_snapshot_manifest_uses_atomic_file_as_publication_marker(tmp_path: Path):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    manifest = _manifest()
+    write_manifest_atomic(artifact, manifest)
+
+    payload = json.loads((artifact / "manifest.json").read_text())
+    assert "complete" not in payload
+    assert "socket_inventory" not in payload
+
+
+def test_snapshot_manifest_captures_runtime_identity_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    tools = LocalSnapshotTools()
+    identity = _runtime_identity()
+    probed_gpu_uuids: list[str] = []
+
+    def current_identity(gpu_uuid: str) -> Any:
+        probed_gpu_uuids.append(gpu_uuid)
+        return identity
+
+    monkeypatch.setattr(tools, "current_identity", current_identity)
+    manifest = tools.make_manifest(
+        argparse.Namespace(
+            model="Qwen/Qwen3-0.6B",
+            model_tag=None,
+            revision="model-sha",
+            tokenizer_revision="tokenizer-sha",
+            served_model_name=None,
+            include_model_state=True,
+        ),
+        ("Qwen/Qwen3-0.6B",),
+        ProcessInventory(100, (100, 101), (101,), "GPU-abc"),
+        _oracle(),
+        tmp_path,
+    )
+
+    assert probed_gpu_uuids == ["GPU-abc"]
+    assert manifest.model_dump(include=type(identity).model_fields.keys()) == (
+        identity.model_dump()
+    )
+
+
 def _fake_snapshot_tools(*, fail_dump: bool = False) -> Any:
     tools = create_autospec(LocalSnapshotTools, instance=True)
     tools.launch_child.return_value = 100
     tools.wait_ready.return_value = _oracle()
-    tools.inventory.return_value = ProcessInventory(
-        100, (100, 101), (101,), "GPU-abc", ()
-    )
+    tools.inventory.return_value = ProcessInventory(100, (100, 101), (101,), "GPU-abc")
 
     def make_manifest(args, engine_argv, inventory, oracle, _workdir):
         return _manifest(
@@ -446,7 +493,7 @@ def _fake_snapshot_tools(*, fail_dump: bool = False) -> Any:
 
     tools.make_manifest.side_effect = make_manifest
     tools.publish.side_effect = write_manifest_atomic
-    tools.current_identity.side_effect = lambda manifest: manifest
+    tools.current_identity.side_effect = lambda _gpu_uuid: _runtime_identity()
     tools.restore.return_value = 100
     tools.request_oracle.return_value = _oracle()
     if fail_dump:
@@ -636,14 +683,22 @@ def test_snapshot_create_outcomes_and_child_paths(
     failing_tools = _fake_snapshot_tools(fail_dump=True)
     with pytest.raises(RuntimeError, match="dump failed"):
         create_snapshot(args(failed), tools=failing_tools)
-    failing_tools.abort_create.assert_called_once()
+    failing_tools.abort_create.assert_called_once_with(100)
     assert not failed.exists()
+
+    failed_manifest = tmp_path / "failed-manifest"
+    manifest_failure_tools = _fake_snapshot_tools()
+    manifest_failure_tools.make_manifest.side_effect = RuntimeError("manifest failed")
+    with pytest.raises(RuntimeError, match="manifest failed"):
+        create_snapshot(args(failed_manifest), tools=manifest_failure_tools)
+    manifest_failure_tools.abort_create.assert_called_once_with(100)
+    assert not failed_manifest.exists()
 
 
 @pytest.mark.parametrize(
     ("invalid_update", "diagnostic"),
     [
-        pytest.param({"unexpected": True}, "fields", id="extra-field"),
+        pytest.param({"unexpected": True}, "unexpected", id="extra-field"),
         pytest.param({"created_at": 1}, "created_at", id="strict-string"),
         pytest.param({"schema_version": True}, "schema_version", id="schema-bool"),
         pytest.param({"schema_version": 2}, "schema_version", id="schema-value"),
@@ -651,45 +706,61 @@ def test_snapshot_create_outcomes_and_child_paths(
         pytest.param({"complete": False}, "complete", id="complete-false"),
         pytest.param({"boundary": "unknown"}, "boundary", id="boundary"),
         pytest.param({"process_tree": []}, "process_tree", id="empty-process-tree"),
-        pytest.param({"process_tree": [0]}, "process_tree", id="nonpositive-pid"),
+        pytest.param({"process_tree": [0]}, "process_tree.0", id="nonpositive-pid"),
         pytest.param(
             {"process_tree": [100, 100]},
-            "process_tree",
+            "root",
             id="duplicate-process-pid",
         ),
         pytest.param({"cuda_holders": []}, "cuda_holders", id="empty-cuda-holders"),
         pytest.param(
-            {"cuda_holders": [-1]}, "cuda_holders", id="nonpositive-cuda-holder"
+            {"cuda_holders": [-1]},
+            "cuda_holders.0",
+            id="nonpositive-cuda-holder",
         ),
         pytest.param(
             {"cuda_holders": [999]},
-            "cuda_holders",
+            "root",
             id="cuda-holder-outside-tree",
         ),
         pytest.param(
             {"cuda_holders": [101, 101]},
-            "cuda_holders",
+            "root",
             id="duplicate-cuda-holder",
         ),
-        pytest.param({"oracle_token_ids": []}, "oracle", id="empty-oracle-token"),
         pytest.param(
-            {"oracle_token_ids": [1, 2]}, "oracle", id="multiple-oracle-tokens"
-        ),
-        pytest.param({"oracle_token_ids": [-1]}, "oracle", id="negative-oracle-token"),
-        pytest.param(
-            {"oracle_sampled_token_logprob": 0}, "oracle", id="integer-logprob"
+            {"oracle_token_ids": []},
+            "oracle_token_ids",
+            id="empty-oracle-token",
         ),
         pytest.param(
-            {"oracle_sampled_token_logprob": True}, "oracle", id="boolean-logprob"
+            {"oracle_token_ids": [1, 2]},
+            "oracle_token_ids",
+            id="multiple-oracle-tokens",
+        ),
+        pytest.param(
+            {"oracle_token_ids": [-1]},
+            "oracle_token_ids.0",
+            id="negative-oracle-token",
+        ),
+        pytest.param(
+            {"oracle_sampled_token_logprob": 0},
+            "oracle_sampled_token_logprob",
+            id="integer-logprob",
+        ),
+        pytest.param(
+            {"oracle_sampled_token_logprob": True},
+            "oracle_sampled_token_logprob",
+            id="boolean-logprob",
         ),
         pytest.param(
             {"oracle_sampled_token_logprob": float("nan")},
-            "oracle",
+            "oracle_sampled_token_logprob",
             id="nan-logprob",
         ),
         pytest.param(
             {"oracle_sampled_token_logprob": float("inf")},
-            "oracle",
+            "oracle_sampled_token_logprob",
             id="infinite-logprob",
         ),
         pytest.param(
@@ -721,10 +792,10 @@ def test_snapshot_manifest_validation_and_restore_lifecycle(
     args = argparse.Namespace(snapshot_dir=str(artifact), host="127.0.0.1", port=9000)
 
     identity_mismatch = _fake_snapshot_tools()
-    identity_mismatch.current_identity.side_effect = lambda _current: _manifest(
-        model_revision="different"
+    identity_mismatch.current_identity.side_effect = lambda _gpu_uuid: (
+        _runtime_identity(binary_revision="different")
     )
-    with pytest.raises(SnapshotCompatibilityError, match="model_revision"):
+    with pytest.raises(SnapshotCompatibilityError, match="binary_revision"):
         restore_snapshot(args, tools=identity_mismatch)
     identity_mismatch.restore.assert_not_called()
 
@@ -743,7 +814,10 @@ def test_snapshot_manifest_validation_and_restore_lifecycle(
     invalid = _manifest().model_dump(mode="json")
     invalid.update(invalid_update)
     (artifact / "manifest.json").write_text(json.dumps(invalid))
-    with pytest.raises(SnapshotCompatibilityError, match=diagnostic):
+    with pytest.raises(
+        SnapshotCompatibilityError,
+        match=f"invalid snapshot manifest: {diagnostic}",
+    ):
         restore_snapshot(args, tools=_fake_snapshot_tools())
 
 
@@ -791,7 +865,9 @@ def test_snapshot_restore_rejects_occupied_pid_before_mutation(
         tools.shm_dir = tmp_path / "shm"
         tools.shm_dir.mkdir()
         monkeypatch.setattr(tools, "preflight", lambda *_args: None)
-        monkeypatch.setattr(tools, "current_identity", lambda manifest: manifest)
+        monkeypatch.setattr(
+            tools, "current_identity", lambda _gpu_uuid: _runtime_identity()
+        )
         criu_calls: list[str] = []
 
         def unexpected_criu(action: str, *_args: object) -> None:
@@ -950,7 +1026,7 @@ def test_snapshot_criu_uses_file_locks_and_cuda_holder_gpu(
     monkeypatch.setattr(tools, "_criu", criu)
     tools.dump(
         artifact,
-        ProcessInventory(100, (100, 101), (101,), "GPU-selected", ()),
+        ProcessInventory(100, (100, 101), (101,), "GPU-selected"),
     )
     with pytest.raises(RuntimeError, match="stop after command capture"):
         tools.restore(artifact, _manifest())
@@ -968,7 +1044,42 @@ def test_snapshot_criu_uses_file_locks_and_cuda_holder_gpu(
             "",
         ),
     )
-    assert tools._gpu_uuid_for_pids((101,)) == "GPU-selected"
+    assert (
+        tools._gpu_uuid_for_pids((101,), ("7, GPU-other", "101, GPU-selected"))
+        == "GPU-selected"
+    )
+
+
+def test_snapshot_inventory_probes_each_process_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    tools = LocalSnapshotTools()
+    descriptor_pids: list[int] = []
+    nvidia_queries: list[tuple[str, ...]] = []
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100, 101))
+
+    def descriptor_targets(pid: int) -> tuple[str, ...]:
+        descriptor_pids.append(pid)
+        return ()
+
+    def run(command: list[str], **_kwargs: object):
+        nvidia_queries.append(tuple(command))
+        output = (
+            "101\n" if "--query-compute-apps=pid" in command else "101, GPU-selected\n"
+        )
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(tools, "_descriptor_targets", descriptor_targets)
+    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
+    monkeypatch.setattr(tools, "_run", run)
+
+    inventory = tools.inventory(100)
+
+    assert descriptor_pids == [100, 101]
+    assert len(nvidia_queries) == 1
+    assert inventory.cuda_holders == (101,)
+    assert inventory.gpu_uuid == "GPU-selected"
+    assert not hasattr(inventory, "sockets")
 
 
 @pytest.mark.parametrize(
@@ -1082,13 +1193,15 @@ def test_snapshot_rejects_unsafe_process_state_before_criu(
 ):
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100, 101))
-    monkeypatch.setattr(tools, "_cuda_pids", lambda: (101,))
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("101, GPU-abc",))
     monkeypatch.setattr(
         tools,
-        "_io_uring_pids",
-        lambda _tree: (101,) if blocked_state == "io_uring" else (),
+        "_descriptor_inventory",
+        lambda _tree: (
+            (101,) if blocked_state == "io_uring" else (),
+            {41},
+        ),
     )
-    monkeypatch.setattr(tools, "_socket_inodes", lambda _tree: {41})
     monkeypatch.setattr(
         tools,
         "_tcp_records",

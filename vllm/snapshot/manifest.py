@@ -32,32 +32,14 @@ class SnapshotSecurityError(SnapshotError):
     """The snapshot artifact does not meet the private-path contract."""
 
 
-class SocketIdentity(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    family: str
-    socket_type: str
-    local_address: str
-    remote_address: str | None
-    state: str
-
-
 _MAX_PID = 2**31 - 1
 _PositivePid = Annotated[int, Field(gt=0, le=_MAX_PID)]
 _OracleTokenId = Annotated[int, Field(ge=0)]
 
 
-class SnapshotManifest(BaseModel):
+class SnapshotRuntimeIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal[1]
-    boundary: Literal[
-        "post-engine-init-pre-http-bind",
-        "post-engine-init-reloadable-state-released",
-    ]
-    complete: Literal[True]
-    created_at: str
-    artifact_bytes: Annotated[int, Field(ge=0)]
     source_revision: str
     binary_revision: str
     python_version: str
@@ -70,15 +52,24 @@ class SnapshotManifest(BaseModel):
     host_id: str
     gpu_name: str
     gpu_uuid: str
+    environment: tuple[tuple[str, str], ...]
+
+
+class SnapshotManifest(SnapshotRuntimeIdentity):
+    schema_version: Literal[1]
+    boundary: Literal[
+        "post-engine-init-pre-http-bind",
+        "post-engine-init-reloadable-state-released",
+    ]
+    created_at: str
+    artifact_bytes: Annotated[int, Field(ge=0)]
     model: str
     served_model_name: str
     model_revision: str
     tokenizer_revision: str
     engine_argv: tuple[str, ...]
-    environment: tuple[tuple[str, str], ...]
     process_tree: Annotated[tuple[_PositivePid, ...], Field(min_length=1)]
     cuda_holders: Annotated[tuple[_PositivePid, ...], Field(min_length=1)]
-    socket_inventory: tuple[SocketIdentity, ...]
     oracle_token_ids: Annotated[
         tuple[_OracleTokenId, ...], Field(min_length=1, max_length=1)
     ]
@@ -90,13 +81,6 @@ class SnapshotManifest(BaseModel):
     def _require_schema_version_one(cls, value: Any) -> Any:
         if type(value) is not int or value != 1:
             raise ValueError("schema version must be integer 1")
-        return value
-
-    @field_validator("complete", mode="before")
-    @classmethod
-    def _require_complete_true(cls, value: Any) -> Any:
-        if type(value) is not bool or value is not True:
-            raise ValueError("complete must be boolean true")
         return value
 
     @field_validator("oracle_sampled_token_logprob", mode="before")
@@ -124,27 +108,11 @@ class SnapshotManifest(BaseModel):
         return self
 
 
-_NON_IDENTITY_FIELDS = frozenset(
-    {
-        "complete",
-        "created_at",
-        "artifact_bytes",
-        "process_tree",
-        "cuda_holders",
-        "socket_inventory",
-        "oracle_token_ids",
-        "oracle_text",
-        "oracle_sampled_token_logprob",
-        "served_model_name",
-    }
-)
-
-
-def validate_identity(expected: SnapshotManifest, actual: SnapshotManifest) -> None:
+def validate_identity(
+    expected: SnapshotRuntimeIdentity, actual: SnapshotRuntimeIdentity
+) -> None:
     """Require an exact match for every field that can affect compatibility."""
-    for field_name in SnapshotManifest.model_fields:
-        if field_name in _NON_IDENTITY_FIELDS:
-            continue
+    for field_name in SnapshotRuntimeIdentity.model_fields:
         if getattr(expected, field_name) != getattr(actual, field_name):
             raise SnapshotCompatibilityError(f"snapshot mismatch: {field_name}")
 
@@ -207,35 +175,12 @@ def validate_artifact_root(path: Path, *, creating: bool) -> None:
             )
 
 
-_ORACLE_FIELDS = frozenset(
-    {"oracle_token_ids", "oracle_text", "oracle_sampled_token_logprob"}
-)
-_ROOT_VALIDATION_FIELDS = {
-    "snapshot_process_tree": "process_tree",
-    "snapshot_cuda_holders": "cuda_holders",
-}
-
-
-def _validation_diagnostic(error: ValidationError) -> str | None:
-    for detail in error.errors(include_url=False):
-        error_type = detail["type"]
-        location = detail["loc"]
-        if error_type == "json_invalid":
-            return "JSON"
-        if error_type == "model_type" and not location:
-            return "root"
-        if error_type in _ROOT_VALIDATION_FIELDS:
-            return _ROOT_VALIDATION_FIELDS[error_type]
-        if not location:
-            continue
-        field = location[0]
-        if len(location) == 1 and error_type in {"extra_forbidden", "missing"}:
-            return "fields"
-        if field in _ORACLE_FIELDS:
-            return "oracle"
-        if isinstance(field, str):
-            return field
-    return None
+def _validation_path(error: ValidationError) -> str:
+    detail = error.errors(include_url=False)[0]
+    location = detail["loc"]
+    if not location:
+        return "JSON" if detail["type"] == "json_invalid" else "root"
+    return ".".join(map(str, location))
 
 
 def _fsync_directory(path: Path) -> None:
@@ -279,6 +224,7 @@ def write_manifest_atomic(path: Path, manifest: SnapshotManifest) -> None:
 
 
 def read_manifest(path: Path) -> SnapshotManifest:
+    """Read a snapshot published by atomically installing its manifest."""
     path = Path(path)
     validate_artifact_root(path, creating=False)
     manifest_path = path / "manifest.json"
@@ -299,10 +245,8 @@ def read_manifest(path: Path) -> SnapshotManifest:
     try:
         return SnapshotManifest.model_validate_json(payload, strict=True)
     except ValidationError as error:
-        diagnostic = _validation_diagnostic(error)
-        suffix = f": {diagnostic}" if diagnostic is not None else ""
         raise SnapshotCompatibilityError(
-            f"invalid snapshot manifest{suffix}"
+            f"invalid snapshot manifest: {_validation_path(error)}"
         ) from error
 
 
