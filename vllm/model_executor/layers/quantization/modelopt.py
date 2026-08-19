@@ -1473,6 +1473,14 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
         self.mxfp8_config = mxfp8_config
 
+    def has_blocked_weights(self) -> bool:
+        # Same gate as ModelOptFp8Config.has_blocked_weights, resolved per
+        # layer: "+quant_fp8" must be on as soon as any layer is block-scaled.
+        return any(
+            info.get("quant_algo", "").upper() == "FP8_PB_WO"
+            for info in self.quantized_layers.values()
+        )
+
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
 
@@ -2139,7 +2147,10 @@ class KMxfp8Static(QuantKeyScheme):
     def process(self, layer, role) -> None:
         if role is not WEIGHT:
             self.reject(role)
-        # Idempotency: emulation kernel may dequant weight to >=2-byte at load.
+        # Idempotency: the emulation kernel's post-load may replace the 1-byte
+        # MXFP8 weight with BF16 (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD, default
+        # on). On a weight reload process runs again after that swap, so skip
+        # the fp8 asserts when the weight is already >=2-byte.
         if layer.weight.element_size() >= 2:
             return
         assert layer.weight.ndim == 2 and layer.weight.dtype == MXFP8_VALUE_DTYPE
