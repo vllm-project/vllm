@@ -256,4 +256,3 @@ def _build_humming_moe_method(layer: "torch.nn.Module", layer_config: "INCLayerC
     from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
 
     return HummingMoEMethod(_build_humming_quant_config(layer_config), layer.moe_config)
-
