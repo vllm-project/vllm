@@ -807,8 +807,16 @@ class MoRIIOConnectorScheduler:
                                 blocks.get_block_ids()
                             )
                             local_attn = attn_block_ids
-                            assert len(local_attn) <= len(remote_attn)
-                            if len(local_attn) != len(remote_attn):
+                            if len(local_attn) > len(remote_attn):
+                                # Speculative decode (e.g. dspark) reserves extra
+                                # lookahead blocks on the decoder, so it can allocate
+                                # more attention blocks than the prefiller holds. Only
+                                # the prompt prefix (remote_attn) is transferred; it
+                                # occupies the leading local blocks, so pull
+                                # remote_attn[i] -> local_attn[i] and let the extra
+                                # lookahead blocks fill during generation.
+                                local_attn = local_attn[: len(remote_attn)]
+                            elif len(local_attn) != len(remote_attn):
                                 local_attn = remote_attn[-len(local_attn) :]
                             local_block_ids = [local_attn, mamba_block_ids]
                         else:
@@ -1458,6 +1466,8 @@ class MoRIIOConnectorWorker:
         self._recving_transfers: defaultdict[ReqId, dict] = defaultdict(dict)
         # Values are (remote_host, remote_notify_port, transfer_id).
         self._recving_transfers_callback_addr: dict[ReqId, tuple[str, str, str]] = {}
+        # Layers the peer never registered; None until the first peer is known.
+        self._draft_only_layers: set[str] | None = None
         # Monotonic-clock start times for each in-flight recv transfer.
         # Used by _pop_done_transfers to abort transfers whose RDMA
         # completion is lost, instead of hanging forever.
@@ -1577,12 +1587,30 @@ class MoRIIOConnectorWorker:
         self._writer.schedule_write(task)
 
     def _get_built_session(self, remote_engine_id):
+        remote_layer_map = self.layer_name_to_remote_kv_cache_metadata[remote_engine_id]
+        if self._draft_only_layers is None:
+            # Draft-model layers exist only on the decoder, so the prefiller
+            # never registered them and there is no remote KV to pull. Recorded
+            # once and skipped in session build, region-index map and read loop
+            # alike, to keep the flat session indexing consistent. Their state
+            # is recomputed locally on decode.
+            self._draft_only_layers = {
+                ln
+                for ln in self.layer_name_to_local_kv_cache_metadata
+                if ln not in remote_layer_map
+            }
+            if self._draft_only_layers:
+                logger.info(
+                    "MoRIIO: skipping %d draft-only layer(s) absent on remote: %s",
+                    len(self._draft_only_layers),
+                    sorted(self._draft_only_layers),
+                )
         if remote_engine_id not in self.built_write_session:
             cur_remote_engine_sessions = []
             for ln, local_metas in self.layer_name_to_local_kv_cache_metadata.items():
-                remote_metas = self.layer_name_to_remote_kv_cache_metadata[
-                    remote_engine_id
-                ][ln]
+                if ln in self._draft_only_layers:
+                    continue
+                remote_metas = remote_layer_map[ln]
                 # One session per registered region, in registration order:
                 # attention layers have a single region; KDA layers have two
                 # (conv then ssm). This flat layout is indexed via
@@ -2966,7 +2994,10 @@ class MoRIIOConnectorWorker:
         if self._region_session_index is None:
             mapping: dict[str, list[int]] = {}
             idx = 0
+            draft_only = self._draft_only_layers or ()
             for ln, metas in self.layer_name_to_local_kv_cache_metadata.items():
+                if ln in draft_only:
+                    continue
                 mapping[ln] = list(range(idx, idx + len(metas)))
                 idx += len(metas)
             self._region_session_index = mapping
@@ -2999,6 +3030,31 @@ class MoRIIOConnectorWorker:
         address the ssm region/session.
         """
         assert self._conv_decomp is not None, "KDA decomposition not derived"
+        # Speculative decode (dspark) loads a draft model only on the decoder,
+        # which changes the decoder's hybrid KV-cache group layout relative to
+        # the (no-spec) prefiller (e.g. decode 20 groups / mamba=112 vs prefill
+        # 4 groups / mamba=3). The KDA recurrent state is a single current slot
+        # per layer, so reconcile the flattened slot lists to the common,
+        # tail-aligned count (the most-recent state) before computing offsets.
+        # This moves valid state slots without over-/under-running either side;
+        # exact per-layer P<->D group remapping under asymmetric grouping is a
+        # follow-up for spec-decode accuracy.
+        if len(local_slots) != len(remote_slots) and remote_slots:
+            if len(local_slots) % len(remote_slots) == 0:
+                # With symmetric mamba grouping (same #groups on prefill and
+                # decode), the decoder reserves an align window of
+                # (num_spec+1) blocks per mamba group under spec decode while
+                # the prefiller holds a single slot per group. The flattened
+                # slot list is group-major, so transfer the prefiller's slot
+                # into each decode group's base (window-start) slot.
+                window = len(local_slots) // len(remote_slots)
+                local_slots = local_slots[::window]
+            else:
+                # Fallback for asymmetric grouping: tail-align to the common
+                # slot count (bringup-safe; avoids over-/under-running).
+                k = min(len(local_slots), len(remote_slots))
+                local_slots = local_slots[-k:]
+                remote_slots = remote_slots[-k:]
         conv, ssm = kda_conv_ssm(
             self.kv_caches[layer_name], self.layer_to_spec.get(layer_name)
         )
@@ -3137,7 +3193,11 @@ class MoRIIOConnectorWorker:
         # SQ-full backpressure deadline, shared across this request's layers.
         _sq_deadline = time.monotonic() + self.moriio_config.transfer_timeout
         # TODO : apply multi-session batch-read when moriio support it
+        _draft_only = self._draft_only_layers or ()
         for layer_name in self.layer_name_to_local_kv_cache_metadata:
+            if layer_name in _draft_only:
+                # Not present on the prefiller; recomputed locally on decode.
+                continue
             region_sessions = self._region_session_indices(layer_name)
             statuses = []
             if self._is_mamba_layer(layer_name):
