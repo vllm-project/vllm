@@ -3682,7 +3682,7 @@ steps:
     --ignore=kernels/test_concat_mla_q.py
     --ignore=kernels/test_fused_qk_norm_rope_gate.py
     --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-    --deselect=kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
+    --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
     --ignore=kernels/test_top_k_per_row.py
     --ignore=kernels/test_kda.py
     --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
