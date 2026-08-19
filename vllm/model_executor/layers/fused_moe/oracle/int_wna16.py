@@ -678,7 +678,7 @@ def _process_weights_marlin(
     # --- Permute scales ---
     marlin_w13_scales = marlin_moe_permute_scales(
         s=marlin_w13_scales,
-        size_k=layer.intermediate_size_per_partition,
+        size_k=w13_qweight.shape[1] * pack_factor,
         size_n=marlin_w13_scales.shape[2],
         group_size=group_size,
         is_a_8bit=is_a_8bit,
@@ -847,7 +847,7 @@ def _process_awq_weights_marlin(
 
     marlin_w13_scales = marlin_moe_permute_scales(
         s=w13_scales,
-        size_k=layer.intermediate_size_per_partition,
+        size_k=w13_qweight.shape[1],
         size_n=w13_scales.shape[2],
         group_size=group_size,
         is_a_8bit=is_a_8bit,
