@@ -14,6 +14,19 @@ from torch.multiprocessing.reductions import reduce_tensor
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
 
+# Streams are cached across calls: the caching allocator keys cached blocks by the
+# stream they were allocated on, so allocating the packed buffers on streams created
+# fresh at every call would strand buffer_size_bytes * num_buffers of reserved memory
+# per call (never reusable, since the stream is never seen again). See gh-52950.
+_STREAM_CACHE: dict[tuple[int, int], list[torch.cuda.Stream]] = {}
+
+
+def _get_streams(num_buffers: int) -> list[torch.cuda.Stream]:
+    key = (torch.cuda.current_device(), num_buffers)
+    if key not in _STREAM_CACHE:
+        _STREAM_CACHE[key] = [torch.cuda.Stream() for _ in range(num_buffers)]
+    return _STREAM_CACHE[key]
+
 
 def unpack_tensor(
     packed_tensor: torch.Tensor,
@@ -154,7 +167,7 @@ def packed_nccl_broadcast_producer(
                     Both producer and consumer must use the same value.
 
     """
-    streams = [torch.cuda.Stream() for _ in range(num_buffers)]
+    streams = _get_streams(num_buffers)
     # Keep references to in-flight chunks so their packed_tensors
     # aren't freed while an async broadcast is still reading them.
     in_flight: list[PackedChunk | None] = [None] * num_buffers
@@ -209,7 +222,7 @@ def packed_nccl_broadcast_consumer(
     """
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.cuda.Stream() for _ in range(num_buffers)]
+    streams = _get_streams(num_buffers)
     buffer_idx = 0
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [
