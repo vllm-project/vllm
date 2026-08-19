@@ -679,6 +679,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         gate_up_output: torch.Tensor,
         quanted_down_input: torch.Tensor,
         valid_rows: torch.Tensor | None,
+        topk: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the fused SITU activation + FP8 quant for the w2 input.
 
@@ -710,6 +711,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             linear_beta=cfg.activation_situ_linear_beta,
             group_size=group_size,
             valid_rows=valid_rows,
+            topk=topk,
         )
         return quanted_down_input, input_scale
 
@@ -835,18 +837,16 @@ class HummingIndexedExperts(HummingExpertsBase):
             **moe_kwargs1,
         )
 
-        valid_rows = None
+        # psum[-1:] is the DeepEP valid *token* count as a zero-cost int32 view.
+        # situ (rows = tokens*topk) multiplies by topk on-device; mul_sum bounds
+        # on tokens, so both read this pointer directly -- no host cast/multiply.
         valid_tokens = None
+        topk = topk_ids.size(1)
         if (
             expert_tokens_meta is not None
             and expert_tokens_meta.psum_recv_per_rank is not None
         ):
-            psum = expert_tokens_meta.psum_recv_per_rank
-            topk = topk_ids.size(1)
-            # situ operates on [num_tokens * topk] rows; mul_sum's outer dim is
-            # tokens (it reduces topk internally), so it bounds on psum[-1] alone.
-            valid_rows = psum[-1:].to(torch.int64) * topk
-            valid_tokens = psum[-1:]
+            valid_tokens = expert_tokens_meta.psum_recv_per_rank[-1:]
 
         if self.fused_situ_quant_enabled(activation):
             # Fused SITU + FP8 quant (per-token or block-FP8 group-128) straight
@@ -854,9 +854,16 @@ class HummingIndexedExperts(HummingExpertsBase):
             inputs, input_scale = self.fused_situ_quant(
                 gate_up_output=buffers["gate_up_output"],
                 quanted_down_input=buffers["quanted_down_input"],
-                valid_rows=valid_rows,
+                valid_rows=valid_tokens,
+                topk=topk,
             )
         else:
+            # Fallback situ_and_mul takes int64 row counts (tokens*topk).
+            valid_rows = (
+                valid_tokens.to(torch.int64) * topk
+                if valid_tokens is not None
+                else None
+            )
             self.apply_activation(
                 activation=activation,
                 input=buffers["gate_up_output"],

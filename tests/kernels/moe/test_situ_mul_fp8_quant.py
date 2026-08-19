@@ -112,7 +112,7 @@ def test_situ_and_mul_quant_pipelined(
     )
     out_sentinel = out.clone()
     valid_rows = (
-        None if valid is None else torch.tensor(valid, dtype=torch.int64, device=DEVICE)
+        None if valid is None else torch.tensor(valid, dtype=torch.int32, device=DEVICE)
     )
 
     situ_and_mul_quant(
@@ -152,6 +152,46 @@ def test_situ_and_mul_quant_pipelined(
     dist = fp8_code_dist(out[:rows], ref_q)
     assert dist.max().item() <= 2
     assert (dist <= 1).float().mean().item() >= 0.99
+
+
+@pytest.mark.parametrize("tokens,topk", [(300, 8), (1, 4), (256, 6)])
+@torch.inference_mode()
+def test_situ_and_mul_quant_topk_row_bound(tokens: int, topk: int) -> None:
+    """valid_rows is a token count; the kernel bounds rows at tokens*topk."""
+    set_random_seed(7)
+    d = SITU_D
+    num_tokens = tokens * topk + 37  # padding tail past the valid rows
+    inp = token_random(num_tokens, 2 * d, torch.bfloat16)
+
+    out = torch.full((num_tokens, d), 17.0, device=DEVICE).to(fp8_dtype)
+    scale = torch.full(
+        (num_tokens, d // GROUP_SIZE), -1.0, dtype=torch.float32, device=DEVICE
+    )
+    out_sentinel = out.clone()
+    valid_rows = torch.tensor(tokens, dtype=torch.int32, device=DEVICE)
+
+    situ_and_mul_quant(
+        out,
+        scale,
+        inp,
+        beta=SITU_BETA,
+        linear_beta=SITU_LINEAR_BETA,
+        group_size=GROUP_SIZE,
+        valid_rows=valid_rows,
+        topk=topk,
+    )
+
+    rows = tokens * topk
+    assert torch.equal(scale[rows:], torch.ones_like(scale[rows:]))
+    assert torch.equal(
+        out[rows:].view(torch.uint8), out_sentinel[rows:].view(torch.uint8)
+    )
+
+    ref_q, ref_s = ref_situ_block_fp8_quant(
+        inp[:rows], SITU_BETA, SITU_LINEAR_BETA, GROUP_SIZE
+    )
+    torch.testing.assert_close(scale[:rows], ref_s, rtol=3e-2, atol=1e-5)
+    assert fp8_code_dist(out[:rows], ref_q).max().item() <= 2
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])

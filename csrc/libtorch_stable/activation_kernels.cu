@@ -566,15 +566,17 @@ __global__ void situ_and_mul_quant_group_ldg_kernel(
     fp8_type* __restrict__ out,          // [num_tokens, D]
     float* __restrict__ scale_out,       // [num_tokens, NUM_GROUPS]
     const scalar_t* __restrict__ input,  // [num_tokens, 2, D]
-    const int64_t num_rows, const int64_t* __restrict__ valid_rows_ptr) {
+    const int64_t num_rows, const int32_t* __restrict__ valid_rows_ptr,
+    const int64_t topk) {
   const int tid = threadIdx.x;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
   static constexpr int NUM_GROUPS = D / GROUP_SIZE;
+  // valid_rows_ptr points at psum's last recv count (tokens); *topk -> rows.
   const int64_t row_bound =
       valid_rows_ptr != nullptr
-          ? max((int64_t)0, min(*valid_rows_ptr, num_rows))
+          ? max((int64_t)0, min((int64_t)(*valid_rows_ptr) * topk, num_rows))
           : num_rows;
 
   static_assert(NUM_GROUPS % 4 == 0, "float4 scale fill needs NUM_GROUPS%4==0");
@@ -679,7 +681,7 @@ __global__ void situ_and_mul_quant_group_scalar_kernel(
     const scalar_t* __restrict__ input,  // [num_tokens, 2, d]
     const int d, const int num_groups, const float beta,
     const float linear_beta, const int64_t num_rows,
-    const int64_t* __restrict__ valid_rows_ptr) {
+    const int32_t* __restrict__ valid_rows_ptr, const int64_t topk) {
   static constexpr int ELTS_PER_LANE = GROUP_SIZE / WARP_SIZE;
   const int tid = threadIdx.x;
   const int warp_id = tid / WARP_SIZE;
@@ -687,7 +689,7 @@ __global__ void situ_and_mul_quant_group_scalar_kernel(
   const int num_warps = blockDim.x / WARP_SIZE;
   const int64_t row_bound =
       valid_rows_ptr != nullptr
-          ? max((int64_t)0, min(*valid_rows_ptr, num_rows))
+          ? max((int64_t)0, min((int64_t)(*valid_rows_ptr) * topk, num_rows))
           : num_rows;
 
   const bool clamp_up = linear_beta > 0.0f;
@@ -913,12 +915,14 @@ void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
 }
 
 // Fused SITU activation and block-FP8 quantization for Humming w2.
-// `valid_rows` excludes DeepEP padding; skipped rows receive scale 1.
+// `valid_rows` is the int32 DeepEP token count (psum[-1]); rows = it * `topk`,
+// so padding is excluded on-device and skipped rows receive scale 1.
 void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                         torch::stable::Tensor& scale,  // [..., 1 or d/128]
                         torch::stable::Tensor& input,  // [..., 2 * d]
                         double beta, double linear_beta, int64_t group_size,
-                        std::optional<torch::stable::Tensor> valid_rows) {
+                        std::optional<torch::stable::Tensor> valid_rows,
+                        int64_t topk) {
   STD_TORCH_CHECK(
       out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn ||
           out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fnuz,
@@ -941,13 +945,16 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
   }
   STD_TORCH_CHECK(out.size(-1) == d && out.numel() == num_tokens * (int64_t)d,
                   "situ_and_mul_quant: out shape must be [num_tokens, d]");
-  const int64_t* valid_rows_ptr = nullptr;
+  const int32_t* valid_rows_ptr = nullptr;
   if (valid_rows.has_value()) {
     STD_TORCH_CHECK(valid_rows->is_cuda() && valid_rows->get_device_index() ==
                                                  input.get_device_index(),
                     "situ_and_mul_quant: valid_rows must be a CUDA tensor on "
                     "the same device as input");
-    valid_rows_ptr = valid_rows->const_data_ptr<int64_t>();
+    STD_TORCH_CHECK(
+        valid_rows->scalar_type() == torch::headeronly::ScalarType::Int,
+        "situ_and_mul_quant: valid_rows must be int32 (psum count)");
+    valid_rows_ptr = valid_rows->const_data_ptr<int32_t>();
   }
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -987,7 +994,7 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                             out.mutable_data_ptr<fp8_t>(),
                             scale.mutable_data_ptr<float>(),
                             input.const_data_ptr<scalar_t>(), num_tokens,
-                            valid_rows_ptr);
+                            valid_rows_ptr, topk);
                     return;
                   }
                 }
@@ -1000,7 +1007,7 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                         scale.mutable_data_ptr<float>(),
                         input.const_data_ptr<scalar_t>(), d, num_groups,
                         (float)beta, (float)linear_beta, num_tokens,
-                        valid_rows_ptr);
+                        valid_rows_ptr, topk);
               });
         });
   }
