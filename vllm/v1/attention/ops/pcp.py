@@ -33,17 +33,23 @@ class DirectPCPFusedNormRopeWorkspace(DirectCPWorkspace):
 
     Each rank contributes the same number of local tokens. Decode rows are
     replicated, while prefill rows are sequence-sharded. The dispatch kernel
-    writes FP8 payloads into the symmetric window, and the combine kernel
+    writes cache-ready payloads into the symmetric window, and the combine kernel
     scatters the unique rows into local paged caches.
     """
 
-    PACKED_ROW_BYTES = 720
+    PACKED_ROW_BYTES = {
+        "fp8": 720,
+        "fp8_e4m3": 720,
+        "fp8_ds_mla": 800,
+    }
 
     def __init__(
         self,
         group: ProcessGroup,
         device: torch.device,
         max_local_tokens: int,
+        kv_cache_dtype: str,
+        index_rope_interleave: bool,
         num_ubatches: int = 1,
     ) -> None:
         if group.size() <= 1:
@@ -54,13 +60,15 @@ class DirectPCPFusedNormRopeWorkspace(DirectCPWorkspace):
             raise ValueError("num_ubatches must be positive")
         super().__init__(group, device, num_ubatches)
         self.max_local_tokens = max_local_tokens
+        self.fp8_ds_mla = kv_cache_dtype == "fp8_ds_mla"
+        self.index_rope_interleave = index_rope_interleave
 
         payload_shape = (
             num_ubatches,
             2,
             self.world_size,
             max_local_tokens,
-            self.PACKED_ROW_BYTES,
+            self.PACKED_ROW_BYTES[kv_cache_dtype],
         )
         signal_shape = (num_ubatches, 2, self.world_size)
         self.received_payload, _ = self._allocate(payload_shape, torch.uint8)
@@ -155,6 +163,8 @@ class DirectPCPFusedNormRopeWorkspace(DirectCPWorkspace):
             index_cache,
             num_decode_tokens,
             self.rank,
+            self.fp8_ds_mla,
+            self.index_rope_interleave,
             payload_multicast_ptr,
             signal_multicast_ptr,
         )
@@ -166,6 +176,8 @@ def _get_fused_pcp_norm_rope_workspace(
     group: GroupCoordinator,
     device: torch.device,
     max_local_tokens: int,
+    kv_cache_dtype: str,
+    index_rope_interleave: bool,
     num_ubatches: int,
 ) -> DirectPCPFusedNormRopeWorkspace | None:
     if group.world_size <= 1 or not direct_cp_multicast_enabled(
@@ -178,6 +190,8 @@ def _get_fused_pcp_norm_rope_workspace(
         group.device_group,
         device,
         max_local_tokens,
+        kv_cache_dtype,
+        index_rope_interleave,
         num_ubatches,
     )
     logger.info_once("Using fused symmetric-memory PCP norm/RoPE cache dispatch.")
@@ -192,18 +206,19 @@ def get_fused_pcp_norm_rope_workspace(
 ) -> DirectPCPFusedNormRopeWorkspace | None:
     parallel_config = vllm_config.parallel_config
     if not (
-        kv_cache_dtype in ("fp8", "fp8_e4m3")
+        kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_ds_mla")
         and model_config.q_lora_rank in (1536, 2048)
         and model_config.kv_lora_rank == 512
         and model_config.qk_rope_head_dim == 64
         and getattr(model_config, "index_head_dim", None) == 128
-        and getattr(model_config, "indexer_rope_interleave", False)
     ):
         return None
     return _get_fused_pcp_norm_rope_workspace(
         get_pcp_group(),
         device,
         vllm_config.scheduler_config.max_num_batched_tokens,
+        kv_cache_dtype,
+        getattr(model_config, "indexer_rope_interleave", False),
         max(parallel_config.num_ubatches, 1),
     )
 
