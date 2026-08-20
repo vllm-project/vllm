@@ -738,6 +738,16 @@ class SiglipVisionTransformer(nn.Module):
         )
         self.last_hs_proc = partial(self.maybe_layer_norm_and_apply_head)
 
+        drops = dict[str, None]()
+        if self.post_layernorm is None:
+            drops["post_layernorm."] = None
+        if self.head is None:
+            drops["head."] = None
+        if drops:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix=drops
+            )
+
     @property
     def dtype(self):
         return next(self.parameters()).dtype
@@ -797,12 +807,7 @@ class SiglipVisionTransformer(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.post_layernorm is None:
-            skip_prefixes.append("post_layernorm.")
-        if self.head is None:
-            skip_prefixes.append("head.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
 
         layer_count = len(self.encoder.layers)
 
@@ -911,6 +916,8 @@ class SiglipTextEmbeddings(nn.Module):
 )
 class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".position_ids": None})
 
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
@@ -1154,8 +1161,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            skip_substrs=[".position_ids"],
             ignore_unexpected_prefixes=["logit_scale.", "logit_bias."],
         )
 
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
