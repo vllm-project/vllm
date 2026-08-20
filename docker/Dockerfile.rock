@@ -545,7 +545,7 @@ RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
     c_ops="$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so')"; \
     test "$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so' | wc -l)" -eq 1; \
     expected="$(printf '%s' "${LMCACHE_ROCM_ARCH}" | tr ';' '\n' | sort -u)"; \
-    actual="$(/opt/rocm/llvm/bin/llvm-objdump --offloading "${c_ops}" \
+    actual="$(llvm-objdump --offloading "${c_ops}" \
         | grep -oE 'gfx[0-9a-z]+' | sort -u)"; \
     if [ "${actual}" != "${expected}" ]; then \
         printf 'LMCache code objects mismatch\nexpected:\n%s\nactual:\n%s\n' \
