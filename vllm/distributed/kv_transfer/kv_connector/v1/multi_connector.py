@@ -364,7 +364,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     def get_finished_count(self) -> int | None:
         # TODO(https://github.com/vllm-project/vllm/issues/33400)
-        # Currently no connectors return non-None
         return None
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:

@@ -145,6 +145,14 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
                 "NixlConnector PCP producers currently require "
                 "decode_context_parallel_size=1."
             )
+        # TODO: Support PCP with bidirectional KV transfer by tracking separate
+        # send and receive completion counts.
+        if pcp_size > 1 and vllm_config.kv_transfer_config.get_from_extra_config(
+            "bidirectional_kv_xfer", False
+        ):
+            raise NotImplementedError(
+                "NixlConnector PCP producers do not support bidirectional KV transfer."
+            )
 
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id

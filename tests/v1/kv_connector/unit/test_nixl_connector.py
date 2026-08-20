@@ -602,6 +602,16 @@ class TestNixlHandshake:
         worker = connector.connector_worker
         assert worker is not None
         assert worker.pcp_rank == pcp_rank
+
+        req_id = "req"
+        metadata = NixlConnectorMetadata()
+        metadata.reqs_in_batch.add(req_id)
+        metadata.reqs_to_send[req_id] = time.perf_counter() + 10
+        worker.start_load_kv(metadata)
+        expected_tracked = pcp_rank == 0
+        assert (req_id in worker._reqs_to_process) == expected_tracked
+        assert (req_id in worker._reqs_to_send) == expected_tracked
+
         payload = MagicMock(spec=NixlHandshakePayload)
         worker.xfer_handshake_metadata = payload
         worker.get_finished = MagicMock(return_value=({"sent"}, set()))
