@@ -293,9 +293,7 @@ def test_dflash2_draft_forces_v2_model_runner():
     assert VllmConfig._is_dflash2_draft(config("dflash", ["DFlash2DraftModel"]))
     assert not VllmConfig._is_dflash2_draft(config("dflash", ["DFlashDraftModel"]))
     assert not VllmConfig._is_dflash2_draft(config("eagle", ["DFlash2DraftModel"]))
-    assert not VllmConfig._is_dflash2_draft(
-        SimpleNamespace(speculative_config=None)
-    )
+    assert not VllmConfig._is_dflash2_draft(SimpleNamespace(speculative_config=None))
     assert not VllmConfig._is_dflash2_draft(
         SimpleNamespace(
             speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
