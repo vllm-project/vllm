@@ -136,6 +136,7 @@ def get_vllm_config():
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
     )
+    cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
     vllm_config = VllmConfig(
         model_config=model_config,

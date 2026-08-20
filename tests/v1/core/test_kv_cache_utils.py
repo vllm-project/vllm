@@ -3146,6 +3146,7 @@ def test_auto_fit_max_model_len_reserves_null_block():
     model_config = ModelConfig(max_model_len=1024)
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     spec = new_kv_cache_spec(block_size=block_size)
 
     # Exactly the 1024 / 16 = 64 blocks a full-length request would need.
