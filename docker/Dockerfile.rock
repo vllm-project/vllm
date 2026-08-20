@@ -285,8 +285,7 @@ COPY --from=fetch_vllm \
     ${COMMON_WORKDIR}/vllm/requirements/rocm.txt \
     requirements/
 
-# -c holds the base's ROCm torch/triton; a transitive torch dep here otherwise
-# resolves to the CUDA build on PyPI and the native build then fails to find HIP.
+# Use constraints file to protect triton, pybind11, and torch dependencies.
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system -c /etc/rocm-constraints.txt -r requirements/rocm.txt
 
@@ -555,8 +554,7 @@ RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
     fi
 
 # DeepEP build stage. ROCShmem is provided by TheRock SDK
-# (rocm[libraries,devel]) -- no from-source build needed. ROCSHMEM_DIR points at
-# the SDK install path so DeepEP finds the headers, static lib, and bitcode.
+# ROCSHMEM_DIR set to the SDK install path so DeepEP finds the headers, etc.
 FROM base AS build_deepep
 ENV ROCSHMEM_DIR=${ROCM_PATH}
 ARG DEEPEP_BRANCH="0f63d3e9"
@@ -927,8 +925,7 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl
 
-# Recompute the base's triton fingerprint. A mismatch means a resolver replaced
-# our ROCm triton -- which is how a CUDA torch gets pulled in from PyPI.
+# Recompute the base's triton fingerprint to detect resolver interference.
 RUN EXPECTED=$(grep '^TRITON_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
     && ACTUAL=$(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \
         -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
@@ -936,6 +933,19 @@ RUN EXPECTED=$(grep '^TRITON_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
     && test -n "${EXPECTED}" \
     && test "${EXPECTED}" = "${ACTUAL}" \
     && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')"
+
+# Recompute the base's pybind11 fingerprint to detect resolver interference.
+RUN EXPECTED=$(grep '^PYBIND11_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
+    && EXPECTED_ABI=$(grep '^PYBIND11_INTERNALS_VERSION: ' /app/versions.txt | cut -d' ' -f2) \
+    && INC=$(python3 -c 'import pybind11; print(pybind11.get_include())') \
+    && ACTUAL=$(find "${INC}" -type f -name '*.h' | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
+    && ACTUAL_ABI=$(grep -rhE '^#[[:space:]]*define PYBIND11_INTERNALS_VERSION' "${INC}" | awk '{print $NF}') \
+    && echo "pybind11 $(pip show pybind11 | awk '/^Version:/ {print $2}')" \
+        "sha256 expected=${EXPECTED} actual=${ACTUAL}" \
+        "internals expected=${EXPECTED_ABI} actual=${ACTUAL_ABI}" \
+    && test -n "${EXPECTED}" \
+    && test "${EXPECTED}" = "${ACTUAL}" \
+    && test "${EXPECTED_ABI}" = "${ACTUAL_ABI}"
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
