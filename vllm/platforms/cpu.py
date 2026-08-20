@@ -296,7 +296,10 @@ class CpuPlatform(Platform):
         # For efficient conv state memory access. The C++ causal_conv1d
         # kernels (VDPBF16PS, no AMX tiles) consume the SD layout on any
         # AVX-512BF16 CPU, so apply it beyond AMX (e.g. AMD Zen5/Turin).
-        if torch.cpu._is_avx512_bf16_supported():
+        if (
+            torch.cpu._is_avx512_bf16_supported()
+            and os.getenv("VLLM_SSM_CONV_STATE_LAYOUT") is None
+        ):
             os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")
