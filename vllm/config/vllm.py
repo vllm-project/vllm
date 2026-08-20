@@ -110,6 +110,7 @@ def default_v2_model_runner_architectures() -> frozenset[str]:
         return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES - {
             "DeepseekV32ForCausalLM",
             "DeepseekV4ForCausalLM",
+            "GlmMoeDsaForCausalLM",
         }
     return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
@@ -120,10 +121,10 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES - {
-            "DeepseekV32ForCausalLM",
-            "DeepseekV32MTPModel",
-        }
+        # Breakable CUDA graphs currently regress performance on ROCm, so no
+        # architecture opts in by default here. Users can still force it with
+        # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
+        return frozenset()
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
