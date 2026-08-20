@@ -40,7 +40,10 @@ from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
-from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.fs.thread_pool import (
+    DualQueueThreadPool,
+    JobState,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -273,6 +276,125 @@ def test_invalid_path_raises_at_construction():
         )
 
 
+def test_multiple_roots_require_block_hash_sharding(tmp_path):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+
+    with pytest.raises(
+        ValueError,
+        match="multiple root_dir paths require path_sharding='by_block_hash'",
+    ):
+        FileSystemTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=memoryview(tensor.numpy()),
+            tier_type="fs",
+            root_dir=f"{tmp_path / 'root0'},{tmp_path / 'root1'}",
+        )
+
+
+@pytest.mark.parametrize("path_sharding", ["by_rank", "round_robin", ""])
+def test_unknown_path_sharding_rejected(tmp_path, path_sharding):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+
+    with pytest.raises(ValueError, match="path_sharding must be omitted"):
+        FileSystemTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=memoryview(tensor.numpy()),
+            tier_type="fs",
+            root_dir=str(tmp_path),
+            path_sharding=path_sharding,
+        )
+
+
+def test_hash_sharding_requires_distinct_roots(tmp_path):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    root = str(tmp_path / "root0")
+
+    with pytest.raises(ValueError, match="root_dir paths must be distinct"):
+        FileSystemTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=memoryview(tensor.numpy()),
+            tier_type="fs",
+            root_dir=f"{root},{root}",
+            path_sharding="by_block_hash",
+        )
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_block_hash_sharding_preserves_full_rows_and_root_affinity(
+    tmp_path, monkeypatch, use_c_ext
+):
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tensor = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    roots = [tmp_path / f"root{idx}" for idx in range(4)]
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=",".join(str(root) for root in roots),
+        path_sharding="by_block_hash",
+        n_read_threads=4,
+        n_write_threads=4,
+    )
+    try:
+        keys = [key(idx) for idx in range(4)]
+        expected = tensor[:4].clone()
+        tier.submit_store(make_job(1, keys, [0, 1, 2, 3]))
+        assert all(result.success for result in drain(tier))
+
+        for root_idx, block_key in enumerate(keys):
+            path = tier.get_file_name(block_key)
+            assert path.startswith(str(roots[root_idx]))
+            assert os.path.getsize(path) == tier._block_size
+            assert os.path.exists(tier.file_mappers[root_idx].get_config_file_path())
+
+        tensor[4:] = 0
+        tier.submit_load(make_job(2, keys, [4, 5, 6, 7], is_promotion=True))
+        assert all(result.success for result in drain(tier))
+        assert torch.equal(tensor[4:], expected)
+    finally:
+        tier.shutdown()
+
+
+def test_hash_sharded_load_reports_noncontiguous_successes(tmp_path):
+    tensor = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    roots = [tmp_path / f"root{idx}" for idx in range(4)]
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=",".join(str(root) for root in roots),
+        path_sharding="by_block_hash",
+        n_read_threads=4,
+        n_write_threads=4,
+    )
+    try:
+        keys = [key(idx) for idx in range(4)]
+        tier.submit_store(make_job(1, keys, [0, 1, 2, 3]))
+        assert all(result.success for result in drain(tier))
+
+        ctx = ReqContext(req_id="hash-sharded-partial")
+        assert lookup_and_wait(tier, keys, ctx=ctx) == [LookupResult.HIT] * 4
+        os.unlink(tier.get_file_name(keys[2]))
+
+        tier.submit_load(make_job(2, keys, [4, 5, 6, 7], is_promotion=True))
+        results = drain(tier)
+        assert len(results) == 1 and not results[0].success
+        assert tuple(results[0].successful_keys) == (keys[0], keys[1], keys[3])
+        assert [tier.lookup(block_key, ctx) for block_key in keys] == [
+            LookupResult.HIT,
+            LookupResult.HIT,
+            LookupResult.MISS,
+            LookupResult.HIT,
+        ]
+    finally:
+        tier.shutdown()
+
+
 @pytest.mark.parametrize("locality", ["local", ""])
 def test_invalid_locality_raises_at_construction(tmp_path, locality):
     tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
@@ -463,6 +585,22 @@ def test_wait_idle_blocks_until_tasks_complete():
         gate.set()
         pool.shutdown(wait=True)
         waiter.join(timeout=5.0)
+
+
+def test_job_state_reports_parallel_wall_time_instead_of_sum():
+    state = JobState(job_id=1, n_tasks=2)
+    state.task_started(10.0)
+    state.task_started(11.0)
+
+    completed, success, transfer_time = state.task_done(True, 12.0)
+    assert not completed
+    assert success
+    assert transfer_time == 2.0
+
+    completed, success, transfer_time = state.task_done(True, 13.0)
+    assert completed
+    assert success
+    assert transfer_time == 3.0
 
 
 def test_batch_lookup_c_extension(tmp_path):
