@@ -356,11 +356,7 @@ class ArceeForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights into the model (delegates to inner model and handles
         tied embeddings)."""
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-            skip_substrs=["gate_proj"],
-        )
+        loader = AutoWeightsLoader(self, skip_substrs=["gate_proj"])
         # AutoWeightLoader handles weight name remapping, including fusing
         # separate q_proj, k_proj, v_proj into qkv_proj
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
