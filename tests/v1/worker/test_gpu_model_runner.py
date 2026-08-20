@@ -1229,6 +1229,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
     )
+    cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
     attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASHINFER)
     vllm_config = VllmConfig(
@@ -1690,6 +1691,7 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
     )
+    cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
     attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASHINFER)
     vllm_config = VllmConfig(

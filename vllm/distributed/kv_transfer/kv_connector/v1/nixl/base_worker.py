@@ -89,6 +89,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
+    """Return whether all views share storage and a block stride."""
+    block_strides = {cache.stride(0) * cache.element_size() for cache in caches}
+    storage_ptrs = {cache.untyped_storage().data_ptr() for cache in caches}
+    return len(block_strides) == len(storage_ptrs) == 1
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
@@ -1024,17 +1031,7 @@ class NixlBaseConnectorWorker:
         seen_storage_addresses: set[int] = set()
         seen_base_addresses: list[int] = []
 
-        # DSv4-style packed allocation: every layer is a distinct strided view into
-        # one block-major storage, so a block's bytes form one contiguous row across
-        # all layers. Registering that row as a single region keeps transfers at one
-        # descriptor per block instead of one per (layer, block).
-        storage_ptrs = {
-            cache.untyped_storage().data_ptr() for cache in xfer_buffers.values()
-        }
-        data_ptrs = {cache.data_ptr() for cache in xfer_buffers.values()}
-        packed_storage = (
-            not self._has_mamba and len(storage_ptrs) == 1 and len(data_ptrs) > 1
-        )
+        packed_storage = _share_storage_and_block_stride(list(xfer_buffers.values()))
 
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
@@ -1113,7 +1110,11 @@ class NixlBaseConnectorWorker:
                     and cache.stride(2) == cache.shape[3]
                     and cache.stride(1) == cache.shape[2] * cache.shape[3]
                 )
-                if storage_is_block_major and (packed_storage or not hnc_contiguous):
+                if storage_is_block_major and (
+                    (packed_storage and is_mla_region) or not hnc_contiguous
+                ):
+                    # TODO(Lucas): handle TP slicing for packed_storage; for now
+                    # restrict to MLA (DSv4) where kv is replicated.
                     storage_block_len = storage.nbytes() // num_blocks
                     region_specs = [
                         (storage_addr, storage_block_len, storage_block_len)

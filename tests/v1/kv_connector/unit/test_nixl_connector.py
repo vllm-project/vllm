@@ -63,6 +63,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -2029,12 +2030,84 @@ def test_register_kv_caches(
         base_addrs = connector.connector_worker.kv_caches_base_addr[
             connector.connector_worker.engine_id
         ][0]
+        if layout == "BLHNC":
+            assert len(base_addrs) == 3
         assert set(base_addrs) == {
             start for start, _len, _tp in blocks_data if owner[start] == 0
         }
         assert len(blocks_data) == num_blocks * len(base_addrs)
 
         assert connector.connector_worker.block_size == 16
+
+
+def test_register_packed_dsv4_mla_cache_as_single_region(
+    default_vllm_config, dist_init
+):
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+
+    nixl_worker = "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker"
+    with (
+        patch(f"{nixl_worker}.NixlWrapper") as mock_nixl_wrapper,
+        patch(f"{nixl_worker}.threading.Event"),
+        patch(f"{nixl_worker}.threading.Thread") as mock_thread,
+        patch(f"{nixl_worker}.get_current_attn_backends") as mock_backends,
+    ):
+        mock_backends.return_value = [TritonAttentionBackend]
+        num_blocks = 2
+        num_layers = 4
+        block_size = 256
+        spec = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            cache_dtype_str="fp8_ds_mla",
+            tokens_per_state=4,
+            alignment=576,
+            model_version="deepseek_v4",
+            state_content_bytes=584,
+        )
+        layer_names = [f"layer{idx}" for idx in range(num_layers)]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names, spec)],
+        )
+        vllm_config = create_vllm_config(attention_backend="TRITON_ATTN")
+        vllm_config.cache_config.block_size = block_size
+        vllm_config.cache_config.kv_cache_layout = "BLHNC"
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+        connector.connector_worker = FakeNixlConnectorWorker(
+            vllm_config,
+            connector.engine_id,
+            hand_shake_latency=0,
+            kv_cache_layout="BLHNC",
+            kv_cache_config=kv_cache_config,
+        )
+        wrapper = mock_nixl_wrapper.return_value
+        connector.connector_worker.nixl_wrapper = wrapper
+        wrapper.get_agent_metadata.return_value = b"fake_agent_metadata"
+        mock_thread.return_value.is_alive.return_value = False
+
+        raw = torch.zeros(
+            spec.page_size_bytes * num_blocks * num_layers,
+            dtype=torch.int8,
+            device=current_platform.device_type,
+        )
+        views = dense_kv_cache_views(
+            raw, spec, num_blocks, num_layers, KVCacheLayout.BLHNC
+        )
+        connector.register_kv_caches(dict(zip(layer_names, views)))
+
+        blocks_data, _ = wrapper.get_xfer_descs.call_args[0]
+        packed_block_len = num_layers * spec.page_size_bytes
+        assert connector.connector_worker.kv_caches_base_addr[
+            connector.connector_worker.engine_id
+        ][0] == [raw.data_ptr()]
+        assert blocks_data.tolist() == [
+            [raw.data_ptr() + block_idx * packed_block_len, packed_block_len, 0]
+            for block_idx in range(num_blocks)
+        ]
 
 
 class FakePlatform(Platform):
