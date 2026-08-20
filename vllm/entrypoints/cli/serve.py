@@ -13,8 +13,6 @@ from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
-else:
-    FlexibleArgumentParser = argparse.ArgumentParser
 
 logger = init_logger(__name__)
 
@@ -146,7 +144,7 @@ class ServeSubcommand(CLISubcommand):
 
     def subparser_init(
         self, subparsers: argparse._SubParsersAction
-    ) -> FlexibleArgumentParser:
+    ) -> "FlexibleArgumentParser":
         serve_parser = subparsers.add_parser(
             self.name,
             help="Launch a local OpenAI-compatible API server to serve LLM "
