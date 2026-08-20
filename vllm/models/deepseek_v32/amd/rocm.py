@@ -119,11 +119,12 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         self._mqa_q_buffer = mqa_q_buffer
         self._q_index_buffer = q_index_buffer
         self._index_weights_buffer = index_weights_buffer
-        cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
-        self._rope_cos, self._rope_sin = cos.contiguous(), sin.contiguous()
-        if self.indexer_rope_emb is not None:
-            cos, sin = self.indexer_rope_emb.cos_sin_cache.chunk(2, dim=-1)
-            self._index_cos, self._index_sin = cos.contiguous(), sin.contiguous()
+        # Set by the model via set_aiter_rope once the layers exist, so the
+        # contiguous halves are split once rather than per layer.
+        self._rope_cos: torch.Tensor | None = None
+        self._rope_sin: torch.Tensor | None = None
+        self._index_cos: torch.Tensor | None = None
+        self._index_sin: torch.Tensor | None = None
 
     @property
     def _active_indexer(self) -> DeepseekV32Indexer | None:
@@ -131,6 +132,19 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         # skip_topk is flipped at runtime by the MTP proposer (see mtp.py
         # set_skip_topk), so this cannot be cached into a flag.
         return None if self.skip_topk else self.indexer
+
+    def set_aiter_rope(
+        self,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+        index_cos: torch.Tensor,
+        index_sin: torch.Tensor,
+    ) -> None:
+        """Adopt the model's contiguous cos/sin halves for the aiter path."""
+        self._rope_cos = rope_cos
+        self._rope_sin = rope_sin
+        self._index_cos = index_cos
+        self._index_sin = index_sin
 
     def get_layer_forward_context(self):
         """This layer's (attn_metadata, mla_slot) view of the forward context."""
@@ -366,6 +380,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         attn_metadata,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """AITER path: dual RMSNorm, indexer QK RoPE/quant, fused QK RoPE + cache."""
+        assert self._rope_cos is not None, "set_aiter_rope was never called"
         active_indexer = self._active_indexer
         has_caches = attn_metadata is not None
 

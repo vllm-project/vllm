@@ -65,7 +65,8 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             dtype=torch.int32,
             device=current_platform.device_type,
         )
-        if rocm_aiter_ops.is_mla_qk_norm_rope_enabled():
+        use_aiter_qk_norm_rope = rocm_aiter_ops.is_mla_qk_norm_rope_enabled()
+        if use_aiter_qk_norm_rope:
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             num_local_heads = (
                 config.num_attention_heads // get_tensor_model_parallel_world_size()
@@ -122,6 +123,21 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             q_index_buffer=q_index_buffer,
             index_weights_buffer=index_weights_buffer,
         )
+
+        if use_aiter_qk_norm_rope:
+            # Split once off the block's own rope: get_rope memoises, so every
+            # layer shares it. The MLA op derives the cos/sin row offset from
+            # rot_dim rather than a stride, so the chunk views will not do; the
+            # indexer op does take a stride but is kept contiguous to match.
+            attn = self.mtp_block.self_attn
+            cos, sin = attn.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
+            rope_cos, rope_sin = cos.contiguous(), sin.contiguous()
+            if attn.indexer_rope_emb is attn.rotary_emb:
+                index_cos, index_sin = rope_cos, rope_sin
+            else:
+                cos, sin = attn.indexer_rope_emb.cos_sin_cache.chunk(2, dim=-1)
+                index_cos, index_sin = cos.contiguous(), sin.contiguous()
+            attn.set_aiter_rope(rope_cos, rope_sin, index_cos, index_sin)
 
     def forward(
         self,
