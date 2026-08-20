@@ -18,6 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -169,6 +170,20 @@ class WeightsMapper:
         return replace(self, orig_to_new_stacked={})
 
 
+def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
+    """Map each tied word embedding qualname to the first name it aliases."""
+    canonical = dict[int, str]()
+    aliased = dict[str, str]()
+    for prefix, submodule in module.named_modules(remove_duplicate=False):
+        if not isinstance(submodule, VocabParallelEmbedding):
+            continue
+        for name, param in submodule.named_parameters(remove_duplicate=False):
+            qualname = f"{prefix}.{name}" if prefix else name
+            if (first_name := canonical.setdefault(id(param), qualname)) != qualname:
+                aliased[qualname] = first_name
+    return aliased
+
+
 class AutoWeightsLoader:
     """
     Helper class to load weights into a [`torch.nn.Module`][]. It is able
@@ -213,6 +228,14 @@ class AutoWeightsLoader:
         # update default skip_substrs
         self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
 
+        # Weight tying makes two qualnames point at the same `nn.Parameter`
+        # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
+        # would write the same storage twice, so only the first name reached by
+        # module traversal is loaded and the rest are skipped.
+        self.aliased_params = _get_tied_embedding_params(module)
+        self._skipped_aliases = dict[str, str]()
+        self._loaded_params_are_complete = True
+
     def _groupby_prefix(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -242,8 +265,10 @@ class AutoWeightsLoader:
         return ".".join((prefix, rest))
 
     def _can_skip(self, qualname: str) -> bool:
-        return any(qualname.startswith(p) for p in self.skip_prefixes) or any(
-            substr in qualname for substr in self.skip_substrs
+        return (
+            qualname in self.aliased_params
+            or any(qualname.startswith(p) for p in self.skip_prefixes)
+            or any(substr in qualname for substr in self.skip_substrs)
         )
 
     def _can_ignore_unexpected(self, qualname: str) -> bool:
@@ -332,6 +357,7 @@ class AutoWeightsLoader:
                     logger.warning(
                         "Unable to collect loaded parameters for module %s", module
                     )
+                    self._loaded_params_are_complete = False
                 else:
                     yield from map(
                         lambda x: self._get_qualname(base_prefix, x),
@@ -415,13 +441,35 @@ class AutoWeightsLoader:
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
         if mapper is not None:
             weights = mapper.apply(weights)
-        # filter out weights with first-prefix/substr to skip in name
-        weights = (
-            (name, weight) for name, weight in weights if not self._can_skip(name)
-        )
+        weights = self._filter_skipped(weights)
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
+        self._check_skipped_aliases(autoloaded_weights)
         return autoloaded_weights
+
+    def _filter_skipped(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for name, weight in weights:
+            if (canonical := self.aliased_params.get(name)) is not None:
+                self._skipped_aliases[name] = canonical
+            if self._can_skip(name):
+                continue
+
+            yield name, weight
+
+    def _check_skipped_aliases(self, autoloaded_weights: set[str]) -> None:
+        """Guard against skipping an alias whose canonical name never loads."""
+        if not self._loaded_params_are_complete:
+            return
+        for alias, canonical in self._skipped_aliases.items():
+            if canonical not in autoloaded_weights:
+                raise ValueError(
+                    f"{alias!r} was skipped because it is tied to {canonical!r} "
+                    f"in {self.module._get_name()}, but {canonical!r} was not "
+                    "found in the checkpoint, so the tied weight is "
+                    "uninitialized."
+                )
 
 
 def maybe_fuse_shared_experts(
