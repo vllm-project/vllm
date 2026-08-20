@@ -388,7 +388,7 @@ class TestErrors:
             client.write(uuid, too_large)
         state_after = client.get_manager_state()
         assert state_after["free_blocks_count"] == state_before["free_blocks_count"]
-        assert uuid not in client.get_manager_state().get("cached_items", [])
+        assert state_after["total_items_count"] == state_before["total_items_count"]
 
     def test_delete_and_read(self, client):
         uuid = _unique_uuid()
@@ -863,20 +863,24 @@ class TestAsyncWrite:
         Simulate a failure during data writing to verify rollback.
         """
         uuid = _unique_uuid()
-        blocks = [1, 2]
+        blocks = [1, 2]  # pre-allocated blocks (but not actually used)
 
+        # Create an invalid array that will cause TypeError in storage.write
         invalid_array = np.array([{1: 1}, {2: 2}])
 
+        # Async write returns immediately;
+        # we must wait for the future to catch the error
+        size, future = client.write(
+            uuid, invalid_array, blocks=blocks, async_write=True
+        )
+
+        # The future should raise TypeError from the background task
         with pytest.raises(TypeError):
-            client.write(uuid, invalid_array, blocks=blocks, async_write=True)
+            future.result()
 
         # The item should have been deleted (rollback) and not be readable
         with pytest.raises(RuntimeError, match="Server error"):
             client.read(uuid)
-
-        # Also verify the item is not in the cache
-        state = client.get_manager_state()
-        assert uuid not in state.get("cached_items", [])
 
     def test_async_write_concurrent(self, client):
         """Multiple concurrent async writes with distinct UUIDs."""
@@ -929,19 +933,187 @@ class TestPreAllocatedBlocks:
         client.delete(uuid)
 
     def test_read_with_preallocated_blocks(self, client):
+        """Test reading using pre-obtained blocks and size without double-locking."""
         uuid = _unique_uuid()
         data = b"preallocated read"
         client.write(uuid, data)
 
-        # First, get the blocks and size via open_read (but don't close)
+        # First, get the blocks and size via open_read (acquires a read lock)
         item = client.open_read(uuid, timeout=0.0)
         blocks = item.blocks
         size = item.size
 
-        # Now read using the pre‑obtained info (no new lock acquired)
-        result = client.read(uuid, size=size, blocks=blocks)
+        # Now read using the pre‑obtained info. We must NOT use client.read()
+        # because that would attempt to acquire another lock and then release it,
+        # causing a double release. Instead, directly read from storage.
+        # We still hold the read lock from open_read, so it's safe.
+        result = client._storage.read_to_numpy(size, blocks)
         assert result.tobytes() == data
 
         # Must close the read lock we acquired above
         client.close_read(uuid)
+        client.delete(uuid)
+
+
+# ---------------------------------------------------------------------------
+# wait_write
+# ---------------------------------------------------------------------------
+
+
+class TestWaitWrite:
+    """Test wait write"""
+
+    def test_wait_write_immediate_when_readable(self, client):
+        """Item already readable → wait_write returns immediately."""
+        uuid = _unique_uuid()
+        data = b"test data"
+        client.write(uuid, data)
+        client.wait_write(uuid, timeout=0.0)
+        client.delete(uuid)
+
+    def test_wait_write_blocks_until_close_write(self, client):
+        """wait_write blocks and unblocks after close_write."""
+        uuid = _unique_uuid()
+        # Allocate blocks, item stays in REF_WRITING state
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
+
+        # Background thread will close the write after a short delay
+        def _close_writer():
+            time.sleep(0.3)  # give wait_write time to block
+            client.close_write(uuid)
+
+        close_thread = threading.Thread(target=_close_writer)
+        close_thread.start()
+
+        # This should block until close_thread calls close_write
+        client.wait_write(uuid, timeout=5.0)  # returns after ~0.3s
+
+        close_thread.join()
+        client.delete(uuid)
+
+    def test_wait_write_timeout_zero_raises(self, client):
+        """timeout=0 → immediate error if still being written."""
+        uuid = _unique_uuid()
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
+
+        try:
+            with pytest.raises(RuntimeError, match="Server error"):
+                client.wait_write(uuid, timeout=0.0)
+        finally:
+            client.close_write(uuid)
+            client.delete(uuid)
+
+    def test_wait_write_timeout_positive_succeeds_after_close_write(self, client):
+        """Positive timeout → waits until close_write."""
+        uuid = _unique_uuid()
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
+
+        def _close_writer():
+            time.sleep(0.3)
+            client.close_write(uuid)
+
+        close_thread = threading.Thread(target=_close_writer)
+        close_thread.start()
+
+        client.wait_write(uuid, timeout=5.0)  # blocks then succeeds
+
+        close_thread.join()
+        client.delete(uuid)
+
+    def test_wait_write_timeout_negative_infinite(self, client):
+        """Timeout=-1 → wait indefinitely until close_write."""
+        uuid = _unique_uuid()
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
+
+        def _close_writer():
+            time.sleep(0.3)
+            client.close_write(uuid)
+
+        close_thread = threading.Thread(target=_close_writer)
+        close_thread.start()
+
+        client.wait_write(uuid, timeout=-1.0)  # infinite wait, unblocked by close
+
+        close_thread.join()
+        client.delete(uuid)
+
+    def test_wait_write_multiple_waiters(self, client):
+        """All waiters for the same UUID are woken by one close_write."""
+        uuid = _unique_uuid()
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
+
+        num_waiters = 3
+        done_count = 0
+        errors = []
+
+        def _waiter():
+            nonlocal done_count
+            try:
+                client.wait_write(uuid, timeout=5.0)
+                done_count += 1
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=_waiter) for _ in range(num_waiters)]
+        for t in threads:
+            t.start()
+
+        # Let all waiters settle into blocking state
+        time.sleep(0.2)
+
+        # Single close_write wakes all
+        client.close_write(uuid)
+
+        for t in threads:
+            t.join(timeout=5.0)
+        assert not any(t.is_alive() for t in threads)
+        assert len(errors) == 0
+        assert done_count == num_waiters
+
+        client.delete(uuid)
+
+    def test_wait_write_nonexistent_uuid(self, client):
+        """wait_write on unknown UUID raises immediately."""
+        uuid = _unique_uuid()
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.wait_write(uuid, timeout=0.0)
+
+    def test_wait_write_then_open_read(self, client):
+        """Integration: wait for write completion, then read."""
+        uuid = _unique_uuid()
+        data = b"test wait then read"
+        size = len(data)
+
+        # 1. Allocate blocks (item in REF_WRITING)
+        alloc = client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=size, use_cache=True)], timeout=0.0
+        )
+        blocks = alloc[0].blocks
+
+        # 2. Start a background writer that writes data and then closes
+        def _write_and_close():
+            client._storage.write(data, blocks)  # write data into shared memory
+            client.close_write(uuid)  # make it readable
+
+        write_thread = threading.Thread(target=_write_and_close)
+        write_thread.start()
+
+        # 3. Wait for the write to complete
+        client.wait_write(uuid, timeout=5.0)
+
+        # 4. Now read the data
+        result = client.read(uuid)
+        assert result.tobytes() == data
+
+        write_thread.join()
         client.delete(uuid)

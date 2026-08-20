@@ -41,11 +41,15 @@ from .constant import (
     OPEN_WRITE,
     PIN,
     UNPIN,
+    WAIT_WRITE,
 )
 from .storage import PagedShmStorage
 from .types import ShmAllocation, ShmWriteRequest
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of ZMQ sockets in the pool to avoid resource exhaustion.
+MAX_POOL_SIZE = 64
 
 
 class _BaseClient:
@@ -75,6 +79,9 @@ class _BaseClient:
         """
         if not response:
             raise ConnectionError("Empty response from server")
+
+        if len(response) < 2:
+            raise RuntimeError(f"Malformed response: {response}")
 
         status = response[0]
         data = response[1] if len(response) > 1 else EMPTY
@@ -215,6 +222,8 @@ class PagedShmClient(_BaseClient):
         Initial number of ZMQ sockets to pre‑allocate.
     pool_workers : int
         Number of threads in the internal thread pool for asynchronous writes.
+    max_pool_size : int
+        Maximum number of ZMQ sockets in the pool (default 64).
     """
 
     def __init__(
@@ -223,9 +232,11 @@ class PagedShmClient(_BaseClient):
         pin: bool = False,
         init_pool_size: int = 4,
         pool_workers: int = 1,
+        max_pool_size: int = MAX_POOL_SIZE,
     ):
         self._pin = pin
         self._address = address
+        self._max_pool_size = max_pool_size
 
         self._resources = contextlib.ExitStack()
         self._finalizer = weakref.finalize(self, self._resources.close)
@@ -239,8 +250,10 @@ class PagedShmClient(_BaseClient):
             self._pool.put(sock)
         self._resources.callback(_close_sock_pool, self._pool)
 
+        # Thread pool for asynchronous writes.
         self._executor: Executor = ThreadPoolExecutor(max_workers=pool_workers)
-        self._resources.callback(self._executor.shutdown, wait=False)
+        # Wait for pending tasks on shutdown to avoid data loss.
+        self._resources.callback(self._executor.shutdown, wait=True)
 
         # Retrieve storage metadata and attach to the shared memory segment
         info = json.loads(self._request(GET_STORAGE_INFO))["data"]
@@ -368,6 +381,7 @@ class PagedShmClient(_BaseClient):
             For sync writes: the size of written data.
             For async writes: (size, future) where future can be awaited.
         """
+
         # Determine size in bytes
         if isinstance(data, torch.Tensor):
             size = data.numel() * data.element_size()
@@ -517,6 +531,14 @@ class PagedShmClient(_BaseClient):
         """Release a read reference for the given UUID."""
         self._request(CLOSE_READ, uuid)
 
+    def wait_write(self, uuid: str, timeout: float = 0.0) -> None:
+        """Wait for the item with the given UUID to become readable.
+        Does NOT acquire a read lock. Returns when the item is ready,
+        or raises TimeoutError if timeout expires.
+        """
+        payload = json.dumps({"uuid": uuid, "timeout": timeout})
+        self._request(WAIT_WRITE, payload)
+
     def pin(self, uuid: str) -> None:
         """Pin an item so it is not evicted from the LRU cache."""
         self._request(PIN, uuid)
@@ -561,6 +583,9 @@ class PagedShmClient(_BaseClient):
     def _init_sock(self) -> zmq.Socket:
         """Create and connect a new REQ socket to the server."""
         sock = self._ctx.socket(zmq.REQ)
+        # Set timeouts to avoid indefinite blocking
+        sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5 seconds receive timeout
+        sock.setsockopt(zmq.SNDTIMEO, 5000)  # 5 seconds send timeout
         sock.connect(self._address)
         return sock
 
@@ -569,12 +594,13 @@ class PagedShmClient(_BaseClient):
         Send a command to the server and return the decoded response string.
 
         Uses a socket from the pool to allow limited concurrency.
-        If the pool is empty, a new socket is created on‑the‑fly.
+        If the pool is empty, a new socket is created on‑the‑fly, but
+        only if the total number of sockets is below `_max_pool_size`.
         """
+        # First try to get a socket from the pool
         try:
             sock = self._pool.get_nowait()
         except queue.Empty:
-            # Pool exhausted – create an additional socket
             sock = self._init_sock()
 
         try:
@@ -587,7 +613,11 @@ class PagedShmClient(_BaseClient):
                 sock.close(linger=0)
             raise
         else:
-            self._pool.put(sock)
+            # Return socket to pool if it fits, otherwise close it.
+            if self._pool.qsize() < self._max_pool_size:
+                self._pool.put(sock)
+            else:
+                sock.close(linger=0)
 
 
 def _close_sock_pool(pool: queue.Queue):
