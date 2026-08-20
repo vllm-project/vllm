@@ -484,6 +484,10 @@ class Siglip2Model(torch.nn.Module):
             require_post_norm=require_post_norm,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
+        if self.vision_model.post_layernorm is None:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix={"vision_model.post_layernorm.": None}
+            )
 
     def forward(
         self,
@@ -510,10 +514,7 @@ class Siglip2Model(torch.nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.vision_model.post_layernorm is None:
-            skip_prefixes.append("vision_model.post_layernorm.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
 
         # Drop layers omitted by num_hidden_layers_override.
         layer_count = len(self.vision_model.encoder.layers)
