@@ -1112,7 +1112,9 @@ def try_get_safetensors_metadata(
 
     try:
         return with_retry(
-            get_safetensors_metadata_partial, "Error retrieving safetensors"
+            get_safetensors_metadata_partial,
+            "Error retrieving safetensors",
+            fatal_errors=(huggingface_hub.errors.NotASafetensorsRepoError,),
         )
     except Exception:
         return None
