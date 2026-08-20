@@ -1410,10 +1410,7 @@ class SpeculativeConfig:
 
         if self.draft_model_config:
             draft_parallel_config = self.draft_parallel_config
-            if (
-                self.method == "mtp"
-                and draft_parallel_config.pipeline_parallel_size > 1
-            ):
+            if draft_parallel_config.pipeline_parallel_size > 1:
                 draft_parallel_config = copy.copy(draft_parallel_config)
                 draft_parallel_config.pipeline_parallel_size = 1
             self.draft_model_config.verify_with_parallel_config(draft_parallel_config)
