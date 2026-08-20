@@ -461,16 +461,7 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         if any(mm_data.values()):
             mm_data = {**mm_data, "return_mm_token_type_ids": True}
 
-        # The prompt is decoded from tokens that already contain special
-        # tokens, so don't let the tokenizer add them again. `super()` still
-        # applies the ValueError fallback and unpadding; `add_special_tokens`
-        # is a text-kwarg, so it is filtered out of the processor constructor
-        # and only reaches the `__call__`.
-        return super()._call_hf_processor(
-            prompt,
-            mm_data,
-            dict(mm_kwargs, add_special_tokens=False),
-        )
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
 
     def _get_mm_token_ids(self, modality: str) -> list[int]:
         """Token ids marking where `modality` sits in the prompt, which for some
@@ -621,9 +612,6 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
 
         with timing_ctx.record("apply_hf_processor"):
             hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-            # HF processors only accept text, and the decoded string already
-            # contains any special tokens, so don't let them be added again
-            # (`_call_hf_processor` disables `add_special_tokens`).
             prompt = hf_processor.decode(prompt)
 
             # Bypass cached processor and always apply to the full set of mm inputs
@@ -634,7 +622,13 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
             prompt_ids, processed_data = self._apply_hf_processor_text_mm(
                 prompt_text=prompt,
                 mm_items=mm_items,
-                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                hf_processor_mm_kwargs={
+                    **hf_processor_mm_kwargs,
+                    # HF processors only accept text, and the decoded string already
+                    # contains any special tokens, so don't let them be added again
+                    # (`_call_hf_processor` disables `add_special_tokens`).
+                    "add_special_tokens": False,
+                },
             )
 
         # Use overrides if provided; fallback to data-dependent hashing.
