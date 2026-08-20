@@ -740,6 +740,42 @@ def _make_mock_worker_for_desc_ids(
 
 
 @pytest.mark.cpu_test
+def test_shared_nixl_region_broadcasts_every_group_block_table():
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=3,
+        has_mamba=False,
+        group_spec_types=(FullAttentionSpec,) * 3,
+        block_len_per_layer=[100] * 3,
+    )
+    worker.region_group_ids = [0, bw._SHARED_REGION_GROUP_ID, 2]
+
+    result = worker._compute_desc_ids(
+        block_ids=([1], [2], [3]),
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+        region_num_blocks=[10, 10, 10],
+    )
+
+    assert result.tolist() == [1, 11, 12, 13, 23]
+
+
+@pytest.mark.cpu_test
+def test_nixl_region_sort_preserves_pipeline_layer_order():
+    names = [
+        "model.layers.10.self_attn",
+        "model.layers.2.self_attn",
+        "model.layers.1.self_attn",
+    ]
+
+    assert sorted(names, key=bw._region_sort_key) == [
+        "model.layers.1.self_attn",
+        "model.layers.2.self_attn",
+        "model.layers.10.self_attn",
+    ]
+
+
+@pytest.mark.cpu_test
 def test_get_block_descs_ids_hybrid_ssm():
     """Test _compute_desc_ids uses per-group strides for hybrid
     FA+SSM when ratio=1 (no kernel block size mismatch)."""
@@ -1749,6 +1785,38 @@ def test_hisparse_host_import_metadata_keeps_source_blocks_separate():
 
 
 @pytest.mark.cpu_test
+def test_hisparse_full_local_hit_does_not_index_empty_import_blocks():
+    source_spec = make_kv_cache_config(block_size=16).kv_cache_groups[0].kv_cache_spec
+    sched = make_nixl_scheduler(heartbeat=True)
+    sched._is_hma_required = False
+    sched.kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        hisparse_host_num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["source"],
+                source_spec,
+                block_pool_id=None,
+                enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(["indexer"], source_spec),
+        ],
+    )
+    request = create_request(do_remote_prefill=True)
+    request.hisparse_host_import = True
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["remote_block_ids"] = ([1, 2],)
+    blocks = MagicMock()
+    blocks.get_unhashed_block_ids_all_groups.return_value = ()
+
+    sched.update_state_after_alloc(request, blocks, num_external_tokens=0)
+
+    assert sched._hisparse_host_blocks_to_recv[request.request_id] == []
+
+
+@pytest.mark.cpu_test
 def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
     """Two 4-way CPU blocks become eight kernel pages per NIXL region."""
     worker = object.__new__(NixlConnectorWorker)
@@ -2042,6 +2110,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     assert worker._physical_blocks_per_logical_kv_block == 3
     assert worker.block_size == 4 and worker.num_blocks == 12
     assert worker.region_block_sizes == [4, 4]
+    assert worker.region_group_ids == [bw._SHARED_REGION_GROUP_ID] * 2
     assert worker.region_strides == [block_stride, block_stride]
     # Both shared tensors are dual-purpose: their FA view is MLA even though
     # a KDA layer registered them first.

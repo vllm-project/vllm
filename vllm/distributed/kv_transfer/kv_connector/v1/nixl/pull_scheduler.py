@@ -165,8 +165,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                             if group.role is KVCacheGroupRole.HISPARSE_SOURCE
                         ]
                         assert len(source_group_ids) == 1
-                        self._hisparse_host_blocks_to_recv[request.request_id] = list(
-                            unhashed_local_block_ids[source_group_ids[0]]
+                        self._hisparse_host_blocks_to_recv[request.request_id] = (
+                            list(unhashed_local_block_ids[source_group_ids[0]])
+                            if unhashed_local_block_ids
+                            else []
                         )
                     local_block_ids = self.get_exchange_clipped_blocks(
                         unhashed_local_block_ids

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import numpy as np
+import regex as re
 import torch
 import zmq
 
@@ -104,6 +105,17 @@ logger = init_logger(__name__)
 
 _HOST_STAGING_SHUTDOWN_TIMEOUT_S = 2.0
 _HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S = 0.001
+_SHARED_REGION_GROUP_ID = -1
+
+
+def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
+    """Sort transfer regions in model-layer order, then by cache name."""
+    if layer_name.endswith(HISPARSE_RESIDENT_SUFFIX):
+        layer_name = layer_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in re.split(r"(\d+)", layer_name)
+    )
 
 
 class NixlBaseConnectorWorker:
@@ -166,7 +178,10 @@ class NixlBaseConnectorWorker:
             for group_id, group in enumerate(block_ids):
                 if not group:
                     continue
-                region_ids = np.flatnonzero(region_group_ids_array == group_id)[:, None]
+                region_ids = np.flatnonzero(
+                    (region_group_ids_array == group_id)
+                    | (region_group_ids_array == _SHARED_REGION_GROUP_ID)
+                )[:, None]
                 assert region_ids.size > 0
                 group_blocks = np.asarray(group)[None, :]
                 if group_blocks.max() >= region_num_blocks_array[region_ids].min():
@@ -337,11 +352,15 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
-        self.block_size = math.lcm(
-            *(
-                group.kv_cache_spec.block_size
-                for group in kv_cache_config.transfer_groups
-            )
+        attention_block_sizes = [
+            group.kv_cache_spec.block_size
+            for group in kv_cache_config.transfer_groups
+            if not isinstance(group.kv_cache_spec, MambaSpec)
+        ]
+        self.block_size = (
+            math.lcm(*attention_block_sizes)
+            if attention_block_sizes
+            else cast(int, vllm_config.cache_config.block_size)
         )
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
@@ -552,6 +571,7 @@ class NixlBaseConnectorWorker:
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
+        self._invalidated_recv_reqs: queue.Queue[ReqId] = queue.Queue()
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
         # Set when the local KV destination is host memory; see host_staging.
         self._host_stager: HostReadStager | None = None
@@ -1197,8 +1217,9 @@ class NixlBaseConnectorWorker:
             return layer_name
 
         # P and D may allocate equivalent transferable layers in different
-        # cache-group orders. Keep the NIXL region lists name-aligned.
-        for layer_name in sorted(xfer_buffers, key=transfer_layer_name):
+        # cache-group orders. Keep their region lists aligned without putting
+        # layers.10 before layers.2, which would break PP region slicing.
+        for layer_name in sorted(xfer_buffers, key=_region_sort_key):
             cache = xfer_buffers[layer_name]
             # NOTE (NickLucche) Hybrid SSM mamba/FA physical page_size may differ when
             # kernel requires a specific block size. This leads to SSM and FA layers
@@ -1271,6 +1292,8 @@ class NixlBaseConnectorWorker:
                 # overlay storage while retaining independent block tables.
                 idx = seen_regions[region_key]
                 self._region_is_mla[idx] |= is_mla_region
+                if self.region_group_ids[idx] != group_index:
+                    self.region_group_ids[idx] = _SHARED_REGION_GROUP_ID
                 if is_mla_region:
                     self.region_block_sizes[idx] = (
                         layer_spec.block_size
@@ -1932,12 +1955,16 @@ class NixlBaseConnectorWorker:
                 remote_region_block_sizes,
                 strict=True,
             ):
-                if remote_size % local_size != 0:
-                    raise ValueError(
-                        "NIXL region block sizes must be integer multiples: "
-                        f"local={local_size}, remote={remote_size}"
-                    )
-                split_ratios.append(remote_size // local_size)
+                if remote_size % local_size == 0:
+                    split_ratios.append(remote_size // local_size)
+                    continue
+                if local_size % remote_size == 0:
+                    split_ratios.append(1)
+                    continue
+                raise ValueError(
+                    "NIXL region block sizes must be integer multiples: "
+                    f"local={local_size}, remote={remote_size}"
+                )
             self.dst_region_split_ratios[engine_id] = split_ratios
             self.dst_region_num_blocks[engine_id] = [
                 count * ratio
@@ -2441,14 +2468,24 @@ class NixlBaseConnectorWorker:
             except queue.Empty:
                 break
 
+        invalidated_recv_reqs = set[ReqId]()
+        while not self._invalidated_recv_reqs.empty():
+            try:
+                invalidated_recv_reqs.add(self._invalidated_recv_reqs.get_nowait())
+            except queue.Empty:
+                break
+
         # Drained: a later request reusing the same id (abort + resubmit) is
         # a distinct lifecycle and may fail again.
         with self._failed_recv_lock:
-            self._failed_recv_reported.difference_update(failed_recv_reqs)
+            self._failed_recv_reported.difference_update(
+                failed_recv_reqs | invalidated_recv_reqs
+            )
 
         # Add failed requests to done_recving for scheduler tracking
         # (blocks are already marked invalid, scheduler will handle recompute)
         done_recving.update(failed_recv_reqs)
+        done_recving.update(invalidated_recv_reqs)
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -2473,7 +2510,7 @@ class NixlBaseConnectorWorker:
                 continue
 
             # Skip KV sync and post-processing for failed requests
-            if req_id in failed_recv_reqs:
+            if req_id in failed_recv_reqs or req_id in invalidated_recv_reqs:
                 logger.warning(
                     "Skipping KV post-processing for failed request %s",
                     req_id,
@@ -2835,10 +2872,12 @@ class NixlBaseConnectorWorker:
                 return
             self._failed_recv_reported.add(req_id)
         # Use .get() here; transfer-result collection owns metadata cleanup.
-        # TODO (NickLucche) handle failed transfer for HMA.
-        if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
-            self._invalid_block_ids.put(set(meta.local_block_ids[0]))
-        self._failed_recv_reqs.put(req_id)
+        if self._is_hma_required:
+            self._failed_recv_reqs.put(req_id)
+        else:
+            if meta := self._recving_metadata.get(req_id):
+                self._invalid_block_ids.put(set(meta.local_block_ids[0]))
+            self._invalidated_recv_reqs.put(req_id)
         self._pending_recv_notifs.pop(req_id, None)
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
