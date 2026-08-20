@@ -1311,7 +1311,7 @@ class MLADCPManager:
     ) -> torch.Tensor:
         # Forced MQA path pass all batch tokens (including prefill) into combine,
         # which may exceed the direct symmetric-memory workspace. Fall back to
-        # the nccl a2a comine for those cases.
+        # the nccl a2a combine for those cases.
         if partial_output.shape[0] <= direct_workspace.max_num_tokens:
             return direct_workspace.lse_reduce(
                 partial_output,
