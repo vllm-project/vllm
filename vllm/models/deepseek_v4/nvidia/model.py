@@ -72,6 +72,14 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4.expert_map import (
+    get_expert_map_layer_index,
+    get_num_expert_map_layers,
+    load_static_expert_map,
+    remap_expert_params_mapping,
+    remap_router_expert_ids,
+    remap_router_weight,
+)
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -179,6 +187,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         intermediate_size: int,
         prefix: str = "",
         num_logical_experts: int | None = None,
+        physical_to_logical_map: torch.Tensor | None = None,
     ):
         super().__init__()
         self.prefix = prefix
@@ -195,6 +204,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.num_logical_experts = (
             num_logical_experts if num_logical_experts is not None else num_experts
         )
+        self.physical_to_logical_map = physical_to_logical_map
 
         self.eplb_state = EplbLayerState()
 
@@ -261,7 +271,12 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         """
         physical_ids: list[int] = []
         for p in range(self.experts_start_idx, self.experts_end_idx):
-            if p % self.num_logical_experts == expert_id:
+            logical_id = (
+                self.physical_to_logical_map[p].item()
+                if self.physical_to_logical_map is not None
+                else p % self.num_logical_experts
+            )
+            if logical_id == expert_id:
                 physical_ids.append(p - self.experts_start_idx)
         return physical_ids
 
@@ -533,6 +548,22 @@ class DeepseekV4MoE(nn.Module):
         quant_config = vllm_config.quant_config
         self.prefix = prefix
         self.use_sequence_parallel = use_sequence_parallel
+        parallel_config = vllm_config.parallel_config
+        eplb_config = parallel_config.eplb_config
+        expert_map_path = eplb_config.expert_map_path
+        if expert_map_path is None:
+            self.physical_to_logical_map = None
+        else:
+            layer_id = extract_layer_index(prefix)
+            self.physical_to_logical_map = load_static_expert_map(
+                expert_map_path,
+                num_layers=get_num_expert_map_layers(config),
+                num_experts=config.n_routed_experts,
+                num_physical_experts=(
+                    config.n_routed_experts + eplb_config.num_redundant_experts
+                ),
+                num_expert_groups=getattr(config, "n_group", 1) or 1,
+            )[layer_id]
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
@@ -655,6 +686,7 @@ class DeepseekV4MoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             prefix=f"{prefix}.experts",
+            physical_to_logical_map=self.physical_to_logical_map,
         )
 
     def _init_fused_moe_experts(
@@ -993,6 +1025,22 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
+        expert_map_path = self.parallel_config.eplb_config.expert_map_path
+        num_physical_experts = (
+            config.n_routed_experts
+            + self.parallel_config.eplb_config.num_redundant_experts
+        )
+        self.static_expert_map = (
+            load_static_expert_map(
+                expert_map_path,
+                num_layers=get_num_expert_map_layers(config),
+                num_experts=config.n_routed_experts,
+                num_physical_experts=num_physical_experts,
+                num_expert_groups=getattr(config, "n_group", 1) or 1,
+            )
+            if expert_map_path is not None
+            else None
+        )
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
@@ -1210,8 +1258,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         head_rank_start = n_local_head * tp_rank
         head_rank_end = n_local_head * (tp_rank + 1)
 
-        # Pre-compute expert mapping ONCE.
-        expert_mapping = self.get_expert_mapping()
+        # Pre-compute the canonical expert mapping once. Static placement only
+        # changes which checkpoint expert populates each physical slot.
+        static_num_experts = (
+            self.static_expert_map.shape[1]
+            if self.static_expert_map is not None and not self.use_mega_moe
+            else None
+        )
+        expert_mapping = self.get_expert_mapping(static_num_experts)
+        static_expert_mappings: dict[int, list[tuple[str, str, int, str]]] = {}
 
         # Block-FP8 shared experts: pad the intermediate up to the TP-uniform
         # block count so the standard loaders below slice it evenly (trailing
@@ -1222,6 +1277,25 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
 
         for name, loaded_weight in weights:
+            static_layer_map = None
+            if self.static_expert_map is not None and ".ffn." in name:
+                layer_idx = get_expert_map_layer_index(name)
+                static_layer_map = self.static_expert_map[layer_idx]
+                if not self.parallel_config.enable_eplb and name.endswith(
+                    (
+                        ".ffn.gate.weight",
+                        ".ffn.gate.bias",
+                        ".ffn.gate.e_score_correction_bias",
+                    )
+                ):
+                    loaded_weight = remap_router_weight(loaded_weight, static_layer_map)
+                elif not self.parallel_config.enable_eplb and name.endswith(
+                    ".ffn.gate.tid2eid"
+                ):
+                    loaded_weight = remap_router_expert_ids(
+                        loaded_weight, static_layer_map
+                    )
+
             if pad_shared_expert and ".shared_experts." in name:
                 loaded_weight = self._pad_shared_expert_weight(
                     self.quant_config, name, loaded_weight
@@ -1252,7 +1326,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
-                    for mapping in expert_mapping:
+                    layer_expert_mapping = expert_mapping
+                    if static_layer_map is not None and not self.use_mega_moe:
+                        if layer_idx not in static_expert_mappings:
+                            static_expert_mappings[layer_idx] = (
+                                remap_expert_params_mapping(
+                                    expert_mapping, static_layer_map
+                                )
+                            )
+                        layer_expert_mapping = static_expert_mappings[layer_idx]
+                    for mapping in layer_expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
                             continue
@@ -1325,7 +1408,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         pad_shape[dim] = pad
         return torch.cat([loaded_weight, loaded_weight.new_zeros(pad_shape)], dim=dim)
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+    def get_expert_mapping(
+        self, num_experts: int | None = None
+    ) -> list[tuple[str, str, int, str]]:
         first_layer = next(iter(islice(self.layers, self.start_layer, self.end_layer)))
         if first_layer.ffn.use_mega_moe:
             return make_deepseek_v4_expert_params_mapping(self.config.n_routed_experts)
@@ -1336,7 +1421,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
-            num_experts=self.config.n_routed_experts,
+            num_experts=num_experts or self.config.n_routed_experts,
         )
 
     def finalize_mega_moe_weights(self) -> None:
@@ -1468,6 +1553,11 @@ class DeepseekV4ForCausalLM(
         )
 
         self.set_moe_parameters()
+        self.static_expert_map = (
+            self.model.static_expert_map[self.model.start_layer : self.model.end_layer]
+            if self.model.static_expert_map is not None
+            else None
+        )
 
     def set_moe_parameters(self) -> None:
         self.num_expert_groups = getattr(self.config, "n_group", 1)

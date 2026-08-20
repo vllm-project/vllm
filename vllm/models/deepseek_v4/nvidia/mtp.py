@@ -55,6 +55,13 @@ from vllm.models.deepseek_v4.common.ops import (
     fused_mtp_input_rmsnorm,
     mtp_shared_head_rmsnorm,
 )
+from vllm.models.deepseek_v4.expert_map import (
+    get_num_expert_map_layers,
+    load_static_expert_map,
+    remap_expert_params_mapping,
+    remap_router_expert_ids,
+    remap_router_weight,
+)
 from vllm.sequence import IntermediateTensors
 
 from .model import (
@@ -284,6 +291,23 @@ class DeepSeekV4MTP(nn.Module):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
+        eplb_config = parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
+        expert_map_path = eplb_config.expert_map_path
+        self.static_expert_map = (
+            load_static_expert_map(
+                expert_map_path,
+                num_layers=get_num_expert_map_layers(self.config),
+                num_experts=self.config.n_routed_experts,
+                num_physical_experts=(
+                    self.config.n_routed_experts + eplb_config.num_redundant_experts
+                ),
+                num_expert_groups=getattr(self.config, "n_group", 1) or 1,
+            )
+            if expert_map_path is not None
+            else None
+        )
         self.pad_shared_expert = getattr(
             self.quant_config, "weight_block_size", None
         ) is not None and not _use_sequence_parallel(vllm_config)
@@ -361,7 +385,8 @@ class DeepSeekV4MTP(nn.Module):
 
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
-        if first_layer.mtp_block.ffn.use_mega_moe:
+        use_mega_moe = first_layer.mtp_block.ffn.use_mega_moe
+        if use_mega_moe:
             expert_mapping = make_deepseek_v4_expert_params_mapping(
                 self.config.n_routed_experts
             )
@@ -371,8 +396,13 @@ class DeepSeekV4MTP(nn.Module):
                 ckpt_gate_proj_name="w1",
                 ckpt_down_proj_name="w2",
                 ckpt_up_proj_name="w3",
-                num_experts=self.config.n_routed_experts,
+                num_experts=(
+                    self.static_expert_map.shape[1]
+                    if self.static_expert_map is not None
+                    else self.config.n_routed_experts
+                ),
             )
+        static_expert_mappings: dict[int, list[tuple[str, str, int, str]]] = {}
 
         # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
         # FP4/MXFP4 experts register ``..._weight_scale``. Choose the suffix
@@ -396,9 +426,26 @@ class DeepSeekV4MTP(nn.Module):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
+            global_layer_idx = spec_layer
 
             name = _remap_weight_name(name)
             name = self._rewrite_spec_layer_name(spec_layer, name)
+
+            static_layer_map = None
+            if self.static_expert_map is not None and ".ffn." in name:
+                static_layer_map = self.static_expert_map[global_layer_idx]
+                if not self.enable_eplb and name.endswith(
+                    (
+                        ".ffn.gate.weight",
+                        ".ffn.gate.bias",
+                        ".ffn.gate.e_score_correction_bias",
+                    )
+                ):
+                    loaded_weight = remap_router_weight(loaded_weight, static_layer_map)
+                elif not self.enable_eplb and name.endswith(".ffn.gate.tid2eid"):
+                    loaded_weight = remap_router_expert_ids(
+                        loaded_weight, static_layer_map
+                    )
 
             if spec_layer != self.model.mtp_start_layer_idx and ".layers" not in name:
                 continue
@@ -438,7 +485,16 @@ class DeepSeekV4MTP(nn.Module):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
-                    for mapping in expert_mapping:
+                    layer_expert_mapping = expert_mapping
+                    if static_layer_map is not None and not use_mega_moe:
+                        if global_layer_idx not in static_expert_mappings:
+                            static_expert_mappings[global_layer_idx] = (
+                                remap_expert_params_mapping(
+                                    expert_mapping, static_layer_map
+                                )
+                            )
+                        layer_expert_mapping = static_expert_mappings[global_layer_idx]
+                    for mapping in layer_expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
                             continue

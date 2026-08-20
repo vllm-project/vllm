@@ -72,6 +72,9 @@ class EPLBConfig:
     num_redundant_experts: int = Field(default=0, ge=0)
     """Number of redundant experts to use for expert parallelism."""
 
+    expert_map_path: str | None = None
+    """Path to a static DSV4 physical-to-logical expert map in JSON format."""
+
     log_balancedness: bool = False
     """
     Log the balancedness each step of expert parallelism.
@@ -489,6 +492,23 @@ class ParallelConfig:
             raise ValueError(
                 "numa_bind_nodes and numa_bind_cpus require numa_bind=True."
             )
+
+        static_expert_map = self.eplb_config.expert_map_path is not None
+        if static_expert_map:
+            if not self.enable_expert_parallel:
+                raise ValueError(
+                    "enable_expert_parallel must be True to use a static expert map."
+                )
+            if self.expert_placement_strategy != "linear":
+                raise ValueError(
+                    "A static expert map cannot be combined with a non-linear "
+                    "expert placement strategy."
+                )
+            if self.eplb_config.num_redundant_experts and not self.enable_eplb:
+                raise ValueError(
+                    "enable_eplb must be True when a static expert map contains "
+                    "redundant expert slots."
+                )
 
         if self.enable_eplb:
             if not current_platform.is_cuda_alike():

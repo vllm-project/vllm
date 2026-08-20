@@ -286,6 +286,7 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self.is_static = parallel_config.eplb_config.expert_map_path is not None
         self.cuda_device_index: int | None = None
         """
         CUDA device index for the async EPLB worker thread.
@@ -360,18 +361,42 @@ class EplbState:
         Build the initial EPLB state.
         """
         self.validate_ep_configuration(model)
-        self.is_async = self.parallel_config.eplb_config.use_async
+        self.is_async = (
+            self.parallel_config.eplb_config.use_async and not self.is_static
+        )
 
-        physical_to_logical_map_list = (
-            EplbState.build_initial_global_physical_to_logical_map(
-                model.num_routed_experts,
-                model.num_redundant_experts,
+        static_map = getattr(model, "static_expert_map", None)
+        if self.is_static:
+            if static_map is None:
+                raise ValueError(
+                    "Static EPLB requires the model to expose its expert map."
+                )
+            expected_shape = (model.num_moe_layers, model.num_physical_experts)
+            if tuple(static_map.shape) != expected_shape:
+                raise ValueError(
+                    "Static EPLB expert map shape does not match the model: "
+                    f"{tuple(static_map.shape)} vs {expected_shape}."
+                )
+            physical_to_logical_map = static_map.to(
+                device=self.device, dtype=torch.long
             )
-        )
-        physical_to_logical_map = torch.tensor(
-            physical_to_logical_map_list,
-            device=self.device,
-        )
+            logical_to_physical_map, logical_replica_count = compute_logical_maps(
+                static_map.to(device="cpu", dtype=torch.long),
+                model.num_logical_experts,
+            )
+            logical_to_physical_map = logical_to_physical_map.to(self.device)
+            logical_replica_count = logical_replica_count.to(self.device)
+        else:
+            physical_to_logical_map_list = (
+                EplbState.build_initial_global_physical_to_logical_map(
+                    model.num_routed_experts,
+                    model.num_redundant_experts,
+                )
+            )
+            physical_to_logical_map = torch.tensor(
+                physical_to_logical_map_list,
+                device=self.device,
+            )
         # Assuming 8 GPUs per node, this supports up to
         # (1023 + 1) / 8 = 128 nodes for now.
         # TODO(rui): make this configurable
@@ -380,49 +405,41 @@ class EplbState:
             f"num_redundant_experts {model.num_redundant_experts} "
             f"must be less than or equal to {MAX_EXPERT_REDUNDANCY}"
         )
-        max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
-        logical_to_physical_map = torch.full(
-            (model.num_logical_experts, max_slots_per_logical_expert),
-            -1,
-            device=self.device,
-        )
-        logical_replica_count = torch.zeros(
-            (model.num_logical_experts,),
-            device=self.device,
-            dtype=torch.long,
-        )
+        if not self.is_static:
+            max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
+            logical_to_physical_map = torch.full(
+                (model.num_logical_experts, max_slots_per_logical_expert),
+                -1,
+                device=self.device,
+            )
+            logical_replica_count = torch.zeros(
+                (model.num_logical_experts,),
+                device=self.device,
+                dtype=torch.long,
+            )
 
-        for i in range(model.num_physical_experts):
-            logical_idx = physical_to_logical_map[i]
-            logical_to_physical_map[logical_idx, logical_replica_count[logical_idx]] = i
-            logical_replica_count[logical_idx] += 1
+            for i in range(model.num_physical_experts):
+                logical_idx = physical_to_logical_map[i]
+                logical_to_physical_map[
+                    logical_idx, logical_replica_count[logical_idx]
+                ] = i
+                logical_replica_count[logical_idx] += 1
 
-        # Duplicate initial mapping for all layers
-        physical_to_logical_map = (
-            physical_to_logical_map.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
+            physical_to_logical_map = (
+                physical_to_logical_map.unsqueeze(0)
+                .expand(model.num_moe_layers, -1)
+                .contiguous()
             )
-            .contiguous()
-        )
-        logical_to_physical_map = (
-            logical_to_physical_map.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-                -1,
+            logical_to_physical_map = (
+                logical_to_physical_map.unsqueeze(0)
+                .expand(model.num_moe_layers, -1, -1)
+                .contiguous()
             )
-            .contiguous()
-        )
-        logical_replica_count = (
-            logical_replica_count.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
+            logical_replica_count = (
+                logical_replica_count.unsqueeze(0)
+                .expand(model.num_moe_layers, -1)
+                .contiguous()
             )
-            .contiguous()
-        )
 
         expert_load_pass = torch.zeros(
             (model.num_moe_layers, model.num_physical_experts),
@@ -464,6 +481,8 @@ class EplbState:
             logical_replica_count,
         )
         self._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
+        if self.is_static and self.should_record_tensor is not None:
+            self.should_record_tensor.fill_(False)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
         assert self.parallel_config.eplb_config.communicator is not None, (
@@ -550,6 +569,9 @@ class EplbState:
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
         """
+        if self.is_static:
+            return
+
         ep_group = get_ep_group().device_group
         if is_profile:
             self.rearrange(is_profile=True)
