@@ -17,6 +17,7 @@ from vllm.multimodal.processing.processor import (
     PromptInsertion,
     PromptReplacement,
     _apply_matches,
+    _apply_token_matches_with_placeholders,
     apply_text_matches,
     apply_token_matches,
     find_mm_placeholders,
@@ -567,171 +568,309 @@ def test_find_update_text(
             assert new_prompt == expected
 
 
+FIND_UPDATE_TOKENS_TEST_CASES = [
+    # Tokenized test cases of `test_find_update_text`
+    # using the vocab of llava-hf/llava-v1.6-mistral-7b-hf
+    (
+        [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
+        {
+            # We use `<image>` before `Image:` to test matches that
+            # occur out of order
+            "pattern_1": [32000],
+            "pattern_2": [9833, 28747],
+            "pattern_3": [918],
+        },
+        {
+            # Test whether target is confused with replacement
+            "pattern_1": [32000, 32000],
+            # Test empty replacement
+            "pattern_2": [],
+            # Test dynamic replacement (beyond the form of `unit * count`)
+            "pattern_3": [1550, 918, 1550],
+        },
+        {
+            PromptInsertion: {
+                0: [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
+                1: [
+                    1,
+                    9833,
+                    28747,
+                    32000,
+                    32000,
+                    32000,
+                    9833,
+                    28747,
+                    32000,
+                    32000,
+                    918,
+                    1550,
+                    918,
+                    1550,
+                ],  # noqa: E501
+                2: [
+                    1,
+                    9833,
+                    28747,
+                    32000,
+                    32000,
+                    32000,
+                    32000,
+                    32000,
+                    9833,
+                    28747,
+                    32000,
+                    32000,
+                    918,
+                    1550,
+                    918,
+                    1550,
+                    1550,
+                    918,
+                    1550,
+                ],  # noqa: E501
+            },
+            PromptReplacement: {
+                0: [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
+                1: [1, 32000, 32000, 9833, 28747, 32000, 32000, 1550, 918, 1550],  # noqa: E501
+                2: [1, 32000, 32000, 32000, 32000, 32000, 1550, 918, 1550],
+            },
+        },
+    ),
+    # Test index targets
+    (
+        [],
+        {
+            "pattern_1": PromptIndexTargets.start(),
+            "pattern_2": PromptIndexTargets.prefix([32000]),
+            "pattern_3": PromptIndexTargets.end(),
+        },
+        {
+            "pattern_1": [-1],
+            "pattern_2": [-2],
+            "pattern_3": [-3],
+        },
+        {
+            PromptInsertion: {
+                0: [],
+                1: [-1, -3],
+                2: [-1, -1, -3, -3],
+            },
+            PromptReplacement: {
+                0: [],
+                1: [-1, -3],
+                2: [-1, -1, -3, -3],
+            },
+        },
+    ),
+    (
+        [32000],
+        {
+            "pattern_1": PromptIndexTargets.start(),
+            "pattern_2": PromptIndexTargets.prefix([32000]),
+            "pattern_3": PromptIndexTargets.end(),
+        },
+        {
+            "pattern_1": [-1],
+            "pattern_2": [-2],
+            "pattern_3": [-3],
+        },
+        {
+            PromptInsertion: {
+                0: [32000],
+                1: [-1, 32000, -2, -3],
+                2: [-1, -1, 32000, -2, -2, -3, -3],
+            },
+            PromptReplacement: {
+                0: [32000],
+                1: [-1, 32000, -2, -3],
+                2: [-1, -1, 32000, -2, -2, -3, -3],
+            },
+        },
+    ),
+    # Test different replacement per item
+    (
+        [32000, 32000, 32000],
+        {
+            "pattern_1": [32000],
+        },
+        {
+            "pattern_1": lambda idx: [-(idx + 1)],
+        },
+        {
+            PromptInsertion: {
+                0: [32000, 32000, 32000],
+                1: [32000, -1, 32000, 32000],
+                2: [32000, -1, -2, 32000, 32000],
+            },
+            PromptReplacement: {
+                0: [32000, 32000, 32000],
+                1: [-1, 32000, 32000],
+                2: [-1, -2, 32000],
+            },
+        },
+    ),
+    (
+        [32000, 32000, 32000],
+        {
+            "pattern_1": PromptIndexTargets.prefix([32000]),
+        },
+        {
+            "pattern_1": lambda idx: [-(idx + 1)],
+        },
+        {
+            PromptInsertion: {
+                0: [32000, 32000, 32000],
+                1: [32000, -1, 32000, 32000],
+                2: [32000, -1, -2, 32000, 32000],
+            },
+            PromptReplacement: {
+                0: [32000, 32000, 32000],
+                1: [32000, -1, 32000, 32000],
+                2: [32000, -1, -2, 32000, 32000],
+            },
+        },
+    ),
+]
+
+
+def _placeholder(modality, item_idx, start_idx, tokens):
+    return PlaceholderFeaturesInfo(
+        modality=modality,
+        item_idx=item_idx,
+        start_idx=start_idx,
+        tokens=tokens,
+        is_embed=None,
+    )
+
+
+FIND_UPDATE_TOKENS_PLACEHOLDER_EXPECTED = [
+    {
+        PromptInsertion: {
+            0: {},
+            1: {
+                "pattern_1": [_placeholder("pattern_1", 0, 4, [32000, 32000])],
+                "pattern_3": [_placeholder("pattern_3", 0, 11, [1550, 918, 1550])],
+            },
+            2: {
+                "pattern_1": [
+                    _placeholder("pattern_1", 0, 4, [32000, 32000]),
+                    _placeholder("pattern_1", 1, 6, [32000, 32000]),
+                ],
+                "pattern_3": [
+                    _placeholder("pattern_3", 0, 13, [1550, 918, 1550]),
+                    _placeholder("pattern_3", 1, 16, [1550, 918, 1550]),
+                ],
+            },
+        },
+        PromptReplacement: {
+            0: {},
+            1: {
+                "pattern_1": [_placeholder("pattern_1", 0, 1, [32000, 32000])],
+                "pattern_3": [_placeholder("pattern_3", 0, 7, [1550, 918, 1550])],
+            },
+            2: {},
+        },
+    },
+    {
+        PromptInsertion: {0: {}, 1: {}, 2: {}},
+        PromptReplacement: {0: {}, 1: {}, 2: {}},
+    },
+    {
+        PromptInsertion: {
+            0: {},
+            1: {
+                "pattern_1": [_placeholder("pattern_1", 0, 0, [-1])],
+                "pattern_2": [_placeholder("pattern_2", 0, 2, [-2])],
+                "pattern_3": [_placeholder("pattern_3", 0, 3, [-3])],
+            },
+            2: {
+                "pattern_1": [
+                    _placeholder("pattern_1", 0, 0, [-1]),
+                    _placeholder("pattern_1", 1, 1, [-1]),
+                ],
+                "pattern_2": [
+                    _placeholder("pattern_2", 0, 3, [-2]),
+                    _placeholder("pattern_2", 1, 4, [-2]),
+                ],
+                "pattern_3": [
+                    _placeholder("pattern_3", 0, 5, [-3]),
+                    _placeholder("pattern_3", 1, 6, [-3]),
+                ],
+            },
+        },
+        PromptReplacement: {
+            0: {},
+            1: {
+                "pattern_1": [_placeholder("pattern_1", 0, 0, [-1])],
+                "pattern_2": [_placeholder("pattern_2", 0, 2, [-2])],
+                "pattern_3": [_placeholder("pattern_3", 0, 3, [-3])],
+            },
+            2: {
+                "pattern_1": [
+                    _placeholder("pattern_1", 0, 0, [-1]),
+                    _placeholder("pattern_1", 1, 1, [-1]),
+                ],
+                "pattern_2": [
+                    _placeholder("pattern_2", 0, 3, [-2]),
+                    _placeholder("pattern_2", 1, 4, [-2]),
+                ],
+                "pattern_3": [
+                    _placeholder("pattern_3", 0, 5, [-3]),
+                    _placeholder("pattern_3", 1, 6, [-3]),
+                ],
+            },
+        },
+    },
+    {
+        PromptInsertion: {
+            0: {},
+            1: {"pattern_1": [_placeholder("pattern_1", 0, 1, [-1])]},
+            2: {
+                "pattern_1": [
+                    _placeholder("pattern_1", 0, 1, [-1]),
+                    _placeholder("pattern_1", 1, 2, [-2]),
+                ]
+            },
+        },
+        PromptReplacement: {
+            0: {},
+            1: {"pattern_1": [_placeholder("pattern_1", 0, 0, [-1])]},
+            2: {
+                "pattern_1": [
+                    _placeholder("pattern_1", 0, 0, [-1]),
+                    _placeholder("pattern_1", 1, 1, [-2]),
+                ]
+            },
+        },
+    },
+    {
+        PromptInsertion: {
+            0: {},
+            1: {"pattern_1": [_placeholder("pattern_1", 0, 1, [-1])]},
+            2: {
+                "pattern_1": [
+                    _placeholder("pattern_1", 0, 1, [-1]),
+                    _placeholder("pattern_1", 1, 2, [-2]),
+                ]
+            },
+        },
+        PromptReplacement: {
+            0: {},
+            1: {"pattern_1": [_placeholder("pattern_1", 0, 1, [-1])]},
+            2: {
+                "pattern_1": [
+                    _placeholder("pattern_1", 0, 1, [-1]),
+                    _placeholder("pattern_1", 1, 2, [-2]),
+                ]
+            },
+        },
+    },
+]
+
+
 @pytest.mark.parametrize(
     ("prompt", "target_by_key", "repl_by_key", "expected_by_update_type_mm_count"),  # noqa: E501
-    [
-        # Tokenized test cases of `test_find_update_text`
-        # using the vocab of llava-hf/llava-v1.6-mistral-7b-hf
-        (
-            [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
-            {
-                # We use `<image>` before `Image:` to test matches that
-                # occur out of order
-                "pattern_1": [32000],
-                "pattern_2": [9833, 28747],
-                "pattern_3": [918],
-            },
-            {
-                # Test whether target is confused with replacement
-                "pattern_1": [32000, 32000],
-                # Test empty replacement
-                "pattern_2": [],
-                # Test dynamic replacement (beyond the form of `unit * count`)
-                "pattern_3": [1550, 918, 1550],
-            },
-            {
-                PromptInsertion: {
-                    0: [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
-                    1: [
-                        1,
-                        9833,
-                        28747,
-                        32000,
-                        32000,
-                        32000,
-                        9833,
-                        28747,
-                        32000,
-                        32000,
-                        918,
-                        1550,
-                        918,
-                        1550,
-                    ],  # noqa: E501
-                    2: [
-                        1,
-                        9833,
-                        28747,
-                        32000,
-                        32000,
-                        32000,
-                        32000,
-                        32000,
-                        9833,
-                        28747,
-                        32000,
-                        32000,
-                        918,
-                        1550,
-                        918,
-                        1550,
-                        1550,
-                        918,
-                        1550,
-                    ],  # noqa: E501
-                },
-                PromptReplacement: {
-                    0: [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
-                    1: [1, 32000, 32000, 9833, 28747, 32000, 32000, 1550, 918, 1550],  # noqa: E501
-                    2: [1, 32000, 32000, 32000, 32000, 32000, 1550, 918, 1550],
-                },
-            },
-        ),
-        # Test index targets
-        (
-            [],
-            {
-                "pattern_1": PromptIndexTargets.start(),
-                "pattern_2": PromptIndexTargets.prefix([32000]),
-                "pattern_3": PromptIndexTargets.end(),
-            },
-            {
-                "pattern_1": [-1],
-                "pattern_2": [-2],
-                "pattern_3": [-3],
-            },
-            {
-                PromptInsertion: {
-                    0: [],
-                    1: [-1, -3],
-                    2: [-1, -1, -3, -3],
-                },
-                PromptReplacement: {
-                    0: [],
-                    1: [-1, -3],
-                    2: [-1, -1, -3, -3],
-                },
-            },
-        ),
-        (
-            [32000],
-            {
-                "pattern_1": PromptIndexTargets.start(),
-                "pattern_2": PromptIndexTargets.prefix([32000]),
-                "pattern_3": PromptIndexTargets.end(),
-            },
-            {
-                "pattern_1": [-1],
-                "pattern_2": [-2],
-                "pattern_3": [-3],
-            },
-            {
-                PromptInsertion: {
-                    0: [32000],
-                    1: [-1, 32000, -2, -3],
-                    2: [-1, -1, 32000, -2, -2, -3, -3],
-                },
-                PromptReplacement: {
-                    0: [32000],
-                    1: [-1, 32000, -2, -3],
-                    2: [-1, -1, 32000, -2, -2, -3, -3],
-                },
-            },
-        ),
-        # Test different replacement per item
-        (
-            [32000, 32000, 32000],
-            {
-                "pattern_1": [32000],
-            },
-            {
-                "pattern_1": lambda idx: [-(idx + 1)],
-            },
-            {
-                PromptInsertion: {
-                    0: [32000, 32000, 32000],
-                    1: [32000, -1, 32000, 32000],
-                    2: [32000, -1, -2, 32000, 32000],
-                },
-                PromptReplacement: {
-                    0: [32000, 32000, 32000],
-                    1: [-1, 32000, 32000],
-                    2: [-1, -2, 32000],
-                },
-            },
-        ),
-        (
-            [32000, 32000, 32000],
-            {
-                "pattern_1": PromptIndexTargets.prefix([32000]),
-            },
-            {
-                "pattern_1": lambda idx: [-(idx + 1)],
-            },
-            {
-                PromptInsertion: {
-                    0: [32000, 32000, 32000],
-                    1: [32000, -1, 32000, 32000],
-                    2: [32000, -1, -2, 32000, 32000],
-                },
-                PromptReplacement: {
-                    0: [32000, 32000, 32000],
-                    1: [32000, -1, 32000, 32000],
-                    2: [32000, -1, -2, 32000, 32000],
-                },
-            },
-        ),
-    ],
+    FIND_UPDATE_TOKENS_TEST_CASES,
 )
 def test_find_update_tokens(
     prompt,
@@ -767,6 +906,73 @@ def test_find_update_tokens(
 
             # Manually constructed results
             assert new_prompt == expected
+
+
+@pytest.mark.parametrize(
+    (
+        "prompt",
+        "target_by_key",
+        "repl_by_key",
+        "expected_by_update_type_mm_count",
+        "expected_placeholders_by_update_type_mm_count",
+    ),
+    [
+        (*case, placeholder_expected)
+        for case, placeholder_expected in zip(
+            FIND_UPDATE_TOKENS_TEST_CASES,
+            FIND_UPDATE_TOKENS_PLACEHOLDER_EXPECTED,
+            strict=True,
+        )
+    ],
+)
+def test_apply_token_matches_with_placeholders(
+    prompt,
+    target_by_key,
+    repl_by_key,
+    expected_by_update_type_mm_count,
+    expected_placeholders_by_update_type_mm_count,
+):
+    for update_type, expected_by_mm_count in expected_by_update_type_mm_count.items():
+        for mm_count, expected in expected_by_mm_count.items():
+            mm_prompt_updates = {
+                key: [
+                    [update_type(key, target, repl_by_key[key]).resolve(i)]
+                    for i in range(mm_count)
+                ]
+                for key, target in target_by_key.items()
+            }
+
+            new_prompt, result, placeholders = _apply_token_matches_with_placeholders(
+                prompt,
+                mm_prompt_updates,
+                tokenizer=None,
+            )
+
+            if any(
+                update_idx is None
+                for update_idxs in result.values()
+                for update_idx in update_idxs
+            ):
+                continue
+
+            expected_placeholders = expected_placeholders_by_update_type_mm_count[
+                update_type
+            ][mm_count]
+
+            # Only displayed on error
+            print("update_type:", update_type)
+            print("mm_count:", mm_count)
+            print("mm_prompt_updates:", mm_prompt_updates)
+            print("new_prompt:", new_prompt)
+            print("result:", result)
+            print("placeholders:", placeholders)
+
+            assert new_prompt == expected
+            assert {
+                modality: ph_list
+                for modality, ph_list in placeholders.items()
+                if ph_list
+            } == expected_placeholders
 
 
 @pytest.mark.parametrize(
