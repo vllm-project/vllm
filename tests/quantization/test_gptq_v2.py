@@ -67,6 +67,7 @@ def test_model_inference(vllm_runner, model_id):
         top_p=0.8,
         top_k=20,
         min_p=0,
+        p_less=False,
         presence_penalty=2,
     )
 

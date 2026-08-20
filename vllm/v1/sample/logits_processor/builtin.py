@@ -20,6 +20,101 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+class PLessLogitsProcessor(LogitsProcessor):
+    def __init__(
+        self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
+    ):
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        self.p_less_count: int = 0
+
+        self.p_less_cpu_tensor = torch.zeros(
+            (max_num_reqs,), dtype=torch.bool, device="cpu", pin_memory=is_pin_memory
+        )
+        self.p_less_cpu = self.p_less_cpu_tensor.numpy()
+
+        self.use_double_tensor = torch.device(device).type != "cpu"
+        if self.use_double_tensor:
+            self.p_less_device = torch.zeros(
+                (max_num_reqs,), dtype=torch.bool, device=device
+            )
+        else:
+            self.p_less_device = self.p_less_cpu_tensor
+        self.p_less: torch.Tensor = self.p_less_device[:0]
+
+    def is_argmax_invariant(self) -> bool:
+        """
+        p-less does not change the argmax.
+        """
+        return True
+
+    def update_state(self, batch_update: BatchUpdate | None):
+        if not batch_update:
+            return
+
+        needs_update = False
+        # Process added requests.
+        for index, params, _, __ in batch_update.added:
+            p_less = params.p_less
+            p_less_before = self.p_less_cpu[index]
+            if p_less_before != p_less:
+                needs_update = True
+                self.p_less_cpu[index] = p_less
+                if p_less and not p_less_before:
+                    self.p_less_count += 1
+                elif not p_less and p_less_before:
+                    self.p_less_count -= 1
+
+        if self.p_less_count:
+            # Process removed requests.
+            if batch_update.removed:
+                needs_update = True
+                for index in batch_update.removed:
+                    if self.p_less_cpu[index]:
+                        self.p_less_cpu[index] = False
+                        self.p_less_count -= 1
+
+            # Process moved requests, unidirectional (a->b) and swap (a<->b).
+            for a_index, b_index, direction in batch_update.moved:
+                p_less_a, p_less_b = self.p_less_cpu[a_index], self.p_less_cpu[b_index]
+                if p_less_a != p_less_b:
+                    needs_update = True
+                    self.p_less_cpu[b_index] = p_less_a
+                    if direction == MoveDirectionality.SWAP:
+                        self.p_less_cpu[a_index] = p_less_b
+                if direction == MoveDirectionality.UNIDIRECTIONAL:
+                    if p_less_a:
+                        self.p_less_cpu[a_index] = False
+                    if p_less_b:
+                        self.p_less_count -= 1
+
+        # Update p_less tensor if needed.
+        size = batch_update.batch_size
+        if self.p_less_count and (needs_update or self.p_less.shape[0] != size):
+            self.p_less = self.p_less_device[:size]
+            if self.use_double_tensor:
+                self.p_less.copy_(self.p_less_cpu_tensor[:size], non_blocking=True)
+            self.p_less.unsqueeze_(-1)
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        Modify the logits based on the p-less method.
+        """
+        if not self.p_less_count:
+            return logits
+
+        # Calculate threshold logits
+        max_logits = logits.amax(dim=-1, keepdim=True)
+        exps = (logits - max_logits).exp()
+        sum_exps = exps.sum(dim=-1, keepdim=True)
+        sum_squared_exps = exps.square().sum(dim=-1, keepdim=True)
+        threshold_logits = sum_squared_exps.log() - sum_exps.log() + max_logits
+        # Create boolean mask for invalid tokens
+        invalid_token_mask = (logits < threshold_logits) & self.p_less
+        # Apply mask to convert logits of invalid tokens to negative infinity
+        logits.masked_fill_(invalid_token_mask, -float("inf"))
+        return logits
+
+
 class MinPLogitsProcessor(LogitsProcessor):
     def __init__(
         self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
