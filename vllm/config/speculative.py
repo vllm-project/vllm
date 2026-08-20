@@ -1125,7 +1125,7 @@ class SpeculativeConfig:
                 )
 
                 if default_source is not None:
-                    logger.info(
+                    logger.info_once(
                         "Defaulted num_speculative_tokens=%d from %s.",
                         self.num_speculative_tokens,
                         default_source,
