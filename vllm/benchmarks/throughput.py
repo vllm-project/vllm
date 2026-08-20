@@ -16,24 +16,11 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
-    AIMODataset,
-    ASRDataset,
     BenchmarkDataset,
-    BurstGPTDataset,
-    ConversationDataset,
-    CustomAudioDataset,
-    InstructCoderDataset,
-    MultiModalConversationDataset,
-    PrefixRepetitionRandomDataset,
-    RandomDataset,
-    RandomDatasetForReranking,
-    RandomMultiModalDataset,
     SampleRequest,
-    ShareGPTDataset,
-    SonnetDataset,
-    VisionArenaDataset,
     add_random_dataset_base_args,
     add_random_multimodal_dataset_args,
+    get_samples,
 )
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
@@ -536,181 +523,56 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
-def get_requests(args, tokenizer):
-    # Common parameters for all dataset types.
-    dataset_cls: type[BenchmarkDataset]
-    common_kwargs = {
-        "dataset_path": args.dataset_path,
-        "random_seed": args.seed,
-    }
-    sample_kwargs = {
-        "tokenizer": tokenizer,
-        "lora_path": args.lora_path,
-        "max_loras": args.max_loras,
-        "lora_assignment": getattr(args, "lora_assignment", "random"),
-        "num_requests": args.num_prompts,
-        "no_oversample": getattr(args, "no_oversample", False),
-    }
+def _to_serve_args(args) -> argparse.Namespace:
+    """Translate throughput args into a namespace the shared get_samples reads.
 
-    if args.dataset_name == "random" or (
-        args.dataset_path is None
-        and args.dataset_name not in {"prefix_repetition", "random-mm", "random-rerank"}
-    ):
-        sample_kwargs["range_ratio"] = args.random_range_ratio
-        # prefer random_* arguments, fall back to regular arguments
-        random_prefix_len = getattr(args, "random_prefix_len", None)
-        sample_kwargs["prefix_len"] = (
-            random_prefix_len if random_prefix_len is not None else args.prefix_len
-        )
-        random_input_len = getattr(args, "random_input_len", None)
-        sample_kwargs["input_len"] = (
-            random_input_len if random_input_len is not None else args.input_len
-        )
-        random_output_len = getattr(args, "random_output_len", None)
-        sample_kwargs["output_len"] = (
-            random_output_len if random_output_len is not None else args.output_len
-        )
-        dataset_cls = RandomDataset
-    elif args.dataset_name == "sharegpt":
-        dataset_cls = ShareGPTDataset
-        if args.backend == "vllm-chat":
-            sample_kwargs["enable_multimodal_chat"] = True
-        if args.output_len is not None:
-            sample_kwargs["output_len"] = args.output_len
-    elif args.dataset_name == "sonnet":
-        assert tokenizer.chat_template or tokenizer.default_chat_template, (
-            "Tokenizer/model must have chat template for sonnet dataset."
-        )
-        dataset_cls = SonnetDataset
-        sample_kwargs["prefix_len"] = args.prefix_len
-        sample_kwargs["return_prompt_formatted"] = True
-        if args.input_len is not None:
-            sample_kwargs["input_len"] = args.input_len
-        if args.output_len is not None:
-            sample_kwargs["output_len"] = args.output_len
-    elif args.dataset_name == "burstgpt":
-        dataset_cls = BurstGPTDataset
-    elif args.dataset_name == "custom_audio":
-        dataset_cls = CustomAudioDataset
-        sample_kwargs["enable_multimodal_chat"] = getattr(
-            args, "enable_multimodal_chat", False
-        )
-        custom_output_len = getattr(args, "custom_output_len", None)
-        if custom_output_len is not None:
-            sample_kwargs["output_len"] = custom_output_len
-        elif args.output_len is not None:
-            sample_kwargs["output_len"] = args.output_len
-    elif args.dataset_name == "hf":
-        if args.output_len is not None:
-            sample_kwargs["output_len"] = args.output_len
-        common_kwargs["hf_name"] = args.hf_name
-        if (
-            args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS
-            or args.hf_name in VisionArenaDataset.SUPPORTED_DATASET_PATHS
-        ):
-            dataset_cls = VisionArenaDataset
-            common_kwargs["dataset_subset"] = None
-            common_kwargs["dataset_split"] = "train"
-            sample_kwargs["enable_multimodal_chat"] = True
-        elif (
-            args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS
-            or args.hf_name in InstructCoderDataset.SUPPORTED_DATASET_PATHS
-        ):
-            dataset_cls = InstructCoderDataset
-            common_kwargs["dataset_split"] = "train"
-        elif (
-            args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
-            or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
-        ):
-            dataset_cls = MultiModalConversationDataset
-            common_kwargs["dataset_subset"] = args.hf_subset
-            common_kwargs["dataset_split"] = args.hf_split
-            sample_kwargs["enable_multimodal_chat"] = True
-        elif (
-            args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS
-            or args.hf_name in ConversationDataset.SUPPORTED_DATASET_PATHS
-        ):
-            dataset_cls = ConversationDataset
-            common_kwargs["dataset_subset"] = args.hf_subset
-            common_kwargs["dataset_split"] = args.hf_split
-            sample_kwargs["enable_multimodal_chat"] = True
-        elif (
-            args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS
-            or args.hf_name in AIMODataset.SUPPORTED_DATASET_PATHS
-        ):
-            dataset_cls = AIMODataset
-            common_kwargs["dataset_subset"] = None
-            common_kwargs["dataset_split"] = "train"
-        elif (
-            args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS
-            or args.hf_name in ASRDataset.SUPPORTED_DATASET_PATHS
-        ):
-            dataset_cls = ASRDataset
-            common_kwargs["dataset_subset"] = args.hf_subset
-            common_kwargs["dataset_split"] = args.hf_split
-            sample_kwargs["asr_min_audio_len_sec"] = args.asr_min_audio_len_sec
-            sample_kwargs["asr_max_audio_len_sec"] = args.asr_max_audio_len_sec
-    elif args.dataset_name == "prefix_repetition":
-        dataset_cls = PrefixRepetitionRandomDataset
-        sample_kwargs["prefix_len"] = args.prefix_repetition_prefix_len
-        sample_kwargs["suffix_len"] = args.prefix_repetition_suffix_len
-        sample_kwargs["num_prefixes"] = args.prefix_repetition_num_prefixes
-        sample_kwargs["output_len"] = args.prefix_repetition_output_len
-    elif args.dataset_name == "random-mm":
-        dataset_cls = RandomMultiModalDataset
-        # prefer random_* arguments, fall back to regular arguments
-        random_input_len = getattr(args, "random_input_len", None)
-        sample_kwargs["input_len"] = (
-            random_input_len
-            if random_input_len is not None
-            else getattr(args, "input_len", None)
-        )
-        random_output_len = getattr(args, "random_output_len", None)
-        sample_kwargs["output_len"] = (
-            random_output_len
-            if random_output_len is not None
-            else getattr(args, "output_len", None)
-        )
-        sample_kwargs["base_items_per_request"] = getattr(
-            args, "random_mm_base_items_per_request", None
-        )
-        sample_kwargs["num_mm_items_range_ratio"] = getattr(
-            args, "random_mm_num_mm_items_range_ratio", None
-        )
-        sample_kwargs["limit_mm_per_prompt"] = getattr(
-            args, "random_mm_limit_mm_per_prompt", None
-        )
-        sample_kwargs["bucket_config"] = getattr(args, "random_mm_bucket_config", None)
-        sample_kwargs["enable_multimodal_chat"] = True
-        random_prefix_len = getattr(args, "random_prefix_len", None)
-        prefix_len = getattr(args, "prefix_len", None)
-        sample_kwargs["prefix_len"] = (
-            random_prefix_len if random_prefix_len is not None else prefix_len
-        )
-        sample_kwargs["range_ratio"] = args.random_range_ratio
-    elif args.dataset_name == "random-rerank":
-        dataset_cls = RandomDatasetForReranking
-        # prefer random_* arguments, fall back to regular arguments
-        random_input_len = getattr(args, "random_input_len", None)
-        sample_kwargs["input_len"] = (
-            random_input_len
-            if random_input_len is not None
-            else getattr(args, "input_len", None)
-        )
-        random_output_len = getattr(args, "random_output_len", None)
-        sample_kwargs["output_len"] = (
-            random_output_len
-            if random_output_len is not None
-            else getattr(args, "output_len", None)
-        )
-        sample_kwargs["batchsize"] = getattr(args, "random_batch_size", 1)
-        sample_kwargs["is_reranker"] = not getattr(args, "no_reranker", False)
-        sample_kwargs["range_ratio"] = args.random_range_ratio
-    else:
-        raise ValueError(f"Unknown dataset name: {args.dataset_name}")
-    # Remove None values
-    sample_kwargs = {k: v for k, v in sample_kwargs.items() if v is not None}
-    requests = dataset_cls(**common_kwargs).sample(**sample_kwargs)
+    ``get_samples`` (used by ``bench serve``) expects ~45 attributes; the
+    throughput CLI exposes most of them under the same names, and this adapter
+    fills the rest while preserving throughput's existing flag names so no
+    script breaks.
+
+    Args:
+        args: parsed throughput CLI namespace.
+
+    Returns:
+        A namespace satisfying get_samples's attribute reads.
+    """
+    d = vars(args).copy()
+    # random_*: prefer --random-* over legacy --input/output/prefix-len.
+    d["random_input_len"] = getattr(args, "random_input_len", None) or args.input_len
+    d["random_output_len"] = getattr(args, "random_output_len", None) or args.output_len
+    d["random_prefix_len"] = getattr(args, "random_prefix_len", None) or args.prefix_len
+    # --output-len maps to the per-dataset output-len entry points get_samples
+    # reads. None passes through (each dataset applies its own default),
+    # matching prior throughput behaviour of omitting output_len when unset.
+    d["hf_output_len"] = args.output_len
+    d["sharegpt_output_len"] = args.output_len
+    # sonnet reads dedicated attrs; fall back to SonnetDataset's own defaults.
+    d["sonnet_input_len"] = args.input_len if args.input_len is not None else 550
+    d["sonnet_output_len"] = args.output_len if args.output_len is not None else 150
+    d["sonnet_prefix_len"] = args.prefix_len
+    # Explicit --enable-multimodal-chat wins; otherwise auto-enable for the
+    # multimodal chat backend (preserves today's vllm-chat handling).
+    d["enable_multimodal_chat"] = bool(
+        getattr(args, "enable_multimodal_chat", False) or args.backend == "vllm-chat"
+    )
+    # serve-only attrs throughput never exposed; keep serve's defaults.
+    d.setdefault("disable_shuffle", False)
+    d.setdefault("skip_chat_template", False)
+    d.setdefault("no_stream", False)
+    d.setdefault("request_id_prefix", "")
+    d.setdefault("chat_template_kwargs", None)
+    return argparse.Namespace(**d)
+
+
+def get_requests(args, tokenizer):
+    serve_args = _to_serve_args(args)
+    # Throughput reuses bench serve's dataset dispatch. vllm-chat is the only
+    # multimodal-capable throughput backend, so it is the only one allowed past
+    # the multimodal gates inside get_samples; other backends raise there.
+    mm_backends = ("vllm-chat",) if args.backend == "vllm-chat" else ()
+    requests = get_samples(serve_args, tokenizer, multimodal_backends=mm_backends)
+    requests = assign_loras(requests, args)
     requests = filter_requests_for_dp(requests, args.data_parallel_size)
     return requests
 
@@ -730,6 +592,28 @@ def filter_requests_for_dp(requests, data_parallel_size):
         for i, r in enumerate(requests)
         if i % data_parallel_size == data_parallel_rank
     ]
+
+
+def assign_loras(requests, args):
+    """Attach a LoRA request to each sample (throughput-only post-processing).
+
+    The shared ``datasets.get_samples`` path carries no LoRA information, so
+    LoRA assignment is applied here, uniformly across every dataset type. No-op
+    when ``--lora-path`` is unset.
+    """
+    lora_path = getattr(args, "lora_path", None)
+    if not lora_path:
+        return requests
+    max_loras = args.max_loras
+    lora_assignment = getattr(args, "lora_assignment", "random")
+    for i, req in enumerate(requests):
+        req.lora_request = BenchmarkDataset.get_lora_request(
+            index=i,
+            max_loras=max_loras,
+            lora_path=lora_path,
+            lora_assignment=lora_assignment,
+        )
+    return requests
 
 
 def validate_args(args):
@@ -785,33 +669,6 @@ def validate_args(args):
                 since --dataset-name is not 'hf'.",
             stacklevel=2,
         )
-    elif args.dataset_name == "hf":
-        if args.dataset_path in (
-            VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
-            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
-            | ConversationDataset.SUPPORTED_DATASET_PATHS
-        ) or args.hf_name in (
-            VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
-            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
-            | ConversationDataset.SUPPORTED_DATASET_PATHS
-        ):
-            assert args.backend == "vllm-chat", (
-                f"{args.dataset_path} needs to use vllm-chat as the backend."
-            )
-        elif args.dataset_path in (
-            InstructCoderDataset.SUPPORTED_DATASET_PATHS
-            | AIMODataset.SUPPORTED_DATASET_PATHS
-            | ASRDataset.SUPPORTED_DATASET_PATHS
-        ) or args.hf_name in (
-            InstructCoderDataset.SUPPORTED_DATASET_PATHS
-            | AIMODataset.SUPPORTED_DATASET_PATHS
-            | ASRDataset.SUPPORTED_DATASET_PATHS
-        ):
-            assert args.backend == "vllm", (
-                f"{args.dataset_path} needs to use vllm as the backend."
-            )
-        else:
-            raise ValueError(f"{args.dataset_path} is not supported by hf dataset.")
 
     # --random-range-ratio: only used when dataset_name is 'random',
     # 'random-mm', or 'random-rerank'

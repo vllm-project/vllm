@@ -7,12 +7,14 @@ Abstract interfaces and data types for the secondary tiering layer.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadingMetricMetadata,
     OffloadKey,
@@ -26,6 +28,7 @@ if TYPE_CHECKING:
         OffloadingConnectorStats,
     )
     from vllm.v1.kv_offload.base import OffloadingSpec
+
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
@@ -51,10 +54,15 @@ class JobMetadata:
 
 @dataclass
 class JobResult:
-    """Result of an async transfer job (successful or failed)."""
+    """Result of an async transfer job."""
 
     job_id: JobId
+    # True if all keys succeeded; False if all or some failed.
     success: bool
+    # Only applicable to promotion jobs. On partial failure, identifies the
+    # keys that were successfully loaded. None means all keys share the fate
+    # indicated by `success`. Must be a subset of the job's original keys.
+    successful_keys: Collection[OffloadKey] | None = None
 
 
 class ParentManager(ABC):
@@ -108,6 +116,8 @@ class SecondaryTierManager(ABC):
     async jobs; get_finished_jobs() polls for completion.
     """
 
+    medium: ClassVar[Medium | None] = None
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -124,6 +134,7 @@ class SecondaryTierManager(ABC):
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
         self.tier_type = tier_type
+        self.locality: Locality | None = None
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
