@@ -7,6 +7,7 @@ from dataclasses import dataclass
 @dataclass
 class ShmWriteRequest:
     """Request to allocate blocks for a write operation."""
+
     uuid: str
     size: int
     use_cache: bool = True
@@ -16,6 +17,7 @@ class ShmWriteRequest:
 @dataclass
 class ShmAllocation:
     """Response from server after allocation, or from open_read."""
+
     uuid: str
     size: int
     blocks: list[int]
@@ -26,6 +28,7 @@ class ShmAllocation:
 @dataclass
 class ShmSlot:
     """Internal representation of an allocated item in the manager."""
+
     uuid: str
     size: int
     use_cache: bool
