@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
+    KVConnectorSchedulerContext,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -42,7 +43,6 @@ from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
-    KVConnectorBlockState,
     NewRequestData,
     ScheduledEncoderInputStats,
     SchedulerOutput,
@@ -292,10 +292,15 @@ class Scheduler(SchedulerInterface):
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
         )
-        # Bind GPU block pool to the KV connector. This must happen after
-        # kv_cache_manager is constructed so block_pool is available.
+        # Bind scheduler-owned KV-cache capabilities after the manager and its
+        # block pool are available.
         if self.connector is not None:
-            self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+            self.connector.bind_scheduler_context(
+                KVConnectorSchedulerContext(
+                    self.kv_cache_manager.block_pool,
+                    self.kv_cache_manager.get_blocks,
+                )
+            )
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
@@ -1234,29 +1239,6 @@ class Scheduler(SchedulerInterface):
         # table. Drained every step so stale offers cannot accumulate.
         boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
 
-        kv_connector_block_state = None
-        if self.connector is not None:
-            snapshot_req_ids = {req.req_id for req in new_reqs_data}
-            snapshot_req_ids.update(
-                req_id
-                for req_id, block_ids in zip(
-                    cached_reqs_data.req_ids,
-                    cached_reqs_data.new_block_ids,
-                    strict=True,
-                )
-                if block_ids
-            )
-            snapshot_req_ids.update(
-                req_id for req_id in boundary_state_offloads if req_id in self.requests
-            )
-            kv_connector_block_state = KVConnectorBlockState(
-                block_ids={
-                    req_id: self.kv_cache_manager.get_block_ids(req_id)
-                    for req_id in snapshot_req_ids
-                },
-                boundary_state_offloads=boundary_state_offloads,
-            )
-
         kv_cache_block_copies, cow_retained_blocks = (
             self.kv_cache_manager.take_kv_cache_block_copies()
         )
@@ -1302,7 +1284,9 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
-            kv_connector_block_state=kv_connector_block_state,
+            boundary_state_offloads=(
+                boundary_state_offloads if self.connector is not None else None
+            ),
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
@@ -1322,8 +1306,8 @@ class Scheduler(SchedulerInterface):
             )
             scheduler_output.ec_connector_metadata = ec_meta
 
-        # Connector-only block state must not be dispatched to workers.
-        scheduler_output.kv_connector_block_state = None
+        # Boundary-state offers are scheduler-local.
+        scheduler_output.boundary_state_offloads = None
 
         # Advance the fence only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).

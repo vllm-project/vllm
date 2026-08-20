@@ -37,10 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock, KVCacheBlockCopy
-from vllm.v1.core.sched.output import (
-    KVConnectorBlockState,
-    SchedulerOutput,
-)
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -115,12 +112,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         generate_store_output(keys)
     )
 
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            block_ids={},
-            boundary_state_offloads={"req": [(1, 99, 28)]},
-        )
-    )
+    output = SimpleNamespace(boundary_state_offloads={"req": [(1, 99, 28)]})
     jobs = scheduler._build_partial_tail_store_jobs(output)
 
     assert len(jobs) == 1
@@ -175,10 +167,7 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     )
 
     output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            block_ids={},
-            boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
-        )
+        boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]}
     )
     jobs = scheduler._build_partial_tail_store_jobs(output)
 
@@ -200,10 +189,7 @@ def test_aligned_boundary_store_flushes_before_cow_destination_reuse():
     )
 
     output = SchedulerOutput.make_empty()
-    output.kv_connector_block_state = KVConnectorBlockState(
-        block_ids={},
-        boundary_state_offloads={"req": [(1, 99, 16)]},
-    )
+    output.boundary_state_offloads = {"req": [(1, 99, 16)]}
     meta = scheduler.build_connector_meta(output)
     [job_id] = meta.store_jobs
 

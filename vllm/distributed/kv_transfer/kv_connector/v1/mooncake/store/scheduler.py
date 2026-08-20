@@ -8,6 +8,7 @@
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVConnectorSchedulerContext,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     partial_hash_hits_enabled,
@@ -24,9 +25,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
@@ -83,7 +83,7 @@ class MooncakeStoreScheduler:
         ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
         self._boundary_state_group_ids = frozenset(mamba_groups)
 
-        self._gpu_block_pool: BlockPool | None = None
+        self._scheduler_context: KVConnectorSchedulerContext | None = None
         self._num_workers = vllm_config.parallel_config.world_size
         self._next_store_job_id = 0
         # store_job_id -> (referenced block ids, ranks yet to report completion)
@@ -92,11 +92,13 @@ class MooncakeStoreScheduler:
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
-        self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
+        self._unfinished_requests: dict[str, Request] = {}
         self._unfinished_request_ids: set[str] = set()
 
-    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
-        self._gpu_block_pool = gpu_block_pool
+    def bind_scheduler_context(
+        self, scheduler_context: KVConnectorSchedulerContext
+    ) -> None:
+        self._scheduler_context = scheduler_context
 
     def get_num_new_matched_tokens(
         self,
@@ -160,11 +162,7 @@ class MooncakeStoreScheduler:
         num_external_tokens: int,
     ):
         """Update state after block allocation."""
-        local_block_ids: tuple[list[int], ...] = ()
-        if num_external_tokens > 0:
-            local_block_ids = blocks.get_block_ids()
-
-        self._unfinished_requests[request.request_id] = (request, local_block_ids)
+        self._unfinished_requests[request.request_id] = request
         self._unfinished_request_ids.add(request.request_id)
 
         if request.request_id not in self.load_specs:
@@ -221,21 +219,12 @@ class MooncakeStoreScheduler:
                 + scheduler_output.num_scheduled_tokens[request.req_id]
             )
             assert request.req_id in self._unfinished_requests
-            request_tuple = self._unfinished_requests.get(request.req_id)
-            request_real = request_tuple[0]  # type: ignore[index]
-
-            if isinstance(request.block_ids, tuple):
-                # Multi-group: preserve per-group structure.
-                unfolded_block_ids = tuple(b.copy() for b in request.block_ids)
-            else:
-                # Single-group legacy: list[int] -> 1-tuple.
-                unfolded_block_ids = (request.block_ids.copy(),)
+            request_real = self._unfinished_requests[request.req_id]
 
             prefill_tokens = _new_req_prefill_tokens(request)
             request_tracker = RequestTracker(
                 req_id=request.req_id,
                 token_len=num_tokens_to_compute,
-                allocated_block_ids=unfolded_block_ids,
                 num_saved_tokens=0,
                 token_ids=prefill_tokens[:num_tokens_to_compute],
                 prefill_end_tokens=len(prefill_tokens),
@@ -261,20 +250,14 @@ class MooncakeStoreScheduler:
         cached_reqs = scheduler_output.scheduled_cached_reqs
         if not force_skip_save:
             for i, req_id in enumerate(cached_reqs.req_ids):
-                new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids:
+                if not cached_reqs.new_block_ids[i]:
                     continue
 
                 req_meta = None
                 if req_id in cached_reqs.resumed_req_ids:
                     # Resumed after preemption
-                    if isinstance(new_block_ids, tuple):
-                        new_block_ids = tuple(b.copy() for b in new_block_ids)
-                    else:
-                        new_block_ids = (new_block_ids.copy(),)
                     load_spec = self.load_specs.pop(req_id, None)
-                    request_tuple = self._unfinished_requests.get(req_id)
-                    request_real = request_tuple[0]  # type: ignore[index]
+                    request_real = self._unfinished_requests[req_id]
                     num_tokens_to_compute = (
                         request_real.num_computed_tokens
                         + scheduler_output.num_scheduled_tokens[req_id]
@@ -285,7 +268,6 @@ class MooncakeStoreScheduler:
                     request_tracker = RequestTracker(
                         req_id=req_id,
                         token_len=num_tokens_to_compute,
-                        allocated_block_ids=new_block_ids,
                         num_saved_tokens=0,
                         token_ids=prefill_tokens[:num_tokens_to_compute].copy(),
                         prefill_end_tokens=len(prefill_tokens),
@@ -309,9 +291,8 @@ class MooncakeStoreScheduler:
                     # Decode/chunked request
                     request_tracker = self._request_trackers[req_id]
                     num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-                    req_tuple = self._unfinished_requests.get(req_id)
-                    if req_tuple:
-                        unfinished_req = req_tuple[0]
+                    unfinished_req = self._unfinished_requests.get(req_id)
+                    if unfinished_req:
                         num_current_tokens = request_tracker.token_len
                         new_token_ids = unfinished_req.all_token_ids[
                             num_current_tokens : num_current_tokens + num_new_tokens
@@ -327,7 +308,6 @@ class MooncakeStoreScheduler:
                     prefill_end = request_tracker.prefill_end_tokens
                     if num_computed_token >= prefill_end:
                         continue
-                    request_tracker.update(new_block_ids)
 
                     last_chunk_tokens_num = (
                         prefill_end // self._block_size * self._block_size
@@ -348,10 +328,7 @@ class MooncakeStoreScheduler:
 
         # Handle requests with pending load specs not yet scheduled
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
-        for request_id, (
-            unfinished_req,
-            block_ids,
-        ) in self._unfinished_requests.items():
+        for request_id, unfinished_req in self._unfinished_requests.items():
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
                 load_spec = self.load_specs.pop(request_id, None)
                 if not load_spec:
@@ -360,7 +337,6 @@ class MooncakeStoreScheduler:
                 request_tracker = RequestTracker(
                     req_id=request_id,
                     token_len=num_tokens_to_compute,
-                    allocated_block_ids=block_ids,
                     num_saved_tokens=0,
                 )
                 self._request_trackers[request_id] = request_tracker
@@ -374,84 +350,63 @@ class MooncakeStoreScheduler:
                 if req_meta is not None:
                     meta.add_request(req_meta)
 
-        block_state = getattr(scheduler_output, "kv_connector_block_state", None)
-        if (
-            block_state is not None
-            and block_state.boundary_state_offloads
-            and not force_skip_save
-        ):
-            self._handle_boundary_state_offloads(
-                block_state.boundary_state_offloads, meta
-            )
+        offloads = getattr(scheduler_output, "boundary_state_offloads", None)
+        if offloads and not force_skip_save:
+            self._handle_boundary_state_offloads(offloads, meta)
 
-        self._apply_current_save_block_ids(meta, scheduler_output)
-        self._reference_save_blocks(meta)
+        self._prepare_request_blocks(meta)
         return meta
 
-    def _apply_current_save_block_ids(
-        self,
-        meta: MooncakeStoreConnectorMetadata,
-        scheduler_output: SchedulerOutput,
-    ) -> None:
-        """Replace append-only mirrors with the core's current block tables."""
-        save_metas = [req_meta for req_meta in meta.requests if req_meta.can_save]
-        if not save_metas:
-            return
-
-        block_state = scheduler_output.kv_connector_block_state
-        assert block_state is not None, (
-            "Current block tables are required for Mooncake store jobs"
-        )
-        for req_meta in save_metas:
-            block_ids = block_state.block_ids.get(req_meta.req_id)
-            assert block_ids is not None, (
-                f"Missing current block table for store request {req_meta.req_id}"
-            )
-            req_meta.block_ids = block_ids
-
-    def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
-        """Take a GPU block reference for every store job this step emits.
+    def _prepare_request_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
+        """Populate worker block IDs and reference blocks used by store jobs.
 
         The worker DMAs out of these blocks after the step that scheduled them,
         so a reference keeps them out of the free queue even once the request
         itself is freed, until every rank reports the job done.
         """
-        pool = self._gpu_block_pool
+        scheduler_context = self._scheduler_context
         for req_meta in meta.requests:
-            if not req_meta.can_save:
-                continue
-            assert pool is not None, (
-                "GPU block pool must be bound before any store job is emitted"
+            assert scheduler_context is not None, (
+                "Scheduler context must be bound before connector metadata is emitted"
             )
+            current_groups = scheduler_context.borrow_request_blocks(
+                req_meta.req_id
+            ).blocks
+
+            if not req_meta.can_save:
+                req_meta.block_ids = tuple(
+                    [block.block_id for block in blocks] for blocks in current_groups
+                )
+                continue
+
+            pool = scheduler_context.gpu_block_pool
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
-            block_ids: list[int] = []
+            blocks_by_id: dict[int, KVCacheBlock] = {}
             if req_meta.boundary_state_offloads:
-                block_ids.extend(
-                    block_id for _, block_id, _ in req_meta.boundary_state_offloads
-                )
-            assert NULL_BLOCK_ID not in block_ids, (
-                "A null block cannot back a boundary-state offload"
-            )
-            # Every allocated block is referenced, not just the ones covering
-            # this job's token range: a rank resumes from its own last
-            # successful offset, which lags the scheduler's whenever a save was
-            # skipped or failed, so it may read anywhere below the range.
-            block_ids.extend(
-                block_id
-                for group_id, group in enumerate(req_meta.block_ids)
-                if group_id not in self._boundary_state_group_ids
-                for block_id in group
-                if block_id != NULL_BLOCK_ID
-            )
-            # An aligned boundary block may also be present in the request's
-            # block table. Take and release exactly one reference per block.
-            block_ids = list(dict.fromkeys(block_ids))
+                for _, block_id, _ in req_meta.boundary_state_offloads:
+                    assert block_id != NULL_BLOCK_ID, (
+                        "A null block cannot back a boundary-state offload"
+                    )
+                    blocks_by_id.setdefault(block_id, pool.blocks[block_id])
+
+            worker_block_ids: list[list[int]] = []
+            for group_id, blocks in enumerate(current_groups):
+                if group_id in self._boundary_state_group_ids:
+                    worker_block_ids.append([])
+                    continue
+                worker_block_ids.append([block.block_id for block in blocks])
+                for block in blocks:
+                    if block.block_id != NULL_BLOCK_ID:
+                        blocks_by_id.setdefault(block.block_id, block)
+            req_meta.block_ids = tuple(worker_block_ids)
+
+            block_ids = list(blocks_by_id)
             assert NULL_BLOCK_ID not in block_ids
             if not block_ids:
                 continue
             self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
-            pool.touch([pool.blocks[block_id] for block_id in block_ids])
+            pool.touch(list(blocks_by_id.values()))
 
     def _handle_boundary_state_offloads(
         self,
@@ -469,8 +424,8 @@ class MooncakeStoreScheduler:
         save_metas = {m.req_id: m for m in meta.requests if m.can_save}
         for req_id, entries in offloads.items():
             tracker = self._request_trackers.get(req_id)
-            req_tuple = self._unfinished_requests.get(req_id)
-            if tracker is None or req_tuple is None:
+            unfinished_req = self._unfinished_requests.get(req_id)
+            if tracker is None or unfinished_req is None:
                 # Request finished/preempted within this step; its blocks are
                 # going away, so the offload is conservatively dropped.
                 logger.debug("Dropping boundary-state offload for request %s", req_id)
@@ -499,8 +454,8 @@ class MooncakeStoreScheduler:
                 ReqMeta(
                     req_id=req_id,
                     token_len_chunk=0,
-                    block_ids=tracker.allocated_block_ids,
-                    block_hashes=req_tuple[0].block_hashes,
+                    block_ids=(),
+                    block_hashes=unfinished_req.block_hashes,
                     can_save=True,
                     num_prompt_tokens=tracker.prefill_end_tokens,
                     boundary_state_offloads=accepted,
@@ -512,8 +467,9 @@ class MooncakeStoreScheduler:
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, MooncakeStoreWorkerMetadata):
             return
-        pool = self._gpu_block_pool
-        assert pool is not None
+        scheduler_context = self._scheduler_context
+        assert scheduler_context is not None
+        pool = scheduler_context.gpu_block_pool
         for store_job_id, count in meta.completed_saves.items():
             pinned = self._pinned_saves.get(store_job_id)
             if pinned is None:

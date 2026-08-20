@@ -634,13 +634,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         would key — but ``store_mask`` masks mamba groups out of it entirely, so
         this is their *only* writer. The exclusion is not an optimization: the
         normal save resolves a chunk's address as
-        ``req_meta.block_ids[g][start // block_size]``, and ``block_ids`` is the
-        connector's append-only mirror of the core's per-group table. An
-        align-mode table is mutated in place (a superseded state block is freed
-        and nulled; speculative blocks relocate), and the connector is never
-        told, so a stale mirror entry is indistinguishable from a live one — a
-        retry of a failed or pressure-skipped chunk would read a block that now
-        belongs to another request.
+        ``req_meta.block_ids[g][start // block_size]``. An align-mode table is
+        mutated in place: a superseded state block is freed and nulled, and
+        speculative blocks relocate. Its current positional entry therefore
+        cannot identify the exact historical boundary state needed by a retry.
 
         Each entry's handed-off block *is* the boundary state and is pinned by
         the core, so it is uploaded under its boundary-end hash key and never

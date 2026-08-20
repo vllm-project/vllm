@@ -1218,8 +1218,7 @@ class OffloadingConnectorScheduler:
     def _build_partial_tail_store_jobs(
         self, scheduler_output: SchedulerOutput
     ) -> dict[int, TransferJob]:
-        block_state = scheduler_output.kv_connector_block_state
-        handoffs = block_state.boundary_state_offloads if block_state else None
+        handoffs = scheduler_output.boundary_state_offloads
         if not handoffs:
             return {}
 

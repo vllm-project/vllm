@@ -316,7 +316,6 @@ class RequestTracker:
 
     req_id: str
     token_len: int
-    allocated_block_ids: tuple[list[int], ...]
     num_saved_tokens: int = 0
     token_ids: list[int] | None = None
     has_pending_offload: bool = False
@@ -327,28 +326,10 @@ class RequestTracker:
 
     def reset(self) -> None:
         self.token_len = 0
-        self.allocated_block_ids = ()
         self.num_saved_tokens = 0
         self.token_ids = None
         self.has_pending_offload = False
         self.prefill_end_tokens = 0
-
-    def update(
-        self,
-        new_block_ids: tuple[list[int], ...] | list[int],
-    ) -> None:
-        # Backward-compat: accept a single list (broadcast to single group).
-        if isinstance(new_block_ids, list):
-            new_block_ids = (new_block_ids,)
-        if len(new_block_ids) != len(self.allocated_block_ids):
-            raise ValueError(
-                f"Group count mismatch: tracker has "
-                f"{len(self.allocated_block_ids)} groups, update has "
-                f"{len(new_block_ids)}"
-            )
-        for existing, new in zip(self.allocated_block_ids, new_block_ids, strict=True):
-            if new:
-                existing.extend(new)
 
 
 @dataclass
@@ -357,6 +338,7 @@ class ReqMeta:
 
     req_id: str
     token_len_chunk: int
+    # Populated from the scheduler context immediately before worker dispatch.
     block_ids: tuple[list[int], ...]
     block_hashes: list[BlockHash]
 
@@ -429,7 +411,7 @@ class ReqMeta:
         return ReqMeta(
             req_id=tracker.req_id,
             token_len_chunk=num_tokens_to_save,
-            block_ids=tracker.allocated_block_ids,
+            block_ids=(),
             can_save=not skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,

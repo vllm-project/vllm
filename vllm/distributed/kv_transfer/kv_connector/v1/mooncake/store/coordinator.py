@@ -212,7 +212,7 @@ class MooncakeStoreCoordinator:
         speculative-state block and persist wrong bytes under a valid prefix
         hash. Mamba state is persisted only through the connector-pinned exact
         block hand-off path
-        (``SchedulerOutput.kv_connector_block_state.boundary_state_offloads``).
+        (``SchedulerOutput.boundary_state_offloads``).
         """
         return self._reachable_masks(
             aligned_token_len,

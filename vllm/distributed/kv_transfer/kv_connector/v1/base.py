@@ -82,6 +82,31 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
+class KVConnectorSchedulerContext:
+    """Scheduler-owned KV-cache capabilities exposed to connectors."""
+
+    def __init__(
+        self,
+        gpu_block_pool: "BlockPool",
+        get_request_blocks: Callable[[str], "KVCacheBlocks"],
+    ) -> None:
+        self._gpu_block_pool = gpu_block_pool
+        self._get_request_blocks = get_request_blocks
+
+    @property
+    def gpu_block_pool(self) -> "BlockPool":
+        """Return the long-lived GPU block pool."""
+        return self._gpu_block_pool
+
+    def borrow_request_blocks(self, request_id: str) -> "KVCacheBlocks":
+        """Borrow the request's current block tables during metadata construction.
+
+        The returned view and its blocks are scheduler-owned. Connectors must
+        not mutate or retain them after ``build_connector_meta`` returns.
+        """
+        return self._get_request_blocks(request_id)
+
+
 class SupportsHMA(ABC):
     """
     The class that indicates the corresponding connector supports hybrid memory
@@ -461,14 +486,10 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
-    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
-        """
-        Bind the GPU block pool to the connector for per-GPU block status tracking.
-        For example, inc/dec ref counts, or iterate over the prefix cache blocks.
-
-        Args:
-            gpu_block_pool: the GPU block pool.
-        """
+    def bind_scheduler_context(
+        self, scheduler_context: KVConnectorSchedulerContext
+    ) -> None:
+        """Bind scheduler-owned KV-cache capabilities."""
         return
 
     @abstractmethod
