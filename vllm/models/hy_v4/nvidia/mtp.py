@@ -83,6 +83,40 @@ def _should_skip_missing_mtp_scale_param(
     )
 
 
+def _resolve_fused_expert_param(
+    param_base: str,
+    ckpt_suffix: str,
+    params_dict: dict,
+) -> str | None:
+    """Map a fused expert checkpoint suffix onto a draft parameter name.
+
+    Fused checkpoints pack every expert into one tensor and name the companion
+    scales by suffixing the projection (``experts.gate_up_proj_scale_inv``),
+    while the draft model owns ``experts.routed_experts.w13_weight`` plus a
+    separate ``..._scale_inv`` parameter. Dropping the suffix would push the
+    scale into the weight parameter and leave the scale at its sentinel init.
+
+    Args:
+        param_base: Draft parameter holding the packed weight.
+        ckpt_suffix: Checkpoint text following the projection name.
+        params_dict: The draft model's named parameters.
+
+    Returns:
+        The matching draft parameter name, or None when there is none.
+    """
+    if not ckpt_suffix:
+        return param_base if param_base in params_dict else None
+    tail = ckpt_suffix.lstrip(".").removeprefix("weight_")
+    for candidate in (
+        f"{param_base}_{tail}",
+        f"{param_base}_scale_inv",
+        f"{param_base}_scale",
+    ):
+        if candidate in params_dict:
+            return candidate
+    return None
+
+
 def _prepare_mtp_fp8_expert_scale(
     quant_config: QuantizationConfig | None,
     name: str,
@@ -574,21 +608,32 @@ class HYV4MTP(nn.Module):
             the addressed experts).
         """
         base = name.split(".experts.")[0]
-        if ".experts.gate_up_proj" in name or ".experts.down_proj" in name:
-            if ".experts.gate_up_proj" in name:
-                target = fused_expert_param_names.get((base, "w13_weight"))
-                if target is None:
-                    return False
+        for ckpt_proj, tag in (
+            (".experts.gate_up_proj", "w13_weight"),
+            (".experts.down_proj", "w2_weight"),
+        ):
+            if ckpt_proj not in name:
+                continue
+            param_base = fused_expert_param_names.get((base, tag))
+            if param_base is None:
+                return False
+            # Keep the checkpoint suffix (e.g. `_scale_inv`) so block-scale
+            # tensors land in the scale parameter, not in the weight.
+            target = _resolve_fused_expert_param(
+                param_base, name.split(ckpt_proj, 1)[1], params_dict
+            )
+            if target is None:
+                return False
+            if tag == "w13_weight":
                 chunks = loaded_weight.chunk(2, dim=-2)
-                loaded = self._load_fused_expert_weights(
+                loaded_w1 = self._load_fused_expert_weights(
                     target, params_dict, chunks[0], "w1", num_experts
-                ) and self._load_fused_expert_weights(
+                )
+                loaded_w3 = self._load_fused_expert_weights(
                     target, params_dict, chunks[1], "w3", num_experts
                 )
+                loaded = loaded_w1 and loaded_w3
             else:
-                target = fused_expert_param_names.get((base, "w2_weight"))
-                if target is None:
-                    return False
                 loaded = self._load_fused_expert_weights(
                     target, params_dict, loaded_weight, "w2", num_experts
                 )

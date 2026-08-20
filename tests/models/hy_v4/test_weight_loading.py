@@ -215,3 +215,27 @@ def test_mtp_load_weights_covers_every_parameter(
 
     with set_current_vllm_config(vllm_config):
         _assert_fully_loaded(mtp, checkpoint)
+
+
+def test_fused_expert_scale_keeps_its_own_parameter() -> None:
+    """Fused block-scale tensors must not be routed into the weight parameter.
+
+    Fused checkpoints name the MoE scales `experts.gate_up_proj_scale_inv`.
+    Resolving them by projection name alone targets `w13_weight`, which silently
+    overwrites weights and leaves `w13_weight_scale_inv` at its sentinel init.
+    """
+    from vllm.models.hy_v4.nvidia.mtp import _resolve_fused_expert_param
+
+    base = "model.layers.78.mtp_block.mlp.experts.routed_experts.w13_weight"
+    params = {base: None, f"{base}_scale_inv": None}
+
+    assert _resolve_fused_expert_param(base, "", params) == base
+    assert (
+        _resolve_fused_expert_param(base, "_scale_inv", params) == f"{base}_scale_inv"
+    )
+    # `_prepare_mtp_fp8_expert_scale` rewrites `.scale` to `.weight_scale_inv`.
+    assert (
+        _resolve_fused_expert_param(base, ".weight_scale_inv", params)
+        == f"{base}_scale_inv"
+    )
+    assert _resolve_fused_expert_param(base, "_scale_inv", {base: None}) is None
