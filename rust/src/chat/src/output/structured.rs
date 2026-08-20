@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Adapts parsed assistant updates into structured chat events.
 //!
 //! This module remains the final assembly stage in `vllm-chat`. Token-to-text

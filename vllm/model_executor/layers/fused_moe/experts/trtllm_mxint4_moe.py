@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt4Static32,
@@ -122,6 +123,9 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         # The kernel handles quantization internally.
         return True
 
+    def supports_routing_replay_capture(self) -> bool:
+        return True
+
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -144,7 +148,12 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
         assert self.w1_scale is not None
         assert self.w2_scale is not None
-        return flashinfer_trtllm_mxint4_moe(
+
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
+        result = flashinfer_trtllm_mxint4_moe(
             x=hidden_states,
             router_logits=router_logits,
             w13_weight_packed=w1,
@@ -160,4 +169,10 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             topk_group=topk_group,
             e_score_correction_bias=e_score_correction_bias,
             routing_method_type=self.routing_method,
+            routing_replay_out=routing_replay_out,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
+        )
+        return result

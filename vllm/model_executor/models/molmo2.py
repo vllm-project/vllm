@@ -51,7 +51,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -89,7 +88,6 @@ from .utils import (
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -1221,20 +1219,7 @@ class Molmo2TextModel(nn.Module, SupportsQuant):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        return AutoWeightsLoader(self).load_weights(weights)
 
 
 def get_patches_grid_size(
@@ -2142,26 +2127,30 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             image_token_pooling=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_pooled_patches
             ),
-            image_num_crops=MultiModalFieldConfig.batched("image"),
-            image_num_pooled_patches=MultiModalFieldConfig.batched("image"),
-            image_num_patches=MultiModalFieldConfig.batched("image"),
+            image_num_crops=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            image_num_pooled_patches=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
+            image_num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_tokens=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_image_tokens
             ),
-            num_image_tokens=MultiModalFieldConfig.batched("image"),
+            num_image_tokens=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_crops
             ),
             video_token_pooling=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_pooled_patches
             ),
-            video_num_crops=MultiModalFieldConfig.batched("video"),
-            video_num_pooled_patches=MultiModalFieldConfig.batched("video"),
-            video_num_patches=MultiModalFieldConfig.batched("video"),
+            video_num_crops=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            video_num_pooled_patches=MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            ),
+            video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             video_tokens=MultiModalFieldConfig.flat_from_sizes(
                 "video", num_video_tokens
             ),
-            num_video_tokens=MultiModalFieldConfig.batched("video"),
+            num_video_tokens=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(

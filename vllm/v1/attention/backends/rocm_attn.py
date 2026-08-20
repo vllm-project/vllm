@@ -103,11 +103,9 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
 
-        # Here we set the query start locs to 0. This is to
-        # cover up an invalid memory access in the prefix_prefil kernel
-        # that we run into during graph capture (#25985)
+        # Zero device query start locations to avoid invalid memory access in
+        # the prefix prefill kernel during graph capture (#25985).
         common_attn_metadata.query_start_loc.zero_()
-        common_attn_metadata.query_start_loc_cpu.zero_()
 
         return attn_metadata
 
@@ -219,6 +217,10 @@ class RocmAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ROCM_ATTN"
+
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
 
     @staticmethod
     def get_impl_cls() -> type["RocmAttentionImpl"]:

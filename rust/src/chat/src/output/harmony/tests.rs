@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use futures::executor::block_on;
@@ -7,7 +10,7 @@ use vllm_text::output::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEve
 
 use super::*;
 use crate::output::ChatOutputProcessor;
-use crate::request::{ChatRequest, ChatTool, ChatToolChoice};
+use crate::request::{ChatRequest, ChatTool, ChatToolChoice, ResolvedToolContext};
 use crate::{AssistantMessageExt, ChatEvent, FinishReason};
 
 fn assistant_prefix() -> Vec<u32> {
@@ -69,18 +72,19 @@ async fn collect_events(
 }
 
 fn request_with_tools() -> ChatRequest {
+    let tools = vec![ChatTool {
+        name: "get_weather".to_string(),
+        description: Some("Get weather".to_string()),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+        }),
+        strict: None,
+    }];
     ChatRequest {
-        tool_choice: ChatToolChoice::Auto,
-        tools: vec![ChatTool {
-            name: "get_weather".to_string(),
-            description: Some("Get weather".to_string()),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {"city": {"type": "string"}},
-                "required": ["city"]
-            }),
-            strict: None,
-        }],
+        tool_context: ResolvedToolContext::new(&[], tools, Some(ChatToolChoice::Auto), true)
+            .expect("tool context should resolve"),
         ..ChatRequest::for_test()
     }
 }

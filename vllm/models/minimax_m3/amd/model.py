@@ -34,15 +34,20 @@ from vllm.config import (
 )
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -52,6 +57,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    is_shared_expert_quant_fse_compatible,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -93,6 +101,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
+    minimax_m3_use_aiter_sparse_pa,
     select_main_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
@@ -103,25 +112,10 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
 )
 
-
-def _fuse_shared_experts_enabled(config: PretrainedConfig) -> bool:
-    """Whether to fuse the shared expert with routed experts.
-
-    ROCm only. Opt-in via ``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS`` (the
-    router-append fusion runs on both aiter and non-aiter MoE);
-    it is disabled under expert parallelism (the shared slot is appended to
-    the routed top-k, which the EP expert-mapping path does not handle).
-    """
-    from vllm.platforms import current_platform
-
-    return bool(
-        current_platform.is_rocm()
-        and getattr(config, "n_shared_experts", None)
-        and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-        and not get_current_vllm_config().parallel_config.enable_expert_parallel
-    )
+logger = init_logger(__name__)
 
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
@@ -300,10 +294,12 @@ class MiniMaxM3MLP(nn.Module):
         return x
 
 
-def _aiter_moe_fused_shared_experts_enabled(config: PretrainedConfig) -> bool:
+def _aiter_moe_fused_shared_experts_enabled(
+    is_fused_shared_expert_enabled: bool,
+) -> bool:
     """Whether the fused shared expert routes through aiter's grouped top-k MoE.
 
-    A strict sub-case of :func:`_fuse_shared_experts_enabled`: shared-expert
+    A strict sub-case of `is_fused_shared_expert_enabled`: shared-expert
     fusion must already be opted in (``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS``)
     and allowed (not under expert parallelism). When additionally on gfx950 with
     an active aiter MoE backend, the shared expert is appended inside aiter's
@@ -311,11 +307,13 @@ def _aiter_moe_fused_shared_experts_enabled(config: PretrainedConfig) -> bool:
     vLLM router's torch concat. Otherwise FSE still runs via the vLLM top-k bias
     router.
     """
-    if not _fuse_shared_experts_enabled(config):
-        return False
     from vllm.platforms.rocm import on_gfx950
 
-    return on_gfx950() and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+    return (
+        on_gfx950()
+        and is_fused_shared_expert_enabled
+        and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+    )
 
 
 class MiniMaxM3MoE(nn.Module):
@@ -368,11 +366,46 @@ class MiniMaxM3MoE(nn.Module):
         # MoE call as the last expert slot, so we don't build a separate module.
         # On gfx950 with aiter MoE the append is fused inside aiter's grouped
         # top-k kernel; otherwise it goes through the vLLM top-k bias router.
-        self.fuse_shared_experts = _fuse_shared_experts_enabled(config)
-        self.use_aiter_moe_fse = _aiter_moe_fused_shared_experts_enabled(config)
+        # It is disabled under expert parallelism (the shared slot is appended to
+        # the routed top-k, which the EP expert-mapping path does not handle).
+        # TODO: Historically, only `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`
+        # is checked to enable FSE for MiniMax-M3, despite AITER not being used.
+        # This should be cleaned up and use `resolve_layer_fused_shared_expert`.
+        fse_requested = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+
+        self.is_fused_shared_expert_enabled = False
+        if (
+            fse_requested
+            and bool(getattr(config, "n_shared_experts", None))
+            and not get_current_vllm_config().parallel_config.enable_expert_parallel
+        ):
+            fse_compatible, fse_reason = is_shared_expert_quant_fse_compatible(
+                quant_config,
+                f"{prefix}.experts",
+                f"{prefix}.shared_experts",
+            )
+            if not fse_compatible:
+                logger.warning(
+                    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
+                    "cannot be enabled: %s.",
+                    fse_reason,
+                )
+            else:
+                self.is_fused_shared_expert_enabled = True
+
+        # When additionally on gfx950 with an active aiter MoE backend, the shared
+        # expert is appended inside aiter's an active aiter MoE backend, the shared
+        # expert is appended inside aiter's biased grouped top-k kernel
+        # (``num_fused_shared_experts``) instead of the vLLM router's torch concat.
+        # Otherwise FSE still runs via the vLLM top-k bias router.
+        # TODO: `on_gfx950()` check here should not be MiniMax-M3 specific, and
+        # the check should be done on resolved MOE backend directly.
+        self.use_aiter_moe_fse = _aiter_moe_fused_shared_experts_enabled(
+            self.is_fused_shared_expert_enabled
+        )
 
         self.shared_experts: MiniMaxM3MLP | None = None
-        if self.n_shared_experts and not self.fuse_shared_experts:
+        if self.n_shared_experts and not self.is_fused_shared_expert_enabled:
             self.shared_experts = MiniMaxM3MLP(
                 config=config,
                 intermediate_size=config.intermediate_size * self.n_shared_experts,
@@ -388,7 +421,7 @@ class MiniMaxM3MoE(nn.Module):
         # always-on shared expert; aiter applies the routed scaling internally.
         # Every other path (vLLM top-k bias router, or no fusion) applies the
         # routed scaling to the MoE output here.
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -409,8 +442,9 @@ class MiniMaxM3MoE(nn.Module):
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
             n_shared_experts=(
-                self.n_shared_experts if self.fuse_shared_experts else None
+                self.n_shared_experts if self.is_fused_shared_expert_enabled else None
             ),
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
         )
@@ -636,6 +670,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
+        # MiniMax-M3 sparse attention owns its KV-cache insert/read path instead
+        # of wrapping the generic Attention module. Keep the same runtime scale
+        # attributes so FP8 KV reads can honor vLLM's per-layer descale contract.
+        set_default_quant_scales(self, register_buffer=True)
 
         # Shared top-k buffer: the indexer writes the selected blocks into it and
         # the attend impl reads them back (no Python value crosses the break).
@@ -647,6 +685,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.impl: MiniMaxM3SparseImpl = select_main_impl_cls(  # type: ignore[assignment]
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             kv_cache_dtype=self.kv_cache_dtype,
+            num_kv_heads=self.num_kv_heads,
         )(
             self.num_heads,
             self.head_dim,
@@ -656,6 +695,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
         )
+        self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(self.num_kv_heads)
+        self.kv_cache_k = torch.tensor([])
+        self.kv_cache_v = torch.tensor([])
+        self._aiter_sparse_pa_cache_data_ptr = 0
         # Self-contained nn.Module: owns its side cache, selects its impl in init
         # (Triton on ROCm, where the SM100 gate is always False).
         self.indexer = MiniMaxM3Indexer(
@@ -694,6 +737,91 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
+    def _ensure_aiter_sparse_pa_kv_cache(self) -> None:
+        if self.kv_cache.numel() == 0:
+            return
+        if self._aiter_sparse_pa_cache_data_ptr == self.kv_cache.data_ptr():
+            return
+
+        kv_cache = self.kv_cache
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            kv_cache = kv_cache.view(self.impl.kv_cache_fp8_dtype)
+        key_cache, value_cache = kv_cache.unbind(1)
+        if not key_cache.is_contiguous() or not value_cache.is_contiguous():
+            raise RuntimeError(
+                "MiniMax-M3 AITER sparse PA requires K/V-separated KV cache "
+                "storage. Set VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1 before "
+                "initializing the engine."
+            )
+
+        x = 16 // key_cache.element_size()
+        if self.head_dim % x != 0:
+            raise RuntimeError(
+                "MiniMax-M3 AITER sparse PA requires head_dim divisible by "
+                f"16 / dtype_size, got head_dim={self.head_dim}, x={x}"
+            )
+        num_blocks = key_cache.shape[0]
+        num_phys16 = num_blocks * 8
+        self.kv_cache_k = key_cache.view(
+            num_phys16,
+            self.num_kv_heads,
+            self.head_dim // x,
+            16,
+            x,
+        )
+        self.kv_cache_v = value_cache.view(
+            num_phys16,
+            self.num_kv_heads,
+            16 // x,
+            self.head_dim,
+            x,
+        )
+        self._aiter_sparse_pa_cache_data_ptr = self.kv_cache.data_ptr()
+
+    def get_aiter_sparse_pa_kv_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
+        self._ensure_aiter_sparse_pa_kv_cache()
+        return self.kv_cache_k, self.kv_cache_v
+
+    def _insert_aiter_sparse_pa_kv(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        index_k: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+        index_slot_mapping: torch.Tensor | None,
+    ) -> None:
+        if self.kv_cache.numel() == 0:
+            return
+        from aiter import reshape_and_cache
+
+        from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+            minimax_m3_insert_index_cache,
+        )
+
+        key_cache, value_cache = self.get_aiter_sparse_pa_kv_cache()
+        kv_cache_dtype = (
+            self.kv_cache_dtype
+            if is_quantized_kv_cache(self.kv_cache_dtype)
+            else "auto"
+        )
+        reshape_and_cache(
+            k.contiguous(),
+            v.contiguous(),
+            key_cache,
+            value_cache,
+            slot_mapping,
+            kv_cache_dtype=kv_cache_dtype,
+            k_scale=getattr(self, "_k_scale", None),
+            v_scale=getattr(self, "_v_scale", None),
+            asm_layout=True,
+        )
+        if index_k is None or index_slot_mapping is None:
+            return
+        index_cache = self.indexer.index_cache.kv_cache
+        if index_cache.numel() == 0:
+            return
+        minimax_m3_insert_index_cache(index_k, index_cache, index_slot_mapping)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -724,31 +852,121 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             return qkv.new_zeros((num_tokens, self.hidden_size))
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
-        index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
-        index_q = qkv.new_empty((num_tokens, self.index_q_size))
-        ops.fused_minimax_m3_qknorm_rope_kv_insert(
-            qkv,
-            self.q_norm.weight,
-            self.k_norm.weight,
-            cos_sin_cache,
-            positions,
-            self.num_heads,
-            self.num_kv_heads,
-            rotary_dim,
-            eps,
-            self.index_q_norm.weight,
-            self.index_k_norm.weight,
-            self.num_idx_heads,
-            main_slot_mapping,
-            index_slot_mapping,
-            self.kv_cache,
-            self.indexer.index_cache.kv_cache,
-            self.kv_cache.size(2),  # paged-cache block size
-            q,
-            index_q,
-            self.kv_cache_dtype,
-        )
+        if self.skip_index_topk:
+            index_q = None
+            if self.use_aiter_sparse_pa:
+                ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                    qkv,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    cos_sin_cache,
+                    positions,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    rotary_dim,
+                    eps,
+                    num_index_heads=self.num_idx_heads,
+                    q_out=q,
+                    skip_index_branch=True,
+                )
+                k_start = self.q_size
+                v_start = k_start + self.kv_size
+                k = qkv[:, k_start:v_start].view(
+                    num_tokens, self.num_kv_heads, self.head_dim
+                )
+                v = qkv[:, v_start : v_start + self.kv_size].view(
+                    num_tokens, self.num_kv_heads, self.head_dim
+                )
+                self._insert_aiter_sparse_pa_kv(
+                    k,
+                    v,
+                    None,
+                    main_slot_mapping,
+                    None,
+                )
+            else:
+                ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                    qkv,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    cos_sin_cache,
+                    positions,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    rotary_dim,
+                    eps,
+                    num_index_heads=self.num_idx_heads,
+                    slot_mapping=main_slot_mapping,
+                    kv_cache=self.kv_cache,
+                    block_size=self.kv_cache.size(2),  # paged-cache block size
+                    q_out=q,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    skip_index_branch=True,
+                )
+        else:
+            index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
+            index_q = qkv.new_empty((num_tokens, self.index_q_size))
+            if self.use_aiter_sparse_pa:
+                ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                    qkv,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    cos_sin_cache,
+                    positions,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    rotary_dim,
+                    eps,
+                    self.index_q_norm.weight,
+                    self.index_k_norm.weight,
+                    self.num_idx_heads,
+                    q_out=q,
+                    index_q_out=index_q,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                )
+                k_start = self.q_size
+                v_start = k_start + self.kv_size
+                index_k_start = v_start + self.kv_size + self.index_q_size
+                k = qkv[:, k_start:v_start].view(
+                    num_tokens, self.num_kv_heads, self.head_dim
+                )
+                v = qkv[:, v_start : v_start + self.kv_size].view(
+                    num_tokens, self.num_kv_heads, self.head_dim
+                )
+                index_k = qkv[
+                    :, index_k_start : index_k_start + self.idx_head_dim
+                ].view(num_tokens, self.idx_head_dim)
+                self._insert_aiter_sparse_pa_kv(
+                    k,
+                    v,
+                    index_k,
+                    main_slot_mapping,
+                    index_slot_mapping,
+                )
+            else:
+                ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                    qkv,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    cos_sin_cache,
+                    positions,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    rotary_dim,
+                    eps,
+                    self.index_q_norm.weight,
+                    self.index_k_norm.weight,
+                    self.num_idx_heads,
+                    main_slot_mapping,
+                    index_slot_mapping,
+                    self.kv_cache,
+                    self.indexer.index_cache.kv_cache,
+                    self.kv_cache.size(2),  # paged-cache block size
+                    q,
+                    index_q,
+                    self.kv_cache_dtype,
+                )
 
         output = torch.empty_like(q)
         attn_output = self._run_attention(q, index_q, output)
@@ -759,7 +977,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def _run_attention(
         self,
         query: torch.Tensor,
-        index_query: torch.Tensor,
+        index_query: torch.Tensor | None,
         output: torch.Tensor,
     ) -> torch.Tensor:
         # Single eager break around both: their split-K kernels read per-request
@@ -768,6 +986,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # When skip_index_topk is set (ATOM index_topk_freq), reuse the selection
         # the preceding compute layer wrote into the shared buffer this forward.
         if not self.skip_index_topk:
+            assert index_query is not None
             self.indexer(index_query)
         return self.impl.forward(self, query, self.kv_cache, output)
 
@@ -913,6 +1132,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers,
+            MiniMaxM3MoE,
+            "block_sparse_moe",
+        )
 
         if get_pp_group().is_last_rank:
             self.norm = MiniMAXGemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -967,7 +1191,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # expert, include the appended slot (id == num_local_experts).
         n_shared = getattr(self.config, "n_shared_experts", 0) or 0
         num_experts = self.config.num_local_experts + (
-            n_shared if _fuse_shared_experts_enabled(self.config) else 0
+            n_shared if self.is_fused_shared_expert_enabled else 0
         )
         return fused_moe_make_expert_params_mapping(
             self,
@@ -999,8 +1223,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = self.get_expert_mapping()
 
-        _fuse_shared = _fuse_shared_experts_enabled(self.config)
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -1018,7 +1240,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # down->w2) so it loads via the routed expert loader. Runs before the
             # stacked/dense mappings so shared_experts.gate_proj/up_proj are not
             # captured by the dense gate_up_proj mapping.
-            if _fuse_shared and ".shared_experts." in name:
+            if self.is_fused_shared_expert_enabled and ".shared_experts." in name:
                 sid = self.config.num_local_experts
                 name = name.replace(".shared_experts.gate_proj.", f".experts.{sid}.w1.")
                 name = name.replace(".shared_experts.up_proj.", f".experts.{sid}.w3.")
