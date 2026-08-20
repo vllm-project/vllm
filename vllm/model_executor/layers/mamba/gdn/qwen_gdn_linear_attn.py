@@ -1828,7 +1828,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_spec_decodes > 0
             and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES
             and self.gdn_decode_kernel == "cuda"
-            and self.num_v_heads == 8 * self.num_k_heads
+            and self.num_v_heads % self.num_k_heads == 0
+            and self.num_v_heads // self.num_k_heads in (1, 2, 3, 4, 8)
             and state_indices is not None
             and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
             and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
