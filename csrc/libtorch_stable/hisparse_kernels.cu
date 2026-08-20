@@ -20,7 +20,6 @@
 #include "../cuda_utils.h"
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
 #include <optional>
 
@@ -37,11 +36,14 @@ constexpr int32_t kTokenDone = -1;
 constexpr int32_t kHashEmpty = -1;
 
 bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
-  std::array<StableIValue, 2> stack{torch::stable::detail::from(tensor),
-                                    torch::stable::detail::from(std::nullopt)};
-  TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
-      "aten::is_pinned", "", stack.data(), TORCH_ABI_VERSION));
-  return torch::stable::detail::to<bool>(stack[0]);
+  cudaPointerAttributes attributes{};
+  const auto status =
+      cudaPointerGetAttributes(&attributes, tensor.const_data_ptr());
+  if (status != cudaSuccess) {
+    cudaGetLastError();
+    return false;
+  }
+  return attributes.type == cudaMemoryTypeHost;
 }
 
 __device__ __forceinline__ int32_t hash_slot(int32_t key, int32_t hash_size) {
