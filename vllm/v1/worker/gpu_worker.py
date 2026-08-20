@@ -258,6 +258,8 @@ class Worker(WorkerBase):
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
 
+        torch.accelerator.synchronize()
+
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
 
