@@ -53,6 +53,38 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+@pytest.mark.parametrize("prompt_start", [-1, 4])
+def test_invalid_routed_experts_start_finishes_only_the_request(prompt_start: int):
+    request = Mock(
+        sampling_params=SamplingParams(
+            routed_experts_prompt_start=prompt_start,
+        ),
+        num_prompt_tokens=3,
+        request_id="request-id",
+        status=RequestStatus.RUNNING,
+        resumable=True,
+    )
+
+    result = Scheduler._get_routed_experts_prompt_start(request)
+
+    assert result is None
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.resumable is False
+
+
+def test_routed_experts_start_at_prompt_end_is_safe():
+    request = Mock(
+        sampling_params=SamplingParams(routed_experts_prompt_start=3),
+        num_prompt_tokens=3,
+        request_id="request-id",
+        status=RequestStatus.RUNNING,
+        resumable=True,
+    )
+
+    assert Scheduler._get_routed_experts_prompt_start(request) == 3
+    assert request.status == RequestStatus.RUNNING
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [

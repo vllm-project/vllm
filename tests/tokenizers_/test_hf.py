@@ -14,6 +14,18 @@ from vllm.tokenizers.hf import (
 )
 
 
+class _SparseVocabTokenizer:
+    all_special_ids: list[int] = []
+    all_special_tokens: list[str] = []
+    vocab_size = 10
+
+    def get_vocab(self) -> dict[str, int]:
+        return {"token": 0}
+
+    def __len__(self) -> int:
+        return self.vocab_size
+
+
 @pytest.mark.parametrize("model_id", ["openai-community/gpt2", "zai-org/chatglm3-6b"])
 def test_cached_tokenizer(model_id: str):
     reference_tokenizer = AutoTokenizer.from_pretrained(
@@ -45,6 +57,12 @@ def _check_consistency(target: TokenizerLike, expected: TokenizerLike):
     )
 
     assert target.encode("prompt") == expected.encode("prompt")
+
+
+def test_cached_tokenizer_converts_vocab_size_to_max_token_id():
+    cached_tokenizer = get_cached_tokenizer(_SparseVocabTokenizer())
+
+    assert cached_tokenizer.max_token_id == 9
 
 
 @pytest.mark.parametrize("model_id", ["openai-community/gpt2"])

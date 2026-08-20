@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.openai.engine.protocol import StreamOptions
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
@@ -59,6 +59,7 @@ class MockModelConfig:
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
     renderer_num_workers: int = 1
+    enable_return_routed_experts: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -227,6 +228,90 @@ async def test_serve_tokens_threads_session_id_header_to_engine():
     await serving.serve_tokens(request, raw_request)
 
     assert engine.generate.call_args.kwargs["session_id"] == "header-session"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_start", [-1, 2])
+async def test_serve_tokens_rejects_out_of_range_routed_experts_prompt_start(
+    prompt_start: int,
+):
+    engine = _mock_engine()
+    engine.model_config.enable_return_routed_experts = True
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    serving.online_renderer.preprocess_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [1]}]
+    )
+    request = GenerateRequest(
+        token_ids=[1],
+        sampling_params=SamplingParams(routed_experts_prompt_start=prompt_start),
+        model=MODEL_NAME,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert (
+        "routed_experts_prompt_start must be in the range [0, 1]"
+        in response.error.message
+    )
+    engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_serve_tokens_accepts_routed_experts_start_at_prompt_end():
+    engine = _mock_engine()
+    engine.model_config.enable_return_routed_experts = True
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    serving.online_renderer.preprocess_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [1]}]
+    )
+    request = GenerateRequest(
+        token_ids=[1],
+        sampling_params=SamplingParams(routed_experts_prompt_start=1),
+        model=MODEL_NAME,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateResponse)
+    engine.generate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_serve_tokens_ignores_routed_experts_start_when_disabled():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1],
+        sampling_params=SamplingParams(routed_experts_prompt_start=1),
+        model=MODEL_NAME,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateResponse)
+    engine.generate.assert_called_once()
 
 
 @pytest.mark.asyncio

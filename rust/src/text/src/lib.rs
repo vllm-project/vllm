@@ -48,6 +48,10 @@ pub struct TextRequestProcessor {
     max_model_len: u32,
     /// Maximum number of top log probabilities accepted by this text facade.
     max_logprobs: i32,
+    /// Maximum tokenized bad-word sequences accepted by the engine.
+    max_num_bad_words: usize,
+    /// Maximum flattened bad-word tokens accepted by the engine.
+    max_bad_words_total_tokens: usize,
 }
 
 impl TextRequestProcessor {
@@ -57,6 +61,8 @@ impl TextRequestProcessor {
             backend,
             max_model_len,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
+            max_num_bad_words: SamplingLimits::DEFAULT_MAX_NUM_BAD_WORDS,
+            max_bad_words_total_tokens: SamplingLimits::DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS,
         }
     }
 
@@ -121,6 +127,8 @@ impl TextRequestProcessor {
             max_logprobs: self.max_logprobs,
             model_vocab_size: self.backend.model_vocab_size(),
             tokenizer_vocab_size: self.backend.tokenizer_vocab_size(),
+            max_num_bad_words: self.max_num_bad_words,
+            max_bad_words_total_tokens: self.max_bad_words_total_tokens,
         };
 
         lower_text_request(

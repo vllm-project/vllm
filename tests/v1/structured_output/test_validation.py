@@ -101,7 +101,7 @@ def test_regex_with_nul_byte_rejected(regex):
     # the pattern reaches the native from_regex call.
     from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
-    with pytest.raises(ValueError, match="NUL"):
+    with pytest.raises(VLLMValidationError, match="NUL"):
         validate_xgrammar_grammar(params)
 
 

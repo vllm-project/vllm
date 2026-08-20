@@ -3,13 +3,14 @@
 import numpy as np
 import torch
 
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import (
+    MAX_NUM_ALLOWED_TOKEN_IDS,
+    MAX_NUM_LOGIT_BIAS_TOKENS,
+    MAX_NUM_STOP_TOKEN_IDS,
+    SamplingParams,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
-
-MAX_NUM_ALLOWED_TOKEN_IDS = 1024
-MAX_NUM_LOGIT_BIAS_TOKENS = 1024
-MAX_NUM_STOP_TOKEN_IDS = 128
 
 
 class LogitBiasState:
@@ -184,9 +185,13 @@ def _bias_kernel(
         allowed_token_ids = tl.load(
             allowed_token_ids_ptr + req_state_idx * allowed_token_ids_stride + block,
             mask=mask,
+            other=-1,
         )
+        mask &= (allowed_token_ids >= 0) & (allowed_token_ids < vocab_size)
         logits = tl.load(
-            logits_ptr + token_idx * logits_stride + allowed_token_ids, mask=mask
+            logits_ptr + token_idx * logits_stride + allowed_token_ids,
+            mask=mask,
+            other=0.0,
         )
 
         tl.debug_barrier()  # save must read original logits before the -inf overwrite
@@ -216,9 +221,15 @@ def _bias_kernel(
         token_ids = tl.load(
             bias_token_ids_ptr + req_state_idx * bias_token_ids_stride + block,
             mask=mask,
+            other=-1,
         )
+        mask &= (token_ids >= 0) & (token_ids < vocab_size)
         bias = tl.load(bias_ptr + req_state_idx * bias_stride + block, mask=mask)
-        logits = tl.load(logits_ptr + token_idx * logits_stride + token_ids, mask=mask)
+        logits = tl.load(
+            logits_ptr + token_idx * logits_stride + token_ids,
+            mask=mask,
+            other=0.0,
+        )
         logits += bias
         tl.store(logits_ptr + token_idx * logits_stride + token_ids, logits, mask=mask)
 
@@ -231,7 +242,9 @@ def _bias_kernel(
         stop_token_ids = tl.load(
             stop_token_ids_ptr + req_state_idx * stop_token_ids_stride + block,
             mask=mask,
+            other=-1,
         )
+        mask &= (stop_token_ids >= 0) & (stop_token_ids < vocab_size)
         tl.store(
             logits_ptr + token_idx * logits_stride + stop_token_ids,
             -float("inf"),

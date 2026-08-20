@@ -13,12 +13,14 @@ request because to_sampling_params() never fell back to defaults.
 
 import pytest
 
+from vllm import SamplingParams
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 class TestChatCompletionStopTokenIds:
@@ -172,3 +174,32 @@ class TestCompletionStopTokenIds:
         )
 
         assert not sampling_params.stop_token_ids
+
+
+@pytest.mark.parametrize(
+    "sampling_params",
+    [
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hello"}],
+            routed_experts_prompt_start=3,
+        ).to_sampling_params(max_tokens=100, default_sampling_params={}),
+        CompletionRequest(
+            model="test-model",
+            prompt="hello",
+            routed_experts_prompt_start=3,
+        ).to_sampling_params(max_tokens=100, default_sampling_params={}),
+    ],
+    ids=["chat-completions", "completions"],
+)
+def test_openai_routes_reject_routed_experts_start_past_prompt(
+    sampling_params: SamplingParams,
+):
+    with pytest.raises(VLLMValidationError, match="routed_experts_prompt_start"):
+        sampling_params.validate_routed_experts_prompt_start(prompt_len=2)
+
+
+def test_routed_experts_start_accepts_prompt_end():
+    params = SamplingParams(routed_experts_prompt_start=2)
+
+    params.validate_routed_experts_prompt_start(prompt_len=2)
