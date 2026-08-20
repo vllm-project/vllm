@@ -21,6 +21,8 @@ pub struct SamplingHints {
     pub default_min_p: Option<f32>,
     pub default_repetition_penalty: Option<f32>,
     pub default_max_tokens: Option<u32>,
+    pub default_post_thinking:
+        Option<vllm_engine_core_client::protocol::sampling::PostThinkingParams>,
 }
 
 /// Effective bounds used to validate and lower sampling requests.

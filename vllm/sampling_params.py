@@ -5,10 +5,11 @@
 import copy
 import json as json_mod
 import math
+from collections.abc import Sequence
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Annotated, Any, NamedTuple
 
 import msgspec
 from pydantic import BeforeValidator
@@ -75,6 +76,182 @@ ThinkingTokenBudget = Annotated[
     int | None,
     BeforeValidator(validate_thinking_token_budget),
 ]
+
+
+class SamplingKnobs(NamedTuple):
+    """Resolved sampling knobs for one decode step."""
+
+    temperature: float
+    top_p: float
+    top_k: int
+    min_p: float
+    presence_penalty: float
+    frequency_penalty: float
+    repetition_penalty: float
+
+
+def last_subsequence_index(haystack: Sequence[int], needle: Sequence[int]) -> int:
+    """Return the last start index of ``needle`` in ``haystack``, or -1."""
+    if not needle:
+        return -1
+    n = len(needle)
+    if n > len(haystack):
+        return -1
+    for i in range(len(haystack) - n, -1, -1):
+        if list(haystack[i : i + n]) == list(needle):
+            return i
+    return -1
+
+
+def tokens_in_reasoning(
+    token_ids: Sequence[int],
+    start_ids: Sequence[int],
+    end_ids: Sequence[int],
+) -> bool:
+    """True when the last think-start is after the last think-end."""
+    if not start_ids or not end_ids:
+        return False
+    return last_subsequence_index(token_ids, start_ids) > last_subsequence_index(
+        token_ids, end_ids
+    )
+
+
+def _validate_optional_temperature(temperature: float | None) -> float | None:
+    if temperature is None:
+        return None
+    if not math.isfinite(temperature):
+        raise VLLMValidationError(
+            f"temperature must be a finite number, got {temperature}.",
+            parameter="temperature",
+            value=temperature,
+        )
+    if temperature < 0.0:
+        raise VLLMValidationError(
+            f"temperature must be non-negative, got {temperature}.",
+            parameter="temperature",
+            value=temperature,
+        )
+    if temperature > 2.0:
+        raise VLLMValidationError(
+            f"temperature must be in [0, 2], got {temperature}.",
+            parameter="temperature",
+            value=temperature,
+        )
+    if 0 < temperature < _MAX_TEMP:
+        logger.warning(
+            "temperature %s is less than %s, which may cause numerical "
+            "errors nan or inf in tensors. We have maxed it out to %s.",
+            temperature,
+            _MAX_TEMP,
+            _MAX_TEMP,
+        )
+        return _MAX_TEMP
+    return temperature
+
+
+def _validate_optional_top_p(top_p: float | None) -> None:
+    if top_p is None:
+        return
+    if not 0.0 < top_p <= 1.0:
+        raise VLLMValidationError(
+            f"top_p must be in (0, 1], got {top_p}.",
+            parameter="top_p",
+            value=top_p,
+        )
+
+
+def _validate_optional_top_k(top_k: int | None) -> None:
+    if top_k is None:
+        return
+    if top_k < -1:
+        raise VLLMValidationError(
+            f"top_k must be 0 (disable), or at least 1, got {top_k}."
+        )
+    if not isinstance(top_k, int):
+        raise VLLMValidationError(f"top_k must be an integer, got {type(top_k).__name__}")
+
+
+def _validate_optional_min_p(min_p: float | None) -> None:
+    if min_p is None:
+        return
+    if not 0.0 <= min_p <= 1.0:
+        raise VLLMValidationError(f"min_p must be in [0, 1], got {min_p}.")
+
+
+def _validate_optional_presence_penalty(presence_penalty: float | None) -> None:
+    if presence_penalty is None:
+        return
+    if not -2.0 <= presence_penalty <= 2.0:
+        raise VLLMValidationError(
+            f"presence_penalty must be in [-2, 2], got {presence_penalty}."
+        )
+
+
+def _validate_optional_frequency_penalty(frequency_penalty: float | None) -> None:
+    if frequency_penalty is None:
+        return
+    if not -2.0 <= frequency_penalty <= 2.0:
+        raise VLLMValidationError(
+            f"frequency_penalty must be in [-2, 2], got {frequency_penalty}."
+        )
+
+
+def _validate_optional_repetition_penalty(repetition_penalty: float | None) -> None:
+    if repetition_penalty is None:
+        return
+    if not math.isfinite(repetition_penalty):
+        raise VLLMValidationError(
+            "repetition_penalty must be a finite number, "
+            f"got {repetition_penalty}."
+        )
+    if repetition_penalty <= 0.0:
+        raise VLLMValidationError(
+            "repetition_penalty must be greater than zero, got "
+            f"{repetition_penalty}."
+        )
+
+
+@dataclass
+class PostThinkingParams:
+    """Sampling knobs to use while the request is not inside a think block.
+
+    Unset fields inherit the corresponding primary ``SamplingParams`` value.
+    Requires a configured reasoning parser.
+    """
+
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    repetition_penalty: float | None = None
+
+    def __post_init__(self) -> None:
+        self.temperature = _validate_optional_temperature(self.temperature)
+        _validate_optional_top_p(self.top_p)
+        _validate_optional_top_k(self.top_k)
+        _validate_optional_min_p(self.min_p)
+        _validate_optional_presence_penalty(self.presence_penalty)
+        _validate_optional_frequency_penalty(self.frequency_penalty)
+        _validate_optional_repetition_penalty(self.repetition_penalty)
+
+    @classmethod
+    def from_optional(
+        cls, value: "PostThinkingParams | dict[str, Any] | None"
+    ) -> "PostThinkingParams | None":
+        if value is None:
+            return None
+        if isinstance(value, PostThinkingParams):
+            return value
+        if isinstance(value, dict):
+            return cls(**value)
+        raise VLLMValidationError(
+            "post_thinking must be an object of sampling knobs "
+            f"(temperature, top_p, top_k, min_p, ...), got {type(value).__name__}.",
+            parameter="post_thinking",
+            value=value,
+        )
 
 
 class SamplingType(IntEnum):
@@ -365,6 +542,11 @@ class SamplingParams(
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
 
+    post_thinking: PostThinkingParams | None = None
+    """Optional sampling knobs used while the request is not inside a think
+    block. Unset fields inherit the primary SamplingParams values. Requires a
+    configured reasoning parser."""
+
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
     If such repetition is detected, generation will be ended early. LLMs can
@@ -388,6 +570,7 @@ class SamplingParams(
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
         thinking_token_budget: int | None = None,
+        post_thinking: PostThinkingParams | dict[str, Any] | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
@@ -451,6 +634,7 @@ class SamplingParams(
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
             thinking_token_budget=thinking_token_budget,
+            post_thinking=PostThinkingParams.from_optional(post_thinking),
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -489,6 +673,7 @@ class SamplingParams(
         self.thinking_token_budget = validate_thinking_token_budget(
             self.thinking_token_budget
         )
+        self.post_thinking = PostThinkingParams.from_optional(self.post_thinking)
 
         if self.stop is None:
             self.stop = []
@@ -732,6 +917,37 @@ class SamplingParams(
                 parameter="bad_words",
                 value=self.bad_words,
             )
+
+    def resolve_sampling_knobs(self, in_reasoning: bool) -> SamplingKnobs:
+        """Return the knobs that apply for the current reasoning phase."""
+        if in_reasoning or self.post_thinking is None:
+            return SamplingKnobs(
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
+                min_p=self.min_p,
+                presence_penalty=self.presence_penalty,
+                frequency_penalty=self.frequency_penalty,
+                repetition_penalty=self.repetition_penalty,
+            )
+        overlay = self.post_thinking
+        return SamplingKnobs(
+            temperature=self.temperature
+            if overlay.temperature is None
+            else overlay.temperature,
+            top_p=self.top_p if overlay.top_p is None else overlay.top_p,
+            top_k=self.top_k if overlay.top_k is None else overlay.top_k,
+            min_p=self.min_p if overlay.min_p is None else overlay.min_p,
+            presence_penalty=self.presence_penalty
+            if overlay.presence_penalty is None
+            else overlay.presence_penalty,
+            frequency_penalty=self.frequency_penalty
+            if overlay.frequency_penalty is None
+            else overlay.frequency_penalty,
+            repetition_penalty=self.repetition_penalty
+            if overlay.repetition_penalty is None
+            else overlay.repetition_penalty,
+        )
 
     @cached_property
     def sampling_type(self) -> SamplingType:
@@ -1147,6 +1363,7 @@ class SamplingParams(
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
             f"thinking_token_budget={self.thinking_token_budget}, "
+            f"post_thinking={self.post_thinking}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "

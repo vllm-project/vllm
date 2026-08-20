@@ -51,6 +51,27 @@ class MinPLogitsProcessor(LogitsProcessor):
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
+    def set_min_p(self, index: int, min_p: float) -> bool:
+        """Update min_p for a live request. Returns True if the value changed."""
+        min_p_before = self.min_p_cpu[index]
+        if min_p_before == min_p:
+            return False
+        self.min_p_cpu[index] = min_p
+        if min_p and not min_p_before:
+            self.min_p_count += 1
+        elif not min_p and min_p_before:
+            self.min_p_count -= 1
+        if self.min_p_count:
+            size = self.min_p.shape[0] if self.min_p.numel() else index + 1
+            size = max(size, index + 1)
+            self.min_p = self.min_p_device[:size]
+            if self.use_double_tensor:
+                self.min_p.copy_(self.min_p_cpu_tensor[:size], non_blocking=True)
+            self.min_p.unsqueeze_(1)
+        else:
+            self.min_p = self.min_p_device[:0]
+        return True
+
     def update_state(self, batch_update: BatchUpdate | None):
         if not batch_update:
             return

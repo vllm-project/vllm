@@ -9,7 +9,9 @@ use serde_json::Value;
 use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
-use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_engine_core_client::protocol::sampling::{
+    PostThinkingParams, RepetitionDetectionParams,
+};
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
@@ -174,6 +176,12 @@ pub struct ChatCompletionRequest {
     /// to "no budget").
     pub thinking_token_budget: Option<i64>,
 
+    /// Sampling knobs to use after the model exits the thinking block.
+    /// Unset fields inherit the primary sampling parameters. Requires a
+    /// configured reasoning parser.
+    #[serde(default)]
+    pub post_thinking: Option<PostThinkingParams>,
+
     /// Whether to include reasoning content in the response
     #[serde(default = "default_true")]
     pub include_reasoning: bool,
@@ -274,6 +282,7 @@ impl Default for ChatCompletionRequest {
             tool_choice: None,
             reasoning_effort: None,
             thinking_token_budget: None,
+            post_thinking: None,
             include_reasoning: true,
             parallel_tool_calls: None,
             user: None,

@@ -44,6 +44,7 @@ from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     BeamSearchParams,
+    PostThinkingParams,
     RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
@@ -256,6 +257,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     thinking_token_budget: ThinkingTokenBudget = None
+    post_thinking: PostThinkingParams | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -685,8 +687,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             min_p = default_sampling_params.get(
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
             )
+        if (post_thinking := self.post_thinking) is None:
+            post_thinking = default_sampling_params.get("post_thinking")
 
-        # Merge server-default stop_token_ids (e.g., model-specific tokens
+        # Merge server-default stop_token_ids (e.g., model-specific tokens)
         # like </call> for gpt-oss) with any request-specified ones
         stop_token_ids = self.stop_token_ids
         default_stop_ids = default_sampling_params.get("stop_token_ids")
@@ -742,6 +746,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             thinking_token_budget=self.thinking_token_budget,
+            post_thinking=post_thinking,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone

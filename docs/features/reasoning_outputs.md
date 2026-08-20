@@ -258,6 +258,56 @@ To use this feature:
 
 If `thinking_token_budget` is not specified, no explicit reasoning limit is applied beyond normal generation constraints such as `max_tokens`.
 
+## Post-thinking sampling
+
+Some reasoning models (for example Qwen3.8) need higher temperature while thinking so they do not loop, then a lower temperature after `</think>` so the final answer stays coherent.
+
+`post_thinking` is an optional overlay of sampling knobs used while the request is **not** inside an open think block. Unset overlay fields inherit the primary sampling parameters.
+
+Requires `--reasoning-parser` (same gate as `thinking_token_budget`). vLLM decides the phase from the last reasoning start/end token IDs in the prompt plus generated tokens:
+
+- inside an open think block → primary `temperature` / `top_p` / `top_k` / `min_p` / penalties
+- otherwise (including thinking disabled, or after `</think>`) → `post_thinking`
+- if thinking re-opens, the primary knobs are restored
+
+The switch is applied on the next engine step after the think-end token is committed. With speculative decoding or async scheduling that can be one speculative window later (a few tokens). That boundary lag does not affect long thinking or answer phases.
+
+GPU workers only (Model Runner V1 and V2). TPU / XPU / CPU keep the primary knobs for the whole request.
+
+### Server default
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+    --reasoning-parser qwen3 \
+    --override-generation-config '{"temperature":1.0,"post_thinking":{"temperature":0.4,"top_p":0.95,"top_k":20}}'
+```
+
+### Online request
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "9.11 and 9.8, which is greater?"}],
+    "temperature": 1.0,
+    "post_thinking": {"temperature": 0.4, "top_p": 0.95, "top_k": 20}
+  }'
+```
+
+### Offline inference
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.sampling_params import PostThinkingParams
+
+llm = LLM(model="Qwen/Qwen3-0.6B", reasoning_parser="qwen3")
+sampling_params = SamplingParams(
+    temperature=1.0,
+    post_thinking=PostThinkingParams(temperature=0.4, top_p=0.95, top_k=20),
+)
+```
+
 `--reasoning-config` accepts a JSON object corresponding to  
 [ReasoningConfig][vllm.config.ReasoningConfig] with the following fields:
 

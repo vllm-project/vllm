@@ -27,6 +27,7 @@ from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
+    PostThinkingParams,
     RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
@@ -247,6 +248,14 @@ class CompletionRequest(OpenAIBaseModel):
             "-1 means unlimited (treated as unset)."
         ),
     )
+    post_thinking: PostThinkingParams | None = Field(
+        default=None,
+        description=(
+            "Sampling knobs to use after the model exits the thinking block. "
+            "Unset fields inherit the primary sampling parameters. Requires "
+            "--reasoning-parser."
+        ),
+    )
 
     stream_interval: Annotated[int, Field(ge=1)] | None = Field(
         default=None,
@@ -340,8 +349,10 @@ class CompletionRequest(OpenAIBaseModel):
             min_p = default_sampling_params.get(
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
             )
+        if (post_thinking := self.post_thinking) is None:
+            post_thinking = default_sampling_params.get("post_thinking")
 
-        # Merge server-default stop_token_ids (e.g., model-specific tokens
+        # Merge server-default stop_token_ids (e.g., model-specific tokens)
         # like </call> for gpt-oss) with any request-specified ones
         stop_token_ids = self.stop_token_ids
         default_stop_ids = default_sampling_params.get("stop_token_ids")
@@ -399,6 +410,7 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
+            post_thinking=post_thinking,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
 

@@ -12,7 +12,12 @@ from vllm.config.reasoning import ReasoningConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import (
+    SamplingKnobs,
+    SamplingParams,
+    tokens_in_reasoning,
+)
+from vllm.v1.sample.logits_processor.builtin import MinPLogitsProcessor
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.collection_utils import swap_dict_values
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -117,6 +122,20 @@ class InputBatch:
             PIN_MEMORY,
         )
         self.thinking_token_budget_reqs: set[str] = set()
+        if reasoning_config is not None and reasoning_config.enabled:
+            self.reasoning_start_token_ids = (
+                reasoning_config.reasoning_start_token_ids or []
+            )
+            self.reasoning_end_token_ids = (
+                reasoning_config.natural_reasoning_end_token_ids
+                or reasoning_config.reasoning_end_token_ids
+                or []
+            )
+        else:
+            self.reasoning_start_token_ids: list[int] = []
+            self.reasoning_end_token_ids: list[int] = []
+        self.post_thinking_params: dict[str, SamplingParams] = {}
+        self.post_thinking_in_reasoning: dict[str, bool] = {}
         self.is_pooling_model = is_pooling_model
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -398,34 +417,21 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
-            if sampling_params.sampling_type == SamplingType.GREEDY:
-                # Should avoid division by zero later when apply_temperature.
-                self.temperature_cpu[req_index] = 0.0
-                self.greedy_reqs.add(req_id)
-            else:
-                self.temperature_cpu[req_index] = sampling_params.temperature
-                self.random_reqs.add(req_id)
-
-            self.top_p_cpu[req_index] = sampling_params.top_p
-            if sampling_params.top_p < 1:
-                self.top_p_reqs.add(req_id)
-            top_k = sampling_params.top_k
-            if 0 < top_k < self.vocab_size:
-                self.top_k_reqs.add(req_id)
-            else:
-                top_k = self.vocab_size
-            self.top_k_cpu[req_index] = top_k
-            self.frequency_penalties_cpu[req_index] = sampling_params.frequency_penalty
-            if sampling_params.frequency_penalty != 0.0:
-                self.frequency_penalties_reqs.add(req_id)
-            self.presence_penalties_cpu[req_index] = sampling_params.presence_penalty
-            if sampling_params.presence_penalty != 0.0:
-                self.presence_penalties_reqs.add(req_id)
-            self.repetition_penalties_cpu[req_index] = (
-                sampling_params.repetition_penalty
+            in_reasoning = True
+            if sampling_params.post_thinking is not None:
+                self.post_thinking_params[req_id] = sampling_params
+                prompt_ids = request.prompt_token_ids or []
+                in_reasoning = tokens_in_reasoning(
+                    [*prompt_ids, *request.output_token_ids],
+                    self.reasoning_start_token_ids,
+                    self.reasoning_end_token_ids,
+                )
+                self.post_thinking_in_reasoning[req_id] = in_reasoning
+            self._apply_sampling_knobs(
+                req_id,
+                req_index,
+                sampling_params.resolve_sampling_knobs(in_reasoning),
             )
-            if sampling_params.repetition_penalty != 1.0:
-                self.repetition_penalties_reqs.add(req_id)
 
             # NOTE(woosuk): self.generators should not include the requests that
             # do not have their own generator.
@@ -581,6 +587,8 @@ class InputBatch:
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
         self.thinking_token_budget_reqs.discard(req_id)
+        self.post_thinking_params.pop(req_id, None)
+        self.post_thinking_in_reasoning.pop(req_id, None)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -837,6 +845,121 @@ class InputBatch:
         del self.req_output_token_ids[num_reqs:]
         del self.spec_token_ids[num_reqs:]
 
+    def _apply_sampling_knobs(
+        self, req_id: str, req_index: int, knobs: SamplingKnobs
+    ) -> bool:
+        """Write resolved sampling knobs for a request. Return True if changed."""
+        changed = False
+        if knobs.temperature < 1e-5:
+            if req_id in self.random_reqs or req_id not in self.greedy_reqs:
+                self.random_reqs.discard(req_id)
+                self.greedy_reqs.add(req_id)
+                changed = True
+            if self.temperature_cpu[req_index] != 0.0:
+                # Avoid division by zero later when apply_temperature.
+                self.temperature_cpu[req_index] = 0.0
+                changed = True
+        else:
+            if req_id in self.greedy_reqs or req_id not in self.random_reqs:
+                self.greedy_reqs.discard(req_id)
+                self.random_reqs.add(req_id)
+                changed = True
+            if self.temperature_cpu[req_index] != knobs.temperature:
+                self.temperature_cpu[req_index] = knobs.temperature
+                changed = True
+
+        if self.top_p_cpu[req_index] != knobs.top_p:
+            self.top_p_cpu[req_index] = knobs.top_p
+            changed = True
+        if knobs.top_p < 1:
+            if req_id not in self.top_p_reqs:
+                self.top_p_reqs.add(req_id)
+                changed = True
+        elif req_id in self.top_p_reqs:
+            self.top_p_reqs.discard(req_id)
+            changed = True
+
+        top_k = knobs.top_k
+        if not (0 < top_k < self.vocab_size):
+            top_k = self.vocab_size
+        if self.top_k_cpu[req_index] != top_k:
+            self.top_k_cpu[req_index] = top_k
+            changed = True
+        if 0 < knobs.top_k < self.vocab_size:
+            if req_id not in self.top_k_reqs:
+                self.top_k_reqs.add(req_id)
+                changed = True
+        elif req_id in self.top_k_reqs:
+            self.top_k_reqs.discard(req_id)
+            changed = True
+
+        if self.frequency_penalties_cpu[req_index] != knobs.frequency_penalty:
+            self.frequency_penalties_cpu[req_index] = knobs.frequency_penalty
+            changed = True
+        if knobs.frequency_penalty != 0.0:
+            if req_id not in self.frequency_penalties_reqs:
+                self.frequency_penalties_reqs.add(req_id)
+                changed = True
+        elif req_id in self.frequency_penalties_reqs:
+            self.frequency_penalties_reqs.discard(req_id)
+            changed = True
+
+        if self.presence_penalties_cpu[req_index] != knobs.presence_penalty:
+            self.presence_penalties_cpu[req_index] = knobs.presence_penalty
+            changed = True
+        if knobs.presence_penalty != 0.0:
+            if req_id not in self.presence_penalties_reqs:
+                self.presence_penalties_reqs.add(req_id)
+                changed = True
+        elif req_id in self.presence_penalties_reqs:
+            self.presence_penalties_reqs.discard(req_id)
+            changed = True
+
+        if self.repetition_penalties_cpu[req_index] != knobs.repetition_penalty:
+            self.repetition_penalties_cpu[req_index] = knobs.repetition_penalty
+            changed = True
+        if knobs.repetition_penalty != 1.0:
+            if req_id not in self.repetition_penalties_reqs:
+                self.repetition_penalties_reqs.add(req_id)
+                changed = True
+        elif req_id in self.repetition_penalties_reqs:
+            self.repetition_penalties_reqs.discard(req_id)
+            changed = True
+
+        if self._set_min_p(req_index, knobs.min_p):
+            changed = True
+        return changed
+
+    def _set_min_p(self, req_index: int, min_p: float) -> bool:
+        for proc in self.logitsprocs.all:
+            if isinstance(proc, MinPLogitsProcessor):
+                return proc.set_min_p(req_index, min_p)
+        return False
+
+    def _sync_post_thinking_overlays(self) -> bool:
+        if not self.post_thinking_params:
+            return False
+        changed = False
+        for req_id, params in self.post_thinking_params.items():
+            req_index = self.req_id_to_index.get(req_id)
+            if req_index is None:
+                continue
+            num_tokens = int(self.num_tokens_no_spec[req_index])
+            token_ids = self.token_ids_cpu[req_index, :num_tokens]
+            in_reasoning = tokens_in_reasoning(
+                token_ids,
+                self.reasoning_start_token_ids,
+                self.reasoning_end_token_ids,
+            )
+            if self.post_thinking_in_reasoning.get(req_id) == in_reasoning:
+                continue
+            self.post_thinking_in_reasoning[req_id] = in_reasoning
+            if self._apply_sampling_knobs(
+                req_id, req_index, params.resolve_sampling_knobs(in_reasoning)
+            ):
+                changed = True
+        return changed
+
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""
 
@@ -849,12 +972,13 @@ class InputBatch:
         # For non-pooling models - generate and apply logitsprocs update;
         # reset batch update tracking.
         # Update sampling metadata if batch state is changed.
+        overlay_changed = self._sync_post_thinking_overlays()
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
         if self.thinking_budget_state_holder is not None and batch_update:
             self.thinking_budget_state_holder.sync_batch(batch_update)
         for logit_proc in self.logitsprocs.all:
             logit_proc.update_state(batch_update)
-        if batch_update:
+        if batch_update or overlay_changed:
             self.sampling_metadata = self._make_sampling_metadata()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:

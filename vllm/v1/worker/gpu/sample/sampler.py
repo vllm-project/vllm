@@ -47,7 +47,18 @@ class Sampler:
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states
-        self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
+        start_ids: list[int] = []
+        end_ids: list[int] = []
+        if reasoning_config is not None and reasoning_config.enabled:
+            start_ids = reasoning_config.reasoning_start_token_ids or []
+            end_ids = (
+                reasoning_config.natural_reasoning_end_token_ids
+                or reasoning_config.reasoning_end_token_ids
+                or []
+            )
+        self.sampling_states = SamplingStates(
+            max_num_reqs, vocab_size, start_ids, end_ids
+        )
         self.penalties_state = PenaltiesState(req_states)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
@@ -61,10 +72,24 @@ class Sampler:
         )
 
     def add_request(
-        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
+        self,
+        req_idx: int,
+        prompt_len: int,
+        sampling_params: SamplingParams,
+        prefill_token_ids: list[int] | None = None,
     ) -> None:
-        self.sampling_states.add_request(req_idx, sampling_params)
+        self.sampling_states.add_request(req_idx, sampling_params, prefill_token_ids)
         self.penalties_state.add_request(req_idx, sampling_params)
+        if sampling_params.post_thinking is not None:
+            knobs = sampling_params.resolve_sampling_knobs(
+                bool(self.sampling_states.in_reasoning[req_idx])
+            )
+            self.penalties_state.update_knobs(
+                req_idx,
+                knobs.repetition_penalty,
+                knobs.frequency_penalty,
+                knobs.presence_penalty,
+            )
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
@@ -73,18 +98,40 @@ class Sampler:
         states = self.sampling_states
         temperature = states.temperature.np[req_idx]
         self.needs_logits_processing[req_idx] = (
-            self.logit_bias_state.use_logit_bias[req_idx]
-            or self.penalties_state.use_penalty[req_idx]
-            or self.bad_words_state.num_bad_words.np[req_idx] > 0
-            or (
-                self.thinking_budget_state.enabled
-                and self.thinking_budget_state.use_thinking_budget[req_idx]
-            )
-            or (temperature != 0.0 and temperature != 1.0)
-            or states.min_p.np[req_idx] != 0.0
-            or states.top_k.np[req_idx] != states.vocab_size
-            or states.top_p.np[req_idx] != 1.0
+                self.logit_bias_state.use_logit_bias[req_idx]
+                or self.penalties_state.use_penalty[req_idx]
+                or self.bad_words_state.num_bad_words.np[req_idx] > 0
+                or (
+                        self.thinking_budget_state.enabled
+                        and self.thinking_budget_state.use_thinking_budget[req_idx]
+                )
+                or (temperature != 0.0 and temperature != 1.0)
+                or states.min_p.np[req_idx] != 0.0
+                or states.top_k.np[req_idx] != states.vocab_size
+                or states.top_p.np[req_idx] != 1.0
         )
+
+    def observe_sampled_tokens(
+        self, req_ids: list[str], sampled_token_ids: list[list[int]]
+    ) -> None:
+        for req_id, tokens in zip(req_ids, sampled_token_ids):
+            req_idx = self.req_states.req_id_to_index.get(req_id)
+            if req_idx is None:
+                continue
+            if not self.sampling_states.observe_tokens(req_idx, tokens):
+                continue
+            params = self.sampling_states.post_thinking_params.get(req_idx)
+            if params is None:
+                continue
+            knobs = params.resolve_sampling_knobs(
+                bool(self.sampling_states.in_reasoning[req_idx])
+            )
+            self.penalties_state.update_knobs(
+                req_idx,
+                knobs.repetition_penalty,
+                knobs.frequency_penalty,
+                knobs.presence_penalty,
+            )
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -189,6 +236,9 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
+        if self.sampling_states.knobs_dirty:
+            self.apply_staged_writes()
+            self.sampling_states.knobs_dirty = False
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
             return logits
 

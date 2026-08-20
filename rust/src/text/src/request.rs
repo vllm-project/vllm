@@ -9,7 +9,9 @@ use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_engine_core_client::protocol::sampling::{
+    PostThinkingParams, RepetitionDetectionParams,
+};
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 
 use crate::error::{Error, Result};
@@ -67,6 +69,9 @@ pub struct SamplingParams {
     /// here; `-1` is normalized to `None` (and other negatives rejected) during
     /// lowering (see `lower_sampling_params`).
     pub thinking_token_budget: Option<i64>,
+    /// Sampling knobs to use after the model exits the thinking block.
+    /// Unset fields inherit the primary sampling parameters.
+    pub post_thinking: Option<PostThinkingParams>,
     /// Number of log probabilities to return per generated token.
     ///
     /// `None` disables sample logprobs. `-1` requests the full vocabulary.
@@ -131,6 +136,7 @@ impl Default for SamplingParams {
             max_tokens: None,
             min_tokens: None,
             thinking_token_budget: None,
+            post_thinking: None,
             logprobs: None,
             prompt_logprobs: None,
             min_p: None,
