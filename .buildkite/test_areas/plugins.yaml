@@ -52,6 +52,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Plugin Integration"
+      dind: false
       device: mi250_2
       timeout_in_minutes: 50
       depends_on:
