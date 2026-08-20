@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser, HyV3ToolParser,
+    Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
     Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
     MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
     Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
@@ -76,7 +76,7 @@ impl ToolParserFactory {
             .register_unified_dummy(names::INKLING)
             .register_parser::<Granite4ToolParser>(names::GRANITE4)
             .register_parser::<HermesToolParser>(names::HERMES)
-            .register_parser::<HyV3ToolParser>(names::HY_V3)
+            .register_unified_dummy(names::HY_V3)
             .register_parser::<Internlm2ToolParser>(names::INTERNLM)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_unified_dummy(names::KIMI_K3)
@@ -99,7 +99,6 @@ impl ToolParserFactory {
             .register_pattern("qwen", names::QWEN3_XML)
             .register_pattern("hermes", names::HERMES)
             .register_pattern("hy3", names::HY_V3)
-            .register_pattern("hy_v3", names::HY_V3)
             // Narrow to `internlm2` substring so it matches `internlm2-chat-7b`
             // and `internlm2_5-7b-chat` but NOT `internlm-chat-7b` (InternLM v1,
             // routes to Llama), `internlm3-*` (also Llama-architecture per
