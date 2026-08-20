@@ -204,7 +204,7 @@ import itertools
 import math
 from abc import abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from math import lcm
 from typing import ClassVar, Generic, TypeVar, cast
@@ -242,10 +242,6 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
-from vllm.model_executor.layers.attention.pcp import (
-    finalize_mla_pcp_decode,
-    maybe_gather_mla_latent_cache_inputs,
-)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -270,6 +266,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
     np_to_pinned_tensor,
@@ -292,12 +289,17 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.dcp_utils import MLADCPManager
+from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.pcp import (
+    finalize_mla_pcp_decode,
+    maybe_gather_mla_latent_cache_inputs,
+)
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
+    KVQuantMode,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     get_kv_quant_mode,
@@ -387,6 +389,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     2. Perform (multi-head/multi-query/grouped-query) attention.
     3. Return the output tensor.
     """
+
+    supports_dense_mha_prefill: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -536,6 +540,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
+        self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
+        # AMX reads kv_b_proj's weight directly and never calls it live; the
+        # reference CPU MLA backend calls it but isn't perf-critical. Skip
+        # the packed-kernel dispatch either way.
+        kv_b_proj._cpu_skip_gemm_dispatch = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
@@ -547,9 +556,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
         self.prefill_backend: MLAPrefillBackend | None
-        if self.impl.is_sparse and not self.impl.supports_dense_mha_prefill:
+        if self.impl.is_sparse and not (
+            self.impl.supports_dense_mha_prefill and self.supports_dense_mha_prefill
+        ):
             logger.warning_once(
-                "Sparse MLA impl has no dense-MHA prefill path; using the top-k "
+                "Sparse MLA layer has no dense-MHA prefill path; using the top-k "
                 "MQA path only."
             )
             self.prefill_backend = None
@@ -902,6 +913,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     group_size=128,
                     transpose_bm=True,
                 )
+            elif self.is_amx_bmm_enabled:
+                # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
+                # AMXMLAImpl's own (N, L, P) packed W_UK -- same as prefill.
+                N, B, P = mqa_q_nope.shape
+                L = self.kv_lora_rank
+                mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
+                ops.bmm_cpu(
+                    mqa_ql_nope,
+                    mqa_q_nope,
+                    self.impl._w_uk_packed,  # type: ignore[attr-defined]
+                    True,
+                    None,
+                )
+                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
@@ -1020,6 +1045,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Let per-backend impls do their own weight packing first (no-op
+        # unless overridden), mirroring Attention.process_weights_after_loading.
+        self.impl.process_weights_after_loading(act_dtype)
+
+        if self.is_amx_bmm_enabled:
+            # AMXMLAImpl already packed its own W_UK/W_UV above, for both
+            # prefill and decode. Release the now-unused raw weight.
+            self.kv_b_proj.weight = torch.nn.Parameter(
+                torch.empty(0), requires_grad=False
+            )
+            return
+
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
@@ -1152,6 +1189,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            # fp8_ds_mla: 656-byte custom layout (kv_lora_rank=512 +
+            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
+            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(
@@ -1182,6 +1222,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+            )
+        elif self.is_amx_bmm_enabled:
+            # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
+            # AMXMLAImpl's own (N, V, L) packed W_UV -- same as prefill.
+            ops.bmm_cpu(
+                out.transpose(0, 1),
+                x,
+                self.impl._w_uv_packed,  # type: ignore[attr-defined]
+                True,
+                None,
             )
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
@@ -1370,6 +1420,20 @@ class _DecodeConcatQuantFP8(QuantFP8):
 
 
 class MLACommonBackend(AttentionBackend):
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Per-token-head modes pack an inline fp32 scale pair after the
+        latent data (single-sided: ``head_size_v == 0`` for MLA)."""
+        mode = spec.kv_quant_mode
+        if spec.state_content_bytes is not None or not mode.is_per_token_head:
+            return spec
+        head_size = spec.head_size
+        if mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_size //= 2
+        scale_bytes = get_dtype_size(torch.float32)
+        content = head_size * get_dtype_size(spec.dtype) + 2 * scale_bytes
+        return replace(spec, state_content_bytes=content)
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
@@ -1965,12 +2029,40 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # Whether this builder can flatten a non-causal query block into decode rows.
     supports_non_causal_multi_token_decode: ClassVar[bool] = False
 
+    # Whether can support non-causal multi-token decode with DCP KV cache.
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = False
+
     # The threshold for reordering the batch into decode and prefill requests.
     # If > 1, the batch will be reordered such that requests with
     # query length <= threshold are classified as decode requests.
     # Use `query_len_support` (above) to set this automatically
     # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
+
+    def _validate_dspark_dcp_support(self, supports_dcp_with_varlen: bool) -> None:
+        speculative_config = getattr(self.vllm_config, "speculative_config", None)
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            speculative_config is None
+            or getattr(speculative_config, "method", None) != "dspark"
+            or parallel_config.decode_context_parallel_size <= 1
+        ):
+            return
+
+        if self.non_causal_multi_token_decode:
+            supported = self.supports_non_causal_multi_token_dcp
+            query_mode = "non-causal draft"
+        else:
+            supported = supports_dcp_with_varlen
+            query_mode = "causal multi-token"
+
+        if not supported:
+            raise ValueError(
+                f"{type(self).__name__} does not support {query_mode} MLA "
+                "attention for DSpark with decode context parallelism. Select "
+                "a backend with explicit DSpark DCP support or set "
+                "decode_context_parallel_size=1."
+            )
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -2065,6 +2157,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.non_causal_multi_token_decode = getattr(
             kv_cache_spec, "non_causal_multi_token_decode", False
         )
+        self._validate_dspark_dcp_support(supports_dcp_with_varlen)
 
         # A draft cache group can have a different head count from the target.
         self.num_heads = get_num_attention_heads_from_layers(

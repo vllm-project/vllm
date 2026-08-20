@@ -166,11 +166,16 @@ COPY build_rust.sh build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
+# Only Rust inputs are present, so suppress the artificial dirty state caused
+# by other tracked files being absent from this build stage.
+ENV SETUPTOOLS_SCM_PRETEND_METADATA={dirty=false}
+
 # Build the release artifacts. Cache cargo registry/git, but not target/,
 # because stale target metadata can outlive source updates across BuildKit
 # cache reuse.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=bind,source=.git,target=.git \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         export RUSTC_WRAPPER=sccache; \
@@ -259,6 +264,7 @@ RUN mkdir dist
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
+    --mount=type=cache,target=/root/.triton \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
         git clone --recurse-submodules --shallow-submodules --filter=blob:none "https://github.com/triton-lang/triton-cpu.git"; \
@@ -271,6 +277,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         fi; \
         uv build --wheel --out-dir=../dist; \
         if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi; \
+        cd ..; \
+        rm -rf triton-cpu; \
     fi
 
 ######################### TEST DEPS #########################

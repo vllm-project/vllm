@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import KVCacheSpec, KVQuantMode
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, KVQuantMode
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
@@ -191,6 +191,20 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Adjust the layer's KV cache spec for this backend's kernels. Used when the
+        kernels want KV packed in a specific way.
+
+        NOTE: temporary compatibility API. Today the Attention layer builds the spec
+        from the model config and the backend only gets to adjust it post-hoc; the end
+        state is for the backend to build and return the spec directly, at which point
+        this hook goes away.
+
+        (see: https://github.com/vllm-project/vllm/issues/42449)
+        """
+        return spec
+
+    @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
         supported_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_sizes:
@@ -303,6 +317,11 @@ class AttentionBackend(ABC):
             return False
 
     @classmethod
+    def supports_non_causal_dcp(cls) -> bool:
+        builder_cls = cls.get_builder_cls()
+        return bool(getattr(builder_cls, "supports_non_causal_multi_token_dcp", False))
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -350,6 +369,7 @@ class AttentionBackend(ABC):
         use_kv_connector: bool = False,
         use_pcp: bool = False,
         use_adaptive_verification: bool = False,
+        use_dcp: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -386,6 +406,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("sliding window not supported")
         if use_non_causal and not cls.supports_non_causal():
             invalid_reasons.append("non-causal attention not supported")
+        if use_mla and use_non_causal and use_dcp and not cls.supports_non_causal_dcp():
+            invalid_reasons.append("non-causal MLA attention with DCP not supported")
         if use_batch_invariant and not cls.supports_batch_invariance():
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():
@@ -864,7 +886,7 @@ class AttentionImplBase(ABC, Generic[T]):
     # False => base 2      (lse = log2(sum(exp(qk))))
     #          -- e.g. FlashInfer trtllm-gen MLA
     # The DCP combine kernel (cp_lse_ag_out_rs / dcp_a2a_lse_reduce in
-    # vllm/v1/attention/ops/common.py) branches on this via its IS_BASE_E
+    # vllm/v1/attention/ops/dcp.py) branches on this via its IS_BASE_E
     # constexpr; getting it wrong silently corrupts the cross-shard
     # softmax denominator.
     lse_base_on_e: bool = True
