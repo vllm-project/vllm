@@ -4,9 +4,11 @@
 use std::collections::BTreeSet;
 
 pub(crate) mod logprobs;
+pub(crate) mod sampling;
 pub(crate) mod token_ids;
 
 use logprobs::validate_logprobs;
+use sampling::validate_resolved_sampling_params;
 use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
@@ -57,6 +59,7 @@ pub fn lower_text_request(
         cache_salt: request.cache_salt.clone(),
         priority: request.priority,
         data_parallel_rank: request.data_parallel_rank,
+        session_id: request.session_id.clone(),
         reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
         lora_request: request.lora_request.clone(),
         arrival_time: request.arrival_time,
@@ -185,7 +188,9 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
+        routed_experts_prompt_start: 0,
     };
+    validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
     Ok(params)
 }
@@ -319,7 +324,7 @@ mod tests {
     use super::*;
     use crate::backend::hf::HfTextBackend;
     use crate::backend::{SamplingHints, TextBackend as _};
-    use crate::error::{LogprobsError, TokenIdsError};
+    use crate::error::{LogprobsError, SamplingParamsError, TokenIdsError};
     use crate::request::{Prompt, TextRequest};
 
     fn stub_tokenizer() -> TestTokenizer {
@@ -483,6 +488,120 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_rejects_invalid_sampling_ranges() {
+        let cases = [
+            (
+                "temperature",
+                SamplingParams {
+                    temperature: Some(5.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "top_p",
+                SamplingParams {
+                    top_p: Some(0.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "min_p",
+                SamplingParams {
+                    min_p: Some(2.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "repetition_penalty",
+                SamplingParams {
+                    repetition_penalty: Some(0.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "frequency_penalty",
+                SamplingParams {
+                    frequency_penalty: Some(100.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "presence_penalty",
+                SamplingParams {
+                    presence_penalty: Some(100.0),
+                    ..SamplingParams::default()
+                },
+            ),
+        ];
+
+        for (expected_parameter, sampling_params) in cases {
+            let error =
+                lower_sampling_params_with_limits(sampling_params, sample_sampling_limits())
+                    .unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    Error::SamplingParams(SamplingParamsError::OutOfRange {
+                        parameter,
+                        ..
+                    }) if parameter == expected_parameter
+                ),
+                "{expected_parameter} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_non_finite_sampling_values() {
+        for (expected_parameter, sampling_params) in [
+            (
+                "temperature",
+                SamplingParams {
+                    temperature: Some(f32::INFINITY),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "repetition_penalty",
+                SamplingParams {
+                    repetition_penalty: Some(f32::NAN),
+                    ..SamplingParams::default()
+                },
+            ),
+        ] {
+            let error =
+                lower_sampling_params_with_limits(sampling_params, sample_sampling_limits())
+                    .unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    Error::SamplingParams(SamplingParamsError::NotFinite {
+                        parameter,
+                        ..
+                    }) if parameter == expected_parameter
+                ),
+                "{expected_parameter} should reject non-finite values"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_sampling_params_accepts_python_compatible_repetition_penalty_above_two() {
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                repetition_penalty: Some(2.5),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap();
+
+        assert_eq!(params.repetition_penalty, 2.5);
+    }
+
+    #[test]
     fn lower_text_request_applies_python_style_eos_hints() {
         let prepared = lower_text_request(
             sample_request(),
@@ -527,6 +646,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -576,6 +696,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -741,6 +862,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -808,6 +930,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -868,6 +991,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1117,6 +1241,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);

@@ -2220,7 +2220,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llm-multimodal"
 version = "1.7.1"
-source = "git+https://github.com/smg-project/llm-multimodal?rev=5390032d6dc8a3e6fdc83acd320260367eb4b9b5#5390032d6dc8a3e6fdc83acd320260367eb4b9b5"
+source = "git+https://github.com/smg-project/llm-multimodal?rev=15adba5e025d8636ba4a334fb379b1371f6196a1#15adba5e025d8636ba4a334fb379b1371f6196a1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2402,9 +2402,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.18.0"
+version = "2.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "328251e58ad8e415be6198888fc207502727dc77945806421ab34f35bf012e7d"
+checksum = "86886cf6dbf4e614b19c9a1eec9775f021869d7eadde0fc73921a81b90c9b4c9"
 dependencies = [
  "indexmap 2.13.0",
  "memo-map",
@@ -2414,9 +2414,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.18.0"
+version = "2.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c6302e47d2b51f9fc978268ff7f5a014de5caa2ad48440309fd10ee711480d7"
+checksum = "bd3e5f077bc2379f0f7d911e7cfdd921114ed99fc884533dca502944cb355b11"
 dependencies = [
  "minijinja",
  "serde",
@@ -5503,10 +5503,15 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "tracing-subscriber",
  "url",
  "uuid",
+ "vllm-build-info",
+ "vllm-tracing",
 ]
+
+[[package]]
+name = "vllm-build-info"
+version = "0.1.0"
 
 [[package]]
 name = "vllm-chat"
@@ -5520,7 +5525,6 @@ dependencies = [
  "expect-test",
  "futures",
  "half",
- "indexmap 2.13.0",
  "itertools 0.14.0",
  "llm-multimodal",
  "minijinja",
@@ -5570,17 +5574,17 @@ dependencies = [
  "serde_json",
  "serde_with",
  "thiserror-ext",
- "time",
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "vllm-bench",
+ "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
  "vllm-server",
+ "vllm-tracing",
 ]
 
 [[package]]
@@ -5754,8 +5758,10 @@ dependencies = [
  "tracing",
  "tracing-futures",
  "tracing-subscriber",
+ "url",
  "uuid",
  "validator",
+ "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-llm",
@@ -5825,6 +5831,15 @@ dependencies = [
  "serde_json",
  "thiserror-ext",
  "vllm-parser",
+]
+
+[[package]]
+name = "vllm-tracing"
+version = "0.1.0"
+dependencies = [
+ "time",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
