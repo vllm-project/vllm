@@ -250,6 +250,22 @@ def test_fused_post_conv_l0():
             id="ratio2-tp4-max-fp32",
         ),
         pytest.param(
+            2,
+            1,
+            (9, 7, 0),
+            torch.float32,
+            torch.bfloat16,
+            id="ratio2-tp1-dspark-width9-fp32",
+        ),
+        pytest.param(
+            2,
+            1,
+            (9,),
+            torch.bfloat16,
+            torch.float32,
+            id="ratio2-tp1-dspark-width9-bf16",
+        ),
+        pytest.param(
             3,
             2,
             (4, 2, 0),

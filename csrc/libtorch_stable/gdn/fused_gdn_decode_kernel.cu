@@ -88,7 +88,8 @@ constexpr int kWarps = kThreads / 32;
 constexpr int kChunkV = 32;
 constexpr int kNumChunks = kDimV / kChunkV;
 constexpr int kRowsPerWarp = kChunkV / kWarps;
-constexpr int kMaxMtpTokens = 8;
+// Target verification includes the sampled token, so MTP K=8 needs 9 slots.
+constexpr int kMaxMtpTokens = kWarps + 1;
 constexpr int kDtBiasFloat32 = 0;
 constexpr int kDtBiasBFloat16 = 1;
 constexpr int kDtBiasFloat16 = 2;
@@ -146,7 +147,7 @@ __device__ __forceinline__ Sum2 warp_reduce_sum_pair(float x, float y) {
   return {x, y};
 }
 
-template <typename StateT, int ValueHeadsPerKeyHead>
+template <typename StateT, int ValueHeadsPerKeyHead, int MaxTokens>
 __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     const __nv_bfloat16* __restrict__ mixed_qkv,
     const __nv_bfloat16* __restrict__ a, const __nv_bfloat16* __restrict__ b,
@@ -175,7 +176,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       accepted > 0 && accepted <= state_indices_width
           ? state_indices[request * state_indices_width + accepted - 1]
           : 0;
-  if (source_slot <= 0 || num_tokens > kMaxMtpTokens) {
+  if (source_slot <= 0 || num_tokens > MaxTokens) {
     for (int linear = tid; linear < num_tokens * kDimV; linear += kThreads) {
       const int token = bos + linear / kDimV;
       const int value = linear % kDimV;
@@ -188,12 +189,12 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
 
   const int key_head = value_head / ValueHeadsPerKeyHead;
   __shared__ StateT shared_state[2][kChunkV][kDimK];
-  __shared__ float shared_q[kMaxMtpTokens][kDimK];
-  __shared__ float shared_k[kMaxMtpTokens][kDimK];
-  __shared__ __nv_bfloat16 shared_v[kMaxMtpTokens][kDimV];
-  __shared__ __nv_bfloat16 shared_out[kMaxMtpTokens][kDimV];
-  __shared__ float shared_decay[kMaxMtpTokens];
-  __shared__ float shared_beta[kMaxMtpTokens];
+  __shared__ float shared_q[MaxTokens][kDimK];
+  __shared__ float shared_k[MaxTokens][kDimK];
+  __shared__ __nv_bfloat16 shared_v[MaxTokens][kDimV];
+  __shared__ __nv_bfloat16 shared_out[MaxTokens][kDimV];
+  __shared__ float shared_decay[MaxTokens];
+  __shared__ float shared_beta[MaxTokens];
 
   StateT* source_state =
       state + static_cast<int64_t>(source_slot) * strides.state_slot +
@@ -201,8 +202,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   copy_state_chunk<StateT, kChunkV, kDimK, 2>(&shared_state[0][0][0],
                                               source_state, 0, tid, kThreads);
 
-  if (warp < num_tokens) {
-    const int t = warp;
+  for (int t = warp; t < num_tokens; t += kWarps) {
     const int token = bos + t;
     const int64_t mixed_base = static_cast<int64_t>(token) * strides.mixed_row;
     float q_values[4];
@@ -242,6 +242,9 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
                                                            dt_bias_type));
       shared_decay[t] = __expf(g);
       shared_beta[t] = sigmoid_fast(b_value);
+    }
+    if constexpr (MaxTokens <= kWarps) {
+      break;
     }
   }
   __syncthreads();
@@ -337,8 +340,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   }
   __syncthreads();
 
-  if (warp < num_tokens) {
-    const int t = warp;
+  for (int t = warp; t < num_tokens; t += kWarps) {
     float output_values[4];
     float sum_square = 0.0f;
 #pragma unroll
@@ -367,10 +369,13 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       out[out_offset] =
           __float2bfloat16(output_values[i] * rstd * weight * gate);
     }
+    if constexpr (MaxTokens <= kWarps) {
+      break;
+    }
   }
 }
 
-template <typename StateT, int ValueHeadsPerKeyHead>
+template <typename StateT, int ValueHeadsPerKeyHead, int MaxTokens>
 void launch_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a_log,
     torch::stable::Tensor const& dt_bias,
@@ -395,7 +400,7 @@ void launch_gdn_decode_post_conv_mtp(
       get_current_cuda_stream(mixed_qkv.get_device_index());
   const int num_requests = static_cast<int>(state_indices.size(0));
   const dim3 grid(num_requests, num_value_heads);
-  gdn_decode_post_conv_mtp_kernel<StateT, ValueHeadsPerKeyHead>
+  gdn_decode_post_conv_mtp_kernel<StateT, ValueHeadsPerKeyHead, MaxTokens>
       <<<grid, kThreads, 0, stream>>>(
           static_cast<const __nv_bfloat16*>(mixed_qkv.data_ptr()), a, b,
           static_cast<const float*>(a_log.data_ptr()), dt_bias.data_ptr(),
@@ -491,7 +496,7 @@ void fused_gdn_decode_post_conv_mtp(
   STD_TORCH_CHECK(state_indices.dim() == 2 && state_indices.size(0) > 0 &&
                       state_indices.size(1) > 0 &&
                       state_indices.size(1) <= kMaxMtpTokens,
-                  "state_indices must have shape [N, S] with 1 <= S <= 8");
+                  "state_indices must have shape [N, S] with 1 <= S <= 9");
   const int num_requests = static_cast<int>(state_indices.size(0));
   STD_TORCH_CHECK(
       cu_seqlens.dim() == 1 && cu_seqlens.numel() == num_requests + 1,
@@ -547,18 +552,28 @@ void fused_gdn_decode_post_conv_mtp(
   const auto* b_ptr = static_cast<const __nv_bfloat16*>(b.data_ptr());
   const auto* output_gate_ptr =
       static_cast<const __nv_bfloat16*>(output_gate.data_ptr());
-  const auto launch = [&]<typename StateT, int ValueHeadsPerKeyHead>() {
-    launch_gdn_decode_post_conv_mtp<StateT, ValueHeadsPerKeyHead>(
+  const auto launch = [&]<typename StateT, int ValueHeadsPerKeyHead,
+                          int MaxTokens>() {
+    launch_gdn_decode_post_conv_mtp<StateT, ValueHeadsPerKeyHead, MaxTokens>(
         mixed_qkv, a_log, dt_bias, state_indices, cu_seqlens,
         num_accepted_tokens, state, norm_weight, out, a_ptr, b_ptr,
         output_gate_ptr, num_key_heads, num_value_heads, scale, norm_eps,
         strides);
   };
+  const auto dispatch_token_width = [&]<typename StateT,
+                                        int ValueHeadsPerKeyHead>() {
+    if (state_indices.size(1) <= kWarps) {
+      launch.template operator()<StateT, ValueHeadsPerKeyHead, kWarps>();
+    } else {
+      launch.template operator()<StateT, ValueHeadsPerKeyHead, kMaxMtpTokens>();
+    }
+  };
   const auto dispatch_state_type = [&]<int ValueHeadsPerKeyHead>() {
     if (state_scalar_type == ScalarType::Float) {
-      launch.template operator()<float, ValueHeadsPerKeyHead>();
+      dispatch_token_width.template operator()<float, ValueHeadsPerKeyHead>();
     } else {
-      launch.template operator()<__nv_bfloat16, ValueHeadsPerKeyHead>();
+      dispatch_token_width
+          .template operator()<__nv_bfloat16, ValueHeadsPerKeyHead>();
     }
   };
   switch (value_heads_per_key_head) {
