@@ -268,7 +268,7 @@ class Cohere2VisionMultiModalProcessor(
         num_patches = hf_inputs.get("num_patches", torch.empty(0))
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            num_patches=MultiModalFieldConfig.batched("image"),
+            num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
