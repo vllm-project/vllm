@@ -35,6 +35,10 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseBackend,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -62,6 +66,16 @@ from vllm.v1.worker.utils import select_common_block_size
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.fixture(autouse=True)
+def _restore_default_dtype():
+    """Several tests here set the process-wide default dtype to float16 and
+    previously leaked it, corrupting later float-sensitive tests in the same
+    pytest process (torch.randn silently produced fp16)."""
+    old = torch.get_default_dtype()
+    yield
+    torch.set_default_dtype(old)
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
@@ -291,6 +305,16 @@ def test_select_common_block_size_uses_largest_shared_int():
     assert selected_size == 64
 
 
+def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+
+    selected_size = select_common_block_size(
+        16,
+        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
+    )
+    assert selected_size == 16
+
+
 def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids(
     dist_init,
 ):
@@ -380,9 +404,13 @@ def test_select_common_block_size_no_valid_option():
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     model = Mock()
-    model.get_num_mm_encoder_tokens.side_effect = lambda num_embeds: num_embeds + 1
+    model.get_mm_lora_token_counts.side_effect = (
+        lambda *, modality, mm_kwargs, num_mm_embeds: (
+            num_mm_embeds + 1,
+            num_mm_embeds + 11,
+        )
+    )
     model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
-    model.get_num_mm_connector_tokens.side_effect = lambda num_tokens: num_tokens + 10
 
     lora_manager = Mock()
     lora_manager.supports_tower_connector_lora.return_value = True

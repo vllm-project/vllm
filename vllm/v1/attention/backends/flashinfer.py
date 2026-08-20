@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
 from typing import ClassVar
@@ -10,6 +10,7 @@ from typing import ClassVar
 import numpy as np
 import torch
 from flashinfer import (
+    BatchAttentionWithAttentionSinkWrapper,
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
@@ -45,10 +46,12 @@ from vllm.utils.flashinfer import (
     supports_trtllm_attention,
     use_trtllm_attention,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
+    get_dtype_size,
     is_quantized_kv_cache,
     is_strictly_contiguous,
     nvfp4_kv_cache_full_dim,
@@ -386,6 +389,21 @@ class BatchDCPPrefillWrapper:
 
 
 class FlashInferBackend(AttentionBackend):
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """NVFP4 stores K and V as separate per-head slots of packed fp4 data
+        plus fp8 block scales."""
+        if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_nvfp4:
+            return spec
+        hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
+        hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
+        assert hs_k == hs_v, "nvfp4 with asymmetric K/V head sizes not yet supported"
+        return replace(
+            spec,
+            num_head_slots=2 * spec.num_kv_heads,
+            state_content_bytes=hs_k * get_dtype_size(spec.dtype),
+        )
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -427,6 +445,12 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def supports_non_causal(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # The wrappers are planned from qo_indptr_cpu, so the CPU query offsets
+        # have to be the ones the kernel runs on.
+        return False
 
     @classmethod
     def supports_sliding_window(cls) -> bool:
@@ -1107,11 +1131,27 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "NVFP4 KV cache."
                 )
             if self._noncausal_prefill_wrapper is None:
-                self._noncausal_prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self._get_workspace_buffer(),
-                    get_kv_cache_layout(),
-                    backend="auto",
-                )
+                if self.has_sinks and current_platform.is_device_capability_family(120):
+                    self._noncausal_prefill_wrapper = (
+                        BatchAttentionWithAttentionSinkWrapper(
+                            self._get_workspace_buffer(),
+                            get_kv_cache_layout(),
+                            backend="auto",
+                            q_data_type=self.q_data_type_prefill,
+                            kv_data_type=self.kv_cache_dtype,
+                            head_dim_qk=self.head_dim,
+                            head_dim_vo=self.head_dim,
+                            window_left=self.window_left,
+                        )
+                    )
+                else:
+                    self._noncausal_prefill_wrapper = (
+                        BatchPrefillWithPagedKVCacheWrapper(
+                            self._get_workspace_buffer(),
+                            get_kv_cache_layout(),
+                            backend="auto",
+                        )
+                    )
             return self._noncausal_prefill_wrapper
 
         if self._prefill_wrapper is None:
@@ -1121,14 +1161,27 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     dcp_a2a=self.dcp_a2a,
                 )
             else:
-                # NVFP4 KV cache requires the trtllm-gen backend inside
-                # the wrapper; fa2/fa3 do not support nvfp4.
-                backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
-                self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self._get_workspace_buffer(),
-                    get_kv_cache_layout(),
-                    backend=backend,
-                )
+                if self.has_sinks and current_platform.is_device_capability_family(120):
+                    assert not self.is_kvcache_nvfp4
+                    self._prefill_wrapper = BatchAttentionWithAttentionSinkWrapper(
+                        self._get_workspace_buffer(),
+                        get_kv_cache_layout(),
+                        backend="auto",
+                        q_data_type=self.q_data_type_prefill,
+                        kv_data_type=self.kv_cache_dtype,
+                        head_dim_qk=self.head_dim,
+                        head_dim_vo=self.head_dim,
+                        window_left=self.window_left,
+                    )
+                else:
+                    # NVFP4 KV cache requires the trtllm-gen backend inside
+                    # the wrapper; fa2/fa3 do not support nvfp4.
+                    backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
+                    self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                        self._get_workspace_buffer(),
+                        get_kv_cache_layout(),
+                        backend=backend,
+                    )
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
@@ -1356,13 +1409,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # seq_lens_cpu is not needed since TRTLLM paths use GPU tensors
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
-        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
-        num_blocks_np = (
-            (seq_lens_np + (page_size - 1)) // page_size
-            if seq_lens_np is not None
-            else None
-        )
+        if needs_seq_lens_cpu:
+            with gpu_sync_allowed():
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            seq_lens_np = seq_lens_cpu.numpy()
+            num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
+        else:
+            seq_lens_cpu = None
+            seq_lens_np = None
+            num_blocks_np = None
 
         # Adjust seq_lens_cpu for DCP
         if self.use_dcp:
@@ -2080,16 +2135,28 @@ class FlashInferImpl(AttentionImpl):
                     else:
                         out_prefill = output[num_decode_tokens:]
 
-                    prefill_wrapper.run(
-                        prefill_query,
-                        kv_cache_for_fi,
-                        q_scale=layer._q_scale_float,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
-                        out=out_prefill,
-                        kv_cache_sf=kv_cache_sf,
-                        sinks=self.sinks,
-                    )
+                    if isinstance(
+                        prefill_wrapper, BatchAttentionWithAttentionSinkWrapper
+                    ):
+                        assert self.sinks is not None
+                        prefill_wrapper.run(
+                            prefill_query,
+                            kv_cache_for_fi,
+                            self.sinks,
+                            self.scale * layer._q_scale_float * layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                            out=out_prefill,
+                        )
+                    else:
+                        prefill_wrapper.run(
+                            prefill_query,
+                            kv_cache_for_fi,
+                            q_scale=layer._q_scale_float,
+                            k_scale=layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                            out=out_prefill,
+                            kv_cache_sf=kv_cache_sf,
+                        )
 
                     if needs_fp8_out_prefill:
                         output[

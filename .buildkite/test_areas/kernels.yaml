@@ -183,6 +183,7 @@ steps:
       - tests/kernels/quantization
       - tests/kernels/quantization/test_rocm_skinny_gemms.py
       - vllm/_aiter_ops.py
+      - vllm/kernels/aiter_ops.py
       - vllm/platforms/rocm.py
       - vllm/model_executor/kernels/
       depends_on:
@@ -338,6 +339,28 @@ steps:
     - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
+
+- label: B12X Linear Kernels (DGX Spark) Nightly
+  key: b12x-linear-kernels-dgx-spark-nightly
+  timeout_in_minutes: 30
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - setup.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/warmup/b12x_warmup.py
+  - vllm/utils/b12x.py
+  - tests/model_executor/kernels/test_b12x_linear.py
+  - tests/model_executor/test_b12x_warmup.py
+  - tests/kernels/quantization/test_block_fp8.py
+  commands:
+  - uv pip install --system b12x==1.2.4
+  - pytest -v -s model_executor/kernels/test_b12x_linear.py
+      model_executor/test_b12x_warmup.py
+      kernels/quantization/test_block_fp8.py -k b12x
 
 - label: Kernels Helion Test
   key: kernels-helion-test

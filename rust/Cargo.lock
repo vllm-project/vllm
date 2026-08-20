@@ -2402,9 +2402,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.22.0"
+version = "2.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef84a52be188a1d4124bd717903fdde96ca4705f2b56adfe2d91fcc57fcb6987"
+checksum = "86886cf6dbf4e614b19c9a1eec9775f021869d7eadde0fc73921a81b90c9b4c9"
 dependencies = [
  "indexmap 2.13.0",
  "memo-map",
@@ -2414,9 +2414,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.22.0"
+version = "2.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd6e279dc925840c2d9ebc1e9f85410611d01292561297463ba3e516c3ad94dd"
+checksum = "bd3e5f077bc2379f0f7d911e7cfdd921114ed99fc884533dca502944cb355b11"
 dependencies = [
  "minijinja",
  "serde",
@@ -5505,8 +5505,13 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "vllm-build-info",
  "vllm-tracing",
 ]
+
+[[package]]
+name = "vllm-build-info"
+version = "0.1.0"
 
 [[package]]
 name = "vllm-chat"
@@ -5574,6 +5579,7 @@ dependencies = [
  "tracing",
  "uuid",
  "vllm-bench",
+ "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
@@ -5755,6 +5761,7 @@ dependencies = [
  "url",
  "uuid",
  "validator",
+ "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-llm",

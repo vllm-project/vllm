@@ -816,6 +816,7 @@ def test_metrics_empty_stats():
 def test_get_kv_cache_configs_multiple_workers():
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.prefix_cache_retention_interval = None
 
     ref_kv_cache_spec = new_kv_cache_spec()
     same_kv_cache_specs = [
@@ -1173,6 +1174,7 @@ def test_get_kv_cache_configs_multiple_workers():
 def test_get_kv_cache_configs_pp_sharding(asymmetric_memory):
     model_config = ModelConfig(max_model_len=512)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.prefix_cache_retention_interval = None
 
     ref_kv_cache_spec = new_kv_cache_spec()
     pp_kv_cache_specs = [
@@ -1702,6 +1704,7 @@ def test_get_kv_cache_config_one_worker():
     # pass max_model_len to pass check_enough_kv_cache_memory
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.prefix_cache_retention_interval = None
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
     # all layers are full attention -> single group
@@ -2015,6 +2018,7 @@ def test_get_kv_cache_config_one_worker():
 def test_get_kv_cache_configs_attention_free():
     kv_cache_specs: dict[str, KVCacheSpec] = {}
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config.cache_config.prefix_cache_retention_interval = None
     kv_cache_configs = get_kv_cache_configs(vllm_config, [kv_cache_specs], [0])
     assert kv_cache_configs == [
         KVCacheConfig(
@@ -2766,21 +2770,20 @@ def test_unify_kv_cache_page_size_padding_requires_backend_support():
         kv_cache_utils.unify_kv_cache_spec_page_size(specs)
 
 
-def test_unpadded_page_size_without_quant_matches_real_page():
-    # Without quantization the offload transfer width is just the raw page.
-    spec = new_kv_cache_spec()
-    assert spec.unpadded_page_size_bytes == spec.real_page_size_bytes
-    assert spec.page_size_bytes == spec.unpadded_page_size_bytes
-
-
 def test_unpadded_page_size_includes_per_token_head_scales():
     # Per-token-head quant carries inline fp32 scales that are carved from the
-    # raw KV allocation, so they must be budgeted into the offload width.
-    spec = new_kv_cache_spec(
-        dtype=torch.uint8, kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD
+    # raw KV allocation, so they must be budgeted into the offload width. The
+    # packing is published by the owning backend's customize_spec hook.
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+
+    dense = new_kv_cache_spec(dtype=torch.uint8)
+    spec = TritonAttentionBackend.customize_spec(
+        new_kv_cache_spec(
+            dtype=torch.uint8, kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD
+        )
     )
     scales = 2 * spec.block_size * spec.num_kv_heads * 4
-    assert spec.unpadded_page_size_bytes == spec.real_page_size_bytes + scales
+    assert spec.unpadded_page_size_bytes == dense.unpadded_page_size_bytes + scales
     assert spec.page_size_bytes == spec.unpadded_page_size_bytes
 
 
