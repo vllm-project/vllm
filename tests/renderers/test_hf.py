@@ -615,6 +615,18 @@ class TestConvertDeveloperToSystem:
         result = convert_developer_to_system(conversation)
         assert "tools" not in result[0]
 
+    def test_keeps_tools_key(self):
+        conversation = [
+            {
+                "role": "developer",
+                "content": "Instructions",
+                "tools": [{"type": "function"}],
+            },
+        ]
+        result = convert_developer_to_system(conversation, keep_tools=True)
+        assert result[0]["role"] == "system"
+        assert result[0]["tools"] == [{"type": "function"}]
+
     def test_no_developer_messages_unchanged(self):
         conversation = [
             {"role": "system", "content": "System prompt"},
