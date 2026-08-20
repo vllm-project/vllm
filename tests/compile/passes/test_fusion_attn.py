@@ -128,7 +128,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         )
         supported = get_supported_kv_cache_layouts([self.attn.attn_backend])
         layout = resolve_kv_cache_layout(
-            self.vllm_config.cache_config, [[m.name for m in supported]]
+            self.vllm_config, [[m.name for m in supported]]
         )
         raw_tensor = torch.zeros(
             num_blocks * spec.page_size_bytes,

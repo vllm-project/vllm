@@ -504,9 +504,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             # Set KV cache layout if the backend requires a specific one
             # (e.g., FlashInfer requires LBHNC on SM100/Blackwell for TRTLLM attention)
             supported = get_supported_kv_cache_layouts([backend_class])
-            layout = resolve_kv_cache_layout(
-                vllm_config.cache_config, [[m.name for m in supported]]
-            )
+            layout = resolve_kv_cache_layout(vllm_config, [[m.name for m in supported]])
 
             common_metadata = _build_common_attn_metadata(
                 q_lens, kv_lens, config.block_size, device

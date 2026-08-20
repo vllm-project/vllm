@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    group_kernel_blocks,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
@@ -86,7 +87,7 @@ class OffloadingConnectorWorker:
                 layer_kv_cache_spec = per_layer_specs.get(
                     layer_name, group_kv_cache_spec
                 )
-                ref = kv_caches[layer_name]
+                ref = group_kernel_blocks(kv_caches[layer_name], num_blocks)
                 page = layer_kv_cache_spec.page_size_bytes
                 elem_size = ref.element_size()
                 byte_offset = ref.storage_offset() * elem_size

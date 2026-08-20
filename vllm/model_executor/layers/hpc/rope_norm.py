@@ -69,8 +69,8 @@ def hpc_rope_norm_forward(
         output.zero_()
         return
 
-    assert kv_cache.dim() == 5, (
-        f"Expected kv_cache to have 5 dims, got {tuple(kv_cache.shape)}"
+    assert kv_cache.dim() == 4, (
+        f"Expected kv_cache to have 4 dims, got {tuple(kv_cache.shape)}"
     )
 
     rope_norm = _hpc_rope_norm_instances[layer_name]

@@ -237,7 +237,7 @@ def record_kv_cache_layout(cache_config: CacheConfig, layout_name: str) -> None:
 
 
 def resolve_kv_cache_layout(
-    cache_config: CacheConfig,
+    vllm_config: VllmConfig,
     supported_layouts: list[list[str]],
     kv_cache_specs: Iterable[KVCacheSpec] | None = None,
 ) -> KVCacheLayout:
@@ -255,6 +255,7 @@ def resolve_kv_cache_layout(
     reaches workers through the ``set_kv_cache_layout`` RPC and
     ``KVCacheConfig.kv_cache_layout``.
     """
+    cache_config = vllm_config.cache_config
     if cache_config.kv_cache_layout is not None:
         return cache_config.get_resolved_kv_cache_layout()
 
@@ -289,7 +290,7 @@ def resolve_kv_cache_layout(
                 f"VLLM_KV_CACHE_LAYOUT={requested} does not satisfy every "
                 f"supported set; valid layouts: {_layout_names(candidates)}."
             )
-    elif (connector := get_kv_connector_cache_layout()) is not None:
+    elif (connector := get_kv_connector_cache_layout(vllm_config)) is not None:
         layout = _layout_from_name(connector)
         if layout not in candidates:
             logger.warning_once(

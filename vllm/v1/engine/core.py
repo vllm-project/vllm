@@ -282,17 +282,19 @@ class EngineCore:
                 )
                 vllm_config.cache_config.enable_prefix_caching = False
 
+        # Resolve the KV cache layout before memory profiling: workers that
+        # capture full cudagraphs initialize a minimal KV cache during it.
+        # Attention-free models resolve the default so layout reads never precede
+        # resolution.
+        layout = resolve_kv_cache_layout(
+            vllm_config,
+            self.model_executor.get_supported_kv_cache_layouts(),
+            [s for specs in kv_cache_specs for s in specs.values()],
+        )
+        self.model_executor.set_kv_cache_layout(layout.name)
+
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
-            # Resolve the KV cache layout before memory profiling: workers that
-            # capture full cudagraphs initialize a minimal KV cache during it.
-            layout = resolve_kv_cache_layout(
-                vllm_config.cache_config,
-                self.model_executor.get_supported_kv_cache_layouts(),
-                [s for specs in kv_cache_specs for s in specs.values()],
-            )
-            self.model_executor.set_kv_cache_layout(layout.name)
-
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
                 # NOTE(yongji): should already be set
                 # during _eep_scale_up_before_kv_init

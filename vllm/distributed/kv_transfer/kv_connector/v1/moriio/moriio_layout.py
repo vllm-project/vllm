@@ -246,11 +246,14 @@ def iter_layer_registration_regions(
     geometry = get_layer_transfer_geometry(layer_name, kv_cache, layer_to_spec)
     region_len = geometry.num_blocks * geometry.regions_per_block * geometry.block_len
     if geometry.regions_per_block == 1:
-        # With padded pages the block stride exceeds the meaningful block_len;
-        # register the full strided span so every block's bytes are covered.
+        # With padded or interleaved pages the block stride exceeds the
+        # meaningful block_len; register the strided span. The span ends with
+        # the last block's meaningful bytes, not a whole stride, so it never
+        # runs past the backing allocation of a strided layer view.
+        block_stride_bytes = geometry.block_stride * kv_cache.element_size()
         region_len = max(
             region_len,
-            geometry.num_blocks * geometry.block_stride * kv_cache.element_size(),
+            (geometry.num_blocks - 1) * block_stride_bytes + geometry.block_len,
         )
     if geometry.split_kv_regions:
         return [(cache, region_len) for cache in kv_cache]

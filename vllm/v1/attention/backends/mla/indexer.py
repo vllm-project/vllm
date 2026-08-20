@@ -188,9 +188,7 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         # DeepSeek-V4 packs the indexer pages beside the MLA latent pages inside
-        # each block, so the layer dim must sit inside the block dim. V3.2-family
-        # models instead keep dense per-layer caches: their sparse kernels index
-        # rows as block_id * block_size, which only layer-compact layouts satisfy.
+        # each block, so the layer dim must sit inside the block dim.
         return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
 
     @staticmethod

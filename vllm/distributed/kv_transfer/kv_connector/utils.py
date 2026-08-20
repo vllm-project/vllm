@@ -35,10 +35,11 @@ EngineId = str
 BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
-def get_kv_connector_cache_layout():
+def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
     # NOTE (NickLucche) When running disaggregated PD with NIXL, LBHNC layout is
     # used for faster transfer.
-    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return None
     kv_config = vllm_config.kv_transfer_config

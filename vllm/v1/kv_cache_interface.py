@@ -233,6 +233,18 @@ class KVCacheSpec:
         )
 
 
+def group_kernel_blocks(cache: torch.Tensor, num_blocks: int) -> torch.Tensor:
+    """View a kernel-block-granular layer cache with manager blocks as dim 0.
+
+    Kernel block splitting subdivides each manager block into uniformly strided
+    kernel blocks, so grouping is a pure view: ``(num_blocks * ratio, ...)``
+    """
+    if cache.shape[0] == num_blocks:
+        return cache
+    assert cache.shape[0] % num_blocks == 0
+    return cache.unflatten(0, (num_blocks, -1))
+
+
 def compute_layer_kv_cache_shape_bytes(
     spec: KVCacheSpec,
     num_blocks: int,
@@ -316,10 +328,16 @@ def create_kv_cache_views(
         # they sit a constant stride apart only if a block is one dense page: no
         # padding at its end, and no other layer's page before the next block.
         dense_page_size = prod(compute_layer_kv_cache_shape_bytes(spec, 1)[1:])
-        assert block_stride == dense_page_size, (
-            "Kernel block splitting needs dense, unpadded KV cache blocks "
-            f"(block stride {block_stride} != page {dense_page_size})."
-        )
+        if block_stride != dense_page_size:
+            raise ValueError(
+                f"The resolved KV cache layout ({layout.name}) does not store "
+                "blocks as dense, unpadded pages (block stride "
+                f"{block_stride} != page {dense_page_size}), so a manager "
+                f"block cannot be split into {ratio} kernel blocks of "
+                f"{kernel_block_size} tokens. Reduce --block-size to "
+                f"{kernel_block_size} or set VLLM_KV_CACHE_LAYOUT to a "
+                "layer-compact layout (e.g. LBNHC)."
+            )
         assert block_stride % ratio == 0, (
             f"Block stride {block_stride} must divide into {ratio} equal kernel blocks."
         )

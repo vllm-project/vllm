@@ -46,9 +46,9 @@ else
 fi
 
 if [[ "$CROSS_LAYERS_BLOCKS" == "True" ]]; then
-  KV_EXTRA_CONFIG=',"kv_connector_extra_config":{"enable_cross_layers_blocks": "True"}'
-else
-  KV_EXTRA_CONFIG=''
+  # Cross-layer blocks are exercised via the block-outermost layout.
+  PREFILLER_KV_LAYOUT="BLHNC"
+  DECODER_KV_LAYOUT="BLHNC"
 fi
 
 # Connector: default pull NixlConnector; NixlPushConnector enables PP prefill.
@@ -56,11 +56,11 @@ KV_CONNECTOR=${KV_CONNECTOR:-NixlConnector}
 
 # Build the kv-transfer-config for P and D
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG_P='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
-  KV_CONFIG_D='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_P='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}'}'
+  KV_CONFIG_D='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}'}'
 else
-  KV_CONFIG_P="{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
-  KV_CONFIG_D="{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_P="{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}"}"
+  KV_CONFIG_D="{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}"}"
 fi
 
 # Models to run
