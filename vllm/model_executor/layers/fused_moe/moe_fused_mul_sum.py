@@ -13,21 +13,18 @@ def moe_fused_mul_sum_kernel(
     outputs_ptr,
     top_ids_ptr,
     expert_map_ptr,
-    num_tokens,
     stride_m,
     has_topk_ids: tl.constexpr,
     has_expert_map: tl.constexpr,
     top_k: tl.constexpr,
     size: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    K_SPLITS: tl.constexpr,
 ):
     # One CTA owns one token's output row. `inputs` is (num_tokens, top_k, size)
     # but only the ~1 slot per token that a local expert wrote is live; looping
     # top_k with a per-slot uniform branch reads just those slots (the branch is
     # block-uniform, so padding slots are skipped, not masked-and-loaded).
     pid_m = tl.program_id(0)
-    pid_k = tl.program_id(1)
 
     if has_topk_ids:
         # All-padding rows (every id < 0) are skipped, leaving their output
@@ -40,15 +37,12 @@ def moe_fused_mul_sum_kernel(
             return
 
     n_tiles: tl.constexpr = (size + BLOCK_K - 1) // BLOCK_K
-    tiles_per_split: tl.constexpr = (n_tiles + K_SPLITS - 1) // K_SPLITS
     a_row = inputs_ptr + pid_m * stride_m
     w_row = topk_weights_ptr + pid_m * top_k
     out_row = outputs_ptr + pid_m * size
 
-    # Static trip count (tiles_per_split is constexpr) so the loop pipelines;
-    # strided by K_SPLITS keeps tiles non-overlapping, kmask drops over-runs.
-    for j in tl.range(0, tiles_per_split):
-        t = pid_k + j * K_SPLITS
+    # Static trip count (n_tiles is constexpr) so the loop pipelines.
+    for t in tl.range(0, n_tiles):
         offs_k = t * BLOCK_K + tl.arange(0, BLOCK_K)
         kmask = offs_k < size
         acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
@@ -69,23 +63,15 @@ def moe_fused_mul_sum_kernel(
 
 
 def _heuristic_config(
-    num_tokens: int,
-    top_k: int,
     size: int,
     element_size: int,
 ):
     is_fp32 = element_size > 2
     max_block_k = 256 if is_fp32 else 512
     BLOCK_K = max(128, min(triton.next_power_of_2(size), max_block_k))
-
-    # Each CTA owns one token row; only split the hidden dim across CTAs when
-    # there are too few tokens to fill the GPU.
-    n_tiles = triton.cdiv(size, BLOCK_K)
-    K_SPLITS = max(1, min(n_tiles, triton.cdiv(512, max(num_tokens, 1))))
-
     num_warps = 4 if is_fp32 else 2
     num_stages = 3
-    return BLOCK_K, K_SPLITS, num_warps, num_stages
+    return BLOCK_K, num_warps, num_stages
 
 
 def moe_fused_mul_sum(
@@ -144,27 +130,23 @@ def moe_fused_mul_sum(
         assert topk_ids.dtype in (torch.int32, torch.int64)
 
     if not isinstance(inputs, FakeTensor):
-        BLOCK_K, K_SPLITS, num_warps, num_stages = _heuristic_config(
-            num_tokens,
-            top_k,
+        BLOCK_K, num_warps, num_stages = _heuristic_config(
             size,
             inputs.element_size(),
         )
-        grid = (num_tokens, K_SPLITS)
+        grid = (num_tokens,)
         moe_fused_mul_sum_kernel[grid](
             inputs,
             topk_weights,
             outputs,
             topk_ids,
             expert_map,
-            num_tokens,
             top_k * size,
             topk_ids is not None,
             expert_map is not None,
             top_k,
             size,
             BLOCK_K,
-            K_SPLITS,
             num_warps=num_warps,
             num_stages=num_stages,
         )
