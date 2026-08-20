@@ -19,17 +19,19 @@ This is identical to DeepSeek V4 except for the outer wrapper
 from __future__ import annotations
 
 import functools
+import json
 from typing import TYPE_CHECKING
 
 from vllm.parser.deepseek_v4 import (
+    _PARAM_RE,
+    _PARTIAL_PARAM_RE,
     DSML_INVOKE_END,
     DSML_INVOKE_NAME_END,
     DSML_INVOKE_PREFIX,
     DSML_PARAM_CLOSE,
-    _PARAM_RE,
-    _PARTIAL_PARAM_RE,
-    _TAG_CHARS,
     _dsml_arg_converter,
+    _has_pending_tag,
+    _is_open_json_string,
     _unwrap_wrapper_args,
 )
 from vllm.parser.engine.events import EventType
@@ -135,32 +137,45 @@ class DeepSeekV32Parser(ParserEngine):
     def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
         slot = self._tool_slots[idx]
 
-        # Fast path: if currently streaming an open string parameter
-        # and raw_delta contains no tags (<), quotes ("), backslashes (\), or newlines,
-        # directly stream raw_delta without full re-conversion.
+        # Fast path: if currently streaming an open, schema-stable string parameter
+        # and raw_delta contains no tag delimiters ('<'), directly append the
+        # JSON-escaped chunk without full re-conversion.
         if (
             slot.active_string_param is not None
-            and slot.streamed_json
-            and _TAG_CHARS.isdisjoint(raw_delta)
+            and slot.in_open_string
+            and "<" not in raw_delta
         ):
-            slot.streamed_json += raw_delta
-            return raw_delta
+            escaped_delta = json.dumps(raw_delta, ensure_ascii=False)[1:-1]
+            slot.streamed_json += escaped_delta
+            return escaped_delta
 
         diff = super()._compute_arg_delta(idx, raw_delta)
 
-        # Update active_string_param state
+        # Update active_string_param and in_open_string state
         last_end = 0
         for m in _PARAM_RE.finditer(slot.args):
             last_end = m.end()
         pm = _PARTIAL_PARAM_RE.search(slot.args, last_end)
-        slot.active_string_param = (
-            pm.group(1) if pm and pm.group(2) == "true" else None
-        )
+        if (
+            pm
+            and pm.group(2) == "true"
+            and not _has_pending_tag(slot.args[pm.start(3) :])
+        ):
+            slot.active_string_param = pm.group(1)
+            is_schema_stable = (
+                slot.string_keys is None or slot.active_string_param in slot.string_keys
+            )
+            slot.in_open_string = is_schema_stable and _is_open_json_string(
+                slot.streamed_json
+            )
+        else:
+            slot.active_string_param = None
+            slot.in_open_string = False
 
         return diff
 
     def _flush_arg_converter(self, idx: int) -> str | None:
         if idx < len(self._tool_slots):
             self._tool_slots[idx].active_string_param = None
+            self._tool_slots[idx].in_open_string = False
         return super()._flush_arg_converter(idx)
-

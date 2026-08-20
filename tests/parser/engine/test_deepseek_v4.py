@@ -1067,9 +1067,7 @@ class TestLongStringParameterStreaming:
         reconstructed = "".join(val for _, val in argument_deltas)
         assert json.loads(reconstructed) == {"text": body}
 
-    def test_long_string_parameter_performance_linear_scaling(
-        self, mock_tokenizer
-    ):
+    def test_long_string_parameter_performance_linear_scaling(self, mock_tokenizer):
         """Ensure streaming very large arguments (e.g. 128 KiB) scales linearly
         and does not exhibit O(n^2) converter overhead."""
         import time
@@ -1095,11 +1093,7 @@ class TestLongStringParameterStreaming:
         )
         body = "A" * (128 * 1024)
         tail = "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
-        chunks = (
-            [header]
-            + [body[i : i + 32] for i in range(0, len(body), 32)]
-            + [tail]
-        )
+        chunks = [header] + [body[i : i + 32] for i in range(0, len(body), 32)] + [tail]
 
         t0 = time.perf_counter()
         previous = ""
@@ -1118,10 +1112,7 @@ class TestLongStringParameterStreaming:
             previous = current
             if delta:
                 for tool_call in delta.tool_calls:
-                    if (
-                        tool_call.function
-                        and tool_call.function.arguments is not None
-                    ):
+                    if tool_call.function and tool_call.function.arguments is not None:
                         argument_deltas.append(tool_call.function.arguments)
 
         elapsed = time.perf_counter() - t0
@@ -1133,3 +1124,113 @@ class TestLongStringParameterStreaming:
         reconstructed = "".join(argument_deltas)
         assert json.loads(reconstructed) == {"text": body}
 
+    def test_multiline_string_parameter_performance_and_escaping(self, mock_tokenizer):
+        """Ensure multiline strings with newlines, quotes, backslashes, tabs,
+        and control characters stay on the linear fast path and reconstruct
+        valid JSON."""
+        import time
+
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "emit_code",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"code": {"type": "string"}},
+                    "required": ["code"],
+                },
+            },
+        }
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=[tool])
+        request = _test_request(tools=[tool])
+
+        header = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="emit_code">\n'
+            '<｜DSML｜parameter name="code" string="true">'
+        )
+        line = 'def foo():\n    msg = "hello \\ world"\t# comment\x00\n'
+        body = line * 2048  # ~100 KiB with lots of newlines, quotes, escapes
+        tail = "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+        chunks = [header] + [body[i : i + 32] for i in range(0, len(body), 32)] + [tail]
+
+        t0 = time.perf_counter()
+        previous = ""
+        argument_deltas = []
+        for delta_text in chunks:
+            current = previous + delta_text
+            delta = parser.extract_tool_calls_streaming(
+                previous_text=previous,
+                current_text=current,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[1],
+                request=request,
+            )
+            previous = current
+            if delta:
+                for tool_call in delta.tool_calls:
+                    if tool_call.function and tool_call.function.arguments is not None:
+                        argument_deltas.append(tool_call.function.arguments)
+
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 2.0, (
+            f"Streaming ~100 KiB multiline string took {elapsed:.2f}s, expected < 2.0s."
+        )
+
+        reconstructed = "".join(argument_deltas)
+        assert json.loads(reconstructed) == {"code": body}
+
+    def test_nullable_union_string_parameter_not_streaming_prematurely(
+        self, mock_tokenizer
+    ):
+        """Ensure nullable/union string schemas do not stream unclosed/invalid JSON."""
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": ["string", "null"]},
+                    },
+                },
+            },
+        }
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=[tool])
+        request = _test_request(tools=[tool])
+
+        header = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="search">\n'
+            '<｜DSML｜parameter name="query" string="true">'
+        )
+        chunks = [
+            header,
+            "not-null",
+            " query text",
+            "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+        ]
+
+        previous = ""
+        argument_deltas = []
+        for delta_text in chunks:
+            current = previous + delta_text
+            delta = parser.extract_tool_calls_streaming(
+                previous_text=previous,
+                current_text=current,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[1],
+                request=request,
+            )
+            previous = current
+            if delta:
+                for tool_call in delta.tool_calls:
+                    if tool_call.function and tool_call.function.arguments is not None:
+                        argument_deltas.append(tool_call.function.arguments)
+
+        reconstructed = "".join(argument_deltas)
+        assert json.loads(reconstructed) == {"query": "not-null query text"}
