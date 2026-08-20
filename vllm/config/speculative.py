@@ -1506,6 +1506,9 @@ class SpeculativeConfig:
     def use_ngram_gpu(self) -> bool:
         return self.method == "ngram_gpu"
 
+    def use_ngram(self) -> bool:
+        return self.method in ("ngram", "ngram_gpu")
+
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
             return False

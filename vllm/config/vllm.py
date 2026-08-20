@@ -2402,15 +2402,16 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
-            if speculative_config.method in ("ngram", "ngram_gpu"):
-                unsupported.append("ngram/ngram_gpu speculative decoding")
-            elif speculative_config.method not in (
+            # Both ngram methods resolve to the same GPU implementation on
+            # the V2 model runner.
+            if speculative_config.method not in (
                 "eagle",
                 "eagle3",
                 "mtp",
                 "dflash",
                 "dspark",
+                "ngram",
+                "ngram_gpu",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 

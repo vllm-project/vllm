@@ -25,8 +25,10 @@ logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
     from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
     from vllm.v1.worker.gpu.states import RequestState
     from vllm.v1.worker.utils import AttentionGroup
 
@@ -63,6 +65,163 @@ def _assign_draft_token_budget(
 _assign_draft_token_budget_compiled = torch.compile(
     _assign_draft_token_budget, dynamic=True
 )
+
+
+def build_verification_layout(
+    capacities: torch.Tensor,
+    num_non_draft_tokens: torch.Tensor,
+    num_bonus_tokens: int,
+    cu_num_logits: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_tokens: int | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build GPU cu_num_logits / query_start_loc from per-request admitted
+    draft counts.
+
+    Trailing (padding) query_start_loc entries are filled with the batch
+    total: the exact CPU value when known (`num_tokens`), otherwise the GPU
+    cumsum tail, so downstream kernels treat everything past the real tokens
+    as padding.
+    """
+    num_reqs = capacities.shape[0]
+    cu_num_logits[:1].zero_()
+    torch.cumsum(
+        capacities + num_bonus_tokens,
+        dim=0,
+        out=cu_num_logits[1 : num_reqs + 1],
+    )
+    query_start_loc[:1].zero_()
+    torch.cumsum(
+        capacities + num_non_draft_tokens,
+        dim=0,
+        out=query_start_loc[1 : num_reqs + 1],
+    )
+    if num_tokens is not None:
+        query_start_loc[num_reqs + 1 :].fill_(num_tokens)
+    else:
+        query_start_loc[num_reqs + 1 :] = query_start_loc[num_reqs]
+    return cu_num_logits[: num_reqs + 1], query_start_loc
+
+
+class VariableDraftTrimmer:
+    """GPU-side verification trimming for variable-length drafters (ngram).
+
+    The drafter records per-request valid draft counts on GPU in
+    `num_valid_drafts_for_trim`. The scheduler still schedules the full
+    num_speculative_tokens per request; at the next step this trimmer clamps
+    each request's scheduled draft slots to the recorded count and rebuilds
+    cu_num_logits / query_start_loc on device, so the CPU keeps only upper
+    bounds. Trimmed slots surface as ordinary rejections through the
+    existing num_rejected accounting — no scheduler round-trip and no
+    CPU<->GPU synchronization.
+    """
+
+    def __init__(
+        self,
+        num_valid_drafts: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_bonus_tokens: int,
+        max_num_reqs: int,
+        max_total_logits: int,
+        device: torch.device,
+    ):
+        self.num_valid_drafts = num_valid_drafts
+        self.query_start_loc = query_start_loc
+        self.num_bonus_tokens = num_bonus_tokens
+        # Rejection sampling chunks logits by the CPU (untrimmed) offsets,
+        # which cannot address the compacted layout; skip trimming for
+        # batches that would not fit in one chunk.
+        self.max_total_logits = max_total_logits
+        self._capacities = torch.empty(max_num_reqs, dtype=torch.int32, device=device)
+        self._num_non_draft_tokens = torch.empty(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        self._cu_num_logits = torch.empty(
+            max_num_reqs + 1, dtype=torch.int32, device=device
+        )
+
+    def trim(
+        self,
+        idx_mapping: torch.Tensor,
+        num_draft_tokens_per_req: np.ndarray,
+        num_scheduled_tokens_np: np.ndarray,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_reqs = idx_mapping.shape[0]
+        capacities = self._capacities[:num_reqs]
+        async_copy_to_gpu(num_draft_tokens_per_req, out=capacities)
+        torch.minimum(capacities, self.num_valid_drafts[idx_mapping], out=capacities)
+        num_non_draft_tokens = self._num_non_draft_tokens[:num_reqs]
+        async_copy_to_gpu(
+            num_scheduled_tokens_np - num_draft_tokens_per_req,
+            out=num_non_draft_tokens,
+        )
+        return build_verification_layout(
+            capacities,
+            num_non_draft_tokens,
+            self.num_bonus_tokens,
+            self._cu_num_logits,
+            self.query_start_loc,
+            num_tokens=None,
+        )
+
+
+def maybe_create_draft_trimmer(
+    *,
+    vllm_config: "VllmConfig",
+    speculator: "BaseSpeculator | None",
+    attn_groups: list[list["AttentionGroup"]],
+    attn_cg_support: "AttentionCGSupportInfo",
+    req_states: "RequestState",
+    query_start_loc: torch.Tensor,
+    num_bonus_tokens: int,
+) -> VariableDraftTrimmer | None:
+    """Create a VariableDraftTrimmer when the drafter and environment support
+    GPU-side trimming; otherwise fall back (with a log) to verifying the full
+    padded drafts, which is correct but wastes verification compute."""
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler import get_max_chunk_logits
+
+    if speculator is None or speculator.num_valid_drafts_for_trim is None:
+        return None
+
+    parallel_config = vllm_config.parallel_config
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+
+    reason = None
+    backend = get_query_lens_mismatch_unsupported_backend(attn_groups)
+    if backend is not None:
+        reason = f"the {backend} attention backend"
+    elif (
+        cudagraph_mode.has_full_cudagraphs()
+        and attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS
+    ):
+        reason = f"varlen decode cudagraphs with {attn_cg_support.min_cg_attn_backend}"
+    elif vllm_config.lora_config is not None:
+        reason = "LoRA"
+    elif parallel_config.pipeline_parallel_size > 1:
+        reason = "pipeline parallelism"
+    elif (
+        parallel_config.decode_context_parallel_size > 1
+        or parallel_config.prefill_context_parallel_size > 1
+    ):
+        reason = "context parallelism"
+
+    if reason is not None:
+        logger.info(
+            "GPU draft trimming is not supported with %s; invalid draft "
+            "slots will be verified (and rejected) instead of trimmed.",
+            reason,
+        )
+        return None
+
+    logger.info("GPU draft trimming enabled for variable-length drafts.")
+    return VariableDraftTrimmer(
+        speculator.num_valid_drafts_for_trim,
+        query_start_loc,
+        num_bonus_tokens,
+        req_states.max_num_reqs,
+        get_max_chunk_logits(req_states.vocab_size),
+        req_states.device,
+    )
 
 
 def build_cost_tables_from_curves(
@@ -415,24 +574,15 @@ class AdaptiveVerificationManager:
             num_non_draft_tokens,
             out=num_non_draft_tokens_gpu,
         )
-        self._cu_num_logits[:1].zero_()
-        torch.cumsum(
-            capacities + self.num_bonus_tokens,
-            dim=0,
-            out=self._cu_num_logits[1 : num_reqs + 1],
-        )
-        self.query_start_loc[:1].zero_()
-        torch.cumsum(
-            capacities + num_non_draft_tokens_gpu,
-            dim=0,
-            out=self.query_start_loc[1 : num_reqs + 1],
-        )
-        self.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
-        return (
-            self._cu_num_logits[: num_reqs + 1],
+        cu_num_logits, query_start_loc = build_verification_layout(
+            capacities,
+            num_non_draft_tokens_gpu,
+            self.num_bonus_tokens,
+            self._cu_num_logits,
             self.query_start_loc,
-            draft_budget,
+            num_tokens,
         )
+        return cu_num_logits, query_start_loc, draft_budget
 
 
 def maybe_create_adaptive_verification_manager(

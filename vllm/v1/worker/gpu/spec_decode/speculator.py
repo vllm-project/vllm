@@ -30,13 +30,17 @@ logger = init_logger(__name__)
 
 
 class BaseSpeculator(ABC):
-    @abstractmethod
-    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        pass
+    # Variable-length drafters publish per-request counts of usable drafts
+    # here, [max_num_reqs] int32 indexed by request slot. Leaving it None
+    # means every scheduled draft is verified; setting it opts the drafter
+    # into device-side trimming by the model runner's draft trimmer.
+    num_valid_drafts_for_trim: torch.Tensor | None = None
 
-    @abstractmethod
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        return None
+
     def capture(self) -> None:
-        pass
+        return None
 
     @abstractmethod
     def propose(

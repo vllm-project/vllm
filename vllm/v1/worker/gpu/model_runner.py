@@ -132,7 +132,9 @@ from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
+    VariableDraftTrimmer,
     maybe_create_adaptive_verification_manager,
+    maybe_create_draft_trimmer,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -239,13 +241,41 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache = EncoderCache()
         self.ec_connector = get_ec_connector(vllm_config, self.encoder_cache)
 
+        self.num_speculative_steps = vllm_config.num_speculative_tokens
+
+        # Multi-module MTP feeds its modules the next num_speculative_steps prefill
+        # tokens during chunked prefill. Other speculators only read the immediate
+        # next one.
+        num_prefill_lookahead = (
+            self.num_speculative_steps
+            if self.speculative_config is not None
+            and self.speculative_config.use_multi_module_mtp()
+            else 1
+        )
+
+        # General request states.
+        use_dense_all_token_ids = (
+            self.speculative_config is not None and self.speculative_config.use_ngram()
+        )
+        self.req_states = RequestState(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            num_speculative_steps=self.num_speculative_steps,
+            vocab_size=self.vocab_size,
+            device=self.device,
+            num_prefill_lookahead=num_prefill_lookahead,
+            use_dense_all_token_ids=use_dense_all_token_ids,
+        )
+
         # Speculative decoding.
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
-        self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
-                self.speculator = init_speculator(self.vllm_config, self.device)
+                self.speculator = init_speculator(
+                    self.vllm_config, self.device, self.req_states
+                )
 
             if self.speculative_config.method in ("eagle3", "dflash", "dspark"):
                 # Drafting may require auxiliary hidden states from target model outputs
@@ -265,29 +295,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
 
-        # Multi-module MTP feeds its modules the next num_speculative_steps prefill
-        # tokens during chunked prefill. Other speculators only read the immediate
-        # next one.
-        num_prefill_lookahead = (
-            self.num_speculative_steps
-            if self.speculative_config is not None
-            and self.speculative_config.use_multi_module_mtp()
-            else 1
-        )
-
         self.step_timing = StepTimingCollector()
-
-        # General request states.
-        self.req_states = RequestState(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            num_speculative_steps=self.num_speculative_steps,
-            vocab_size=self.vocab_size,
-            device=self.device,
-            num_prefill_lookahead=num_prefill_lookahead,
-        )
         self.adaptive_verification: AdaptiveVerificationManager | None = None
+        self.draft_trimmer: VariableDraftTrimmer | None = None
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
@@ -550,6 +560,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
             max_total_logits=get_max_chunk_logits(self.vocab_size),
         )
+        # Variable-length drafters (ngram_gpu) trim scheduled draft slots to
+        # the drafter's valid counts on GPU, when supported.
+        self.draft_trimmer = None
+        if self.adaptive_verification is None:
+            self.draft_trimmer = maybe_create_draft_trimmer(
+                vllm_config=self.vllm_config,
+                speculator=self.speculator,
+                attn_groups=self.attn_groups,
+                attn_cg_support=attn_cg_support,
+                req_states=self.req_states,
+                query_start_loc=self.input_buffers.query_start_loc,
+                num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
+            )
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
@@ -573,8 +596,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
-        if self.adaptive_verification is not None:
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        varlen_decode = bool(self.adaptive_verification or self.draft_trimmer)
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
@@ -583,6 +605,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
+            varlen_decode=varlen_decode,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -590,7 +613,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            varlen_decode=self.adaptive_verification is not None,
+            varlen_decode=varlen_decode,
         )
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
@@ -1156,6 +1179,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         adaptive_verification = (
             self.adaptive_verification if num_draft_tokens_per_req is not None else None
         )
+        draft_trimmer = None
+        if (
+            adaptive_verification is None
+            and num_draft_tokens_per_req is not None
+            and self.draft_trimmer is not None
+            # The chunked logits path indexes by the CPU (untrimmed) offsets,
+            # which cannot address the trimmed layout.
+            and total_num_logits <= self.draft_trimmer.max_total_logits
+        ):
+            draft_trimmer = self.draft_trimmer
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
         if adaptive_verification is not None:
             # num_scheduled_tokens represents the draft budget evenly distributed across
@@ -1185,9 +1218,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
             )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
+        elif draft_trimmer is not None:
+            # Clamp scheduled draft slots to the drafter's valid counts on
+            # GPU. CPU-side totals remain upper bounds; the trimmed gap is
+            # treated as padding downstream.
+            cu_num_logits, query_start_loc = draft_trimmer.trim(
+                idx_mapping, num_draft_tokens_per_req, num_scheduled_tokens_np
+            )
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
-                idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
+                idx_mapping,
+                total_num_logits,
+                cu_num_logits,
+                self.decode_query_len,
+                # With GPU trimming, total_num_logits is an upper bound; the
+                # gap must hold benign (in-bounds) values.
+                zero_init=draft_trimmer is not None,
             )
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
@@ -1240,6 +1286,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits,
             total_num_logits,
             self.model_state.num_new_sampled_tokens_per_step,
+            zero_init_logits_indices=draft_trimmer is not None,
         )
 
         # CPU upper bound on seq_lens; padded entries left at zero.
@@ -1296,7 +1343,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_lens=prompt_lens,
             max_query_len=(
                 int(num_scheduled_tokens_upper_bound.max())
-                if adaptive_verification is not None
+                if adaptive_verification is not None or draft_trimmer is not None
                 else None
             ),
         )
@@ -1848,11 +1895,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         if self.num_speculative_steps > 0:
-            # Spec-decode and diffusion LLMs both use draft tokens but the latter does
-            # not have a speculator (i.e. self.speculator is None)
+            # Spec-decode and diffusion LLMs both use draft tokens.
             self.draft_tokens_handler.set_draft_tokens(
-                input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping],
+                input_batch, self.req_states.draft_tokens[input_batch.idx_mapping]
             )
 
         # Post-step KV connector related operations.
