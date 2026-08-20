@@ -40,6 +40,9 @@ AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
             "gpu_memory_utilization": 0.85,
         },
     },
+    "mistralai/Voxtral-Mini-3B-2507": {
+        "prompt": ("[INST][AUDIO]What can you tell me about this audio?[/INST]"),
+    },
     "microsoft/VibeVoice-ASR-HF": {
         "prompt": (
             "<|im_start|>system\n"
