@@ -344,3 +344,63 @@ def test_expert_map_is_required_for_nonlocal_ids(hidden_size: int, dtype: torch.
         expert_map=None,
     )
     assert unmapped.isnan().any(), "expert_map is not redundant: dropping it must leak"
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_num_valid_tokens_bounds_stale_padding(dtype: torch.dtype):
+    """Rows past num_valid_tokens are left untouched, even with stale ids/NaN.
+
+    Under cudagraph decode the grid is the static padded token count and the
+    tail rows past num_recv hold stale (non -1) ids and stale NaN in `inputs`
+    from a prior replay -- the -1 mask alone cannot spot them. Bounding on
+    num_valid_tokens must skip the tail before any load so its NaN never reaches
+    the output; without the bound it is summed and a masked finalize can then
+    propagate the NaN. Regression guard for the decode accuracy fix.
+    """
+    set_random_seed(0)
+    device = "cuda"
+    num_tokens, num_recv, top_k, hidden_size = 17, 10, 8, 512
+
+    inputs = torch.randn(num_tokens, top_k, hidden_size, dtype=dtype, device=device)
+    topk_weights = torch.rand(num_tokens, top_k, dtype=dtype, device=device)
+    # All ids valid (>= 0): the stale tail is indistinguishable by the -1 mask.
+    topk_ids = torch.randint(
+        0, NUM_EXPERTS, (num_tokens, top_k), dtype=torch.int32, device=device
+    )
+    inputs[num_recv:] = float("nan")  # stale down_output behind the padding tail
+    num_valid = torch.tensor([num_recv], dtype=torch.int32, device=device)
+
+    atol, rtol = (1e-2, 1e-2) if dtype == torch.bfloat16 else (1e-4, 1e-4)
+
+    bounded = moe_fused_mul_sum(
+        inputs=inputs,
+        topk_weights=topk_weights,
+        outputs=torch.full(
+            (num_tokens, hidden_size), SENTINEL, dtype=dtype, device=device
+        ),
+        topk_ids=topk_ids,
+        num_valid_tokens=num_valid,
+    )
+    assert torch.all(bounded[num_recv:] == SENTINEL), (
+        "padding tail past num_recv written"
+    )
+    assert not bounded[:num_recv].isnan().any(), "real rows leaked NaN"
+    ref = _reference(
+        inputs[:num_recv].nan_to_num(),
+        topk_weights[:num_recv],
+        topk_ids[:num_recv],
+        expert_map=None,
+    )
+    torch.testing.assert_close(bounded[:num_recv].float(), ref, atol=atol, rtol=rtol)
+
+    # Without the bound the stale tail is summed and leaks NaN into its rows.
+    unbounded = moe_fused_mul_sum(
+        inputs=inputs,
+        topk_weights=topk_weights,
+        outputs=torch.full(
+            (num_tokens, hidden_size), SENTINEL, dtype=dtype, device=device
+        ),
+        topk_ids=topk_ids,
+    )
+    assert unbounded[num_recv:].isnan().any(), "num_valid_tokens bound is load-bearing"

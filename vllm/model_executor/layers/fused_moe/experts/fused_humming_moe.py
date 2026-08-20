@@ -882,16 +882,16 @@ class HummingIndexedExperts(HummingExpertsBase):
             **moe_kwargs2,
         )
 
-        # topk_ids is already globalized (non-local slots and padding are -1),
-        # so every non-(-1) id is a local expert: the expert_map lookup would
-        # be redundant. Passing None drops it while the -1 mask still skips
-        # padding rows.
+        # expert_map masks any non-local id; num_valid_tokens bounds the
+        # persistent kernel to the real token rows [0, num_recv) so the padding
+        # tail is never iterated (CUDA-graph-safe device scalar).
         moe_fused_mul_sum(
             inputs=buffers["down_output"].view(*topk_ids.shape, -1),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
             outputs=output,
+            num_valid_tokens=valid_tokens,
         )
 
 

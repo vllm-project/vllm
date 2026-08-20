@@ -13,9 +13,11 @@ def moe_fused_mul_sum_kernel(
     outputs_ptr,
     top_ids_ptr,
     expert_map_ptr,
+    num_valid_tokens_ptr,
     stride_m,
     has_topk_ids: tl.constexpr,
     has_expert_map: tl.constexpr,
+    has_num_valid: tl.constexpr,
     top_k: tl.constexpr,
     hidden_size: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -24,6 +26,13 @@ def moe_fused_mul_sum_kernel(
     # row (the decision is invariant over hidden tiles); the `if take` branch is
     # block-uniform, so padding slots are skipped rather than masked-and-loaded.
     pid_m = tl.program_id(0)
+    # Bound to the real recv rows [0, num_recv). Under cudagraph decode the grid
+    # is the static padded token count, and padding rows past num_recv carry
+    # stale ids and stale NaN in `inputs`; returning before any load leaves their
+    # output rows untouched instead of summing that garbage. The constexpr guard
+    # short-circuits, so num_valid_tokens_ptr is only read when it is provided.
+    if has_num_valid and pid_m >= tl.load(num_valid_tokens_ptr).to(tl.int32):
+        return
     w_row = topk_weights_ptr + pid_m * top_k
 
     takes = ()
@@ -81,6 +90,7 @@ def moe_fused_mul_sum(
     outputs: torch.Tensor | None = None,
     topk_ids: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
+    num_valid_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Fused kernel for MoE (Mixture of Experts) to perform weighted summation
@@ -103,6 +113,11 @@ def moe_fused_mul_sum(
             needed when `topk_ids` may contain non-local expert ids; if every
             non-(-1) id is already a local expert, leave it None to skip the
             redundant per-slot lookup.
+        num_valid_tokens: Optional device scalar (1-element tensor) holding the
+            number of real token rows (num_recv for a decode dispatch). When
+            provided, rows past it are left untouched, so the static cudagraph
+            grid never sums stale padding rows. Pass the token count, not
+            token*top_k.
 
     Returns:
         The fused weighted sum of expert outputs.
@@ -142,9 +157,11 @@ def moe_fused_mul_sum(
             outputs,
             topk_ids,
             expert_map,
+            num_valid_tokens,
             top_k * hidden_size,
             topk_ids is not None,
             expert_map is not None,
+            num_valid_tokens is not None,
             top_k,
             hidden_size,
             BLOCK_K,
