@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
+    KVConnectorSchedulerContext,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -22,13 +23,26 @@ from vllm.v1.request import Request
 
 
 class DummyConnectorMetadata(KVConnectorMetadata):
-    def __init__(self, block_hashes_by_req: dict[str, list[BlockHash]]):
+    def __init__(
+        self,
+        block_hashes_by_req: dict[str, list[BlockHash]],
+        block_ids_by_req: dict[str, tuple[list[int], ...]],
+    ):
         self.block_hashes_by_req = block_hashes_by_req
+        self.block_ids_by_req = block_ids_by_req
 
 
 class DummyKVConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config, role, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, role, kv_cache_config)
+        self.scheduler_context: KVConnectorSchedulerContext | None = None
+        self.gpu_block_pool = None
+
+    def bind_scheduler_context(
+        self, scheduler_context: KVConnectorSchedulerContext
+    ) -> None:
+        self.scheduler_context = scheduler_context
+        self.gpu_block_pool = scheduler_context.gpu_block_pool
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
@@ -47,8 +61,14 @@ class DummyKVConnector(KVConnectorBase_V1):
         assert block_hashes_by_req is not None, (
             "DummyKVConnector expected 'block_hashes_by_req' on scheduler_output"
         )
+        assert self.scheduler_context is not None
+        block_ids_by_req = {
+            req_id: self.scheduler_context.borrow_request_blocks(req_id).get_block_ids()
+            for req_id in scheduler_output.num_scheduled_tokens
+        }
         return DummyConnectorMetadata(
             block_hashes_by_req=block_hashes_by_req,
+            block_ids_by_req=block_ids_by_req,
         )
 
     def start_load_kv(self, kv_caches, finished_req_ids):
@@ -129,3 +149,13 @@ def test_connector_receives_block_hashes(_load_plugin):
             num_tokens // block_size
         )
         assert meta.block_hashes_by_req[req.request_id] == req.block_hashes
+
+    expected_block_ids = {
+        req.req_id: req.block_ids for req in output.scheduled_new_reqs
+    }
+    assert meta.block_ids_by_req == expected_block_ids
+    connector = scheduler.connector
+    assert isinstance(connector, DummyKVConnector)
+    assert connector.scheduler_context is not None
+    assert connector.gpu_block_pool is scheduler.kv_cache_manager.block_pool
+    assert connector.scheduler_context.gpu_block_pool is connector.gpu_block_pool

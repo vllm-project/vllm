@@ -3,6 +3,7 @@
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorRole,
+    KVConnectorSchedulerContext,
     SupportsHMA,
     supports_hma,
 )
@@ -13,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import 
 __all__ = [
     "KVConnectorRole",
     "KVConnectorBase_V1",
+    "KVConnectorSchedulerContext",
     "supports_hma",
     "SupportsHMA",
     "DecodeBenchConnector",

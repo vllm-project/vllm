@@ -9,6 +9,7 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
+    KVConnectorSchedulerContext,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     connector as mooncake_store_connector,
@@ -88,6 +89,13 @@ def test_scheduler_role_initializes_store_scheduler_only():
     mock_worker.assert_not_called()
     assert connector.connector_scheduler is mock_scheduler.return_value
     assert connector.connector_worker is None
+    block_pool = MagicMock()
+
+    scheduler_context = KVConnectorSchedulerContext(block_pool, MagicMock())
+    connector.bind_scheduler_context(scheduler_context)
+    mock_scheduler.return_value.bind_scheduler_context.assert_called_once_with(
+        scheduler_context
+    )
 
 
 def test_worker_methods_delegate_to_store_worker():

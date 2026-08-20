@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
+    KVConnectorSchedulerContext,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -291,10 +292,15 @@ class Scheduler(SchedulerInterface):
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
         )
-        # Bind GPU block pool to the KV connector. This must happen after
-        # kv_cache_manager is constructed so block_pool is available.
+        # Bind scheduler-owned KV-cache capabilities after the manager and its
+        # block pool are available.
         if self.connector is not None:
-            self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+            self.connector.bind_scheduler_context(
+                KVConnectorSchedulerContext(
+                    self.kv_cache_manager.block_pool,
+                    self.kv_cache_manager.get_blocks,
+                )
+            )
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
