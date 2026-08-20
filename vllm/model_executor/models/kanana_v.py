@@ -561,8 +561,8 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
 
         mm_fields_config = dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", pixel_sizes),
-            vision_grid_thw=MultiModalFieldConfig.batched("image"),
-            image_token_thw=MultiModalFieldConfig.batched("image"),
+            vision_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            image_token_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
         return mm_fields_config
 

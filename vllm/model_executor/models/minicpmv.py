@@ -98,6 +98,7 @@ from vllm.transformers_utils.processor import (
 )
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.collection_utils import flatten_2d_lists
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -108,7 +109,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import AutoWeightsLoader, flatten_bn, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -471,12 +472,12 @@ def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
 def _minicpmv_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     return dict(
         pixel_values=MultiModalFieldConfig.batched("image"),
-        image_sizes=MultiModalFieldConfig.batched("image"),
-        tgt_sizes=MultiModalFieldConfig.batched("image"),
+        image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        tgt_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         image_embeds=MultiModalFieldConfig.batched("image"),
         video_pixel_values=MultiModalFieldConfig.batched("video"),
-        video_image_sizes=MultiModalFieldConfig.batched("video"),
-        video_tgt_sizes=MultiModalFieldConfig.batched("video"),
+        video_image_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+        video_tgt_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         video_embeds=MultiModalFieldConfig.batched("video"),
     )
 
@@ -652,7 +653,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return MiniCPMVMultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_model_version(self):
@@ -1548,7 +1549,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
@@ -1565,6 +1567,10 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
 
 
 class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
+    hf_to_vllm_mapper = WeightsMapper(
+        # The vision-only models have no audio tower or TTS head to load weights into.
+        orig_to_new_prefix={"apm.": None, "audio": None, "tts": None}
+    )
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1640,7 +1646,9 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        # Needed as a Python int to size the mask below.
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
@@ -1656,13 +1664,14 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self._ensure_resampler_device()
         return loaded
 
 
 class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
+    hf_to_vllm_mapper = MiniCPMV2_6.hf_to_vllm_mapper
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1737,7 +1746,8 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
@@ -1753,13 +1763,14 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self._ensure_resampler_device()
         return loaded
 
 
 class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
+    hf_to_vllm_mapper = MiniCPMV2_6.hf_to_vllm_mapper
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1839,7 +1850,8 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
@@ -1855,8 +1867,8 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes, all_temporal_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self._ensure_resampler_device()
         return loaded
 

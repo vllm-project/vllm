@@ -346,14 +346,6 @@ class SamplingParams(
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
-    routed_experts_prompt_start: int = 0
-    """When enable_return_routed_experts is active, skip the first
-    routed_experts_prompt_start prompt tokens from the returned routing
-    data. In multi-turn agent scenarios, set this to the length of the
-    already-returned prefix to avoid duplicating routing for prompt tokens
-    covered by earlier turns. Default 0 returns routing for all prompt
-    tokens."""
-
     # Fields used for bad words
     bad_words: list[str] | None = None
     """Words that are not allowed to be generated. More precisely, only the
@@ -372,6 +364,19 @@ class SamplingParams(
     when they hit the maximum output length (e.g. 'abcdabcdabcd...' or
     '\\emoji \\emoji \\emoji ...'). This feature can detect such behavior
     and terminate early, saving time and tokens."""
+
+    # Debugging / RL-specific parameters. Not intended for production serving.
+    routed_experts_prompt_start: int = 0
+    """When enable_return_routed_experts is active, skip the first
+    routed_experts_prompt_start prompt tokens from the returned routing
+    data. In multi-turn agent scenarios, set this to the length of the
+    already-returned prefix to avoid duplicating routing for prompt tokens
+    covered by earlier turns. Default 0 returns routing for all prompt
+    tokens."""
+    trace_decode_token_ids: list[int] | None = None
+    """If provided, forces the engine to emit this predetermined sequence of
+    token IDs during decoding instead of sampling randomly. Real logprobs are
+    still computed. Conflict checking is performed at the engine level."""
 
     @staticmethod
     def from_optional(
@@ -407,6 +412,8 @@ class SamplingParams(
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
         routed_experts_prompt_start: int = 0,
+        # Debugging / RL-specific parameters.
+        trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -470,6 +477,7 @@ class SamplingParams(
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
             routed_experts_prompt_start=routed_experts_prompt_start,
+            trace_decode_token_ids=trace_decode_token_ids,
         )
 
     def __post_init__(self) -> None:
@@ -780,6 +788,7 @@ class SamplingParams(
     ) -> None:
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
+        self._validate_trace_replay(model_config, speculative_config)
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
@@ -867,6 +876,61 @@ class SamplingParams(
                 f"token_id(s) {invalid_token_ids} in logit_bias contain "
                 f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
                 parameter="logit_bias",
+                value=invalid_token_ids,
+            )
+
+    def _validate_trace_replay(
+        self,
+        model_config: ModelConfig,
+        speculative_config: SpeculativeConfig | None,
+    ) -> None:
+        """Validate trace replay request compatibility."""
+        if self.trace_decode_token_ids is None:
+            return
+
+        if len(self.trace_decode_token_ids) == 0:
+            raise ValueError("trace_decode_token_ids must be a non-empty list.")
+        if self.n != 1:
+            raise ValueError("trace_decode_token_ids requires n=1.")
+        if not all(isinstance(t, int) and t >= 0 for t in self.trace_decode_token_ids):
+            raise ValueError(
+                "trace_decode_token_ids must contain non-negative integers."
+            )
+
+        if self.prompt_logprobs is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with prompt_logprobs."
+            )
+        if speculative_config is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with speculative decoding."
+            )
+        if self.structured_outputs is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with structured outputs."
+            )
+        if self.repetition_detection is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with repetition_detection."
+            )
+        if self.thinking_token_budget is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with thinking_token_budget."
+            )
+        if self.bad_words:
+            raise ValueError("trace_decode_token_ids is not supported with bad_words.")
+
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in self.trace_decode_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"token_id(s) {invalid_token_ids} in trace_decode_token_ids "
+                f"contain out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="trace_decode_token_ids",
                 value=invalid_token_ids,
             )
 
@@ -1029,6 +1093,15 @@ class SamplingParams(
                 "structured_outputs.json_object must be True if set; omit "
                 "structured_outputs to disable structured outputs"
             )
+        # Reject a regex containing a NUL byte early, in every backend mode. A
+        # NUL is never meaningful in a regex pattern and is not handled by the
+        # regex-to-grammar conversion. Checked here, before backend selection,
+        # so it is a clean 400 rather than a silent fallback in the default
+        # "auto" mode.
+        if self.structured_outputs.regex and "\x00" in self.structured_outputs.regex:
+            raise VLLMValidationError(
+                "structured_outputs.regex must not contain a NUL character ('\\x00')"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
@@ -1083,7 +1156,7 @@ class SamplingParams(
             try:
                 validate_xgrammar_grammar(self)
                 self.structured_outputs._backend = "xgrammar"
-            except ValueError:
+            except VLLMValidationError:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
@@ -1094,7 +1167,12 @@ class SamplingParams(
                 so_params = self.structured_outputs
                 if not skip_guidance and so_params.json:
                     if isinstance(so_params.json, str):
-                        schema = json_mod.loads(so_params.json)
+                        try:
+                            schema = json_mod.loads(so_params.json)
+                        except json_mod.JSONDecodeError as e:
+                            raise VLLMValidationError(
+                                "Invalid JSON grammar specification."
+                            ) from e
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)

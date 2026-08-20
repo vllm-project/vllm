@@ -62,12 +62,14 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     HasInnerState,
     IsHybrid,
+    MambaStateShapes,
     MixtureOfExperts,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
+    SupportsReplaySSM,
 )
 from vllm.model_executor.models.kimi_k25 import KimiK25MediaPixelInputs
 from vllm.model_executor.models.kimi_k25_vit import (
@@ -91,7 +93,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
+from vllm.models.deepseek_v4.nvidia.model import (
+    DeepseekV4MegaMoEExperts,
+    DeepseekV4MLP,
+)
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
@@ -352,7 +357,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         torch.distributed.barrier(group=ep_group.cpu_group)
         self._synchronized_ep_groups.add(key)
 
-    def finalize_weights(self) -> None:
+    def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
         if self._transformed_l1_weights is not None:
             return
 
@@ -486,8 +491,8 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer,
             activation_clamp=activation_clamp,
             activation=self.activation,
-            activation_beta=self.activation_beta,
-            activation_linear_beta=self.activation_linear_beta,
+            situ_beta=self.activation_beta,
+            situ_linear_beta=self.activation_linear_beta,
             fast_math=fast_math,
         )
         return y
@@ -1198,6 +1203,85 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             }
         )
 
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        super()._set_aux_hidden_state_layers(layers)
+        if self.use_attn_res:
+            # Emitted once, at configuration time. Which layers are tapped and
+            # which convention is in force are the two things you need to
+            # confirm from a running process, and neither is recoverable from
+            # the served output.
+            logger.info_once(
+                "Kimi-K3 aux hidden capture: layers=%s mode=%s "
+                "(VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=%d)",
+                layers,
+                "attn_res_stream" if self._aux_attn_res_stream else "prefix_only",
+                int(self._aux_attn_res_stream),
+            )
+
+    @property
+    def _aux_attn_res_stream(self) -> bool:
+        return envs.VLLM_KIMI_K3_AUX_ATTN_RES_STREAM
+
+    def _capture_aux_hidden_stream(
+        self,
+        layer_idx: int,
+        prefix_sum: torch.Tensor,
+        pending_mlp_out: torch.Tensor | None,
+        block_residual: torch.Tensor,
+    ) -> torch.Tensor:
+        """Auxiliary feature tapped after ``layer_idx`` under AttnRes.
+
+        The wire between layers only carries the current block's running prefix;
+        the committed blocks live in the bank. The value the next consumer
+        actually reads is the pre-norm AttnRes mixture over
+        ``bank[:num_blocks] + prefix``, which is what the DFlash drafters were
+        trained against. ``attn_res`` with no delta, no block write and no
+        output norm computes exactly that and leaves both the prefix and the
+        bank untouched.
+
+        Folding the pending MLP output into the prefix rather than passing it as
+        ``delta`` is deliberate: the kernel writes an applied delta back into
+        the prefix in place, which would double-add it into the live residual
+        stream.
+        """
+        prefix = prefix_sum if pending_mlp_out is None else prefix_sum + pending_mlp_out
+        # `use_attn_res` is what constructs the norm and projection weights this
+        # reads; without it there is no mixture to compute and the attribute
+        # lookups below would raise.
+        if not (self._aux_attn_res_stream and self.use_attn_res):
+            return prefix
+
+        if layer_idx + 1 < self.end_layer:
+            consumer = self.layers[layer_idx + 1]
+            score_norm = consumer.self_attention_res_norm
+            score_proj = consumer.self_attention_res_proj
+            num_blocks = consumer.prev_valid_blocks
+        elif get_pp_group().is_last_rank:
+            # Nothing downstream but the model's own output-side aggregation.
+            score_norm = self.output_attn_res_norm
+            score_proj = self.output_attn_res_proj
+            num_blocks = self.num_attn_res_blocks
+        else:
+            # Last layer of a non-final pipeline stage: the consumer lives on
+            # the next rank and the output-side aggregation only exists on the
+            # last one, so there is nothing here to mix against. Falling back
+            # to the running prefix keeps the tap defined rather than reaching
+            # for weights this rank does not construct.
+            return prefix
+
+        return attn_res(
+            prefix,
+            None,
+            block_residual,
+            score_norm.weight,
+            score_proj.weight.squeeze(0),
+            None,
+            num_blocks=num_blocks,
+            block_write_idx=-1,
+            eps=score_norm.variance_epsilon,
+            output_norm_eps=0.0,
+        )
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -1265,7 +1349,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if (layer_idx + 1) in self.aux_hidden_state_layers:
                 if self.use_attn_res:
                     assert prefix_sum is not None
-                    aux_hidden_state = prefix_sum + hidden_states
+                    assert residual is not None
+                    aux_hidden_state = self._capture_aux_hidden_stream(
+                        layer_idx, prefix_sum, hidden_states, residual
+                    )
                 else:
                     assert residual is not None
                     aux_hidden_state = hidden_states + residual
@@ -1477,7 +1564,13 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
 
 class KimiLinearForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsEagle3
+    nn.Module,
+    HasInnerState,
+    SupportsPP,
+    MixtureOfExperts,
+    IsHybrid,
+    SupportsEagle3,
+    SupportsReplaySSM,
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1531,15 +1624,20 @@ class KimiLinearForCausalLM(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.kda_state_dtype(
+    ) -> tuple[torch.dtype, ...]:
+        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
         )
+        if vllm_config.cache_config.use_kda_recoverssm:
+            dtypes = MambaStateDtypeCalculator.append_kda_recoverssm_record(
+                dtypes, vllm_config.model_config.dtype
+            )
+        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
         tp_size = parallel_config.tensor_parallel_size
@@ -1548,13 +1646,22 @@ class KimiLinearForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
-        return MambaStateShapeCalculator.kda_state_shape(
+        shapes = MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_attn_config["num_heads"],
             hf_config.linear_attn_config["head_dim"],
             conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
             num_spec=num_spec,
         )
+        if vllm_config.cache_config.use_kda_recoverssm:
+            return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                shapes,
+                hf_config.linear_attn_config["num_heads"],
+                hf_config.linear_attn_config["head_dim"],
+                tp_world_size=tp_size,
+                spec_query_len=1 + num_spec,
+            )
+        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(
@@ -1572,10 +1679,7 @@ class KimiLinearForCausalLM(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights)
         self.model.finalize_mega_moe_weights()
         # The fused MultiHeadLatentAttention's process_weights_after_loading
@@ -1615,6 +1719,7 @@ class KimiK3ForConditionalGeneration(
     SupportsEagle3,
     HasInnerState,
     IsHybrid,
+    SupportsReplaySSM,
 ):
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 
