@@ -20,7 +20,13 @@
 #include "../cuda_utils.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <optional>
+
+#include <torch/csrc/stable/c/shim.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/headeronly/version.h>
 
 namespace {
 
@@ -29,6 +35,14 @@ constexpr int kWarpSize = 32;
 // newest / invalid), no miss handling needed.
 constexpr int32_t kTokenDone = -1;
 constexpr int32_t kHashEmpty = -1;
+
+bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
+  std::array<StableIValue, 2> stack{torch::stable::detail::from(tensor),
+                                    torch::stable::detail::from(std::nullopt)};
+  TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::is_pinned", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<bool>(stack[0]);
+}
 
 __device__ __forceinline__ int32_t hash_slot(int32_t key, int32_t hash_size) {
   // Knuth multiplicative hash for the open-addressing table.
@@ -826,11 +840,11 @@ __global__ void hisparse_copy_blocks_kernel(
   const int lane_id = threadIdx.x % kWarpSize;
   const int warp_id = blockIdx.x * NUM_WARPS + threadIdx.x / kWarpSize;
   const int total_warps = gridDim.x * NUM_WARPS;
-  const int num_rows = num_pairs * block_size;
+  const int64_t num_rows = static_cast<int64_t>(num_pairs) * block_size;
 
-  for (int row = warp_id; row < num_rows; row += total_warps) {
-    const int pair = row / block_size;
-    const int block_offset = row % block_size;
+  for (int64_t row = warp_id; row < num_rows; row += total_warps) {
+    const int64_t pair = row / block_size;
+    const int64_t block_offset = row % block_size;
     const int32_t src_block = src_block_ids[pair];
     const int32_t dst_block = dst_block_ids[pair];
     if (src_block < 0 || src_block >= num_src_blocks || dst_block < 0 ||
@@ -894,8 +908,9 @@ void hisparse_swap_in(
     std::optional<torch::stable::Tensor> const& resident_block_table,
     int64_t resident_block_size, int64_t resident_null_block,
     int64_t row_value_bytes) {
-  STD_TORCH_CHECK(host_cache.device().is_cpu(),
-                  "host_cache must be CPU memory");
+  STD_TORCH_CHECK(
+      host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
+      "host_cache must be pinned CPU memory");
   STD_TORCH_CHECK(hot_cache.is_cuda(), "hot_cache must be on CUDA");
   STD_TORCH_CHECK(
       hot_block_table.is_cuda() &&
@@ -1171,8 +1186,9 @@ void hisparse_gather_plan(
     std::optional<torch::stable::Tensor> const& request_state_indices,
     std::optional<torch::stable::Tensor> const& attention_indices,
     int64_t attention_block_stride, int64_t row_value_bytes) {
-  STD_TORCH_CHECK(host_cache.device().is_cpu(),
-                  "host_cache must be CPU memory");
+  STD_TORCH_CHECK(
+      host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
+      "host_cache must be pinned CPU memory");
   STD_TORCH_CHECK(hot_cache.is_cuda(), "hot_cache must be on CUDA");
   STD_TORCH_CHECK(
       global_indices.is_cuda() && hot_indices.is_cuda() && miss_mask.is_cuda(),
@@ -1252,6 +1268,10 @@ void hisparse_gather_plan(
   const dim3 grid(num_rows, num_chunks);
   const int32_t hot_block_size =
       hot_cache.dim() == 3 ? static_cast<int32_t>(hot_cache.size(1)) : 1;
+  if (attention_indices.has_value()) {
+    STD_TORCH_CHECK(attention_block_stride >= hot_block_size,
+                    "attention block stride must cover one hot block");
+  }
   const int64_t hot_rows = hot_cache.size(0) * hot_block_size;
   const int64_t hot_block_stride =
       hot_cache.stride(0) * hot_cache.element_size();
@@ -1279,8 +1299,9 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
                              torch::stable::Tensor const& miss_hot_indices,
                              torch::stable::Tensor const& miss_counts,
                              int64_t row_value_bytes) {
-  STD_TORCH_CHECK(host_cache.device().is_cpu(),
-                  "host_cache must be CPU memory");
+  STD_TORCH_CHECK(
+      host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
+      "host_cache must be pinned CPU memory");
   STD_TORCH_CHECK(hot_cache.is_cuda(), "hot_cache must be on CUDA");
   STD_TORCH_CHECK(
       miss_global_indices.is_cuda() && miss_hot_indices.is_cuda() &&
@@ -1344,8 +1365,9 @@ void hisparse_backup(torch::stable::Tensor const& src_cache,
                      torch::stable::Tensor const& dst_slots,
                      int64_t row_value_bytes) {
   STD_TORCH_CHECK(src_cache.is_cuda(), "src_cache must be on CUDA");
-  STD_TORCH_CHECK(host_cache.device().is_cpu(),
-                  "host_cache must be CPU memory");
+  STD_TORCH_CHECK(
+      host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
+      "host_cache must be pinned CPU memory");
   STD_TORCH_CHECK(src_indices.is_cuda() && dst_slots.is_cuda(),
                   "src_indices/dst_slots must be on CUDA");
   STD_TORCH_CHECK(
@@ -1410,8 +1432,9 @@ void hisparse_backup_layers(torch::stable::Tensor const& hot_backing,
   STD_TORCH_CHECK(hot_backing.is_cuda(), "hot_backing must be on CUDA");
   STD_TORCH_CHECK(hot_backing.is_contiguous(),
                   "hot_backing must be contiguous");
-  STD_TORCH_CHECK(host_anchor.device().is_cpu(),
-                  "host_anchor must be CPU memory");
+  STD_TORCH_CHECK(
+      host_anchor.device().is_cpu() && is_pinned_cpu_tensor(host_anchor),
+      "host_anchor must be pinned CPU memory");
   STD_TORCH_CHECK(layer_offsets.is_cuda() && src_indices_ptrs.is_cuda() &&
                       host_cache_ptrs.is_cuda() && dst_slots.is_cuda(),
                   "backup metadata must be on CUDA");
@@ -1485,8 +1508,9 @@ void hisparse_backup_indexer(torch::stable::Tensor const& src_cache,
                              torch::stable::Tensor const& dst_slots,
                              int64_t value_bytes) {
   STD_TORCH_CHECK(src_cache.is_cuda(), "src_cache must be on CUDA");
-  STD_TORCH_CHECK(host_cache.device().is_cpu(),
-                  "host_cache must be CPU memory");
+  STD_TORCH_CHECK(
+      host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
+      "host_cache must be pinned CPU memory");
   STD_TORCH_CHECK(src_cache.dim() == 3 && host_cache.dim() == 3,
                   "indexer caches must be paged 3D tensors");
   STD_TORCH_CHECK(src_indices.is_cuda() && dst_slots.is_cuda(),
@@ -1542,7 +1566,9 @@ void hisparse_copy_blocks(torch::stable::Tensor const& src_cache,
                           torch::stable::Tensor& dst_cache,
                           torch::stable::Tensor const& src_block_ids,
                           torch::stable::Tensor const& dst_block_ids) {
-  STD_TORCH_CHECK(src_cache.device().is_cpu(), "src_cache must be CPU memory");
+  STD_TORCH_CHECK(
+      src_cache.device().is_cpu() && is_pinned_cpu_tensor(src_cache),
+      "src_cache must be pinned CPU memory");
   STD_TORCH_CHECK(dst_cache.is_cuda(), "dst_cache must be on CUDA");
   STD_TORCH_CHECK(src_cache.dim() == 3 && dst_cache.dim() == 3,
                   "cache tensors must be paged 3D tensors");

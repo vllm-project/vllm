@@ -42,6 +42,7 @@ if not current_platform.is_cuda():
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseMetadataBuilder,
     FlashInferMLASparseTRTLLMBackend,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -1754,6 +1755,19 @@ def test_hisparse_copy_prefix_blocks_into_packed_hma(dtype, row_width):
 
 
 @requires_hisparse_ops
+def test_hisparse_copy_blocks_rejects_unpinned_host_memory():
+    device = torch.device(DEVICE_TYPE)
+    source = torch.empty((1, 64, 16), dtype=torch.uint8)
+    destination = torch.empty_like(source, device=device)
+    block_ids = torch.zeros(1, dtype=torch.int32, device=device)
+
+    with pytest.raises(RuntimeError, match="pinned CPU memory"):
+        torch.ops._C_cache_ops.hisparse_copy_blocks(
+            source, destination, block_ids, block_ids
+        )
+
+
+@requires_hisparse_ops
 def test_hisparse_backup_packed_indexer_pages():
     device = torch.device(DEVICE_TYPE)
     num_blocks, block_size, value_bytes, scale_bytes = 2, 64, 128, 4
@@ -1982,6 +1996,29 @@ def test_hisparse_gather_zeroes_unaligned_destination():
 
     torch.testing.assert_close(hot_cache[1, 0], torch.zeros_like(hot_cache[1, 0]))
     assert storage[row_bytes].item() == 7
+
+
+@requires_hisparse_ops
+def test_hisparse_gather_rejects_short_attention_block_stride():
+    device = torch.device(DEVICE_TYPE)
+    host_cache = torch.ones(1, 16, dtype=torch.uint8).pin_memory()
+    hot_cache = torch.empty((1, 2, 16), dtype=torch.uint8, device=device)
+    global_indices = torch.zeros((1, 1), dtype=torch.int32, device=device)
+    hot_indices = torch.zeros_like(global_indices)
+    miss_mask = torch.ones_like(global_indices)
+    attention_indices = torch.empty_like(global_indices)
+
+    with pytest.raises(RuntimeError, match="stride must cover one hot block"):
+        torch.ops._C_cache_ops.hisparse_gather_plan(
+            host_cache,
+            hot_cache,
+            global_indices,
+            hot_indices,
+            miss_mask,
+            None,
+            attention_indices,
+            1,
+        )
 
 
 @requires_hisparse_ops
@@ -2425,6 +2462,26 @@ def test_hisparse_fp8_decode_resolves_each_speculative_step():
     assert steps == [0, 1, 2]
     assert kernel_shapes == [(1, num_decodes, 2, 4)] * query_len
     assert output.shape == (num_tokens, 2, 1)
+
+
+def test_hisparse_shared_sparse_builder_routes_multi_token_chunks_to_prefill():
+    builder = object.__new__(FlashInferMLASparseMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=object()),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=4,
+            parallel_drafting=False,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+
+    builder._init_reorder_batch_threshold(
+        1024,
+        supports_spec_as_decode=True,
+        supports_dcp_with_varlen=True,
+    )
+
+    assert builder.reorder_batch_threshold == 1
 
 
 def test_flashmla_cache_dtype_aliases_use_ds_layout():

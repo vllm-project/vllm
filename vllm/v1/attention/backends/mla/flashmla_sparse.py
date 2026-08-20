@@ -221,6 +221,7 @@ class FlashMLASparseMetadataBuilder(
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     require_uniform_decodes: ClassVar[bool] = True
+    hisparse_supports_multi_token_decode: ClassVar[bool] = True
     metadata_cls = FlashMLASparseMetadata
 
     def __init__(

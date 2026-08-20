@@ -1439,6 +1439,7 @@ class MLACommonBackend(AttentionBackend):
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """Per-token-head modes pack an inline fp32 scale pair after the
         latent data (single-sided: ``head_size_v == 0`` for MLA)."""
+        spec = super().customize_spec(spec)
         mode = spec.kv_quant_mode
         if spec.state_content_bytes is not None or not mode.is_per_token_head:
             return spec

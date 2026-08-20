@@ -143,6 +143,7 @@ T = TypeVar("T", bound=SparseMLACommonMetadata)
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     metadata_cls: type[T]
     require_uniform_decodes: ClassVar[bool] = False
+    hisparse_supports_multi_token_decode: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -219,6 +220,24 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 )
         self._prefill_backend = (
             layer_prefill_backend.clone() if layer_prefill_backend is not None else None
+        )
+
+    def _init_reorder_batch_threshold(
+        self,
+        reorder_batch_threshold: int | None = 1,
+        supports_spec_as_decode: bool = False,
+        supports_dcp_with_varlen: bool = False,
+    ) -> None:
+        if (
+            self.vllm_config.attention_config.hisparse_config is not None
+            and not self.hisparse_supports_multi_token_decode
+        ):
+            reorder_batch_threshold = 1
+            supports_spec_as_decode = False
+        super()._init_reorder_batch_threshold(
+            reorder_batch_threshold,
+            supports_spec_as_decode,
+            supports_dcp_with_varlen,
         )
 
     @staticmethod

@@ -102,8 +102,8 @@ class KVConnectorModelRunnerMixin:
             transfer_results = kv_connector.get_transfer_results(
                 scheduler_output.finished_req_ids
             )
-            output.finished_sending = transfer_results.finished_sending or None
-            output.finished_recving = transfer_results.finished_recving or None
+            output.finished_sending = transfer_results.finished_sending
+            output.finished_recving = transfer_results.finished_recving
             output.failed_recving = transfer_results.failed_recving
             output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
 

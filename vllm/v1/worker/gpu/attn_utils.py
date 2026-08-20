@@ -87,17 +87,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 # get_kv_cache_layout() needs the current vLLM config.
                 with set_current_vllm_config(vllm_config):
                     indexes = backend.indexes_kv_by_block_stride()
-                spec = replace(
-                    spec,
-                    indexes_kv_by_block_stride=indexes,
-                )
+                spec = replace(spec, indexes_kv_by_block_stride=indexes)
                 spec = backend.customize_spec(spec)
-                spec = replace(
-                    spec,
-                    supported_kernel_block_sizes=tuple(
-                        backend.get_supported_kernel_block_sizes_for_config(vllm_config)
-                    ),
-                )
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
 

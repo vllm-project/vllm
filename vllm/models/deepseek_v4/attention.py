@@ -62,7 +62,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
-    MLACacheRole,
+    SparseCacheRole,
     get_kv_quant_mode,
 )
 from vllm.v1.kv_offload.sparse.hisparse_runtime import (
@@ -795,7 +795,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             compress_ratio=self.compress_ratio,
             # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
-            cache_role=MLACacheRole.INDEXER,
+            cache_role=SparseCacheRole.INDEXER,
         )
 
     def forward(self): ...

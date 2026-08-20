@@ -238,7 +238,10 @@ class AttentionBackend(ABC):
 
         (see: https://github.com/vllm-project/vllm/issues/42449)
         """
-        return spec
+        return replace(
+            spec,
+            supported_kernel_block_sizes=tuple(cls.get_supported_kernel_block_sizes()),
+        )
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:

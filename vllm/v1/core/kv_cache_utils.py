@@ -34,9 +34,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    MLACacheRole,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     replace_as,
 )
@@ -1456,13 +1456,13 @@ def _get_hisparse_hma_config(
         name: spec
         for name, spec in specs.items()
         if not isinstance(spec, MLAAttentionSpec)
-        or spec.cache_role is MLACacheRole.MAIN
+        or spec.cache_role is SparseCacheRole.SPARSE
     }
     indexer_specs = {
         name: spec
         for name, spec in specs.items()
         if isinstance(spec, MLAAttentionSpec)
-        and spec.cache_role is MLACacheRole.INDEXER
+        and spec.cache_role is SparseCacheRole.INDEXER
     }
     assert host_specs and indexer_specs
 
@@ -1743,7 +1743,7 @@ def _hisparse_gpu_memory_usage(
         for spec in per_layer_specs.values()
         if (
             isinstance(spec, MLAAttentionSpec)
-            and spec.cache_role is MLACacheRole.INDEXER
+            and spec.cache_role is SparseCacheRole.INDEXER
         )
         or (
             is_deepseek_v4

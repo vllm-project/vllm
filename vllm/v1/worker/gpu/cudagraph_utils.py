@@ -504,15 +504,10 @@ class ModelCudaGraphManager(CudaGraphManager):
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
-        decode_post_forward_hook: Callable[[int], None] | None = None,
         kv_residency_capture_hook: Callable[[bool], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture CUDA graphs for model forward pass.
-
-        ``decode_post_forward_hook`` is captured after uniform single-token
-        FULL graphs. Padded rows must be safe for the hook to process.
-        """
+        """Capture CUDA graphs for model forward pass."""
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
         if self.use_breakable_cg:
             self.init_breakable_cg_runner(model)
@@ -588,14 +583,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                         model_output = self.run_pw_graph(model, model_inputs)
                     else:
                         model_output = model(**model_inputs)
-
-                if (
-                    decode_post_forward_hook is not None
-                    and desc.uniform_token_count == 1
-                    and cg_mode != CUDAGraphMode.PIECEWISE
-                ):
-                    assert desc.num_reqs is not None
-                    decode_post_forward_hook(desc.num_reqs)
 
                 if cg_mode == CUDAGraphMode.PIECEWISE:
                     # PW CUDA graph (compiled or breakable) internally handles the

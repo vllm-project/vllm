@@ -140,8 +140,8 @@ class KVCacheSpecKind(str, Enum):
     UNKNOWN = "unknown"
 
 
-class MLACacheRole(str, Enum):
-    MAIN = "main"
+class SparseCacheRole(str, Enum):
+    SPARSE = "sparse"
     INDEXER = "indexer"
 
 
@@ -442,7 +442,7 @@ class MLAAttentionSpec(FullAttentionSpec):
     alignment: int | None = None  # Default to None for no padding.
     compress_ratio: int = 1  # Default to 1 for no compression.
     model_version: str | None = None
-    cache_role: MLACacheRole = MLACacheRole.MAIN
+    cache_role: SparseCacheRole = SparseCacheRole.SPARSE
     is_index_group_leader: bool = False
     # Marks draft groups that flatten a non-causal query block into decode rows.
     non_causal_multi_token_decode: bool = False

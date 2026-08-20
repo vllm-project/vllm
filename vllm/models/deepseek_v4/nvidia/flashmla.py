@@ -194,6 +194,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 assert self.topk_indices_buffer is not None
                 if self.hisparse_cache is not None:
                     hisparse_cache = self.hisparse_cache
+                    # Indexer padding is -1, and the resolver bounds-checks it
+                    # while producing topk_lens, so the separate is_valid mask
+                    # is unnecessary on this path.
                     kv_cache, global_indices, topk_lens = cast(
                         tuple[torch.Tensor, torch.Tensor, torch.Tensor],
                         hisparse_cache.resolve_topk(

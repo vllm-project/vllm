@@ -58,10 +58,10 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
-    MLACacheRole,
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
@@ -97,7 +97,7 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
             head_size=128,
             dtype=torch.bfloat16,
             supported_kernel_block_sizes=indexer_sizes,
-            cache_role=MLACacheRole.INDEXER,
+            cache_role=SparseCacheRole.INDEXER,
         ),
     }
     group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
@@ -179,7 +179,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
             dtype=torch.uint8,
             compress_ratio=compress_ratio,
             supported_kernel_block_sizes=(256,),
-            cache_role=MLACacheRole.INDEXER,
+            cache_role=SparseCacheRole.INDEXER,
         )
 
     full_specs = {
@@ -3024,6 +3024,9 @@ def test_unpadded_page_size_includes_per_token_head_scales():
     scales = 2 * spec.block_size * spec.num_kv_heads * 4
     assert spec.unpadded_page_size_bytes == dense.unpadded_page_size_bytes + scales
     assert spec.page_size_bytes == spec.unpadded_page_size_bytes
+    assert spec.supported_kernel_block_sizes == tuple(
+        TritonAttentionBackend.get_supported_kernel_block_sizes()
+    )
 
 
 def test_page_size_padded_wins():

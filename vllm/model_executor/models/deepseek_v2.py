@@ -106,7 +106,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, MLACacheRole
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, SparseCacheRole
 from vllm.v1.kv_offload.sparse.hisparse_runtime import HiSparseIndexGroupBuilder
 
 from .interfaces import (
@@ -653,7 +653,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-            cache_role=MLACacheRole.INDEXER,
+            cache_role=SparseCacheRole.INDEXER,
         )  # Only has one vector instead of K + V
 
     def forward(self): ...
