@@ -42,32 +42,45 @@ def _make_sampler() -> Sampler:
 
 
 @pytest.mark.parametrize(
-    ("sampling_params", "expected"),
+    ("sampling_params", "expected", "expected_non_temperature"),
     [
-        pytest.param(SamplingParams(), False, id="defaults"),
-        pytest.param(SamplingParams(temperature=0.0), False, id="greedy"),
+        pytest.param(SamplingParams(), False, False, id="defaults"),
+        pytest.param(SamplingParams(temperature=0.0), False, False, id="greedy"),
         pytest.param(
-            SamplingParams(thinking_token_budget=3), True, id="thinking-budget"
+            SamplingParams(thinking_token_budget=3),
+            True,
+            True,
+            id="thinking-budget",
         ),
-        pytest.param(SamplingParams(logit_bias={1: 1.0}), True, id="logit-bias"),
-        pytest.param(SamplingParams(frequency_penalty=0.1), True, id="penalty"),
-        pytest.param(SamplingParams(_bad_words_token_ids=[[1]]), True, id="bad-words"),
-        pytest.param(SamplingParams(temperature=0.7), True, id="temperature"),
-        pytest.param(SamplingParams(min_p=0.1), True, id="min-p"),
-        pytest.param(SamplingParams(top_k=10), True, id="top-k"),
-        pytest.param(SamplingParams(top_p=0.9), True, id="top-p"),
+        pytest.param(SamplingParams(logit_bias={1: 1.0}), True, True, id="logit-bias"),
+        pytest.param(SamplingParams(frequency_penalty=0.1), True, True, id="penalty"),
         pytest.param(
-            SamplingParams.for_sampler_warmup(), True, id="all-logits-processors"
+            SamplingParams(_bad_words_token_ids=[[1]]), True, True, id="bad-words"
+        ),
+        pytest.param(SamplingParams(temperature=0.7), True, False, id="temperature"),
+        pytest.param(SamplingParams(min_p=0.1), True, True, id="min-p"),
+        pytest.param(SamplingParams(top_k=10), True, True, id="top-k"),
+        pytest.param(SamplingParams(top_p=0.9), True, True, id="top-p"),
+        pytest.param(
+            SamplingParams.for_sampler_warmup(),
+            True,
+            True,
+            id="all-logits-processors",
         ),
     ],
 )
 def test_logits_processing_cache_matches_request_features(
-    sampling_params: SamplingParams, expected: bool
+    sampling_params: SamplingParams,
+    expected: bool,
+    expected_non_temperature: bool,
 ):
     sampler = _make_sampler()
     sampler.add_request(3, prompt_len=1, sampling_params=sampling_params)
 
     assert sampler.needs_logits_processing[3] == expected
+    assert (
+        sampler.needs_non_temperature_logits_processing[3] == expected_non_temperature
+    )
 
 
 def test_logits_processing_cache_is_overwritten_when_slot_is_reused():
@@ -76,6 +89,7 @@ def test_logits_processing_cache_is_overwritten_when_slot_is_reused():
     sampler.add_request(3, 1, SamplingParams())
 
     assert not sampler.needs_logits_processing[3]
+    assert not sampler.needs_non_temperature_logits_processing[3]
 
 
 def test_logits_processing_cache_only_checks_active_requests():
@@ -88,3 +102,5 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
+    assert not np.any(sampler.needs_non_temperature_logits_processing[sampling_only])
+    assert np.any(sampler.needs_non_temperature_logits_processing[with_processing])
