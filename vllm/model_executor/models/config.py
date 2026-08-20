@@ -220,6 +220,14 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if len(set(head_dims.values())) <= 1:
             return
 
+        cache_config = vllm_config.cache_config
+        kv_cache_dtype = getattr(cache_config, "cache_dtype", None)
+        if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
+            # TURBOQUANT backend supports any head size and handles the mixed
+            # head_dim/global_head_dim layout without needing a uniform kernel.
+            # Skip the flash-attn / triton override so TURBOQUANT is selected.
+            return
+
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 

@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
     replace_as,
 )
@@ -1130,6 +1131,25 @@ def unify_kv_cache_spec_page_size(
                 ratio = max_page_size // layer_page_size
                 new_block_size = layer_spec.block_size * ratio
                 new_spec = replace(layer_spec, block_size=new_block_size)
+            elif isinstance(layer_spec, TQFullAttentionSpec):
+                # TQ layers with heterogeneous head dims (e.g. Gemma4 256 vs 512)
+                # have different slot sizes and thus different page sizes. The TQ
+                # cache's num-blocks-first layout supports padded pages: the kernel
+                # reads only tq_slot_size bytes per slot and strides by block_size.
+                # Pick the largest block size that still fits in max_page_size,
+                # then compute the padded slot size for the physical allocation.
+                best_block_size = layer_spec.largest_block_size_within(
+                    max_page_size, [16, 32, 64, 128]
+                )
+                padded_slot_size = max_page_size // (
+                    best_block_size * layer_spec.num_kv_heads
+                )
+                new_spec = replace(
+                    layer_spec,
+                    block_size=best_block_size,
+                    tq_slot_size=padded_slot_size,
+                    page_size_padded=max_page_size,
+                )
             elif (
                 isinstance(layer_spec, AttentionSpec)
                 and layer_spec.indexes_kv_by_block_stride
