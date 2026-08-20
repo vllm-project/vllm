@@ -471,7 +471,8 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             ".mlp.up_proj": (".mlp.gate_up_proj", 1),
             ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
             ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
-        }
+        },
+        orig_to_new_prefix={"mtp.": None},
     )
     packed_modules_mapping = {
         "qkv_proj": [
@@ -560,7 +561,6 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=["mtp."],
             # Skip loading extra parameters for GPTQ/modelopt models.
             ignore_unexpected_suffixes=[
                 ".bias",
