@@ -8,15 +8,12 @@ import sys
 from pathlib import Path
 
 from vllm.snapshot import runtime as _runtime
-from vllm.snapshot.manifest import SnapshotRuntimeIdentity as SnapshotRuntimeIdentity
 from vllm.snapshot.manifest import validate_artifact_root, validate_identity
 from vllm.snapshot.types import Oracle, oracles_match
 
 LocalSnapshotTools = _runtime.LocalSnapshotTools
-ProcessInventory = _runtime.ProcessInventory
 SnapshotCreateError = _runtime.SnapshotCreateError
 SnapshotRestoreError = _runtime.SnapshotRestoreError
-_TcpSocketRecord = _runtime._TcpSocketRecord
 _error_detail = _runtime._error_detail
 
 
