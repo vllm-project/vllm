@@ -54,7 +54,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.sequence import IntermediateTensors
 
 from .bailing_moe import BailingMoeForCausalLM
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -442,7 +448,7 @@ class SarvamMLABlock(nn.Module):
         return hidden_states, residual
 
 
-class SarvamMLAModel(nn.Module):
+class SarvamMLAModel(nn.Module, EagleModelMixin):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
@@ -508,7 +514,7 @@ class SarvamMLAModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -521,12 +527,22 @@ class SarvamMLAModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(
                 hidden_states,
                 positions,
                 residual,
             )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -535,6 +551,9 @@ class SarvamMLAModel(nn.Module):
             hidden_states = self.norm(hidden_states)
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(
@@ -591,7 +610,9 @@ class SarvamMixtureOfExperts(MixtureOfExperts):
                 moe.set_eplb_state(eplb_state)
 
 
-class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfExperts):
+class SarvamMLAForCausalLM(
+    nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, SarvamMixtureOfExperts
+):
     packed_modules_mapping = {
         "q_proj": ["q_proj"],
         "q_a_proj": ["q_a_proj"],
@@ -658,7 +679,7 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         return self.model(
             input_ids=input_ids,
             positions=positions,
