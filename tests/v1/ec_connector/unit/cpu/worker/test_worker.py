@@ -22,6 +22,7 @@ Mocking policy
 
 import contextlib
 import logging
+import time
 import uuid
 from collections import deque
 from unittest.mock import MagicMock, Mock, patch
@@ -53,6 +54,11 @@ _requires_cuda = pytest.mark.skipif(
     reason="exercises real CUDA stream/event coordination in ECCPUWorker",
 )
 
+# Cycles to stall the compute stream for. Must comfortably outlast the host-side
+# work the lifetime tests do while a copy is deliberately held back — ~0.5 s on
+# a current datacenter GPU.
+_STALL_CYCLES = 1_000_000_000
+
 
 def _make_region() -> ECSharedRegion:
     """Fresh region backed by a real per-test mmap file."""
@@ -75,7 +81,22 @@ def _vllm_config(rank: int = 0) -> Mock:
 def _meta(
     *, saves: dict | None = None, loads: dict | None = None
 ) -> ECCPUConnectorMetadata:
-    return ECCPUConnectorMetadata(saves=saves or {}, loads=loads or {})
+    """Build step metadata from plain `{mm_hash: block_ids}` dicts.
+
+    Load transfer ids are synthesized here so tests can keep naming loads by
+    mm_hash; `_load_id` recovers the id the worker will report.
+    """
+    return ECCPUConnectorMetadata(
+        saves=saves or {},
+        loads={
+            mm_hash: (idx, block_ids)
+            for idx, (mm_hash, block_ids) in enumerate((loads or {}).items())
+        },
+    )
+
+
+def _load_id(meta: ECCPUConnectorMetadata, mm_hash: str) -> int:
+    return meta.loads[mm_hash][0]
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -132,6 +153,37 @@ def make_worker():
     for region in regions:
         with contextlib.suppress(Exception):
             region.cleanup()
+
+
+def _wait_for_completion(
+    worker: ECCPUWorker, expected, direction: str, timeout_s: float = 30.0
+) -> None:
+    """Poll ``build_connector_worker_meta`` until ``expected`` is reported done.
+
+    Saves are reported by mm_hash, loads by transfer id.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        meta = worker.build_connector_worker_meta()
+        if meta is not None and expected in getattr(meta, f"completed_{direction}"):
+            return
+        time.sleep(0.001)
+    raise AssertionError(f"{direction} for {expected!r} never reported complete")
+
+
+def _warm_up_stream_pools(worker: ECCPUWorker) -> None:
+    """Run one throwaway save so the stream and event pools are populated.
+
+    The first CUDA stream creation in a process blocks the host for ~0.5 s on
+    driver initialization, which would swallow the stall the lifetime tests
+    below install. One flush puts a stream and its events in the worker's pools,
+    matching the steady state every step after the first sees.
+    """
+    scratch = torch.zeros(_HIDDEN_DIM, dtype=_DTYPE, device="cuda")
+    worker.save_caches({"w": scratch}, "w", _meta(saves={"w": [0]}))
+    worker.flush_saves()
+    _wait_for_completion(worker, "w", "saves")
+    assert worker._stream_pool, "warm-up did not recycle a stream"
 
 
 # ── save_caches ──────────────────────────────────────────────────────────────
@@ -395,6 +447,112 @@ def test_save_then_load_round_trips_bytes(make_worker):
     assert torch.equal(out.cpu(), src.cpu())
 
 
+# ── memory lifetime across in-flight copies ─────────────────────────────────
+
+
+@_requires_cuda
+def test_save_survives_encoder_cache_free_before_copy_runs(make_worker):
+    """The bytes handed to ``save_caches`` must reach the mmap intact even when
+    the caller drops its ``encoder_cache`` reference before the copy has run.
+
+    The model runner pops encoder cache entries on whatever step the scheduler
+    asks it to, with no dependency on the save copy having landed. Dropping the
+    last reference hands the GPU memory back to the caching allocator, which is
+    free to reuse it for the next same-sized allocation on the compute stream —
+    the copy reads that memory on a different stream, so the allocator has no
+    reason to hold it back.
+
+    The stall makes the hazard deterministic rather than timing-dependent: the
+    save copy is gated behind the compute stream, so it provably has not started
+    while the overwrite (issued on an ungated stream and waited on) completes.
+
+    The mmap must be pinned, as it is in production: a copy into pageable host
+    memory blocks the host until it lands, which would hide the hazard.
+    """
+    worker = make_worker(pin_memory_available=True)
+    _warm_up_stream_pools(worker)
+    worker._region.blocks.fill_(0x5A)
+
+    block_ids = [0, 1, 2]
+    saved = torch.full((len(block_ids), _HIDDEN_DIM), 1.0, dtype=_DTYPE, device="cuda")
+    expected = saved.cpu().reshape(-1).view(torch.uint8)
+
+    encoder_cache = {"h": saved}
+    worker.save_caches(encoder_cache, "h", _meta(saves={"h": block_ids}))
+
+    torch.cuda._sleep(_STALL_CYCLES)
+    worker.flush_saves()
+
+    saved_ptr = saved.data_ptr()
+    del saved
+    encoder_cache.clear()
+
+    # Same size on the same stream, so the allocator hands back the block just
+    # freed. Overwriting it from an ungated stream — and waiting for that write
+    # — orders the overwrite strictly before the still-stalled save copy.
+    overwrite = torch.empty((len(block_ids), _HIDDEN_DIM), dtype=_DTYPE, device="cuda")
+    reused = overwrite.data_ptr() == saved_ptr
+    other_stream = torch.cuda.Stream()
+    with torch.cuda.stream(other_stream):
+        overwrite.fill_(-1.0)
+    other_stream.synchronize()
+
+    _wait_for_completion(worker, "h", "saves")
+
+    actual = worker._region.blocks[block_ids].reshape(-1).view(torch.uint8)
+    assert torch.equal(actual, expected), (
+        "mmap holds bytes written after save_caches was called; the copy read "
+        f"freed source memory (allocator reused the freed block: {reused})"
+    )
+
+
+@_requires_cuda
+def test_load_buffer_survives_eviction_while_consumer_read_is_queued(make_worker):
+    """A loaded encoder cache entry must keep its bytes for a consumer already
+    queued on the compute stream, even after the entry is dropped and another
+    load is dispatched.
+
+    ``start_load_caches`` allocates its destination inside the load stream's
+    context, which ties that memory to the load stream in the caching allocator.
+    Dropping the encoder cache entry returns it to the load stream's pool, where
+    the next load can claim it — while the model's read of it is still queued on
+    the compute stream.
+    """
+    worker = make_worker(pin_memory_available=True)
+    _warm_up_stream_pools(worker)
+    a_blocks, b_blocks = [4, 5], [6, 7]
+    for block_idx, fill in zip(a_blocks + b_blocks, (0x11, 0x12, 0x21, 0x22)):
+        worker._region.blocks[block_idx].fill_(fill)
+    expected_a = worker._region.blocks[a_blocks].reshape(-1).clone()
+
+    encoder_cache: dict[str, torch.Tensor] = {}
+    meta_a = _meta(loads={"a": a_blocks})
+    worker.start_load_caches(encoder_cache, meta_a)
+    loaded_a = encoder_cache["a"]
+
+    # Queue a consumer of the loaded entry on the compute stream behind a stall,
+    # the way the model reads the encoder cache later in the step.
+    torch.cuda._sleep(_STALL_CYCLES)
+    consumed = loaded_a.clone()
+
+    # Draining the completion report recycles the load stream into the pool, so
+    # the next load allocates from the same allocator pool the entry was freed to.
+    _wait_for_completion(worker, _load_id(meta_a, "a"), "loads")
+
+    loaded_a_ptr = loaded_a.data_ptr()
+    del loaded_a
+    encoder_cache.clear()
+
+    worker.start_load_caches(encoder_cache, _meta(loads={"b": b_blocks}))
+    reused = encoder_cache["b"].data_ptr() == loaded_a_ptr
+    torch.accelerator.synchronize()
+
+    assert torch.equal(consumed.cpu().reshape(-1).view(torch.int8), expected_a), (
+        "queued consumer read bytes from a later load; the load destination was "
+        f"recycled while still in use (allocator reused the buffer: {reused})"
+    )
+
+
 # ── buffer recycling ────────────────────────────────────────────────────────
 
 
@@ -555,8 +713,14 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
         is_ec_producer = True
         is_ec_consumer = True
 
+    class _Parallel:
+        tensor_parallel_size = 1
+        prefill_context_parallel_size = 1
+        distributed_executor_backend = "mp"
+
     class _Cfg:
         ec_transfer_config = _EC()
+        parallel_config = _Parallel()
 
     scheduler = ECCPUScheduler(_Cfg())
 
@@ -602,7 +766,8 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     scheduler.update_state_after_alloc(_Request(), 0)
     meta_load = scheduler.build_connector_meta(scheduler_output=None)
     assert "img_001" in meta_load.loads
-    assert meta_load.loads["img_001"] == meta_save.saves["img_001"]
+    _, load_blocks = meta_load.loads["img_001"]
+    assert load_blocks == meta_save.saves["img_001"]
 
     load_cache: dict[str, torch.Tensor] = {}
     worker.start_load_caches(load_cache, meta_load)

@@ -42,14 +42,17 @@ class Transfer:
     """A batched copy in flight on a dedicated GPU stream.
 
     Its descriptor buffers and stream are held until `end_event` fires; only
-    then are the buffers and stream safe to recycle and the `mm_hashes` safe to
-    report as complete. `start_event`/`end_event` bracket the copy so its
-    elapsed time can be measured on completion.
+    then are the buffers and stream safe to recycle and the `completions` safe
+    to report. `start_event`/`end_event` bracket the copy so its elapsed time
+    can be measured on completion.
+
+    `completions` is what the scheduler is told about this copy: mm_hashes for
+    saves, transfer ids for loads.
     """
 
     start_event: torch.Event
     end_event: torch.Event
-    mm_hashes: list[str]
+    completions: list[str] | list[int]
     bufs: DescriptorBuffers
     stream: torch.Stream
     num_bytes: int
@@ -106,7 +109,7 @@ class ECCPUWorker:
         self._save_stream: torch.Stream | None = None
 
         # Batched copies whose end event has not yet fired. Buffers and stream
-        # stay held until the event fires; the mm_hashes are reported to the
+        # stay held until the event fires; the completions are reported to the
         # scheduler only then. Separate per direction because saves and loads
         # can be in flight concurrently.
         self._inflight_saves: deque[Transfer] = deque()
@@ -129,25 +132,26 @@ class ECCPUWorker:
             else torch.Event(enable_timing=True)
         )
 
-    def _collect_finished(self, inflight: deque[Transfer], direction: str) -> list[str]:
+    def _collect_finished(self, inflight: deque[Transfer], direction: str) -> list:
         """Pop transfers whose end event has fired, recycle their stream,
-        events, and buffers, and return the mm_hashes that completed.
+        events, and buffers, and return their completions.
 
         The front check is conservative: a transfer is reported only once its
-        own end event fires, so completed hashes are always genuinely done. A
-        later transfer that happens to finish first simply waits behind the
-        front and is reported on a subsequent poll.
+        own end event fires, so completions are always genuinely done, and each
+        is reported exactly once because the transfer is popped as it is
+        reported. A later transfer that happens to finish first simply waits
+        behind the front and is reported on a subsequent poll.
         """
-        done: list[str] = []
+        done: list = []
         while inflight and inflight[0].end_event.query():
             transfer = inflight.popleft()
-            done.extend(transfer.mm_hashes)
+            done.extend(transfer.completions)
             elapsed_ms = transfer.start_event.elapsed_time(transfer.end_event)
             logger.debug(
                 "EC %s: %d entr%s (%d bytes) took %.3f ms",
                 direction,
-                len(transfer.mm_hashes),
-                "y" if len(transfer.mm_hashes) == 1 else "ies",
+                len(transfer.completions),
+                "y" if len(transfer.completions) == 1 else "ies",
                 transfer.num_bytes,
                 elapsed_ms,
             )
@@ -247,7 +251,7 @@ class ECCPUWorker:
             Transfer(
                 start_event=start_event,
                 end_event=end_event,
-                mm_hashes=self._save_mm_hashes,
+                completions=self._save_mm_hashes,
                 bufs=bufs,
                 stream=stream,
                 num_bytes=num_bytes,
@@ -281,10 +285,11 @@ class ECCPUWorker:
 
         # Copy every dispatched load. The scheduler routes an input here only
         # after missing the GPU encoder cache, so a resident hit is not expected;
-        # copying unconditionally keeps every scheduler pin balanced by exactly
-        # one completion report.
+        # copying unconditionally means every participating rank reports each
+        # transfer exactly once, which is what the scheduler counts to release
+        # the pin.
         load_items = connector_metadata.loads
-        total_blocks = sum(len(idxs) for idxs in load_items.values())
+        total_blocks = sum(len(block_ids) for _, block_ids in load_items.values())
 
         stream = self._acquire_stream()
         compute_stream = current_platform.current_stream()
@@ -305,7 +310,7 @@ class ECCPUWorker:
             sizes[:] = block_size
 
             op_idx = 0
-            for block_ids in load_items.values():
+            for _, block_ids in load_items.values():
                 for block_idx in block_ids:
                     src_ptrs[op_idx] = src_base + block_idx * block_size
                     dst_ptrs[op_idx] = dst_buf_base + op_idx * block_size
@@ -318,7 +323,7 @@ class ECCPUWorker:
                 Transfer(
                     start_event=start_event,
                     end_event=end_event,
-                    mm_hashes=list(load_items.keys()),
+                    completions=[tid for tid, _ in load_items.values()],
                     bufs=bufs,
                     stream=stream,
                     num_bytes=total_blocks * block_size,
@@ -327,7 +332,7 @@ class ECCPUWorker:
 
             # Slice contiguous buffer into per-hash views.
             offset = 0
-            for mm_hash, block_ids in load_items.items():
+            for mm_hash, (_, block_ids) in load_items.items():
                 n = len(block_ids)
                 encoder_cache[mm_hash] = (
                     dst_buf[offset : offset + n].view(dtype).reshape(n, -1)
@@ -337,7 +342,8 @@ class ECCPUWorker:
         current_platform.current_stream().wait_stream(stream)
 
     def build_connector_worker_meta(self) -> ECCPUWorkerMetadata | None:
-        """Report the mm_hashes whose GPU copies have completed this step.
+        """Report the GPU copies that completed on this rank this step: saved
+        mm_hashes and loaded transfer ids.
 
         Returns None when nothing finished, so the scheduler sees no payload.
         """

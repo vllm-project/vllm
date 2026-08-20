@@ -41,7 +41,11 @@ class _Request:
 
 
 class _WorkerOutput:
-    """Stand-in for ECConnectorOutput carrying a completion report."""
+    """Stand-in for ECConnectorOutput carrying a completion report.
+
+    `saves` are mm_hashes; `loads` are transfer ids. One entry per reporting
+    rank, so a list holding the same id twice is two ranks reporting it.
+    """
 
     def __init__(self, *, saves=None, loads=None):
         self.ec_connector_worker_meta = ECCPUWorkerMetadata(
@@ -56,6 +60,7 @@ def _make_scheduler(
     *,
     is_producer=True,
     is_consumer=True,
+    tensor_parallel_size=1,
 ) -> ECCPUScheduler:
     region = ECSharedRegion(
         engine_id=str(uuid.uuid4()),
@@ -66,15 +71,32 @@ def _make_scheduler(
 
     _is_prod = is_producer
     _is_cons = is_consumer
+    _tp = tensor_parallel_size
 
     class _EC:
         is_ec_producer = _is_prod
         is_ec_consumer = _is_cons
 
+    class _Parallel:
+        tensor_parallel_size = _tp
+        prefill_context_parallel_size = 1
+        distributed_executor_backend = "mp"
+
     class _Cfg:
         ec_transfer_config = _EC()
+        parallel_config = _Parallel()
 
     return ECCPUScheduler(_Cfg())
+
+
+def _load_ids(meta) -> list[int]:
+    """Transfer ids the scheduler dispatched in this step's metadata."""
+    return [transfer_id for transfer_id, _ in meta.loads.values()]
+
+
+def _load_blocks(meta, mm_hash: str) -> list[int]:
+    """Block ids the scheduler dispatched for one load."""
+    return meta.loads[mm_hash][1]
 
 
 def _seed_cached(s: ECCPUScheduler, mm_hash: str, n_blocks: int):
@@ -105,7 +127,7 @@ def test_offload_reuse_cycle(monkeypatch):
     s.update_state_after_alloc(req, 0)
     meta_c = s.build_connector_meta(scheduler_output=None)
     assert "h1" in meta_c.loads
-    assert meta_c.loads["h1"] == meta_a.saves["h1"]
+    assert _load_blocks(meta_c, "h1") == meta_a.saves["h1"]
 
     s.shutdown()
 
@@ -189,7 +211,7 @@ def test_load_returns_correct_block_ids(monkeypatch):
     # Reload.
     s.update_state_after_alloc(req, 0)
     meta_load = s.build_connector_meta(scheduler_output=None)
-    assert meta_load.loads["a"] == meta_save.saves["a"]
+    assert _load_blocks(meta_load, "a") == meta_save.saves["a"]
     s.shutdown()
 
 
@@ -239,17 +261,79 @@ def test_load_pin_protects_blocks_until_completion(monkeypatch):
     s.update_state_after_alloc(_Request([_Feature("a")]), 0)
     meta = s.build_connector_meta(scheduler_output=None)
     assert "a" in meta.loads
+    (transfer_id,) = _load_ids(meta)
 
     # Try to save "b" (needs 2 blocks, but "a" is pinned) — must fail.
     s.update_state_after_alloc(_Request([_Feature("b", length=2)]), 0)
     meta2 = s.build_connector_meta(scheduler_output=None)
     assert "b" not in meta2.saves  # can't evict pinned "a"
 
-    # Worker reports the load complete → "a" unpins. Now "b" can evict it.
-    s.update_connector_output(_WorkerOutput(loads=["a"]))
+    # The one participant reports the load complete → "a" unpins. Now "b" can
+    # evict it.
+    s.update_connector_output(_WorkerOutput(loads=[transfer_id]))
     s.update_state_after_alloc(_Request([_Feature("b", length=2)]), 0)
     meta3 = s.build_connector_meta(scheduler_output=None)
     assert "b" in meta3.saves
+    s.shutdown()
+
+
+def _can_evict(s: ECCPUScheduler, mm_hash: str, n_blocks: int) -> bool:
+    """Whether a new save of `mm_hash` can claim `n_blocks`, i.e. whether the
+    blocks currently held by other entries are reclaimable."""
+    s.update_state_after_alloc(_Request([_Feature(mm_hash, length=n_blocks)]), 0)
+    meta = s.build_connector_meta(scheduler_output=None)
+    return mm_hash in meta.saves
+
+
+def test_load_needs_every_participant_before_unpin(monkeypatch):
+    """With two participating ranks, one report must not release the pin.
+
+    This is the multi-rank case: each rank copies the same CPU blocks into its
+    own GPU memory, so the blocks stay in use until the last rank is done.
+    """
+    s = _make_scheduler(monkeypatch, num_blocks=2, tensor_parallel_size=2)
+    _seed_cached(s, "a", n_blocks=2)
+
+    s.update_state_after_alloc(_Request([_Feature("a")]), 0)
+    (transfer_id,) = _load_ids(s.build_connector_meta(scheduler_output=None))
+
+    # First rank reports: still in use by the second, so "a" must hold.
+    s.update_connector_output(_WorkerOutput(loads=[transfer_id]))
+    assert _can_evict(s, "b", 2) is False
+    assert s.has_pending_push_work() is True
+
+    # Second rank reports: now it is genuinely free.
+    s.update_connector_output(_WorkerOutput(loads=[transfer_id]))
+    assert s.has_pending_push_work() is False
+    assert _can_evict(s, "c", 2) is True
+    s.shutdown()
+
+
+def test_late_report_does_not_release_a_later_load_of_same_hash(monkeypatch):
+    """A straggling report from one dispatch must not release the pin taken by
+    a subsequent dispatch of the same mm_hash.
+
+    This is what the transfer id is for: mm_hash identifies a cache entry, not
+    a transfer, so it cannot tell the two dispatches apart.
+    """
+    s = _make_scheduler(monkeypatch, num_blocks=2, tensor_parallel_size=2)
+    _seed_cached(s, "a", n_blocks=2)
+
+    # First dispatch, fully reported by both ranks → pin released.
+    s.update_state_after_alloc(_Request([_Feature("a")]), 0)
+    (first_id,) = _load_ids(s.build_connector_meta(scheduler_output=None))
+    s.update_connector_output(_WorkerOutput(loads=[first_id, first_id]))
+    assert s.has_pending_push_work() is False
+
+    # Second dispatch of the same hash takes a fresh pin.
+    s.update_state_after_alloc(_Request([_Feature("a")]), 0)
+    (second_id,) = _load_ids(s.build_connector_meta(scheduler_output=None))
+    assert second_id != first_id
+
+    # A replayed report for the first dispatch must be ignored entirely.
+    s.update_connector_output(_WorkerOutput(loads=[first_id, first_id]))
+    assert s.has_pending_push_work() is True
+    assert _can_evict(s, "b", 2) is False
     s.shutdown()
 
 
@@ -369,11 +453,11 @@ def test_update_connector_output_ignores_foreign_meta(monkeypatch):
     s.shutdown()
 
 
-def test_update_connector_output_ignores_unknown_hash(monkeypatch):
-    """Completion reports for evicted / never-seen hashes are dropped."""
+def test_update_connector_output_ignores_unknown_report(monkeypatch):
+    """Reports for a never-seen save hash or a transfer id this scheduler never
+    dispatched are dropped rather than mutating unrelated state."""
     s = _make_scheduler(monkeypatch)
-    # Neither hash exists in the cache.
-    s.update_connector_output(_WorkerOutput(saves=["gone"], loads=["also_gone"]))
+    s.update_connector_output(_WorkerOutput(saves=["gone"], loads=[4242]))
     assert s.has_cache_item("gone") is False
     s.shutdown()
 
@@ -404,10 +488,10 @@ def test_has_pending_push_work_tracks_inflight_load(monkeypatch):
     assert s.has_pending_push_work() is False  # ready + unpinned
 
     s.update_state_after_alloc(_Request([_Feature("a")]), 0)
-    s.build_connector_meta(scheduler_output=None)
+    meta = s.build_connector_meta(scheduler_output=None)
     assert s.has_pending_push_work() is True  # pinned, awaiting unpin
 
-    s.update_connector_output(_WorkerOutput(loads=["a"]))
+    s.update_connector_output(_WorkerOutput(loads=_load_ids(meta)))
     assert s.has_pending_push_work() is False
     s.shutdown()
 
