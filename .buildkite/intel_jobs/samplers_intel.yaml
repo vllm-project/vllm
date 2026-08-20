@@ -2,7 +2,7 @@ group: Samplers Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: Samplers Test (XPU Kernel)
+- label: ":intel: (BMG) Samplers Test"
   key: samplers-test-xpu-kernel-intel
   timeout_in_minutes: 40
   device: intel_gpu

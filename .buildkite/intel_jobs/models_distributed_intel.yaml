@@ -2,7 +2,7 @@ group: Models - Distributed
 depends_on: 
   - image-build-xpu
 steps:
-- label: Distributed Model Tests (2 GPUs)
+- label: ":intel: (BMG) Distributed Model Tests"
   key: distributed-model-tests-2-gpus
   timeout_in_minutes: 65
   device: intel_gpu

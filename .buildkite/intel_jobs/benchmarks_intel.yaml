@@ -2,7 +2,7 @@ group: Benchmarks
 depends_on: 
   - image-build-xpu
 steps:
-- label: Benchmarks CLI Test
+- label: ":intel: (BMG) Benchmarks CLI"
   key: benchmarks-cli-test
   timeout_in_minutes: 40
   device: intel_gpu

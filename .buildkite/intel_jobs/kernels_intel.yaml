@@ -2,7 +2,7 @@ group: Kernels Intel
 depends_on: 
   - image-build-xpu
 steps:
-- label: vLLM IR Tests
+- label: ":intel: (BMG) vLLM IR Tests"
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
