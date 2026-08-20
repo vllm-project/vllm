@@ -9,10 +9,10 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
-from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
+from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
