@@ -57,7 +57,7 @@ class PagedShmServer:
         self.block_size = self.storage.block_size
 
         # Priority queue for pending open_write requests.
-        # Elements: (deadline, identity, list_of_ShmWriteRequest)
+        # Elements: (deadline, identity, list_of_ShmItem)
         self.wait_for_open_write: PriorityQueue = PriorityQueue()
 
         # Per-uuid priority queues for pending open_read requests.
@@ -349,226 +349,210 @@ class PagedShmServer:
         """Close the shared memory storage."""
         self._resources.close()
 
-    def run(self, conn: mp.connection.Connection) -> None:
-        """Run the ZMQ server main loop.
 
-        This method binds to an IPC address, notifies the parent via the
-        given connection, and processes incoming ZMQ requests until a
-        SHUTDOWN command is received or an error occurs.
+def _zmq_server(size: int, block_size: int, conn):
+    context = zmq.Context()
+    socket = None
+    server = None
 
-        Args:
-            conn: Pipe connection to send the bound address to the parent.
-        """
-        context = zmq.Context()
-        socket = None
+    try:
+        # Create server and storage
+        server = PagedShmServer(size, block_size)
 
-        try:
-            # Bind to an available IPC path
-            address = get_open_zmq_ipc_path()
-            socket = context.socket(zmq.ROUTER)
-            socket.setsockopt(zmq.LINGER, 0)
-            socket.bind(address)
+        # Bind to an available IPC path
+        address = get_open_zmq_ipc_path()
+        socket = context.socket(zmq.ROUTER)
+        socket.setsockopt(zmq.LINGER, 0)
+        socket.bind(address)
 
-            # Notify parent process of the address
-            conn.send(address)
-            conn.close()
+        # Notify parent process of the address
+        conn.send(address)
+        conn.close()
 
-            # Command dispatcher (excluding OPEN_WRITE, OPEN_READ, and DELETE,
-            # which are handled separately because they may return None or need
-            # special cleanup of waiting queues)
-            handlers: dict[bytes, tuple[Callable, bool]] = {
-                CLOSE_WRITE: (self.close_write, True),
-                CLOSE_READ: (self.close_read, True),
-                PIN: (self.pin, True),
-                UNPIN: (self.unpin, True),
-                GET_INFO: (self.get_info, True),
-                GET_MANAGER_STATE: (self.get_manager_state, False),
-                GET_STORAGE_INFO: (self.get_storage_info, False),
-            }
+        # Command dispatcher (excluding OPEN_WRITE, OPEN_READ, and DELETE,
+        # which are handled separately because they may return None or need
+        # special cleanup of waiting queues)
+        handlers: dict[bytes, tuple[Callable, bool]] = {
+            CLOSE_WRITE: (server.close_write, True),
+            CLOSE_READ: (server.close_read, True),
+            PIN: (server.pin, True),
+            UNPIN: (server.unpin, True),
+            GET_INFO: (server.get_info, True),
+            GET_MANAGER_STATE: (server.get_manager_state, False),
+            GET_STORAGE_INFO: (server.get_storage_info, False),
+        }
 
-            poller = zmq.Poller()
-            poller.register(socket, zmq.POLLIN)
+        poller = zmq.Poller()
+        poller.register(socket, zmq.POLLIN)
 
-            logger.info("PagedShmServer started at %s", address)
+        logger.info("PagedShmServer started at %s", address)
 
-            while True:
-                try:
-                    socks = dict(poller.poll(POLL_INTERVAL))
-                except (zmq.ZMQError, KeyboardInterrupt, EOFError):
-                    # Terminate gracefully if the context was closed or signal received
+        while True:
+            try:
+                socks = dict(poller.poll(POLL_INTERVAL))
+            except (zmq.ZMQError, KeyboardInterrupt, EOFError):
+                # Terminate gracefully if the context was closed or signal received
+                break
+
+            if socket not in socks or socks[socket] != zmq.POLLIN:
+                # Periodic processing: handle timeouts and maybe satisfy one request
+                server.defer_open_write(socket)
+                server.defer_open_read(socket)  # only cleans up timeouts
+                continue
+
+            # Receive request — expect at least [identity, delimiter, command]
+            try:
+                frames = socket.recv_multipart()
+            except zmq.ZMQError as e:
+                logger.error("Error receiving message: %s", e)
+                # If the error is fatal (e.g. context terminated), exit loop
+                if e.errno == zmq.ETERM:
                     break
+                continue
 
-                if socket not in socks or socks[socket] != zmq.POLLIN:
-                    # Periodic processing: handle timeouts and maybe satisfy one request
-                    self.defer_open_write(socket)
-                    self.defer_open_read(socket)  # only cleans up timeouts
-                    continue
+            if len(frames) < 3:
+                logger.warning(
+                    "Received malformed message with %d frames, ignoring", len(frames)
+                )
+                continue
 
-                # Receive request — expect at least [identity, delimiter, command]
+            identity, delimiter, command, *payloads = frames
+            if delimiter != EMPTY:
+                logger.warning(
+                    "Invalid delimiter in message from %s, ignoring", identity
+                )
+                continue
+
+            def _send_response(frames: list):
                 try:
-                    frames = socket.recv_multipart()
+                    socket.send_multipart(frames)
                 except zmq.ZMQError as e:
-                    logger.error("Error receiving message: %s", e)
-                    # If the error is fatal (e.g. context terminated), exit loop
-                    if e.errno == zmq.ETERM:
-                        break
-                    continue
+                    logger.debug("Failed to send response to %s: %s", frames[0], e)
 
-                if len(frames) < 3:
-                    logger.warning(
-                        "Received malformed message with %d frames, ignoring",
-                        len(frames),
-                    )
-                    continue
+            # ------------------------------------------------------------------
+            # Handle SHUTDOWN command before entering the normal dispatch table
+            # ------------------------------------------------------------------
+            if command == SHUTDOWN:
+                logger.info("Received SHUTDOWN command from %s, exiting", identity)
+                _send_response([identity, EMPTY, OK, b"shutting down"])
+                break
 
-                identity, delimiter, command, *payloads = frames
-                if delimiter != EMPTY:
-                    logger.warning(
-                        "Invalid delimiter in message from %s, ignoring", identity
-                    )
-                    continue
-
-                # Helper to send a response with standard multipart format
-                def _send_response(frames: list):
-                    try:
-                        socket.send_multipart(frames)
-                    except zmq.ZMQError as e:
-                        logger.debug("Failed to send response to %s: %s", frames[0], e)
-
-                # ------------------------------------------------------------------
-                # Handle SHUTDOWN command before entering the normal dispatch table
-                # ------------------------------------------------------------------
-                if command == SHUTDOWN:
-                    logger.info("Received SHUTDOWN command from %s, exiting", identity)
-                    _send_response([identity, EMPTY, OK, b"shutting down"])
-                    break
-
-                # Handle OPEN_WRITE and OPEN_READ separately
-                if command == OPEN_WRITE:
-                    try:
-                        result = self.open_write(payloads[0].decode("utf-8"), identity)
-                        if result is not None:
-                            _send_response(
-                                [identity, EMPTY, OK, result.encode("utf-8")]
-                            )
-                    except Exception as e:
-                        error_msg = f"{type(e).__name__}: {e}".encode()
-                        _send_response([identity, EMPTY, ERROR, error_msg])
-                        logger.warning("Command OPEN_WRITE failed: %s", e)
-                    continue
-
-                if command == OPEN_READ:
-                    try:
-                        result = self.open_read(payloads[0].decode("utf-8"), identity)
-                        if result is not None:
-                            _send_response(
-                                [identity, EMPTY, OK, result.encode("utf-8")]
-                            )
-                    except Exception as e:
-                        error_msg = f"{type(e).__name__}: {e}".encode()
-                        _send_response([identity, EMPTY, ERROR, error_msg])
-                        logger.warning("Command OPEN_READ failed: %s", e)
-                    continue
-
-                # Handle DELETE separately to clear pending open_read waiters
-                if command == DELETE:
-                    uuid = payloads[0].decode("utf-8")
-                    try:
-                        # Clear waiting open_read requests for this uuid
-                        q = self.wait_for_open_read.pop(uuid, None)
-                        if q is not None:
-                            while not q.empty():
-                                _, ident = q.get()
-                                _send_response(
-                                    [ident, EMPTY, ERROR, b"Item deleted while waiting"]
-                                )
-                        self.delete(uuid)
-                        _send_response([identity, EMPTY, OK, b'{"status":"ok"}'])
-                    except Exception as e:
-                        error_msg = f"{type(e).__name__}: {e}".encode()
-                        _send_response([identity, EMPTY, ERROR, error_msg])
-                        logger.warning("DELETE failed: %s", e)
-                    continue
-
-                # Dispatch other commands
-                handler_info = handlers.get(command)
-                if handler_info is None:
-                    _send_response(
-                        [
-                            identity,
-                            EMPTY,
-                            ERROR,
-                            f"Unknown command: "
-                            f"{command.decode('utf-8', errors='replace')}".encode(),
-                        ]
-                    )
-                    continue
-
-                handler, requires_payload = handler_info
-                success = False
+            # Handle OPEN_WRITE and OPEN_READ separately
+            if command == OPEN_WRITE:
                 try:
-                    if requires_payload:
-                        param = payloads[0].decode("utf-8")
-                        result = handler(param)
-                    else:
-                        result = handler()
-
+                    result = server.open_write(payloads[0].decode("utf-8"), identity)
                     if result is not None:
                         _send_response([identity, EMPTY, OK, result.encode("utf-8")])
-                    success = True
                 except Exception as e:
                     error_msg = f"{type(e).__name__}: {e}".encode()
                     _send_response([identity, EMPTY, ERROR, error_msg])
-                    logger.warning(
-                        "Command %s failed: %s",
-                        command.decode("utf-8", errors="replace"),
-                        e,
-                    )
+                    logger.warning("Command OPEN_WRITE failed: %s", e)
+                continue
 
-                if success and command == CLOSE_WRITE:
-                    # Wake up open_read waiters for this specific uuid
-                    try:
-                        close_req = json.loads(payloads[0].decode("utf-8"))
-                        uuid = close_req.get("uuid")
-                        if uuid:
-                            self.defer_open_read(socket, uuid)
-                    except Exception:
-                        # If parsing fails, fall back to periodic processing
-                        self.defer_open_read(socket)
+            if command == OPEN_READ:
+                try:
+                    result = server.open_read(payloads[0].decode("utf-8"), identity)
+                    if result is not None:
+                        _send_response([identity, EMPTY, OK, result.encode("utf-8")])
+                except Exception as e:
+                    error_msg = f"{type(e).__name__}: {e}".encode()
+                    _send_response([identity, EMPTY, ERROR, error_msg])
+                    logger.warning("Command OPEN_READ failed: %s", e)
+                continue
 
-                if success and command == CLOSE_READ:
-                    # Space may have been freed; try one open_write
-                    self.defer_open_write(socket)
+            # Handle DELETE separately to clear pending open_read waiters
+            if command == DELETE:
+                uuid = payloads[0].decode("utf-8")
+                try:
+                    # Clear waiting open_read requests for this uuid
+                    q = server.wait_for_open_read.pop(uuid, None)
+                    if q is not None:
+                        while not q.empty():
+                            _, ident = q.get()
+                            _send_response(
+                                [ident, EMPTY, ERROR, b"Item deleted while waiting"]
+                            )
+                    server.delete(uuid)
+                    _send_response([identity, EMPTY, OK, b'{"status":"ok"}'])
+                except Exception as e:
+                    error_msg = f"{type(e).__name__}: {e}".encode()
+                    _send_response([identity, EMPTY, ERROR, error_msg])
+                    logger.warning("DELETE failed: %s", e)
+                continue
 
-        except Exception as e:
-            logger.exception("Fatal error in zmq_server: %s", e)
-        finally:
-            if socket is not None:
-                with contextlib.suppress(Exception):
-                    socket.close()
-            if context is not None:
-                with contextlib.suppress(Exception):
-                    context.term()
+            # Dispatch other commands
+            handler_info = handlers.get(command)
+            if handler_info is None:
+                _send_response(
+                    [
+                        identity,
+                        EMPTY,
+                        ERROR,
+                        f"Unknown command: "
+                        f"{command.decode('utf-8', errors='replace')}".encode(),
+                    ]
+                )
+                continue
+
+            handler, requires_payload = handler_info
+            success = False
+            try:
+                if requires_payload:
+                    param = payloads[0].decode("utf-8")
+                    result = handler(param)
+                else:
+                    result = handler()
+
+                if result is not None:
+                    _send_response([identity, EMPTY, OK, result.encode("utf-8")])
+                success = True
+            except Exception as e:
+                error_msg = f"{type(e).__name__}: {e}".encode()
+                _send_response([identity, EMPTY, ERROR, error_msg])
+                logger.warning(
+                    "Command %s failed: %s",
+                    command.decode("utf-8", errors="replace"),
+                    e,
+                )
+
+            if success and command == CLOSE_WRITE:
+                # Wake up open_read waiters for this specific uuid
+                try:
+                    close_req = json.loads(payloads[0].decode("utf-8"))
+                    uuid = close_req.get("uuid")
+                    if uuid:
+                        server.defer_open_read(socket, uuid)
+                except Exception:
+                    # If parsing fails, fall back to periodic processing
+                    server.defer_open_read(socket)
+
+            if success and command == CLOSE_READ:
+                # Space may have been freed; try one open_write
+                server.defer_open_write(socket)
+
+    except Exception as e:
+        logger.exception("Fatal error in zmq_server: %s", e)
+    finally:
+        if socket is not None:
             with contextlib.suppress(Exception):
-                self.close()
-            logger.debug("[shutdown] PagedShmServer stopped")
+                socket.close()
+        if context is not None:
+            with contextlib.suppress(Exception):
+                context.term()
+        if server is not None:
+            with contextlib.suppress(Exception):
+                server.close()
+        logger.debug("[shutdown] PagedShmServer stopped")
 
 
 class PagedShmServerProc:
-    """Process wrapper for PagedShmServer.
-
-    Manages the lifecycle of a PagedShmServer running in a separate process.
-    """
-
     def __init__(self, size: int, block_size: int):
         ctx = mp.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe()
 
-        # Create the server instance; its run() method will be the process target
-        self.server = PagedShmServer(size, block_size)
         proc = ctx.Process(
-            target=self.server.run,
-            args=(child_conn,),
+            target=_zmq_server,
+            args=(size, block_size, child_conn),
         )
 
         self.proc = proc
@@ -622,7 +606,6 @@ class PagedShmServerProc:
 def maybe_start_paged_shm_server(
     model_config: ModelConfig,
 ) -> PagedShmServerProc | None:
-    """Conditionally start a PagedShmServer process based on model configuration."""
     multimodal_config = model_config.multimodal_config
     if multimodal_config is None:
         return None
