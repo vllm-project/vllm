@@ -43,7 +43,13 @@ FINISH
 
 The design introduces two extension points. Extension A is the permanent per-parameter `weight_loader`, which performs eager parameter processing. Extension B is per-module `refresh_derived_state()`, which rebuilds derived values at finish. The transport layer supplies checkpoint-format tensors and does not implement model transformations.
 
-## 3. V1 scope: matching dtype and checkpoint format
+## 3. Scope overview: two reload paths
+
+Weight reload is divided into two connected but clearly bounded scopes. **V1** covers cases where the sender already provides the dtype and checkpoint format required by serving. Its primary concern is to reuse the native loader, PWAL, and derived-state logic while keeping runtime storage stable. **V2** covers cases where trainer and serving dtypes differ. It keeps the same reload lifecycle but adds online quantization loaders so conversion happens while weights are received, rather than after an entire layer or model has been staged.
+
+In short, V1 answers how to safely update format-matched weights, while V2 answers how to update weights that require online conversion. Pre-quantized checkpoints remain in V1. BF16 trainer to FP8/FP4/INT8 serving belongs to V2 and requires an explicit online quantization loader. The two scopes are detailed below.
+
+## 4. V1 scope: matching dtype and checkpoint format
 
 V1 assumes the sender already provides the dtype and checkpoint format required by the serving configuration. It reuses existing loaders, PWAL, and derived-state logic, but does not implicitly convert BF16 weights into a low-precision serving format.
 
@@ -62,7 +68,7 @@ V1 assumes the sender already provides the dtype and checkpoint format required 
 
 The main V1 prerequisite is replacing shape-changing `replace_parameter` calls in PWAL with `resize_ + copy_`. Quantization methods record original shapes during `create_weights`, implement `restore_weights_before_loading()`, and use an idempotent conversion guard. Non-shape-changing PWAL does not need to run again. Derived-only work moves into `refresh_derived_state()`.
 
-## 4. V2 scope: online quantization
+## 5. V2 scope: online quantization
 
 V2 preserves the V1 lifecycle and permanently attaches online quantization to parameter loaders during `create_weights`. When `model.load_weights()` receives a BF16 or FP16 checkpoint tensor, the loader converts it into the serving format and writes it into stable runtime storage. Cold loading and reload therefore share the same conversion implementation.
 
@@ -75,7 +81,7 @@ V2 preserves the V1 lifecycle and permanently attaches online quantization to pa
 
 A serving quantization configuration without a matching online loader is rejected. Pre-quantized checkpoints such as GPTQ and compressed-tensors remain V1 checkpoint-format/PWAL paths.
 
-## 5. Shared V1/V2 responsibilities
+## 6. Shared V1/V2 responsibilities
 
 * **Start:** drain requests and restore only shape-changing layers, not the whole model schema.
 * **Manifest:** declare tensor names, checkpoint dtypes and shapes, logical shards, quantization format/version, and expected coverage.
@@ -85,7 +91,7 @@ A serving quantization configuration without a matching online loader is rejecte
 * **Finish:** complete selective PWAL and derived-state refresh before manifest validation. Serving does not resume after any failure.
 * **Storage:** perform conversions in the original parameter storage, preserving Python identity, `data_ptr`, and CUDA Graph validity.
 
-## 6. Smallest quantizable unit
+## 7. Smallest quantizable unit
 
 Automatic detection operates on a `QuantizationUnit`, not on an arbitrary parameter or network chunk. A unit is the smallest input set satisfying all of these conditions:
 
@@ -98,7 +104,7 @@ The quantization method and parameter loader jointly discover units. The loader 
 
 In the reference implementation, a quantization method exposes `reload_units(layer)` to declare unit keys, staged parameters, and a finalize callback. A shard-aware wrapper around the normal loader maps global expert ids to local expert ids and reports `(parameter, local expert, shard id)` keys. Quantization semantics remain owned by the quantization method, while actual shard arrivals remain owned by the model loader. The framework does not hard-code Q/K/V, w1/w2/w3, or individual quantization formats.
 
-## 7. Eager processing and buffer lifetime
+## 8. Eager processing and buffer lifetime
 
 ```text
 receive one shard
@@ -119,7 +125,7 @@ The per-expert reference implementation lazily creates one checkpoint-format sla
 
 Asynchronous quantization must protect input lifetime with a CUDA event. Retained inputs are released as soon as the kernel no longer reads them. Peak additional memory is proportional to unmatched shards, not the checkpoint size of the complete layer or model.
 
-## 8. Unit granularity matrix
+## 9. Unit granularity matrix
 
 | Granularity/parameter | Smallest processing unit | Cross-shard buffer | Processing point |
 |---|---|---|---|
@@ -135,7 +141,7 @@ Asynchronous quantization must protect input lifetime with a CUDA event. Retaine
 
 If a quantization backend has scale or layout dependencies across an entire layer, it must not be forced into per-expert units merely to reduce memory. It remains deferred until `FINISH`.
 
-## 9. Sharded transport
+## 10. Sharded transport
 
 Because one transfer operation carries one sharding, each transport record needs a complete logical identity rather than only a parameter name:
 
@@ -162,12 +168,12 @@ transport bucket -> model.load_weights(record)
 
 The receiver applies backpressure when bytes retained by quantization trackers reach the configured budget. It pauses sending or reduces bucket size and prioritizes shards that complete nearly covered units. NCCL, CUDA IPC, and filesystem transfer share the same record schema. `(update_id, sequence_no)` identifies retransmissions.
 
-## 10. Consistency and failure semantics
+## 11. Consistency and failure semantics
 
 Requests have drained before reload begins, so eager writes cannot be observed by an executing forward pass. Immediate quantization and input release are memory optimizations inside the update window, not hot-swap or per-unit publication. Requests resume only after `FINISH` completes coverage validation, selective PWAL, derived-state refresh, and manifest validation.
 
 An in-place update cannot cheaply roll back units already written. If `FINISH` detects a missing shard, conversion error, or OOM, the worker must not resume serving. The control plane must complete the same update or rebuild/reload the worker. Continuing to serve the old model after a failed update would require a complete shadow copy or double buffer and is outside this RFC's V1/V2 scope.
 
-## 11. Verification requirements
+## 12. Verification requirements
 
 Every enabled quantization backend must test out-of-order shards, units spanning buckets, duplicates and retransmission, missing keys, dtype mismatch, release of unit buffers, cold-load versus reload tensor/output equivalence, stable parameter identity, and stable `data_ptr`. A row in the V1/V2 matrix is considered supported only after its corresponding tests pass.

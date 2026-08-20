@@ -49,7 +49,13 @@ FINISH
 
 本方案只有两个扩展点：扩展点 A 是永久绑定在 parameter 上的 `weight_loader`，负责 per-parameter eager 处理；扩展点 B 是 module 的 `refresh_derived_state()`，负责 finish 阶段的派生状态刷新。传输层只提供 checkpoint-format tensor。
 
-### 1.3 v1 scope：dtype/格式匹配
+## 1.3 Scope 概览：两条 reload 路径
+
+Weight reload 分为两个相互衔接但边界清晰的 scope。**V1** 面向发送端已经提供 serving 所需 dtype 和 checkpoint format 的场景，重点是复用原生 loader、PWAL 和派生状态逻辑，同时保证 runtime storage 稳定。**V2** 面向 trainer dtype 与 serving dtype 不一致的场景，在相同 reload 流程中增加 online quantization loader；量化发生在权重接收过程中，而不是等整层或整模型接收完成后再统一处理。
+
+因此，V1 解决“匹配格式权重如何安全更新”，V2 解决“输入权重需要在线转换时如何更新”。预量化 checkpoint 仍属于 V1；BF16 trainer 到 FP8/FP4/INT8 serving 则属于 V2，且必须存在明确的在线量化 loader。下面分别说明两个 scope 的覆盖矩阵和处理路径。
+
+### 1.4 V1 scope：dtype/格式匹配
 
 v1 的原则是“发送端已经提供 serving 所需 dtype/格式”，reload 只复用冷启动已有的 loader、PWAL 和 derived-state 逻辑，不新增 BF16 到低精度的隐式转换。
 
@@ -68,7 +74,7 @@ v1 的原则是“发送端已经提供 serving 所需 dtype/格式”，reload 
 
 v1 的关键改造是将 shape-changing PWAL 中的 `replace_parameter` 改为 `resize_ + copy_`，在 `create_weights` 时记录 original shapes，提供 `restore_weights_before_loading()`，并用 converted guard 保证 PWAL 幂等。非 shape-changing PWAL 不需要在 finish 重跑；derived-only 逻辑移入 `refresh_derived_state()`。
 
-### 1.4 v2 scope：在线量化
+### 1.5 V2 scope：在线量化
 
 v2 保留 v1 的 transaction 和调用栈，在 `create_weights` 阶段把在线量化逻辑绑定到 parameter 的 loader。于是 `model.load_weights` 收到 BF16/FP16 checkpoint tensor 时，loader 按量化方法把它转换为 serving tensor，再写入稳定 runtime storage；冷启动与 reload 共用同一转换实现。
 
@@ -81,7 +87,7 @@ v2 保留 v1 的 transaction 和调用栈，在 `create_weights` 阶段把在线
 
 v2 不支持“声明了 serving quantization 但没有对应在线 loader”的组合；该组合必须报错，而不是执行精度不正确的 `copy_`。预量化 checkpoint（GPTQ、compressed-tensors 等）仍走 v1 的 checkpoint-format/PWAL 路径。
 
-### 1.5 v1/v2 共同流程与职责
+### 1.6 V1/V2 共同流程与职责
 
 * **Start**：drain 请求，只 restore shape-changing layer，不恢复整个模型 schema。
 * **Manifest**：声明 tensor name、checkpoint dtype/shape、logical shard、量化格式/版本和 expected coverage。
