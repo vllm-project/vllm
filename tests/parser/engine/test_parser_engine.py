@@ -1392,25 +1392,14 @@ class TestAdapterRequestAdjustment:
         assert adjusted.structured_outputs.structural_tag == '{"existing": true}'
         get_tag.assert_not_called()
 
-    def test_adapter_only_attrs_do_not_leak_to_engine(self):
-        class AdapterAttrsEngine(_CombinedTestEngine):
-            structural_tag_model = "test-model"
-
-        _, ToolAdapter = make_adapters(
-            AdapterAttrsEngine,
-            tool_adapter_attrs={"custom_adapter_flag": True},
-        )
-
-        assert AdapterAttrsEngine.structural_tag_model == "test-model"
-        assert "custom_adapter_flag" not in AdapterAttrsEngine.__dict__
-        assert ToolAdapter.custom_adapter_flag is True
-
     def test_engine_capabilities_are_copied_to_tool_adapter(self):
         class EngineCapabilities(_CombinedTestEngine):
+            structural_tag_model = "test-model"
             supports_required_and_named = False
 
         _, ToolAdapter = make_adapters(EngineCapabilities)
 
+        assert ToolAdapter.structural_tag_model == "test-model"
         assert ToolAdapter.supports_required_and_named is False
 
     def test_qwen3_subclasses_disable_inherited_structural_tag(self):

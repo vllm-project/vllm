@@ -10,7 +10,7 @@ any changes to the serving layer itself.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -210,8 +210,6 @@ class ParserEngineToolAdapter(ToolParser):
 
 def make_adapters(
     parser_engine_cls: type[ParserEngine],
-    *,
-    tool_adapter_attrs: Mapping[str, object] | None = None,
 ) -> tuple[type[ParserEngineReasoningAdapter], type[ParserEngineToolAdapter]]:
     reasoning_adapter = type(
         f"{parser_engine_cls.__name__}ReasoningAdapter",
@@ -222,7 +220,6 @@ def make_adapters(
         "_parser_engine_cls": parser_engine_cls,
         "structural_tag_model": parser_engine_cls.structural_tag_model,
         "supports_required_and_named": parser_engine_cls.supports_required_and_named,
-        **(tool_adapter_attrs or {}),
     }
     tool_adapter = type(
         f"{parser_engine_cls.__name__}ToolAdapter",
