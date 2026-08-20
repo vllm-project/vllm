@@ -4,10 +4,17 @@
 """
 Paged shared memory manager with LRU eviction.
 
-Manages a fixed-size shared memory pool divided into equal-sized blocks.
-Items can be allocated, written, read (with reference counting), pinned,
-and deleted.  A block‑level LRU cache automatically evicts idle cacheable
-items when free blocks run low.
+Write flow:
+- open_write(items):
+    allocates blocks atomically for multiple items, sets ref_count=-1.
+- close_write(uuid):
+    finalizes write; if not open_read, sets ref_count=0 and caches if eligible.
+
+Read flow:
+- open_read(uuid): increments ref_count, removes from cache if idle.
+- close_read(uuid): decrements ref_count; if becomes 0, re-caches if cacheable.
+
+Additional: pin/unpin prevent eviction; delete removes idle items.
 """
 
 from collections import deque
@@ -167,7 +174,6 @@ class PagedShmManager:
     def pin(self, uuid: str):
         """
         Pin an item so it will not be evicted. Only applicable if use_cache is True.
-        If the item is currently in the LRU cache, remove it and adjust available blocks.
         """
         item = self._get_item(uuid)
 

@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """
-Paged shared memory storage:
-Manages a shared memory segment divided into fixed-size blocks. Provides
-iterators and read/write methods supporting both CPU and GPU direct (batch)
-transfers.
+Paged shared memory storage
+The paged shared memory storage is utilized by three components.
+- PagedShmServer: Manages the entire lifecycle—creates on start, unlinks on stop.
+    No I/O operations.
+- API Server: Opens existing memory, writes preprocessed Multi-modal Tensors, and
+    closes (without unlinking) on exit.
+- GPU Worker: Opens existing memory, reads data with PIN_MEMORY-accelerated H2D
+    transfers, and closes (without unlinking) on exit.
 """
 
 import weakref
