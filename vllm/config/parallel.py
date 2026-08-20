@@ -677,6 +677,7 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "flashinfer_nvlink_one_sided",
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",
@@ -972,7 +973,7 @@ class ParallelConfig:
 
         if self.enable_eplb and self.eplb_config.communicator is None:
             # Prefer NIXL when available: zero-copy RDMA reads, compatible
-            # with both async EPLB and elastic EP (deferred remote setup).
+            # with both async EPLB and elastic EP.
             # Fallbacks: pynccl for elastic EP (stateless groups need it),
             # torch_gloo for static EP.  torch_nccl is avoided because NCCL
             # is incompatible with async EPLB (multi-stream conflicts) and

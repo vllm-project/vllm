@@ -43,11 +43,11 @@ from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
-    JobMetadata,
     JobResult,
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.fs.io import (
     batch_load_block,
@@ -95,13 +95,14 @@ class FileSystemTierManager(SecondaryTierManager):
     get_finished_jobs() polls job completion and returns completed JobResults.
 
     Cross-process sharing:
-        In order to enable KV cache sharing between multiple vLLM instances
-        using the same ``root_dir`` (e.g., via a shared PVC) the environment
-        variable ``PYTHONHASHSEED`` must be set to the same fixed value
-        (e.g., "0") on all instances. Without this, each process initializes
-        ``NONE_HASH`` (the chain-hash seed for block content hashes) with
-        random bytes, producing different block filenames for identical token
-        content.
+        KV cache sharing between multiple vLLM instances using the same
+        ``root_dir`` (e.g., via a shared PVC) works by default: ``NONE_HASH``
+        (the chain-hash seed for block content hashes) is derived from a fixed
+        default seed, so identical token content produces identical block
+        filenames across instances. Setting the ``PYTHONHASHSEED`` environment
+        variable to the same value on all instances overrides the default seed,
+        and is required to share a cache when using a non-cryptographic
+        prefix-caching hash algorithm, which seeds ``NONE_HASH`` randomly.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
@@ -214,12 +215,13 @@ class FileSystemTierManager(SecondaryTierManager):
         return LookupResult.HIT if result else LookupResult.MISS
 
     @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
+        keys = list(job_metadata.keys)
         if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
+            self._store_job_keys[job_metadata.job_id] = keys
         task = functools.partial(
             batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
+            [self.file_mapper.get_file_name(key) for key in keys],
             self._primary_kv_view,
             [int(bid) * self._block_size for bid in job_metadata.block_ids],
             self._block_size,
@@ -228,7 +230,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         # Track this load's keys so a failed promotion can mark only its failed
         # keys as a miss (see get_finished_jobs).
@@ -271,7 +273,7 @@ class FileSystemTierManager(SecondaryTierManager):
         """Collect finished jobs; a failed promotion marks only its failed keys
         as a miss here (scheduler thread)."""
         results = []
-        for job_id, success in self._pool.get_finished():
+        for job_id, success, transfer_time in self._pool.get_finished():
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
                 if success and keys:
@@ -298,10 +300,17 @@ class FileSystemTierManager(SecondaryTierManager):
                         job_id=job_id,
                         success=False,
                         successful_keys=tuple(successful) if successful else None,
+                        transfer_time=transfer_time,
                     )
                 )
-            else:
-                results.append(JobResult(job_id=job_id, success=success))
+                continue
+            results.append(
+                JobResult(
+                    job_id=job_id,
+                    success=success,
+                    transfer_time=transfer_time,
+                )
+            )
         return results
 
     @override

@@ -43,6 +43,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.configs.deepseek_vl2 import (
     DeepseekVLV2Config,
     MlpProjectorConfig,
@@ -244,6 +245,7 @@ class DeepseekVL2MultiModalProcessor(
     ) -> BatchFeature:
         if not mm_data:
             tokenizer = self.info.get_tokenizer()
+            assert isinstance(tokenizer, HfTokenizer)
             return tokenizer(prompt, add_special_tokens=True, return_tensors="pt")
 
         processed_outputs = super()._call_hf_processor(
@@ -268,7 +270,9 @@ class DeepseekVL2MultiModalProcessor(
 
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            images_spatial_crop=MultiModalFieldConfig.batched("image"),
+            images_spatial_crop=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -291,6 +295,7 @@ class DeepseekVL2MultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
 
                 num_image_tokens = self.info.get_num_image_tokens(
@@ -406,7 +411,9 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return parent, names[-1]
 
     # patch for timm ViT instance to support tensor parallel
-    def patch_vit_for_tp(self, vit: torch.nn.Module, quant_config: QuantizationConfig):
+    def patch_vit_for_tp(
+        self, vit: torch.nn.Module, quant_config: QuantizationConfig | None
+    ):
         try:
             import timm
         except ImportError as e:
