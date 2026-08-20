@@ -1755,24 +1755,37 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """Apply multi-modal prompt updates to token IDs."""
         tokenizer = self.info.get_tokenizer()
 
-        new_token_ids, match_result, placeholders = (
-            _apply_token_matches_with_placeholders(
-                token_ids,
-                mm_prompt_updates,
-                tokenizer,
-            )
+        uses_base_token_matching = (
+            type(self)._apply_token_matches
+            is BaseMultiModalProcessor._apply_token_matches
+            and type(self)._find_mm_placeholders
+            is BaseMultiModalProcessor._find_mm_placeholders
         )
 
-        if all(
-            all(update_idx is not None for update_idx in update_idxs)
-            for update_idxs in match_result.values()
-        ):
-            placeholders = {
-                modality: modality_placeholders
-                for modality, modality_placeholders in placeholders.items()
-                if modality_placeholders
-            }
-            return new_token_ids, placeholders
+        if uses_base_token_matching:
+            new_token_ids, match_result, placeholders = (
+                _apply_token_matches_with_placeholders(
+                    token_ids,
+                    mm_prompt_updates,
+                    tokenizer,
+                )
+            )
+
+            if all(
+                all(update_idx is not None for update_idx in update_idxs)
+                for update_idxs in match_result.values()
+            ):
+                placeholders = {
+                    modality: modality_placeholders
+                    for modality, modality_placeholders in placeholders.items()
+                    if modality_placeholders
+                }
+                return new_token_ids, placeholders
+        else:
+            new_token_ids, match_result = self._apply_token_matches(
+                token_ids,
+                mm_prompt_updates,
+            )
 
         # If the search text does not represent a special token,
         # it may have different token IDs in the prompt, because
@@ -1784,12 +1797,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # Since it is inefficient to search for all possible tokenizations
         # of the search text in the prompt, we instead perform string-based
         # updates on the decoded token IDs, then encode them back.
-        new_text, match_result = self._apply_text_matches(
-            _seq2text(tokenizer, token_ids, use_cache=False),
-            mm_prompt_updates,
-        )
+        if not all(
+            all(update_idx is not None for update_idx in update_idxs)
+            for update_idxs in match_result.values()
+        ):
+            new_text, match_result = self._apply_text_matches(
+                _seq2text(tokenizer, token_ids, use_cache=False),
+                mm_prompt_updates,
+            )
 
-        new_token_ids = _seq2tokens(tokenizer, new_text, use_cache=False)
+            new_token_ids = _seq2tokens(tokenizer, new_text, use_cache=False)
 
         matched_updates = defaultdict[str, list[Sequence[ResolvedPromptUpdate]]](list)
         for modality, update_idxs in match_result.items():
