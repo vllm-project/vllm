@@ -422,6 +422,20 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         )
         return mm_placeholders
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> "BatchFeature":
+        # The prompt is decoded from tokens that already contain special
+        # tokens, so don't let the tokenizer add them again.
+        return self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(text=prompt, **mm_data),
+            dict(**mm_kwargs, add_special_tokens=False),
+        )
+
     def apply(
         self,
         inputs: ProcessorInputs,
@@ -436,29 +450,23 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         prompt = inputs.prompt
         mm_items = inputs.mm_data_items
         hf_processor_mm_kwargs = inputs.hf_processor_mm_kwargs
-        tokenization_kwargs = inputs.tokenization_kwargs
 
         with timing_ctx.record("apply_hf_processor"):
             hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-            if not isinstance(prompt, str):
-                # HF processors only accept text, and the decoded string already
-                # contains any special tokens, so don't let them be added again
-                prompt = hf_processor.decode(prompt)
-                tokenization_kwargs = {
-                    **tokenization_kwargs,
-                    "add_special_tokens": False,
-                }
+            # HF processors only accept text, and the decoded string already
+            # contains any special tokens, so don't let them be added again
+            # (`_call_hf_processor` disables `add_special_tokens`).
+            prompt = hf_processor.decode(prompt)
 
             # Bypass cached processor and always apply to the full set of mm inputs
             # NOTE: we can't just set caching=False because base class method
             # transforms outputs to `MultiModalKwargs` which is not going to
             # work for Transformers. The vision path has logic tied to
             # `mm_tokens_per_modality` in _apply_vision()
-            prompt_ids, processed_data, _ = self._apply_hf_processor_text_mm(
+            prompt_ids, processed_data = self._apply_hf_processor_text_mm(
                 prompt_text=prompt,
                 mm_items=mm_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                tokenization_kwargs=tokenization_kwargs,
             )
 
         # Use overrides if provided; fallback to data-dependent hashing.

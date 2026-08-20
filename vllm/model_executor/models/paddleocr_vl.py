@@ -249,7 +249,6 @@ class PaddleOCRVLMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
             final_mm_kwargs = dict(mm_kwargs or {})
@@ -259,7 +258,7 @@ class PaddleOCRVLMultiModalProcessor(
             processed_outputs = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**final_mm_kwargs),
                 dict(text=prompt, **mm_data),
-                dict(**mm_kwargs, **tok_kwargs),
+                mm_kwargs,
             )
             num_patches_per_image = processed_outputs["image_grid_thw"].prod(-1)
             processed_outputs["pixel_values"] = processed_outputs["pixel_values"].split(

@@ -1306,7 +1306,6 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
@@ -1314,15 +1313,10 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
             mm_data["audio"] = audios
         mm_kwargs = dict(mm_kwargs)
         processor_kwargs = _filter_moss_audio_processor_config(mm_kwargs)
-        tok_kwargs = {
-            key: value
-            for key, value in tok_kwargs.items()
-            if key not in MOSS_AUDIO_PROCESSOR_CONFIG_KEYS
-        }
         return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**processor_kwargs),
             dict(text=prompt, **mm_data),
-            dict(**tok_kwargs),
+            {},
         )
 
     def _get_mm_fields_config(
