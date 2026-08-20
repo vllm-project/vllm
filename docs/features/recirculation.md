@@ -31,6 +31,10 @@ When `beta` is omitted, vLLM uses the convex coefficient
 over the first `ramp_tokens` positions and adjusts the convex `beta`
 accordingly.
 
+An identity configuration with `alpha = 0` and `beta` omitted or set to `1`
+disables Recirculation. It therefore agrees exactly with the baseline and does
+not incur a redundant upper-layer pass.
+
 The paper reports the following fixed configurations for its pretrained-model
 perplexity evaluation:
 
@@ -52,6 +56,35 @@ from the normal pass, and the recirculated cache affects later blocks.
 For exact tokenwise evaluation, set `--long-prefill-token-threshold 1` and do
 not enable speculative decoding. For throughput experiments, increase the
 threshold to sweep the block size and measure the quality-throughput tradeoff.
+
+## Reproducible evaluation
+
+`benchmarks/benchmark_recirculation.py` scores deterministic, pre-tokenized
+1024-token C4 windows. It excludes the first token in each independent window,
+reports token-weighted negative log-likelihood and perplexity, and records
+latency, decode throughput, peak GPU memory, revisions, and window hashes.
+
+Install the optional dataset dependency, then reuse the same window file for
+both quality runs:
+
+```bash
+uv pip install 'datasets>=3.3.0,<=3.6.0'
+
+.venv/bin/python benchmarks/benchmark_recirculation.py \
+  --mode baseline \
+  --windows-file results/recirculation-windows.json \
+  --output results/baseline-exact.json
+
+.venv/bin/python benchmarks/benchmark_recirculation.py \
+  --mode recirculation \
+  --windows-file results/recirculation-windows.json \
+  --output results/recirculation-exact.json
+```
+
+Use `--num-windows 50` for a larger sample. For a normal-scheduler baseline
+performance measurement, add `--long-prefill-token-threshold 0
+--performance-only`. The exact runs default to one sequence, eager BF16,
+`max_model_len=1024`, no prefix caching, and no speculative decoding.
 
 ## Current restrictions
 

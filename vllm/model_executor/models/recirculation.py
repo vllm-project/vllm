@@ -51,6 +51,8 @@ class RecirculationConfig:
             ramp_tokens=raw_config.get("ramp_tokens", 0),
         )
         config.validate(hf_config.num_hidden_layers)
+        if config.alpha == 0.0 and config.beta in (None, 1.0):
+            return None
         return config
 
     def validate(self, num_hidden_layers: int) -> None:
