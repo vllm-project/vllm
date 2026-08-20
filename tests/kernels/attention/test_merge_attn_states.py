@@ -15,6 +15,14 @@ from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
 )
 
+pytestmark = [
+    pytest.mark.skip_global_cleanup,
+    pytest.mark.skipif(
+        not current_platform.is_cuda_alike(),
+        reason="merge_attn_states kernels require CUDA or ROCm.",
+    ),
+]
+
 
 # Naive PyTorch Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 # can be used to combine partial attention results (in the split-KV case)
@@ -73,6 +81,32 @@ DTYPES = [torch.float32, torch.half, torch.bfloat16]
 all_case_info: list[tuple] = []
 
 
+@pytest.mark.parametrize("merge_fn", [merge_attn_states_cuda, merge_attn_states_triton])
+@pytest.mark.parametrize("output_dtype", [torch.float32, torch.half, torch.bfloat16])
+def test_merge_attn_states_both_empty(merge_fn, output_dtype) -> None:
+    """When a token is empty on both sides (both LSE -inf), the 0/0 softmax
+    scales must not surface as NaN in the merged output."""
+    num_tokens, num_heads, head_size = 6, 8, 128
+    prefix_output = torch.zeros(
+        num_tokens, num_heads, head_size, device="cuda", dtype=output_dtype
+    )
+    prefix_lse = torch.randn(num_heads, num_tokens, device="cuda")
+    suffix_output = torch.zeros(
+        num_tokens, num_heads, head_size, device="cuda", dtype=output_dtype
+    )
+    suffix_lse = torch.randn(num_heads, num_tokens, device="cuda")
+
+    # Tokens 2 and 3 are empty on both sides.
+    empty = slice(2, 4)
+    prefix_lse[:, empty] = float("-inf")
+    suffix_lse[:, empty] = float("-inf")
+
+    output = torch.empty_like(prefix_output)
+    merge_fn(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
+
+    assert not output.isnan().any()
+
+
 def generate_markdown_table():
     global all_case_info
     table_header = (
@@ -127,12 +161,6 @@ def test_merge_attn_states(
     input_dtype: torch.dtype,
     use_fp8: bool,
 ):
-    if not current_platform.is_cuda():
-        pytest.skip(
-            "Currently only support compare triton merge_attn_states "
-            "with custom cuda merge_attn_states kernel"
-        )
-
     NUM_TOKENS = num_tokens
     NUM_HEADS = num_query_heads
     HEAD_SIZE = head_size

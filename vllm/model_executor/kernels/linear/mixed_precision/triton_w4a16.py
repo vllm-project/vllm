@@ -400,12 +400,40 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         if self.w_zp_name is not None:
             zp = getattr(layer, self.w_zp_name, None)
             if zp is not None:
-                # Checkpoint: [N//8, K//G] int32 (N packed at dim 0, K//G at dim 1)
-                # Kernel needs: [K//G, N//8] — just transpose
+                # Kernel needs [K//G, N//8]:
+                #        input(K) at dim 0, output(N) packed at dim 1.
+                # AutoGPTQ:
+                #        output_dim=1 -> already [K//G, N//8], no transpose.
+                # compressed-tensors:
+                #        output_dim=0 -> [N//8, K//G], needs transpose.
+                # None (unknown):
+                #        infer from shape; if square (ambiguous), default to transpose.
+                zp_output_dim = getattr(zp, "output_dim", None)
+                if zp_output_dim is not None:
+                    needs_transpose = zp_output_dim != 1
+                else:
+                    # in case output_dim is None
+                    c = self.config
+                    K, N = c.partition_weight_shape
+                    group_size = c.group_size if c.group_size != -1 else K
+                    expected_shape = (K // group_size, N // 8)
+                    transposed_shape = (N // 8, K // group_size)
+                    if (
+                        tuple(zp.data.shape) == expected_shape
+                        and expected_shape != transposed_shape
+                    ):
+                        needs_transpose = False
+                    else:
+                        needs_transpose = True
+                zp_data = (
+                    zp.data.t().contiguous()
+                    if needs_transpose
+                    else zp.data.contiguous()
+                )
                 replace_parameter(
                     layer,
                     self.w_zp_name,
-                    torch.nn.Parameter(zp.data.t().contiguous(), requires_grad=False),
+                    torch.nn.Parameter(zp_data, requires_grad=False),
                 )
 
     def apply_weights(
@@ -421,7 +449,11 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         group_size = c.group_size if c.group_size != -1 else K
 
         # For symmetric types (uint4b8), use the scalar bias; no zeros tensor
-        zp_bias = c.weight_type.bias if c.weight_type.has_bias() else 0
+        if c.weight_type.has_bias():
+            zp_bias = c.weight_type.bias
+            w_zp = None  # symmetric: ignore qzeros, use scalar bias instead
+        else:
+            zp_bias = 0
 
         output = triton_w4a16_gemm(
             a=x_2d,

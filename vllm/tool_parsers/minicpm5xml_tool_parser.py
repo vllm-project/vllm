@@ -360,7 +360,7 @@ def _parse_function_block(
                 if not key:
                     has_invalid_param = True
                     break
-                val_text = (param.text or "").strip()
+                val_text = param.text or ""
                 if not _add_argument(
                     func_name or "",
                     key,
@@ -392,7 +392,8 @@ def _parse_function_block(
                 val_text = pm.group(2) or ""
                 if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
                     val_text = val_text[len("<![CDATA[") : -len("]]>")]
-                val_text = val_text.strip()
+                else:
+                    val_text = val_text.strip()
                 if not _add_argument(
                     func_name or "",
                     key,
@@ -445,7 +446,8 @@ def _parse_partial_params(
         val_text = pm.group(2) or ""
         if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
             val_text = val_text[len("<![CDATA[") : -len("]]>")]
-        val_text = val_text.strip()
+        else:
+            val_text = val_text.strip()
         _add_argument(
             func_name,
             key,

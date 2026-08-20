@@ -23,12 +23,14 @@ import uvloop
 from fastapi import FastAPI, Response
 
 import vllm.envs as envs
+from vllm.entrypoints.launchers.launcher import NoSignalServer
 from vllm.logger import init_logger
 from vllm.utils.system_utils import (
     decorate_logs,
     kill_process_tree,
     set_process_title,
 )
+from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
 
 logger = init_logger(__name__)
 
@@ -235,7 +237,7 @@ def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
 
 
 def _run_python_vllm_dp_server(child_args: argparse.Namespace) -> None:
-    from vllm.entrypoints.openai.api_server import run_server
+    from vllm.entrypoints.launchers.api_server.entry import run_server
 
     uvloop.run(run_server(child_args))
 
@@ -257,7 +259,7 @@ def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
     name = f"APIServer_DP{child_args.data_parallel_rank}"
     set_process_title(name)
     decorate_logs(name)
-    if envs.VLLM_RUST_FRONTEND_PATH:
+    if envs.VLLM_USE_RUST_FRONTEND and envs.VLLM_RUST_FRONTEND_PATH:
         _run_rust_vllm_dp_server(child_args)
     else:
         _run_python_vllm_dp_server(child_args)
@@ -335,7 +337,7 @@ class DPSupervisor:
             ssl_cert_reqs=self.args.ssl_cert_reqs,
             ssl_ciphers=self.args.ssl_ciphers,
         )
-        supervisor_server = uvicorn.Server(config)
+        supervisor_server = NoSignalServer(config)
         supervisor_server_task = asyncio.create_task(
             supervisor_server.serve(),
             name="dp-supervisor",
@@ -512,7 +514,11 @@ class DPSupervisor:
 
     async def _shutdown_children(self) -> None:
         """Terminate the vLLM DP servers."""
-        timeout = self.args.shutdown_timeout + CHILD_EXIT_GRACE_S
+        process_timeout = get_engine_process_shutdown_timeout(
+            self.args.shutdown_timeout, self.args.shutdown_timeout
+        )
+        assert process_timeout is not None
+        timeout = process_timeout + CHILD_EXIT_GRACE_S
 
         try:
             logger.info(

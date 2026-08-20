@@ -412,6 +412,21 @@ def _has_module(module_name: str) -> bool:
     return True
 
 
+@cache
+def _has_module_spec(module_name: str) -> bool:
+    """Return True if *module_name* is installed, without importing it.
+
+    Unlike [`_has_module`][vllm.utils.import_utils._has_module], this only
+    resolves the import spec. It therefore does not pay the import cost of
+    heavyweight modules, at the price of not verifying that native
+    dependencies (shared libraries, etc.) are satisfied. The result is cached.
+    """
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
+
+
 def has_deep_ep() -> bool:
     """Whether the optional `deep_ep` package is available."""
     return _has_module("deep_ep")
@@ -504,8 +519,24 @@ def has_triton_kernels() -> bool:
 
 @cache
 def has_tilelang() -> bool:
-    """Whether the optional `tilelang` package is available."""
-    return _has_module("tilelang")
+    """Whether the optional `tilelang` package is available.
+
+    Only the import spec is checked: importing `tilelang` is expensive, so
+    callers must import it lazily at their point of use rather than relying
+    on this function to have imported it already.
+    """
+    if not _has_module_spec("tilelang"):
+        return False
+    # ROCm-only guard, imported lazily to avoid loading rocm on CUDA.
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
+
+        # TODO: Re-enable when tilelang supports gfx1250
+        if on_gfx1250():
+            return False
+    return True
 
 
 def has_arctic_inference() -> bool:
@@ -552,6 +583,11 @@ def has_cutedsl() -> bool:
 def has_humming() -> bool:
     """Whether the optional `humming` package is available."""
     return _has_module("humming")
+
+
+def has_quark():
+    """Whether the optional `quark` package is available."""
+    return _has_module("quark")
 
 
 def check_torchcodec_available():
