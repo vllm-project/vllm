@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Select the content-addressed ROCm base for this checkout, building it only
-# when the exact content ref is absent.
+# Select an immutable ROCm base image, building only on an exact registry miss.
 
 set -euo pipefail
 
@@ -10,10 +9,11 @@ CACHE_REPO="${ROCM_BASE_CACHE_REPO:-${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}}
 BUILDER_NAME="${ROCM_BASE_BUILDER_NAME:-vllm-rocm-base-builder}"
 DEFAULT_ROCM_BASE_METADATA_VERSION="2"
 DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE}"
+DEFAULT_ROCM_BASE_CONTENT_ARGS="BASE_IMAGE TRITON_BRANCH TRITON_REPO PYTORCH_BRANCH PYTORCH_REPO PYTORCH_VISION_BRANCH PYTORCH_VISION_REPO PYTORCH_AUDIO_BRANCH PYTORCH_AUDIO_REPO FA_BRANCH FA_REPO AITER_BRANCH AITER_REPO MORI_BRANCH MORI_REPO PYTORCH_ROCM_ARCH PYTHON_VERSION USE_SCCACHE SCCACHE_DOWNLOAD_URL SCCACHE_BUCKET_NAME SCCACHE_REGION_NAME SCCACHE_S3_NO_CREDENTIALS"
+DEFAULT_ROCM_BASE_BUILD_ARGS="${DEFAULT_ROCM_BASE_CONTENT_ARGS} SCCACHE_ENDPOINT"
 
 ROCM_BASE_LAYER_CACHE_REF=""
 ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-main"
-ROCM_BASE_STABLE_TAG_UPDATED=0
 declare -a ROCM_BASE_CACHE_ARGS=()
 
 metadata_set() {
@@ -75,14 +75,15 @@ normalize_repo_slug() {
 
 is_trusted_main_build() {
     local actual_repo=""
+    local stable_branch="${ROCM_BASE_STABLE_BRANCH:-${CI_BASE_STABLE_BRANCH:-main}}"
+    local stable_repo="${ROCM_BASE_STABLE_REPO_SLUG:-${CI_BASE_STABLE_REPO_SLUG:-vllm-project/vllm}}"
     local trusted_repo=""
 
     [[ "${BUILDKITE:-false}" == "true" ]] || return 1
     [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]] || return 1
-    [[ "${BUILDKITE_BRANCH:-}" == "${ROCM_BASE_STABLE_BRANCH:-main}" ]] || return 1
+    [[ "${BUILDKITE_BRANCH:-}" == "${stable_branch}" ]] || return 1
     actual_repo=$(normalize_repo_slug "${BUILDKITE_REPO:-}")
-    trusted_repo=$(normalize_repo_slug \
-        "${ROCM_BASE_STABLE_REPO_SLUG:-vllm-project/vllm}")
+    trusted_repo=$(normalize_repo_slug "${stable_repo}")
     [[ -n "${actual_repo}" && "${actual_repo}" == "${trusted_repo}" ]]
 }
 
@@ -143,6 +144,7 @@ extract_arg_default() {
         "${DOCKERFILE}" | head -1
 }
 
+# 0: found; 1: confirmed missing; 2: registry/parsing failure.
 resolve_image_digest() {
     local image_ref="$1"
     local attempts="${ROCM_IMAGE_DIGEST_ATTEMPTS:-4}"
@@ -159,7 +161,7 @@ resolve_image_digest() {
     if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ \
         || ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
         echo "Invalid image digest retry configuration" >&2
-        return 1
+        return 2
     fi
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
@@ -169,6 +171,14 @@ resolve_image_digest() {
         if ((status == 0)) && [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             printf '%s\n' "${digest}"
             return 0
+        fi
+        if ((status != 0)) && { grep -Eqi \
+            'manifest[ _]unknown|name[ _]unknown|no such manifest|unexpected status from (HEAD|GET) request to https?://[^[:space:]]+/v2/[^[:space:]]+/manifests/[^[:space:]]+:[[:space:]]*404([^0-9]|$)' \
+            <<< "${output}" \
+            || grep -Fqix -- "ERROR: ${image_ref}: not found" <<< "${output}" \
+            || grep -Fqix -- "ERROR: docker.io/${image_ref#docker.io/}: not found" \
+                <<< "${output}"; }; then
+            return 1
         fi
         if ((attempt < attempts)); then
             printf \
@@ -180,22 +190,35 @@ resolve_image_digest() {
 
     printf 'Failed to resolve digest for %s (status %d)\n%s\n' \
         "${image_ref}" "${status}" "${output:-<no output>}" >&2
-    return 1
+    return 2
+}
+
+canonical_pinned_image_ref() {
+    local image_ref="$1"
+    local digest="$2"
+    local repository="${image_ref%@*}"
+    local last_component="${repository##*/}"
+
+    [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    if [[ "${last_component}" == *:* ]]; then
+        repository="${repository%:*}"
+    fi
+    [[ -n "${repository}" ]] || return 1
+    printf '%s@%s\n' "${repository}" "${digest}"
 }
 
 trusted_base_content_ref() {
     local base_hash="$1"
-    local metadata_version="$2"
 
-    printf '%s:base-v%s-%s\n' "${BASE_REPO}" "${metadata_version}" "${base_hash}"
+    printf '%s:base-%s\n' "${BASE_REPO}" "${base_hash}"
 }
 
 scoped_base_content_ref() {
     local base_hash="$1"
-    local metadata_version="$2"
+    local scope=""
 
-    printf '%s:base-v%s-preview-%s\n' \
-        "${BASE_REPO}" "${metadata_version}" "${base_hash}"
+    scope=$(tag_component "$(rocm_base_layer_cache_scope)" 40)
+    printf '%s:base-%s-%s\n' "${BASE_REPO}" "${scope}" "${base_hash}"
 }
 
 find_matching_base_content_ref() {
@@ -210,20 +233,24 @@ find_matching_base_content_ref() {
     local attempts="${ROCM_IMAGE_DIGEST_ATTEMPTS:-4}"
     local delay_secs="${ROCM_IMAGE_DIGEST_RETRY_DELAY:-2}"
     local attempt=0
+    local digest_status=0
     local inspect_status=0
     shift 2
 
     if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ \
         || ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
         echo "Invalid image identity retry configuration" >&2
-        return 1
+        return 3
     fi
 
     for image_ref in "$@"; do
-        if ! digest=$(resolve_image_digest "${image_ref}"); then
-            continue
-        fi
-        immutable_ref="${image_ref}@${digest}"
+        digest_status=0
+        digest=$(resolve_image_digest "${image_ref}") || digest_status=$?
+        case "${digest_status}" in
+            0) immutable_ref="${image_ref}@${digest}" ;;
+            1) continue ;;
+            *) return 3 ;;
+        esac
         label_values=""
         for ((attempt = 1; attempt <= attempts; attempt++)); do
             inspect_status=0
@@ -252,71 +279,48 @@ find_matching_base_content_ref() {
             echo "ROCm base content ref has unexpected identity: ${immutable_ref}" >&2
             echo "  expected hash/version: ${expected_hash} / ${expected_version}" >&2
             echo "  found hash/version:    ${remote_hash} / ${remote_version}" >&2
-            # A content-addressed ref with the wrong identity is corrupt. The
-            # stable alias is allowed to describe older content and is only a
-            # migration/recovery candidate.
-            if [[ "${image_ref}" != "${BASE_REPO}:base" ]]; then
-                return 2
-            fi
+            return 2
         fi
         echo "Failed to read complete ROCm base identity labels: ${immutable_ref}" >&2
+        return 3
     done
     return 1
 }
 
-rocm_version_from_base_image() {
-    local base_image="$1"
-    local version=""
+resolve_rocm_base_arg_value() {
+    local arg_name="$1"
+    local use_sccache="$2"
 
-    version="$(sed -n -E 's/.*:([0-9]+\.[0-9]+(\.[0-9]+)?)-.*/\1/p' <<<"${base_image}")"
-    tag_component "${version:-${base_image}}" 16
+    case "${arg_name}" in
+        USE_SCCACHE)
+            printf '%s\n' "${use_sccache}"
+            ;;
+        *)
+            if [[ -v "${arg_name}" ]]; then
+                printf '%s\n' "${!arg_name}"
+            else
+                extract_arg_default "${arg_name}"
+            fi
+            ;;
+    esac
 }
 
-should_push_stable_tag() {
-    if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
-        return 1
-    fi
+hash_rocm_base_arg_values() {
+    local use_sccache="$1"
+    local pinned_base_image="$2"
+    local arg_name=""
+    local arg_value=""
+    shift 2 || true
 
-    if [[ "${ROCM_BASE_PUSH_STABLE_TAG:-}" == "0" ]]; then
-        return 1
-    fi
-
-    is_trusted_main_build
-}
-
-trusted_main_tip_matches_build() {
-    local branch="${ROCM_BASE_STABLE_BRANCH:-main}"
-    local build_commit="${BUILDKITE_COMMIT:-}"
-    local remote_tip=""
-
-    is_trusted_main_build || return 1
-    if [[ ! "${build_commit}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-        echo "Skipping ROCm stable tag: Buildkite commit is missing or invalid" >&2
-        return 1
-    fi
-    remote_tip=$(git ls-remote --exit-code "${BUILDKITE_REPO}" \
-        "refs/heads/${branch}" 2>/dev/null | awk 'NR == 1 { print $1 }')
-    if [[ ! "${remote_tip}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-        echo "Skipping ROCm stable tag: could not resolve remote ${branch} tip" >&2
-        return 1
-    fi
-    if [[ "${remote_tip,,}" != "${build_commit,,}" ]]; then
-        echo "Skipping ROCm stable tag: ${branch} changed after ${build_commit} (${remote_tip})" >&2
-        return 1
-    fi
-    return 0
-}
-
-promote_stable_base_tag() {
-    local source_ref="$1"
-    local stable_tag="$2"
-
-    ROCM_BASE_STABLE_TAG_UPDATED=0
-    should_push_stable_tag && trusted_main_tip_matches_build || return 0
-
-    docker buildx imagetools create --prefer-index=false \
-        -t "${stable_tag}" "${source_ref}"
-    ROCM_BASE_STABLE_TAG_UPDATED=1
+    for arg_name in "$@"; do
+        [[ -n "${arg_name}" ]] || continue
+        if [[ "${arg_name}" == "BASE_IMAGE" ]]; then
+            arg_value="${pinned_base_image}"
+        else
+            arg_value=$(resolve_rocm_base_arg_value "${arg_name}" "${use_sccache}")
+        fi
+        printf 'arg:%s=%s\n' "${arg_name}" "${arg_value:-<empty>}"
+    done
 }
 
 setup_builder() {
@@ -331,36 +335,23 @@ setup_builder() {
 
 compute_base_content_hash() {
     local use_sccache="$1"
-    local base_image_digest="$2"
+    local pinned_base_image="$2"
+    local metadata_version="${3:-${ROCM_BASE_METADATA_VERSION:-${DEFAULT_ROCM_BASE_METADATA_VERSION}}}"
     local content_files="${ROCM_BASE_CONTENT_FILES:-${DEFAULT_ROCM_BASE_CONTENT_FILES}}"
-    local sccache_arg=""
-    local sccache_value=""
+    local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
     local -a content_paths=()
+    local -a content_arg_names=()
 
     read -r -a content_paths <<< "${content_files}"
+    read -r -a content_arg_names <<< "${content_args}"
 
     {
+        printf 'metadata-version:%s\n' "${metadata_version}"
         printf 'content-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
         printf 'dockerfile:%s\n' "${DOCKERFILE}"
-        printf 'base-image-digest:%s\n' "${base_image_digest}"
-        printf 'use-sccache:%s\n' "${use_sccache}"
-        if [[ "${use_sccache}" == "1" ]]; then
-            # These values can change the installed binary or final image
-            # configuration. SCCACHE_ENDPOINT is transport-only and therefore
-            # deliberately excluded from image identity.
-            for sccache_arg in \
-                SCCACHE_DOWNLOAD_URL \
-                SCCACHE_BUCKET_NAME \
-                SCCACHE_REGION_NAME \
-                SCCACHE_S3_NO_CREDENTIALS; do
-                sccache_value="${!sccache_arg:-}"
-                if [[ -z "${sccache_value}" ]]; then
-                    sccache_value=$(extract_arg_default "${sccache_arg}")
-                fi
-                printf 'arg:%s=%s\n' \
-                    "${sccache_arg}" "${sccache_value:-<empty>}"
-            done
-        fi
+        printf 'resolved-build-args:\n'
+        hash_rocm_base_arg_values \
+            "${use_sccache}" "${pinned_base_image}" "${content_arg_names[@]}"
     } | sha256sum | cut -d' ' -f1
 }
 
@@ -387,13 +378,17 @@ build_base_image() {
     local writable_content_tag=""
     local build_ref=""
     local immutable_ref=""
-    local selected_digest=""
-    local stable_digest=""
     local reuse_status=0
+    local cache_hit=0
+    local build_required=0
     local content_files="${ROCM_BASE_CONTENT_FILES:-${DEFAULT_ROCM_BASE_CONTENT_FILES}}"
     local content_files_hash=""
     local metadata_version="${ROCM_BASE_METADATA_VERSION:-${DEFAULT_ROCM_BASE_METADATA_VERSION}}"
-    local -a sccache_args=()
+    local build_arg_names_config="${ROCM_BASE_BUILD_ARGS:-${DEFAULT_ROCM_BASE_BUILD_ARGS}}"
+    local arg_name=""
+    local arg_value=""
+    local -a build_args=()
+    local -a build_arg_names=()
     local -a content_paths=()
 
     if [[ ! -f "${DOCKERFILE}" ]]; then
@@ -409,28 +404,33 @@ build_base_image() {
         return 1
     fi
 
-    base_image_arg="$(extract_arg_default BASE_IMAGE)"
+    base_image_arg="$(resolve_rocm_base_arg_value BASE_IMAGE "${use_sccache}")"
     if ! base_image_digest=$(resolve_image_digest "${base_image_arg}"); then
         echo "Failed to resolve ROCm base input image: ${base_image_arg}" >&2
         return 1
     fi
-    pinned_base_image="${base_image_arg%@*}@${base_image_digest}"
+    if ! pinned_base_image=$(canonical_pinned_image_ref \
+        "${base_image_arg}" "${base_image_digest}"); then
+        echo "Failed to pin ROCm base input image: ${base_image_arg}" >&2
+        return 1
+    fi
     read -r -a content_paths <<< "${content_files}"
     content_files_hash="$(compute_content_hash "${content_paths[@]}")"
-    base_hash=$(compute_base_content_hash "${use_sccache}" "${base_image_digest}")
-    rocm_version="$(rocm_version_from_base_image "${base_image_arg}")"
-    triton_arg="$(extract_arg_default TRITON_BRANCH)"
-    pytorch_arg="$(extract_arg_default PYTORCH_BRANCH)"
-    pytorch_vision_arg="$(extract_arg_default PYTORCH_VISION_BRANCH)"
-    pytorch_audio_arg="$(extract_arg_default PYTORCH_AUDIO_BRANCH)"
-    fa_arg="$(extract_arg_default FA_BRANCH)"
-    aiter_arg="$(extract_arg_default AITER_BRANCH)"
-    mori_arg="$(extract_arg_default MORI_BRANCH)"
-    python_version_arg="$(extract_arg_default PYTHON_VERSION)"
-    pytorch_rocm_arch_arg="$(extract_arg_default PYTORCH_ROCM_ARCH)"
-    dependency_summary="base=${base_image_arg},rocm=${rocm_version},python=${python_version_arg},pytorch=${pytorch_arg},torchvision=${pytorch_vision_arg},torchaudio=${pytorch_audio_arg},triton=${triton_arg},flash-attn=${fa_arg},aiter=${aiter_arg},mori=${mori_arg},pytorch-rocm-arch=${pytorch_rocm_arch_arg}"
-    trusted_content_tag=$(trusted_base_content_ref "${base_hash}" "${metadata_version}")
-    scoped_content_tag=$(scoped_base_content_ref "${base_hash}" "${metadata_version}")
+    base_hash=$(compute_base_content_hash \
+        "${use_sccache}" "${pinned_base_image}" "${metadata_version}")
+    rocm_version="$(tag_component "${base_image_digest}" 16)"
+    triton_arg="$(resolve_rocm_base_arg_value TRITON_BRANCH "${use_sccache}")"
+    pytorch_arg="$(resolve_rocm_base_arg_value PYTORCH_BRANCH "${use_sccache}")"
+    pytorch_vision_arg="$(resolve_rocm_base_arg_value PYTORCH_VISION_BRANCH "${use_sccache}")"
+    pytorch_audio_arg="$(resolve_rocm_base_arg_value PYTORCH_AUDIO_BRANCH "${use_sccache}")"
+    fa_arg="$(resolve_rocm_base_arg_value FA_BRANCH "${use_sccache}")"
+    aiter_arg="$(resolve_rocm_base_arg_value AITER_BRANCH "${use_sccache}")"
+    mori_arg="$(resolve_rocm_base_arg_value MORI_BRANCH "${use_sccache}")"
+    python_version_arg="$(resolve_rocm_base_arg_value PYTHON_VERSION "${use_sccache}")"
+    pytorch_rocm_arch_arg="$(resolve_rocm_base_arg_value PYTORCH_ROCM_ARCH "${use_sccache}")"
+    dependency_summary="base=${pinned_base_image},rocm=${rocm_version},python=${python_version_arg},pytorch=${pytorch_arg},torchvision=${pytorch_vision_arg},torchaudio=${pytorch_audio_arg},triton=${triton_arg},flash-attn=${fa_arg},aiter=${aiter_arg},mori=${mori_arg},pytorch-rocm-arch=${pytorch_rocm_arch_arg}"
+    trusted_content_tag=$(trusted_base_content_ref "${base_hash}")
+    scoped_content_tag=$(scoped_base_content_ref "${base_hash}")
     # Preview writes share an exact-content namespace so stacked PRs can reuse
     # identical images. They may import the trusted ref, but never overwrite it.
     if is_trusted_main_build; then
@@ -441,25 +441,22 @@ build_base_image() {
     fi
 
     configure_rocm_base_layer_cache
-
-    if [[ "${use_sccache}" == "1" ]]; then
-        for env_name in \
-            SCCACHE_DOWNLOAD_URL \
-            SCCACHE_ENDPOINT \
-            SCCACHE_BUCKET_NAME \
-            SCCACHE_REGION_NAME \
-            SCCACHE_S3_NO_CREDENTIALS; do
-            if [[ -n "${!env_name:-}" ]]; then
-                sccache_args+=(--build-arg "${env_name}=${!env_name}")
-            fi
-        done
-    fi
+    read -r -a build_arg_names <<< "${build_arg_names_config}"
+    for arg_name in "${build_arg_names[@]}"; do
+        [[ -n "${arg_name}" ]] || continue
+        if [[ "${arg_name}" == "BASE_IMAGE" ]]; then
+            arg_value="${pinned_base_image}"
+        else
+            arg_value=$(resolve_rocm_base_arg_value "${arg_name}" "${use_sccache}")
+        fi
+        build_args+=(--build-arg "${arg_name}=${arg_value}")
+    done
 
     echo "--- :docker: Preparing ROCm base image"
     echo "Dockerfile: ${DOCKERFILE}"
     echo "Trusted content tag: ${trusted_content_tag}"
     echo "Writable content tag: ${writable_content_tag}"
-    echo "Stable tag: ${stable_tag} ($(should_push_stable_tag && echo enabled || echo disabled))"
+    echo "Stable tag: ${stable_tag} (promotion deferred until smoke passes)"
     echo "Content hash: ${base_hash}"
     echo "Dependency summary: ${dependency_summary}"
     echo "USE_SCCACHE: ${use_sccache}"
@@ -471,38 +468,31 @@ build_base_image() {
         if [[ "${trusted_content_tag}" == "${scoped_content_tag}" ]]; then
             immutable_ref=$(find_matching_base_content_ref \
                 "${base_hash}" "${metadata_version}" \
-                "${trusted_content_tag}" "${stable_tag}") || reuse_status=$?
+                "${trusted_content_tag}") || reuse_status=$?
         else
             immutable_ref=$(find_matching_base_content_ref \
                 "${base_hash}" "${metadata_version}" \
-                "${trusted_content_tag}" "${scoped_content_tag}" \
-                "${stable_tag}") \
+                "${trusted_content_tag}" "${scoped_content_tag}") \
                 || reuse_status=$?
+        fi
+        if [[ ${reuse_status} -gt 1 ]]; then
+            return 1
         fi
     else
         reuse_status=1
         echo "Forced/no-cache ROCm base build; bypassing content image reuse"
     fi
 
-    if ((reuse_status > 1)); then
-        return "${reuse_status}"
-    fi
-
     if [[ ${reuse_status} -eq 0 && -n "${immutable_ref}" ]]; then
+        cache_hit=1
         echo "Reusing ROCm base image with matching content: ${immutable_ref}"
-        if [[ "${immutable_ref%@*}" == "${stable_tag}" \
-            && "${writable_content_tag}" != "${stable_tag}" ]]; then
-            echo "Backfilling ROCm base content tag: ${writable_content_tag}"
-            docker buildx imagetools create --prefer-index=false \
-                -t "${writable_content_tag}" "${immutable_ref}"
-            if ! immutable_ref=$(find_matching_base_content_ref \
-                "${base_hash}" "${metadata_version}" \
-                "${writable_content_tag}"); then
-                echo "Backfilled ROCm base content tag failed identity validation" >&2
-                return 1
-            fi
-        fi
     else
+        if [[ "${ROCM_BASE_REFRESH_SKIP:-0}" == "1" ]]; then
+            echo "ROCM_BASE_REFRESH_SKIP=1 but no exact ROCm base image exists" >&2
+            return 1
+        fi
+        build_required=1
+        metadata_set "rocm-base-built-in-build" "1"
         build_ref="${writable_content_tag}"
         echo "No reusable ROCm base content image found; building ${build_ref}"
         setup_builder
@@ -512,9 +502,7 @@ build_base_image() {
             --provenance=false \
             --progress "${BUILDKIT_PROGRESS:-plain}" \
             --file "${DOCKERFILE}" \
-            --build-arg "BASE_IMAGE=${pinned_base_image}" \
-            --build-arg "USE_SCCACHE=${use_sccache}" \
-            "${sccache_args[@]}" \
+            "${build_args[@]}" \
             --label "org.opencontainers.image.source=https://github.com/vllm-project/vllm" \
             --label "org.opencontainers.image.vendor=vLLM" \
             --label "org.opencontainers.image.title=vLLM ROCm base" \
@@ -545,41 +533,24 @@ build_base_image() {
         fi
     fi
 
-    selected_digest="${immutable_ref##*@}"
     metadata_set "rocm-base-image" "${immutable_ref}"
-    metadata_set "rocm-base-push-stable-tag" "0"
-    stable_digest=$(resolve_image_digest "${stable_tag}" 2>/dev/null || true)
-    if [[ -n "${stable_digest}" && "${stable_digest}" == "${selected_digest}" ]]; then
-        echo "--- :white_check_mark: Existing ROCm base is current"
-        echo "Stable ${stable_tag} already resolves to ${selected_digest}"
-        return 0
+    metadata_set "rocm-base-content-hash" "${base_hash}"
+    metadata_set "rocm-base-image-content" "${immutable_ref%@*}"
+    metadata_set "rocm-base-image-stable" "${stable_tag}"
+    # Do not overwrite a build latch on retry. If an earlier attempt did not
+    # publish an outcome, the missing key makes the consumer build fully.
+    if ((build_required == 0)) \
+        && [[ "${BUILDKITE_RETRY_COUNT:-0}" == "0" ]]; then
+        metadata_set "rocm-base-built-in-build" "0"
     fi
-
-    promote_stable_base_tag "${immutable_ref}" "${stable_tag}"
-
-    metadata_set "rocm-base-push-stable-tag" "${ROCM_BASE_STABLE_TAG_UPDATED}"
-    metadata_set "rocm-base-refresh" "1"
+    metadata_set "rocm-base-build-required" "${build_required}"
+    metadata_set "rocm-base-cache-hit" "${cache_hit}"
 
     echo "--- :white_check_mark: ROCm base image published"
     echo "Use BASE_IMAGE=${immutable_ref} for downstream ROCm CI builds"
 }
 
 main() {
-    metadata_set "rocm-base-refresh" "0"
-
-    if [[ "${ROCM_BASE_REFRESH_SKIP:-0}" == "1" ]]; then
-        local stable_ref="${BASE_REPO}:base"
-        local stable_digest=""
-
-        if ! stable_digest=$(resolve_image_digest "${stable_ref}"); then
-            echo "Could not pin explicitly skipped ROCm base: ${stable_ref}" >&2
-            return 1
-        fi
-        metadata_set "rocm-base-image" "${stable_ref}@${stable_digest}"
-        metadata_set "rocm-base-push-stable-tag" "0"
-        echo "ROCM_BASE_REFRESH_SKIP=1; pinned current stable base at ${stable_digest}"
-        return 0
-    fi
     build_base_image
 }
 

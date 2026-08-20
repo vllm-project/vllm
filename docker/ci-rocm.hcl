@@ -103,6 +103,21 @@ variable "DEEPEP_CACHE_KEY" {
   default = ""
 }
 
+# Source-scoped dependency cache refs for untrusted writers. Empty values keep
+# origin/main's canonical cache names; PRs add these as read candidates and use
+# them as their only dependency-cache export destinations.
+variable "NIXL_CACHE_WRITE_REF" {
+  default = ""
+}
+
+variable "ROCSHMEM_CACHE_WRITE_REF" {
+  default = ""
+}
+
+variable "DEEPEP_CACHE_WRITE_REF" {
+  default = ""
+}
+
 # Docker Hub registry cache for AMD builds.
 #
 # A separate repo (rocm/vllm-ci-cache) is used for BuildKit layer cache.
@@ -244,6 +259,9 @@ function "get_cache_to_rocm_rust" {
 function "get_cache_from_rocm_deps" {
   params = []
   result = compact([
+    NIXL_CACHE_WRITE_REF != "" ? "type=registry,ref=${NIXL_CACHE_WRITE_REF}" : "",
+    ROCSHMEM_CACHE_WRITE_REF != "" ? "type=registry,ref=${ROCSHMEM_CACHE_WRITE_REF}" : "",
+    DEEPEP_CACHE_WRITE_REF != "" ? "type=registry,ref=${DEEPEP_CACHE_WRITE_REF}" : "",
     NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY}" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH}" : ""),
     ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY}" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH}" : ""),
     DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY}" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH}" : ""),
@@ -253,21 +271,21 @@ function "get_cache_from_rocm_deps" {
 function "get_cache_to_rocm_nixl" {
   params = []
   result = compact([
-    NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY},mode=min" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH},mode=min" : ""),
+    NIXL_CACHE_WRITE_REF != "" ? "type=registry,ref=${NIXL_CACHE_WRITE_REF},mode=min" : (NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY},mode=min" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH},mode=min" : "")),
   ])
 }
 
 function "get_cache_to_rocm_rocshmem" {
   params = []
   result = compact([
-    ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY},mode=min" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH},mode=min" : ""),
+    ROCSHMEM_CACHE_WRITE_REF != "" ? "type=registry,ref=${ROCSHMEM_CACHE_WRITE_REF},mode=min" : (ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY},mode=min" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH},mode=min" : "")),
   ])
 }
 
 function "get_cache_to_rocm_deepep" {
   params = []
   result = compact([
-    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY},mode=min" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH},mode=min" : ""),
+    DEEPEP_CACHE_WRITE_REF != "" ? "type=registry,ref=${DEEPEP_CACHE_WRITE_REF},mode=min" : (DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY},mode=min" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH},mode=min" : "")),
   ])
 }
 
@@ -282,6 +300,9 @@ target "_ci-rocm" {
     ARG_PYTORCH_ROCM_ARCH = PYTORCH_ROCM_ARCH
     CI_BASE_IMAGE         = CI_BASE_IMAGE
     max_jobs              = CI_MAX_JOBS
+  }
+  labels = {
+    "vllm.rocm.ci_base_image" = CI_BASE_IMAGE
   }
 }
 
@@ -344,15 +365,20 @@ group "test-rocm-ci-with-wheel" {
   targets = ["rust-rocm-ci", "csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm"]
 }
 
-# Primary output tag for the ci_base build. In Buildkite this is a unique,
-# build-scoped tag; ci-bake-rocm.sh validates it before creating content and
-# stable aliases.
+# Image tags for the ci_base build. ci-bake-rocm.sh publishes a
+# content-scoped primary tag plus a build-scoped handoff alias.
+# Stable runtime aliases are promoted only after the build-scoped
+# test image passes smoke validation.
 variable "CI_BASE_IMAGE_TAG" {
   default = "rocm/vllm-dev:ci_base"
 }
 
-# Versioned, content-addressed trusted ref. Preview builds import it read-only;
-# the wrapper creates their source-scoped content alias after validation.
+variable "CI_BASE_IMAGE_TAG_BUILD_EXTRA" {
+  default = ""
+}
+
+# Content-addressed trusted ref. PR builds import it read-only and
+# publish their output to a separately scoped CI_BASE_IMAGE_TAG.
 variable "CI_BASE_TRUSTED_CONTENT_REF" {
   default = ""
 }
@@ -407,7 +433,10 @@ target "ci-base-rocm-ci" {
     get_cache_from_rocm_deps(),
   )
   cache-to = ["type=inline"]
-  tags     = compact([CI_BASE_IMAGE_TAG])
+  tags     = compact([
+    CI_BASE_IMAGE_TAG,
+    CI_BASE_IMAGE_TAG_BUILD_EXTRA,
+  ])
   attest   = ["type=provenance,disabled=true"]
   output   = ["type=registry"]
 }
