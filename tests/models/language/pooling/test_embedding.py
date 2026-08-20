@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import pytest
+import torch
+from transformers import AutoModel
 
+from vllm import PoolingParams
 from vllm.config import PoolerConfig
-from vllm.platforms import current_platform
 
 from ...utils import check_embeddings_close
 
@@ -18,20 +19,33 @@ from ...utils import check_embeddings_close
         # case won't pass because gte-Qwen2-1.5B-instruct will cache custom
         # model code with bidirectional attention.
         # [Decoder-only]
-        pytest.param("BAAI/bge-multilingual-gemma2",
-                     marks=[pytest.mark.core_model]),
+        pytest.param(
+            "BAAI/bge-multilingual-gemma2",
+            marks=[pytest.mark.core_model, pytest.mark.slow_test],
+        ),
         pytest.param(
             "intfloat/e5-mistral-7b-instruct",
-            # CPU v1 doesn't support sliding window
-            marks=[pytest.mark.core_model]),
-        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base",
-                     marks=[pytest.mark.cpu_model]),
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param(
+            "ssmits/Qwen2-7B-Instruct-embed-base", marks=[pytest.mark.cpu_model]
+        ),
         # [Encoder-only]
-        pytest.param("BAAI/bge-base-en-v1.5", marks=[pytest.mark.core_model]),
+        pytest.param(
+            "BAAI/bge-base-en-v1.5",
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.cpu_model,
+                pytest.mark.slow_test,
+            ],
+        ),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-small"),
         # [Cross-Encoder]
-        pytest.param("sentence-transformers/stsb-roberta-base-v2"),
+        pytest.param(
+            "sentence-transformers/stsb-roberta-base-v2",
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
     ],
 )
 def test_models(
@@ -39,23 +53,17 @@ def test_models(
     vllm_runner,
     example_prompts,
     model,
-    monkeypatch,
 ) -> None:
-
-    if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
-        # ROCm Triton FA does not currently support sliding window attention
-        # switch to use ROCm CK FA backend
-        monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
-
     vllm_extra_kwargs = {}
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
-        vllm_extra_kwargs["override_pooler_config"] = \
-            PoolerConfig(pooling_type="MEAN", normalize=False)
+        vllm_extra_kwargs["pooler_config"] = PoolerConfig(
+            seq_pooling_type="MEAN", use_activation=False
+        )
 
-    max_model_len: Optional[int] = 512
+    max_model_len: int | None = 512
     if model in [
-            "sentence-transformers/all-MiniLM-L12-v2",
-            "sentence-transformers/stsb-roberta-base-v2"
+        "sentence-transformers/all-MiniLM-L12-v2",
+        "sentence-transformers/stsb-roberta-base-v2",
     ]:
         max_model_len = None
 
@@ -70,14 +78,140 @@ def test_models(
     with hf_runner(model, is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
-    with vllm_runner(model,
-                     runner="pooling",
-                     max_model_len=max_model_len,
-                     **vllm_extra_kwargs) as vllm_model:
+    with vllm_runner(
+        model, runner="pooling", max_model_len=max_model_len, **vllm_extra_kwargs
+    ) as vllm_model:
         vllm_outputs = vllm_model.embed(example_prompts)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "BAAI/bge-base-en-v1.5",
+        "intfloat/multilingual-e5-small",
+    ],
+)
+@torch.inference_mode()
+def test_encoder_only_model_runner_v2_attention(
+    hf_runner,
+    vllm_runner,
+    monkeypatch,
+    model: str,
+) -> None:
+    prompts = [
+        "short input",
+        "a longer input that exercises mixed sequence lengths",
+    ]
+
+    with hf_runner(model, dtype="float", auto_cls=AutoModel) as hf_model:
+        hf_outputs = []
+        for prompt in prompts:
+            inputs = hf_model.tokenizer(prompt, return_tensors="pt")
+            output = hf_model.model(**hf_model.wrap_device(inputs))
+            embedding = torch.nn.functional.normalize(
+                output.last_hidden_state[0, -1].float(), dim=0
+            )
+            hf_outputs.append(embedding.cpu().tolist())
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype="float",
+        max_model_len=64,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.25,
+        pooler_config=PoolerConfig(
+            task="embed", seq_pooling_type="LAST", use_activation=True
+        ),
+    ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+        vllm_outputs = vllm_model.embed(prompts)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
+
+
+@pytest.mark.core_model
+def test_encoder_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> None:
+    model = "sentence-transformers/all-MiniLM-L6-v2"
+    prompt_batches = [
+        ["short input"],
+        [
+            "short input",
+            "a longer input that exercises mixed sequence lengths",
+        ],
+    ]
+
+    with hf_runner(model, is_sentence_transformer=True) as hf_model:
+        hf_outputs = [hf_model.encode(prompts) for prompts in prompt_batches]
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        model,
+        runner="pooling",
+        max_model_len=64,
+    ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+        vllm_outputs = [vllm_model.embed(prompts) for prompts in prompt_batches]
+
+    for hf_batch, vllm_batch in zip(hf_outputs, vllm_outputs):
+        check_embeddings_close(
+            embeddings_0_lst=hf_batch,
+            embeddings_1_lst=vllm_batch,
+            name_0="hf",
+            name_1="vllm",
+            tol=1e-2,
+        )
+
+
+@pytest.mark.core_model
+def test_matryoshka_dimensions_model_runner_v2(
+    hf_runner, vllm_runner, monkeypatch
+) -> None:
+    model = "Snowflake/snowflake-arctic-embed-m-v1.5"
+    prompts = ["short input", "a longer input for a different output width"]
+    dimensions = [None, 256]
+
+    with hf_runner(model, is_sentence_transformer=True) as hf_model:
+        hf_outputs = hf_model.encode(prompts)
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        model,
+        runner="pooling",
+        max_model_len=64,
+        gpu_memory_utilization=0.25,
+    ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+        vllm_outputs = vllm_model.embed(
+            prompts,
+            pooling_params=[PoolingParams(dimensions=d) for d in dimensions],
+        )
+
+    expected_outputs = []
+    for output, dimension in zip(hf_outputs, dimensions):
+        output = torch.as_tensor(output)
+        if dimension is not None:
+            output = torch.nn.functional.normalize(output[:dimension], dim=0)
+        expected_outputs.append(output.tolist())
+
+    assert [len(output) for output in vllm_outputs] == [768, 256]
+    check_embeddings_close(
+        embeddings_0_lst=expected_outputs,
         embeddings_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",

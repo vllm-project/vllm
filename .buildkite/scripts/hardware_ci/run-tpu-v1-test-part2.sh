@@ -61,13 +61,12 @@ echo "Results will be stored in: $RESULTS_DIR"
 echo "--- Installing Python dependencies ---"
 python3 -m pip install --progress-bar off git+https://github.com/thuml/depyf.git \
     && python3 -m pip install --progress-bar off pytest pytest-asyncio tpu-info \
-    && python3 -m pip install --progress-bar off "lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d" \
-    && python3 -m pip install --progress-bar off hf-transfer
+    && python3 -m pip install --progress-bar off "lm-eval[api]>=0.4.12" \
+    && python3 -m pip install --progress-bar off hf-transfer tblib==3.1.0
 echo "--- Python dependencies installed ---"
-export VLLM_USE_V1=1
+
 export VLLM_XLA_CHECK_RECOMPILATION=1
 export VLLM_XLA_CACHE_PATH=
-echo "Using VLLM V1"
 
 echo "--- Hardware Information ---"
 # tpu-info
@@ -128,7 +127,7 @@ run_and_track_test() {
 
 # --- Actual Test Execution ---
 run_and_track_test 1 "test_struct_output_generate.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
+    "python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
 run_and_track_test 2 "test_moe_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py"
 run_and_track_test 3 "test_lora.py" \

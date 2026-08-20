@@ -83,7 +83,7 @@ After the provisioning, you can interact with the model by using the OpenAI SDK:
 
     client = OpenAI(
         base_url="https://gateway.<gateway domain>",
-        api_key="<YOUR-DSTACK-SERVER-ACCESS-TOKEN>"
+        api_key="<YOUR-DSTACK-SERVER-ACCESS-TOKEN>",
     )
 
     completion = client.chat.completions.create(
@@ -93,7 +93,7 @@ After the provisioning, you can interact with the model by using the OpenAI SDK:
                 "role": "user",
                 "content": "Compose a poem that explains the concept of recursion in programming.",
             }
-        ]
+        ],
     )
 
     print(completion.choices[0].message.content)

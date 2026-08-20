@@ -8,10 +8,9 @@ import math
 import os
 import pickle as pkl
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import product
-from typing import Callable, Optional
 
 import pandas as pd
 import torch
@@ -34,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     quantize_weights,
 )
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = ["meta-llama/Llama-3-8b", "meta-llama/Llama-2-70b-hf"]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512, 1024]
@@ -63,23 +62,23 @@ class BenchmarkTensors:
     a: torch.Tensor
 
     w_q: torch.Tensor
-    group_size: Optional[int]
+    group_size: int | None
     wtype: ScalarType
     w_g_s: torch.Tensor
-    w_g_zp: Optional[torch.Tensor]
-    w_ch_s: Optional[torch.Tensor]
-    w_tok_s: Optional[torch.Tensor]
+    w_g_zp: torch.Tensor | None
+    w_ch_s: torch.Tensor | None
+    w_tok_s: torch.Tensor | None
 
 
 @dataclass
 class TypeConfig:
     act_type: torch.dtype
     weight_type: ScalarType
-    output_type: Optional[torch.dtype]
-    group_scale_type: Optional[torch.dtype]
-    group_zero_type: Optional[torch.dtype]
-    channel_scale_type: Optional[torch.dtype]
-    token_scale_type: Optional[torch.dtype]
+    output_type: torch.dtype | None
+    group_scale_type: torch.dtype | None
+    group_zero_type: torch.dtype | None
+    channel_scale_type: torch.dtype | None
+    token_scale_type: torch.dtype | None
 
 
 def rand_data(shape, dtype=torch.float16, scale=1):
@@ -93,8 +92,8 @@ def quantize_and_pack(
     atype: torch.dtype,
     w: torch.Tensor,
     wtype: ScalarType,
-    stype: Optional[torch.dtype],
-    group_size: Optional[int],
+    stype: torch.dtype | None,
+    group_size: int | None,
     zero_points: bool = False,
 ):
     assert wtype.is_integer(), "TODO: support floating point weights"
@@ -113,7 +112,7 @@ def quantize_and_pack(
 
 
 def create_bench_tensors(
-    shape: tuple[int, int, int], types: TypeConfig, group_size: Optional[int]
+    shape: tuple[int, int, int], types: TypeConfig, group_size: int | None
 ) -> list[BenchmarkTensors]:
     m, n, k = shape
 
@@ -232,12 +231,13 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
         assert bt.w_tok_s is None
         assert bt.group_size is not None
 
-        fn = lambda: ops.gptq_marlin_gemm(
+        fn = lambda: ops.marlin_gemm(
             a=bt.a,
             c=None,
             b_q_weight=w_q,
             b_bias=None,
             b_scales=w_s,
+            a_scales=None,
             global_scale=None,
             b_zeros=w_zp,
             g_idx=g_idx,
@@ -331,8 +331,8 @@ def bench_fns(label: str, sub_label: str, description: str, fns: list[Callable])
     return res
 
 
-_SWEEP_SCHEDULES_RESULTS: Optional[pd.DataFrame] = None
-_SWEEP_SCHEDULES_RESULTS_CSV: Optional[str] = None
+_SWEEP_SCHEDULES_RESULTS: pd.DataFrame | None = None
+_SWEEP_SCHEDULES_RESULTS_CSV: str | None = None
 
 
 def bench(

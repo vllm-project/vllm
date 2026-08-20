@@ -11,7 +11,7 @@ import regex as re
 import seaborn as sns
 from torch.utils.benchmark import Measurement as TMeasurement
 
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(

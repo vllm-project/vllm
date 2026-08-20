@@ -3,67 +3,168 @@
 
 import argparse
 import signal
-from typing import Optional
+import time
 
 import uvloop
 
 import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import (run_server, run_server_worker,
-                                                setup_server)
-from vllm.entrypoints.openai.cli_args import (make_arg_parser,
-                                              validate_parsed_serve_args)
-from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
-                                    show_filtered_argument_or_group_from_help)
+from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
+from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.openai.dp_supervisor import run_dp_supervisor
+from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser, decorate_logs, get_tcp_uri,
-                        set_process_title)
-from vllm.v1.engine.core import EngineCoreProc
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.network_utils import get_tcp_uri
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
+from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-from vllm.v1.utils import (APIServerProcessManager,
-                           wait_for_completion_or_failure)
+from vllm.v1.utils import (
+    APIServerProcessManager,
+    RustFrontendProcessManager,
+    wait_for_completion_or_failure,
+)
 
 logger = init_logger(__name__)
 
+DESCRIPTION = """Launch a local OpenAI-compatible API server to serve LLM
+completions via HTTP. Defaults to Qwen/Qwen3-0.6B if no model is specified.
+
+Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
+--help=ModelConfig, --help=Frontend)
+  Use `--help=all` to show all available flags at once.
+"""
+
 
 class ServeSubcommand(CLISubcommand):
-    """The `serve` subcommand for the vLLM CLI. """
+    """The `serve` subcommand for the vLLM CLI."""
+
     name = "serve"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         # If model is specified in CLI (as positional arg), it takes precedence
-        if hasattr(args, 'model_tag') and args.model_tag is not None:
+        if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
-        if args.headless or args.api_server_count < 1:
-            run_headless(args)
+        if getattr(args, "grpc", False):
+            from vllm.entrypoints.grpc_server import serve_grpc
+
+            uvloop.run(serve_grpc(args))
+            return
+
+        rust_frontend_path = (
+            envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
+        )
+
+        if args.headless:
+            if args.api_server_count is not None and args.api_server_count > 0:
+                raise ValueError(
+                    f"--api-server-count={args.api_server_count} cannot be "
+                    "used with --headless (no API servers are started in "
+                    "headless mode)."
+                )
+            # Default to 0 in headless mode (no API servers)
+            args.api_server_count = 0
+
+        # Detect LB mode for defaulting api_server_count.
+        # Multi-port: --data-parallel-multi-port-external-lb
+        # External LB: --data-parallel-external-lb or --data-parallel-rank
+        # Hybrid LB: --data-parallel-hybrid-lb or --data-parallel-start-rank
+        is_external_lb = (
+            args.data_parallel_external_lb or args.data_parallel_rank is not None
+        )
+
+        # If --data_parallel_multi_port_external_lb and --data_parallel_hybrid_lb
+        # are unset, default to hybrid if --data-parallel-start-rank is set
+        is_hybrid_lb = is_multi_port = False
+        if (
+            not args.data_parallel_hybrid_lb
+            and not args.data_parallel_multi_port_external_lb
+        ):
+            is_hybrid_lb = args.data_parallel_start_rank is not None
         else:
-            if args.api_server_count > 1:
-                run_multi_api_server(args)
+            is_hybrid_lb = args.data_parallel_hybrid_lb
+            is_multi_port = args.data_parallel_multi_port_external_lb
+
+        if sum([is_multi_port, is_external_lb, is_hybrid_lb]) > 1:
+            raise ValueError(
+                "Cannot use more than one data parallel load balancing mode. "
+                "Choose one of: --data-parallel-multi-port-external-lb, "
+                "--data-parallel-external-lb (or --data-parallel-rank), "
+                "--data-parallel-hybrid-lb (or --data-parallel-start-rank)."
+            )
+
+        # Default api_server_count if not explicitly set.
+        # - Multi-port: 1 (supervisor spawns one server per local DP rank)
+        # - Rust frontend: 1 (not applicable as it's multithreaded)
+        # - External LB: 1 (external LB handles distribution)
+        # - Hybrid LB: Use local DP size (internal LB for local ranks only)
+        # - Internal LB: Use full DP size
+        if args.api_server_count is None:
+            if is_multi_port or is_external_lb or rust_frontend_path:
+                args.api_server_count = 1
+            elif is_hybrid_lb:
+                args.api_server_count = args.data_parallel_size_local or 1
+                if args.api_server_count > 1:
+                    logger.info(
+                        "Defaulting api_server_count to data_parallel_size_local "
+                        "(%d) for hybrid LB mode.",
+                        args.api_server_count,
+                    )
             else:
-                # Single API server (this process).
-                uvloop.run(run_server(args))
+                args.api_server_count = args.data_parallel_size
+                if args.api_server_count > 1:
+                    logger.info(
+                        "Defaulting api_server_count to data_parallel_size (%d).",
+                        args.api_server_count,
+                    )
+        elif rust_frontend_path and args.api_server_count > 1:
+            logger.warning(
+                "Ignoring --api-server-count=%d when using rust front-end process",
+                args.api_server_count,
+            )
+            args.api_server_count = 1
+
+        # Elastic EP currently only supports running with at most one API server.
+        if getattr(args, "enable_elastic_ep", False) and args.api_server_count > 1:
+            logger.warning(
+                "Elastic EP only supports running with with at most one API server. "
+                "Capping api_server_count from %d to 1.",
+                args.api_server_count,
+            )
+            args.api_server_count = 1
+
+        if is_multi_port:
+            run_dp_supervisor(args)
+        elif args.api_server_count < 1:
+            run_headless(args)
+        elif args.api_server_count > 1 or rust_frontend_path:
+            run_multi_api_server(args)
+        else:
+            # Single API server (this process).
+            args.api_server_count = None
+            uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        self, subparsers: argparse._SubParsersAction
+    ) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
-            "serve",
-            help="Start the vLLM OpenAI Compatible API server.",
-            description="Start the vLLM OpenAI Compatible API server.",
-            usage="vllm serve [model_tag] [options]")
+            self.name,
+            help="Launch a local OpenAI-compatible API server to serve LLM "
+            "completions via HTTP.",
+            description=DESCRIPTION,
+            usage="vllm serve [model_tag] [options]",
+        )
 
         serve_parser = make_arg_parser(serve_parser)
-        show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
-        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
+        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
 
 
@@ -72,49 +173,68 @@ def cmd_init() -> list[CLISubcommand]:
 
 
 def run_headless(args: argparse.Namespace):
-
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
 
     # Create the EngineConfig.
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
-    vllm_config = engine_args.create_engine_config(usage_context=usage_context,
-                                                   headless=True)
-
-    if not envs.VLLM_USE_V1:
-        raise ValueError("Headless mode is only supported for V1")
+    vllm_config = engine_args.create_engine_config(
+        usage_context=usage_context, headless=True
+    )
 
     if engine_args.data_parallel_hybrid_lb:
-        raise ValueError("data_parallel_hybrid_lb is not applicable in "
-                         "headless mode")
+        raise ValueError("data_parallel_hybrid_lb is not applicable in headless mode")
 
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
 
     if local_engine_count <= 0:
-        raise ValueError("data_parallel_size_local must be > 0 in "
-                         "headless mode")
+        raise ValueError("data_parallel_size_local must be > 0 in headless mode")
 
-    host = parallel_config.data_parallel_master_ip
-    port = engine_args.data_parallel_rpc_port  # add to config too
-    handshake_address = get_tcp_uri(host, port)
+    shutdown_requested = False
 
     # Catch SIGTERM and SIGINT to allow graceful shutdown.
     def signal_handler(signum, frame):
+        nonlocal shutdown_requested
         logger.debug("Received %d signal.", signum)
-        raise SystemExit
+        if not shutdown_requested:
+            shutdown_requested = True
+            raise SystemExit
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
+    if parallel_config.node_rank_within_dp > 0:
+        from vllm.version import __version__ as VLLM_VERSION
+
+        # Run headless workers (for multi-node PP/TP).
+        host = parallel_config.master_addr
+        head_node_address = f"{host}:{parallel_config.master_port}"
+        logger.info(
+            "Launching vLLM (v%s) headless multiproc executor, "
+            "with head node address %s for torch.distributed process group.",
+            VLLM_VERSION,
+            head_node_address,
+        )
+
+        executor = MultiprocExecutor(vllm_config, monitor_workers=False)
+        executor.start_worker_monitor(inline=True)
+        return
+
+    host = parallel_config.data_parallel_master_ip
+    port = parallel_config.data_parallel_rpc_port
+    handshake_address = get_tcp_uri(host, port)
+
     logger.info(
         "Launching %d data parallel engine(s) in headless mode, "
-        "with head node address %s.", local_engine_count, handshake_address)
+        "with head node address %s.",
+        local_engine_count,
+        handshake_address,
+    )
 
     # Create the engines.
     engine_manager = CoreEngineProcManager(
-        target_fn=EngineCoreProc.run_engine_core,
         local_engine_count=local_engine_count,
         start_index=vllm_config.parallel_config.data_parallel_rank,
         local_start_index=0,
@@ -126,107 +246,162 @@ def run_headless(args: argparse.Namespace):
     )
 
     try:
-        engine_manager.join_first()
+        engine_manager.monitor_engine_liveness()
     finally:
+        timeout = None
+        if shutdown_requested:
+            timeout = vllm_config.shutdown_timeout
+            logger.info("Waiting up to %d seconds for processes to exit", timeout)
+        engine_manager.shutdown(timeout=timeout)
         logger.info("Shutting down.")
-        engine_manager.close()
 
 
 def run_multi_api_server(args: argparse.Namespace):
-
     assert not args.headless
-    num_api_servers = args.api_server_count
+    rust_frontend_path = (
+        envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
+    )
+    num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
-    orig_mm_processor_cache_gb = args.mm_processor_cache_gb
+    if rust_frontend_path and num_api_servers > 1:
+        raise ValueError(
+            "VLLM_RUST_FRONTEND_PATH does not support api_server_count > 1"
+        )
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
-        # Not compatible with API server scale-out
-        args.mm_processor_cache_gb = 0
+    shutdown_requested = False
 
-    listen_address, sock = setup_server(args)
+    # Catch SIGTERM and SIGINT to allow graceful shutdown.
+    def signal_handler(signum, frame):
+        nonlocal shutdown_requested
+        logger.debug("Received %d signal.", signum)
+        if not shutdown_requested:
+            shutdown_requested = True
+            raise SystemExit
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    engine_args._api_process_count = num_api_servers
+    engine_args._api_process_rank = -1
+
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-    model_config = vllm_config.model_config
 
-    if num_api_servers > 1:
-        if not envs.VLLM_USE_V1:
-            raise ValueError("api_server_count > 1 is only supported for V1")
-
-        if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-            raise ValueError("VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
-                             "with api_server_count > 1")
-
-        if model_config.is_multimodal_model and orig_mm_processor_cache_gb > 0:
-            logger.warning("Multi-modal processor cache is disabled because "
-                           "it is not compatible with `api_server_count > 1`.")
+    if num_api_servers > 1 and envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+        raise ValueError(
+            "VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used with api_server_count > 1"
+        )
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
 
     parallel_config = vllm_config.parallel_config
     dp_rank = parallel_config.data_parallel_rank
-    external_dp_lb = parallel_config.data_parallel_external_lb
-    hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
-    assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
+    assert parallel_config.local_engines_only or dp_rank == 0
 
-    api_server_manager: Optional[APIServerProcessManager] = None
+    api_server_manager: APIServerProcessManager | RustFrontendProcessManager | None = (
+        None
+    )
 
-    with launch_core_engines(vllm_config, executor_class, log_stats,
-                             num_api_servers) as (local_engine_manager,
-                                                  coordinator, addresses):
+    from vllm.v1.engine.utils import get_engine_zmq_addresses
 
-        # Construct common args for the APIServerProcessManager up-front.
-        api_server_manager_kwargs = dict(
-            target_server_fn=run_api_server_worker_proc,
-            listen_address=listen_address,
-            sock=sock,
-            args=args,
-            num_servers=num_api_servers,
-            input_addresses=addresses.inputs,
-            output_addresses=addresses.outputs,
-            stats_update_address=coordinator.get_stats_publish_address()
-            if coordinator else None)
+    # Defer port allocation to the child's bind() to avoid TOCTOU, except
+    # for Rust front-end and Ray DP, which can't see the post-bind rebind
+    # (CLI-arg subprocess / pickled-into-actor snapshot respectively) and
+    # so pre-allocate driver-side -- reintroducing the original race only
+    # there.
+    is_ray_dp = parallel_config.data_parallel_backend == "ray"
+    addresses = get_engine_zmq_addresses(
+        vllm_config,
+        num_api_servers,
+        defer_api_server_ports=not (rust_frontend_path or is_ray_dp),
+    )
 
-        # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the
-        # start of the API servers until the local engine is started
-        # (after the launcher context manager exits),
-        # since we get the front-end stats update address from the coordinator
-        # via the handshake with the local engine.
-        if dp_rank == 0 or not (external_dp_lb or hybrid_dp_lb):
-            # Start API servers using the manager.
+    with launch_core_engines(
+        vllm_config, executor_class, log_stats, addresses
+    ) as engine_launch:
+        local_engine_manager = engine_launch.engine_manager
+        coordinator = engine_launch.coordinator
+        addresses = engine_launch.addresses
+        stats_update_address = (
+            coordinator.get_stats_publish_address() if coordinator else None
+        )
+
+        if rust_frontend_path:
+            if parallel_config.local_engines_only:
+                expected_engine_start_index = parallel_config.data_parallel_rank
+                expected_engine_count = parallel_config.data_parallel_size_local
+            else:
+                expected_engine_start_index = 0
+                expected_engine_count = parallel_config.data_parallel_size
+            # Start rust front-end process.
+            api_server_manager = RustFrontendProcessManager(
+                binary_path=rust_frontend_path,
+                sock=sock,
+                args=args,
+                input_address=addresses.inputs[0],
+                output_address=addresses.outputs[0],
+                engine_start_index=expected_engine_start_index,
+                engine_count=expected_engine_count,
+                data_parallel_size=parallel_config.data_parallel_size,
+                stats_update_address=stats_update_address,
+            )
+        else:
+            # Start API server(s).
             api_server_manager = APIServerProcessManager(
-                **api_server_manager_kwargs)
+                listen_address=listen_address,
+                sock=sock,
+                args=args,
+                num_servers=num_api_servers,
+                input_addresses=addresses.inputs,
+                output_addresses=addresses.outputs,
+                stats_update_address=stats_update_address,
+                tensor_queue=engine_launch.tensor_queue,
+            )
 
-    # Start API servers now if they weren't already started.
-    if api_server_manager is None:
-        api_server_manager_kwargs["stats_update_address"] = (
-            addresses.frontend_stats_publish_address)
-        api_server_manager = APIServerProcessManager(
-            **api_server_manager_kwargs)
+            if not is_ray_dp:
+                # Forward each child's bound endpoints to the engine handshake
+                # (runs on ``with`` exit). Skipped for Ray DP, where addresses
+                # are pre-allocated above and Ray actors already hold them.
+                actual_inputs, actual_outputs = (
+                    api_server_manager.gather_actual_addresses()
+                )
+                addresses.inputs = actual_inputs
+                addresses.outputs = actual_outputs
 
-    # Wait for API servers
-    wait_for_completion_or_failure(api_server_manager=api_server_manager,
-                                   engine_manager=local_engine_manager,
-                                   coordinator=coordinator)
+        # Set frontend processes to watch during engine startup.
+        # If any of these processes exit before the engines are up, the engine startup
+        # will be aborted with an error.
+        engine_launch.watched_frontend_processes = api_server_manager.processes
 
+    # Wait for API servers.
+    try:
+        wait_for_completion_or_failure(
+            api_server_manager=api_server_manager,
+            engine_manager=local_engine_manager,
+            coordinator=coordinator,
+        )
+    finally:
+        timeout = shutdown_by = None
+        if shutdown_requested:
+            timeout = vllm_config.shutdown_timeout
+            shutdown_by = time.monotonic() + timeout
+            logger.info("Waiting up to %d seconds for processes to exit", timeout)
 
-def run_api_server_worker_proc(listen_address,
-                               sock,
-                               args,
-                               client_config=None,
-                               **uvicorn_kwargs) -> None:
-    """Entrypoint for individual API server worker processes."""
+        def to_timeout(deadline: float | None) -> float | None:
+            return (
+                deadline if deadline is None else max(deadline - time.monotonic(), 0.0)
+            )
 
-    # Set process title and add process-specific prefix to stdout and stderr.
-    server_index = client_config.get("client_index", 0) if client_config else 0
-    set_process_title("APIServer", str(server_index))
-    decorate_logs()
-
-    uvloop.run(
-        run_server_worker(listen_address, sock, args, client_config,
-                          **uvicorn_kwargs))
+        api_server_manager.shutdown(timeout=timeout)
+        if local_engine_manager:
+            local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
+        if coordinator:
+            coordinator.shutdown(timeout=to_timeout(shutdown_by))

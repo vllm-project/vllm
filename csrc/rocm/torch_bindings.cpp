@@ -14,6 +14,10 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // vLLM custom ops for rocm
 
+// skinny_gemms.cu (LLMM1/wvSplitK/wvSplitKrc/wvSplitKQ) is excluded on gfx1250
+// (gfx9/gfx11 ISA, unsupported there); skip these registrations to avoid
+// undefined symbols. vLLM uses default/Triton GEMM for these ops on gfx1250.
+#ifndef VLLM_SKIP_SKINNY_GEMMS
   // Custom gemm op for matrix-vector multiplication
   rocm_ops.def(
       "LLMM1(Tensor in_a, Tensor in_b, int rows_per_block) -> "
@@ -22,15 +26,53 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
-      "wvSplitK(Tensor in_a, Tensor in_b, int CuCount) -> "
+      "wvSplitK(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "
       "Tensor");
   rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
 
+  // W4A16 grouped skinny GEMM: packed int4 weights, per-group scales,
+  // optional zero points for asymmetric quantization
+  rocm_ops.def(
+      "wvSplitK_int4_g(Tensor in_a, Tensor in_b, Tensor in_scale, "
+      "Tensor? in_zero_points, Tensor? in_bias, int CuCount, "
+      "int group_size) -> Tensor");
+  rocm_ops.impl("wvSplitK_int4_g", torch::kCUDA, &wvSplitK_int4_g);
+
+  // Custom gemm op for skinny matrix-matrix multiplication
+  rocm_ops.def(
+      "wvSplitKrc(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "
+      "Tensor");
+  rocm_ops.impl("wvSplitKrc", torch::kCUDA, &wvSplitKrc);
+
   // wvSplitK for fp8
   rocm_ops.def(
-      "wvSplitKQ(Tensor in_a, Tensor in_b, Tensor! out_c, Tensor scale_a, "
+      "wvSplitKQ(Tensor in_a, Tensor in_b, Tensor? in_bias, Tensor! out_c, "
+      "Tensor scale_a, "
       "          Tensor scale_b, int CuCount) -> ()");
   rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
+#endif  // VLLM_SKIP_SKINNY_GEMMS
+
+#ifdef VLLM_ROCM_GFX1100
+  // W4A16 GPTQ kernels for AMD RDNA3 (gfx1100).
+  rocm_ops.def(
+      "gptq_gemm_rdna3(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
+      "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
+  rocm_ops.impl("gptq_gemm_rdna3", torch::kCUDA, &gptq_gemm_rdna3);
+
+  rocm_ops.def(
+      "gptq_gemm_rdna3_wmma(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
+      "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
+  rocm_ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
+
+  rocm_ops.def(
+      "moe_gptq_gemm_rdna3(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor b_qzeros, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
+#endif
 
   // Custom attention op
   // Compute the attention between an input query and the cached
@@ -48,7 +90,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                Tensor? alibi_slopes,"
       "                str kv_cache_dtype,"
       "                Tensor k_scale, Tensor v_scale,"
-      "                Tensor? fp8_out_scale) -> ()");
+      "                Tensor? fp8_out_scale,"
+      "                str mfma_type) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
 }
 

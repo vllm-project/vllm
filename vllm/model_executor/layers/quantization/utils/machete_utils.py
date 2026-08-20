@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -15,10 +14,6 @@ def query_machete_supported_quant_types(zero_points: bool) -> list[ScalarType]:
         return [scalar_types.uint4, scalar_types.uint8]
     else:
         return [scalar_types.uint4b8, scalar_types.uint8b128]
-
-
-def query_machete_supported_act_types(zero_points: bool) -> list[ScalarType]:
-    return [torch.float16, torch.bfloat16]
 
 
 def query_machete_supported_group_sizes(act_type: torch.dtype) -> list[int]:
@@ -39,12 +34,19 @@ def query_machete_supported_group_sizes(act_type: torch.dtype) -> list[int]:
         return [-1, 128]
 
 
-def check_machete_supports_shape(in_features: int, out_featrues: int) \
-    -> tuple[bool, Optional[str]]:
+def check_machete_supports_shape(
+    in_features: int, out_features: int
+) -> tuple[bool, str | None]:
     if in_features % MACHETE_PREPACKED_BLOCK_SHAPE[0] != 0:
-        return False, "Input features size must be divisible by "\
-            f"{MACHETE_PREPACKED_BLOCK_SHAPE[0]}"
-    if out_featrues % MACHETE_PREPACKED_BLOCK_SHAPE[1] != 0:
-        return False, "Output features size must be divisible by "\
-            f"{MACHETE_PREPACKED_BLOCK_SHAPE[1]}"
+        return (
+            False,
+            "Input features size must be divisible by "
+            f"{MACHETE_PREPACKED_BLOCK_SHAPE[0]}",
+        )
+    if out_features % MACHETE_PREPACKED_BLOCK_SHAPE[1] != 0:
+        return (
+            False,
+            "Output features size must be divisible by "
+            f"{MACHETE_PREPACKED_BLOCK_SHAPE[1]}",
+        )
     return True, None

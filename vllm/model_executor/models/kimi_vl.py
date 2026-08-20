@@ -42,11 +42,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import copy
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal
 
 import torch
 from torch import nn
@@ -54,36 +53,40 @@ from transformers import BatchFeature
 from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
-from vllm.model_executor.models.interfaces import (SupportsMultiModal,
-                                                   SupportsPP)
+from vllm.model_executor.models.interfaces import (
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from vllm.model_executor.models.moonvit import MoonVitPretrainedModel
-from vllm.model_executor.models.utils import merge_multimodal_embeddings
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItems, NestedTensors)
-from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
-                                   MultiModalDataItems)
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
+from vllm.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+    NestedTensors,
+)
+from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
+    ImageProcessorItems,
+    MultiModalDataItems,
+)
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+)
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
-from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
+from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig, MoonViTConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
-from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
 
 
 # For dummy input only
@@ -94,33 +97,37 @@ class MaxImageTokenMeta:
 
 
 class KimiVLMultiModalProjector(nn.Module):
-
-    def __init__(self, config: KimiVLConfig, \
-                 use_data_parallel: bool = False, prefix: str = ""):
+    def __init__(
+        self,
+        config: KimiVLConfig,
+        prefix: str = "",
+    ):
         super().__init__()
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = is_vit_use_data_parallel()
 
-        self.hidden_size = (config.vision_config.hidden_size *
-                            config.vision_config.merge_kernel_size[0] *
-                            config.vision_config.merge_kernel_size[1])
+        self.hidden_size = (
+            config.vision_config.hidden_size
+            * config.vision_config.merge_kernel_size[0]
+            * config.vision_config.merge_kernel_size[1]
+        )
 
-        self.pre_norm = torch.nn.LayerNorm(config.vision_config.hidden_size,
-                                           eps=1e-5)
-        self.linear_1 = ReplicatedLinear(self.hidden_size,
-                                         self.hidden_size,
-                                         bias=True,
-                                         prefix=maybe_prefix(
-                                             prefix, "linear_1"))
-        self.linear_2 = ReplicatedLinear(self.hidden_size,
-                                         config.text_config.hidden_size,
-                                         bias=True,
-                                         prefix=maybe_prefix(
-                                             prefix, "linear_2"))
+        self.pre_norm = torch.nn.LayerNorm(config.vision_config.hidden_size, eps=1e-5)
+        self.linear_1 = ReplicatedLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=True,
+            prefix=maybe_prefix(prefix, "linear_1"),
+        )
+        self.linear_2 = ReplicatedLinear(
+            self.hidden_size,
+            config.text_config.hidden_size,
+            bias=True,
+            prefix=maybe_prefix(prefix, "linear_2"),
+        )
         self.act = GELUActivation()
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.pre_norm(image_features).view(
-            -1, self.hidden_size)
+        hidden_states = self.pre_norm(image_features).view(-1, self.hidden_size)
         hidden_states, _ = self.linear_1(hidden_states)
         hidden_states = self.act(hidden_states)
         hidden_states, _ = self.linear_2(hidden_states)
@@ -135,10 +142,11 @@ class KimiVLImagePixelInputs(TensorSchema):
         - ps: Patch size
         - ni: Number of images
     """
+
     type: Literal["pixel_values"] = "pixel_values"
 
     pixel_values: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("np", 3, "ps", "ps"),
     ]
 
@@ -151,11 +159,10 @@ KimiVLImageInputs = KimiVLImagePixelInputs
 
 
 class KimiVLProcessingInfo(BaseProcessingInfo):
-
     def get_hf_config(self):
         return self.ctx.get_hf_config(KimiVLConfig)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_num_image_tokens(
@@ -170,25 +177,25 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
         in_token_limit = hf_processor.image_processor.in_token_limit
         height = image_height
         width = image_width
-        assert isinstance(height,
-                          int), f"height must be int, current height {height}"
-        assert isinstance(width,
-                          int), f"width must be int, current width {width}"
+        assert isinstance(height, int), f"height must be int, current height {height}"
+        assert isinstance(width, int), f"width must be int, current width {width}"
         assert kernel_size is not None, "kernel_size must be specified"
 
         if (width // patch_size) * (height // patch_size) > in_token_limit:
-            scale = math.sqrt(in_token_limit / ((width // patch_size) *
-                                                (height // patch_size)))
+            scale = math.sqrt(
+                in_token_limit / ((width // patch_size) * (height // patch_size))
+            )
             new_w, new_h = int(width * scale), int(height * scale)
             width, height = new_w, new_h
 
         kernel_height, kernel_width = kernel_size
 
-        pad_height = (kernel_height * patch_size - height %
-                      (kernel_height * patch_size)) % (kernel_height *
-                                                       patch_size)
-        pad_width = (kernel_width * patch_size - width %
-                     (kernel_width * patch_size)) % (kernel_width * patch_size)
+        pad_height = (
+            kernel_height * patch_size - height % (kernel_height * patch_size)
+        ) % (kernel_height * patch_size)
+        pad_width = (
+            kernel_width * patch_size - width % (kernel_width * patch_size)
+        ) % (kernel_width * patch_size)
 
         # Calculate new dimensions after padding and patching
         token_height = (height + pad_height) // (kernel_size[0] * patch_size)
@@ -201,7 +208,6 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
 
 
 class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
-
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -214,19 +220,23 @@ class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
+        image_overrides = mm_options.get("image")
+
         return {
-            "image":
-            self._get_dummy_images(width=MaxImageTokenMeta.width,
-                                   height=MaxImageTokenMeta.height,
-                                   num_images=num_images)
+            "image": self._get_dummy_images(
+                width=MaxImageTokenMeta.width,
+                height=MaxImageTokenMeta.height,
+                num_images=num_images,
+                overrides=image_overrides,
+            )
         }
 
 
 class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -239,8 +249,9 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
         # image_grid_hws is shapes for each subtensor in pixel_values
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_grid_sizes),
-            image_grid_hws=MultiModalFieldConfig.batched("image"),
+                "image", image_grid_sizes
+            ),
+            image_grid_hws=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -253,7 +264,8 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems))
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
+            )
 
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
@@ -275,16 +287,18 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(KimiVLMultiModalProcessor,
-                                        info=KimiVLProcessingInfo,
-                                        dummy_inputs=KimiVLDummyInputsBuilder)
-class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                     SupportsPP):
-
+@MULTIMODAL_REGISTRY.register_processor(
+    KimiVLMultiModalProcessor,
+    info=KimiVLProcessingInfo,
+    dummy_inputs=KimiVLDummyInputsBuilder,
+)
+class KimiVLForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsEncoderCudaGraph, SupportsPP
+):
     supports_encoder_tp_data = True
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|media_start|>image<|media_content|><|media_pad|><|media_end|>"
 
@@ -298,86 +312,236 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         super().__init__()
         model_config = vllm_config.model_config
         config: KimiVLConfig = model_config.hf_config
-        self.config = config
         quant_config = vllm_config.quant_config
 
-        assert isinstance(config.vision_config, MoonViTConfig)
-        self.use_data_parallel = model_config.multimodal_config.mm_encoder_tp_mode == "data"
-        self.hidden_size = config.text_config.hidden_size
-        self.vision_tower = MoonVitPretrainedModel(config.vision_config,
-                                                   self.use_data_parallel,
-                                                   prefix=maybe_prefix(
-                                                       prefix, "vision_tower"))
-
-        self.multi_modal_projector = KimiVLMultiModalProjector(
-            config=config,
-            use_data_parallel=self.use_data_parallel,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"))
-
+        self.config = config
         self.quant_config = quant_config
-        sub_vllm_config = copy.deepcopy(vllm_config)
-        sub_vllm_config.model_config.hf_config = sub_vllm_config.model_config.hf_config.text_config
-        self.language_model = DeepseekV2Model(
-            vllm_config=sub_vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
+
+        assert isinstance(config.vision_config, MoonViTConfig)
+        self.use_data_parallel = (
+            model_config.multimodal_config.mm_encoder_tp_mode == "data"
         )
-        self.unpadded_vocab_size = config.text_config.vocab_size
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
-                config.text_config.hidden_size,
-                org_num_embeddings=self.config.text_config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+        self.hidden_size = config.text_config.hidden_size
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = MoonVitPretrainedModel(
+                config.vision_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
             )
-        else:
-            self.lm_head = PPMissingLayer()
+            self.multi_modal_projector = KimiVLMultiModalProjector(
+                config=config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["DeepseekV2ForCausalLM"],
+            )
+
         self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors)
-        logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size, logit_scale)
+            self.language_model.make_empty_intermediate_tensors
+        )
+
         self.media_placeholder: int = self.config.media_placeholder_token_id
 
-    # ref: qwen2_vl.py
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. "
-                             f"Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            if mm_input.ndim == 2:
-                return mm_input
-            if mm_input.ndim != 3:
-                raise ValueError(f"{name} should be 2D or batched 3D tensor. "
-                                 f"Got ndim: {mm_input.ndim} "
-                                 f"(shape={mm_input.shape})")
-            return mm_input.reshape(-1, mm_input.shape[-1])
-        else:
-            return torch.concat(mm_input)
+        self.model_config = model_config
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=[
+                "pixel_values",
+                "pos_embeds",
+                "rope_freqs_cis",
+                "cu_seqlens",
+                "max_seqlen",
+                "merge_gather_idx",
+            ],
+            out_hidden_size=self.hidden_size,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config,
+    ) -> tuple[int, int]:
+        # Min: estimated smallest possible encoder input.
+        # 224x224 image with patch_size=14 -> 16x16 patches, then merge
+        # kernel (2,2) -> 8x8 = 64 output tokens.
+        min_budget = 64
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def _get_grid_hws(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[tuple[int, int]]:
+        grid_hws = mm_kwargs["image_grid_hws"]
+        if not isinstance(grid_hws, list):
+            grid_hws = grid_hws.tolist()
+        return grid_hws
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        kh, kw = self.config.vision_config.merge_kernel_size
+        return [
+            EncoderItemSpec(
+                input_size=h * w,
+                output_tokens=(h // kh) * (w // kw),
+            )
+            for h, w in self._get_grid_hws(mm_kwargs)
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        grid_hws = self._get_grid_hws(mm_kwargs)
+        pixel_values = mm_kwargs["pixel_values"]
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "image_grid_hws": pixel_values.new_zeros((0, 2), dtype=torch.long),
+            }
+
+        patches_per_item = [h * w for h, w in grid_hws]
+        cum_patches = [0]
+        for p in patches_per_item:
+            cum_patches.append(cum_patches[-1] + p)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_grid = torch.tensor(
+            [grid_hws[i] for i in indices],
+            dtype=torch.long,
+            device=pixel_values.device,
+        )
+        return {
+            "pixel_values": selected_pv,
+            "image_grid_hws": selected_grid,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        kh, kw = self.config.vision_config.merge_kernel_size
+        # Ceil so the buffer fits the worst case of one item using the full
+        # budget. Floor under-allocates when budget is not a multiple of
+        # max_batch_size.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+
+        # Shape the synthetic grid so neither dimension exceeds Rope2DPosEmb's
+        # precomputed range. Pack as wide a row as fits, then add rows.
+        rope = self.vision_tower.encoder.rope_2d
+        max_wo = rope.max_width // kw
+        wo = min(per_mm_item_output, max_wo)
+        ho = (per_mm_item_output + wo - 1) // wo
+        assert ho * kh <= rope.max_height, (
+            f"per_mm_item_output={per_mm_item_output} exceeds RoPE grid capacity "
+            f"(max {(rope.max_height // kh) * (rope.max_width // kw)} tokens)"
+        )
+        grid_hws_list = [(ho * kh, wo * kw) for _ in range(max_batch_size)]
+
+        patch_size = self.config.vision_config.patch_size
+        if isinstance(patch_size, int):
+            patch_size = (patch_size, patch_size)
+
+        total_patches = sum(h * w for h, w in grid_hws_list)
+        in_channels = 3
+        dummy_pixel_values = torch.randn(
+            total_patches,
+            in_channels,
+            patch_size[0],
+            patch_size[1],
+            device=device,
+            dtype=dtype,
+        )
+
+        buffers = self.vision_tower.prepare_encoder_metadata(
+            grid_hws_list,
+            max_batch_size=max_batch_size,
+            max_seqlen_override=token_budget,
+            device=device,
+        )
+        values = buffers | {"pixel_values": dummy_pixel_values}
+
+        return EncoderCudaGraphCaptureInputs(values=values)
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        grid_hws_list = self._get_grid_hws(mm_kwargs)
+        buffers = self.vision_tower.prepare_encoder_metadata(
+            grid_hws_list,
+            max_batch_size=max_batch_size,
+            device=mm_kwargs["pixel_values"].device,
+        )
+        values = buffers | {"pixel_values": mm_kwargs["pixel_values"]}
+        return EncoderCudaGraphReplayBuffers(values=values)
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        pixel_values = values.pop("pixel_values")
+        metadata = values
+        image_features = self.vision_tower(
+            pixel_values, grid_hw=None, encoder_metadata=metadata
+        )
+        return self.multi_modal_projector(image_features)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        pixel_values = mm_kwargs["pixel_values"]
+        image_grid_hws = mm_kwargs["image_grid_hws"]
+        image_features = self.vision_tower(pixel_values, image_grid_hws)
+        return self.multi_modal_projector(torch.cat(image_features))
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[KimiVLImageInputs]:
+        self, **kwargs: object
+    ) -> KimiVLImageInputs | None:
         # image input type must be pixel values now
         pixel_values = kwargs.pop("pixel_values", None)
         image_grid_hws = kwargs.pop("image_grid_hws", None)
 
         if pixel_values is None:
             return None
-
-        image_grid_hws = self._validate_and_reshape_mm_tensor(
-            image_grid_hws, "image grid hws")
-        # pixel_values may have complex shapes
-        num_channels = 3
-        patch_size = self.config.vision_config.patch_size
-        if isinstance(pixel_values, list):
-            pixel_values = torch.cat([
-                x.reshape(-1, num_channels, patch_size, patch_size)
-                for x in pixel_values
-            ])
-        else:
-            pixel_values = pixel_values.reshape(-1, num_channels, patch_size,
-                                                patch_size)
-        pixel_values = pixel_values.to(self.vision_tower.dtype)
 
         return KimiVLImagePixelInputs(
             type="pixel_values",
@@ -387,34 +551,27 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     # perform vt on processored pixel_values
     @torch.inference_mode()
-    def _process_image_pixels(self,
-                              inputs: KimiVLImagePixelInputs) -> torch.Tensor:
-        assert self.vision_tower is not None
-
+    def _process_image_pixels(self, inputs: KimiVLImagePixelInputs) -> torch.Tensor:
         pixel_values = inputs["pixel_values"]
         image_grid_hws = inputs["image_grid_hws"]
         if self.use_data_parallel:
-            return run_dp_sharded_mrope_vision_model(self.vision_tower,
-                                                     pixel_values,
-                                                     image_grid_hws.tolist(),
-                                                     rope_type="rope_2d")
+            return run_dp_sharded_mrope_vision_model(
+                self.vision_tower,
+                pixel_values,
+                image_grid_hws.tolist(),
+                rope_type="rope_2d",
+            )
         else:
             return self.vision_tower(pixel_values, image_grid_hws)
 
-    def _process_image_input(self,
-                             image_input: KimiVLImageInputs) -> torch.Tensor:
+    def _process_image_input(self, image_input: KimiVLImageInputs) -> torch.Tensor:
         assert image_input["type"] == "pixel_values"
         image_features = self._process_image_pixels(image_input)
         assert isinstance(image_features, (list, tuple))
         lengths = [x.shape[0] for x in image_features]
-        return self.multi_modal_projector(
-            torch.cat(image_features)).split(lengths)
+        return self.multi_modal_projector(torch.cat(image_features)).split(lengths)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> Optional[NestedTensors]:
+    def embed_multimodal(self, **kwargs: object) -> NestedTensors | None:
         # Validate the multimodal input keyword arguments
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -424,54 +581,16 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
-    ) -> torch.Tensor:
-
-        # `get_input_embeddings` should already be implemented for the language
-        # model as one of the requirements of basic vLLM model implementation.
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-
-        if multimodal_embeddings is not None and len(
-                multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                multimodal_embeddings=multimodal_embeddings,
-                placeholder_token_id=self.config.media_placeholder_token_id)
-
-        return inputs_embeds
-
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
-        # NOTE: In v1, inputs_embeds is always generated at model runner from
-        # `get_multimodal_embeddings` and `get_input_embeddings`, this
-        # condition is only for v0 compatibility.
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            if image_input is None:
-                inputs_embeds = None
-            else:
-                inputs_embeds = self.get_input_embeddings(input_ids)
-                image_embeds = self._process_image_input(image_input)
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids,
-                    inputs_embeds,
-                    image_embeds,
-                    placeholder_token_id=self.config.
-                    media_placeholder_token_id,
-                )
-                input_ids = None
 
         hidden_states = self.language_model(
             input_ids=input_ids,
@@ -482,139 +601,9 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata,
-                       **kwargs) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata, **kwargs)
-        return logits
+    def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        config = self.config.text_config
-        _KEYS_TO_MODIFY_MAPPING = {
-            "language_model.lm_head": "lm_head",
-            "language_model.model": "language_model",
-        }
-        # only doing this for language model part for now.
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        if not config.use_mla:
-            stacked_params_mapping += [
-                (".qkv_proj", ".q_proj", "q"),
-                (".qkv_proj", ".k_proj", "k"),
-                (".qkv_proj", ".v_proj", "v"),
-            ]
-        if getattr(config, "n_routed_experts", None):
-            # Params for weights, fp8 weight scales, fp8 activation scales
-            # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=config.n_routed_experts)
-        else:
-            expert_params_mapping = []
-
-        params_dict = dict(self.named_parameters())
-
-        for args in weights:
-            name, loaded_weight = args[:2]
-            kwargs = args[2] if len(args) > 2 else {}
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            spec_layer = get_spec_layer_idx_from_weight_name(config, name)
-            if spec_layer is not None:
-                continue  # skip spec decode layers for main model
-
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
-                if key_to_modify in name:
-                    name = name.replace(key_to_modify, new_key)
-            use_default_weight_loading = False
-            if "vision" in name:
-                if self.vision_tower is not None:
-                    # We only do sharding for language model and
-                    # not vision model for now.
-                    use_default_weight_loading = True
-            else:
-                for (param_name, weight_name,
-                     shard_id) in stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    # We have mlp.experts[0].gate_proj in the checkpoint.
-                    # Since we handle the experts below in expert_params_mapping,
-                    # we need to skip here BEFORE we update the name, otherwise
-                    # name will be updated to mlp.experts[0].gate_up_proj, which
-                    # will then be updated below in expert_params_mapping
-                    # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                    if (("mlp.experts." in name) and name not in params_dict):
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-
-                    if is_pp_missing_parameter(name, self):
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id, **kwargs)
-                    break
-                else:
-                    for idx, (param_name, weight_name, expert_id,
-                              shard_id) in enumerate(expert_params_mapping):
-                        if weight_name not in name:
-                            continue
-                        name = name.replace(weight_name, param_name)
-
-                        if is_pp_missing_parameter(name, self):
-                            continue
-
-                        param = params_dict[name]
-                        weight_loader = param.weight_loader
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      expert_id=expert_id,
-                                      shard_id=shard_id,
-                                      **kwargs)
-                        break
-                    else:
-                        use_default_weight_loading = True
-            if use_default_weight_loading:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight, **kwargs)
-
-
-def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config,
-                                        weight_name: str) -> Optional[int]:
-    if hasattr(config,
-               "num_nextn_predict_layers") and (config.num_nextn_predict_layers
-                                                > 0):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx+i}."):
-                return layer_idx + i
-    return None
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

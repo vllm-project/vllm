@@ -47,12 +47,17 @@ macro (append_cmake_prefix_path PKG EXPR)
   list(APPEND CMAKE_PREFIX_PATH ${_PREFIX_PATH})
 endmacro()
 
-#
-# Add a target named `hipify${NAME}` that runs the hipify preprocessor on a set
-# of CUDA source files. The names of the corresponding "hipified" sources are
-# stored in `OUT_SRCS`.
-#
+# Resolve hipified output paths for `NAME` into `OUT_SRCS` and register the
+# `.cu` sources with the shared `hipify_all` target. Per-extension hipify
+# targets are unsafe to run in parallel against a shared csrc/ output dir, so
+# accumulation here is paired with a single finalize step.
 function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
+  if (TARGET hipify_all)
+    message(FATAL_ERROR
+      "hipify_sources_target(${NAME}) called after vllm_finalize_hipify_target. "
+      "Add the new HIP extension before the finalizer call in CMakeLists.txt.")
+  endif()
+
   #
   # Split into C++ and non-C++ (i.e. CUDA) sources.
   #
@@ -73,17 +78,47 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
     list(APPEND HIP_SRCS "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
   endforeach()
 
-  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
-  add_custom_target(
-    hipify${NAME}
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
-    DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${SRCS}
-    BYPRODUCTS ${HIP_SRCS}
-    COMMENT "Running hipify on ${NAME} extension source files.")
+  set_property(GLOBAL APPEND PROPERTY VLLM_HIPIFY_ALL_SRCS ${SRCS})
+  set_property(GLOBAL APPEND PROPERTY VLLM_HIPIFY_ALL_BYPRODUCTS ${HIP_SRCS})
+
+  # Chain hipify targets so they run sequentially. Parallel hipify
+  # invocations race on shutil.copytree, overwriting .hip files
+  # produced by another target back to .cu originals.
+  if (DEFINED _VLLM_LAST_HIPIFY_TARGET)
+    add_dependencies(hipify${NAME} ${_VLLM_LAST_HIPIFY_TARGET})
+  endif()
+  set(_VLLM_LAST_HIPIFY_TARGET "hipify${NAME}" PARENT_SCOPE)
 
   # Swap out original extension sources with hipified sources.
   list(APPEND HIP_SRCS ${CXX_SRCS})
   set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)
+endfunction()
+
+# Define the single shared `hipify_all` custom target that runs hipify once
+# on the union of every HIP extension's sources. Call after the last HIP
+# `define_extension_target`.
+function (vllm_finalize_hipify_target)
+  if (TARGET hipify_all)
+    return()
+  endif()
+
+  get_property(ALL_SRCS GLOBAL PROPERTY VLLM_HIPIFY_ALL_SRCS)
+  get_property(ALL_BYPRODUCTS GLOBAL PROPERTY VLLM_HIPIFY_ALL_BYPRODUCTS)
+
+  if (NOT ALL_SRCS)
+    return()
+  endif()
+
+  list(REMOVE_DUPLICATES ALL_SRCS)
+  list(REMOVE_DUPLICATES ALL_BYPRODUCTS)
+
+  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+  add_custom_target(
+    hipify_all
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${ALL_SRCS}
+    DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${ALL_SRCS}
+    BYPRODUCTS ${ALL_BYPRODUCTS}
+    COMMENT "Running hipify on all extension source files.")
 endfunction()
 
 #
@@ -129,9 +164,54 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
   set(${OUT_GPU_FLAGS} ${GPU_FLAGS} PARENT_SCOPE)
 endfunction()
 
+# Find libgomp that gets shipped with PyTorch wheel and create a shim dir with:
+#   libgomp.so    -> libgomp-<hash>.so...
+#   libgomp.so.1  -> libgomp-<hash>.so...
+# OUTPUT: TORCH_GOMP_SHIM_DIR  ("" if not found)
+function(vllm_prepare_torch_gomp_shim TORCH_GOMP_SHIM_DIR)
+  set(${TORCH_GOMP_SHIM_DIR} "" PARENT_SCOPE)
+
+  # Use run_python to locate vendored libgomp; never throw on failure.
+  run_python(_VLLM_TORCH_GOMP_PATH
+    "
+import os, glob
+import torch
+torch_pkg = os.path.dirname(torch.__file__)
+site_root = os.path.dirname(torch_pkg)
+
+# Search both torch.libs and torch/lib
+roots = [os.path.join(site_root, 'torch.libs'), os.path.join(torch_pkg, 'lib')]
+candidates = []
+for root in roots:
+    if not os.path.isdir(root):
+        continue
+    candidates.extend(glob.glob(os.path.join(root, 'libgomp*.so*')))
+
+print(candidates[0] if candidates else '')
+"
+    "failed to probe for libgomp")
+
+  if(_VLLM_TORCH_GOMP_PATH STREQUAL "" OR NOT EXISTS "${_VLLM_TORCH_GOMP_PATH}")
+    return()
+  endif()
+
+  # Create shim under the build tree
+  set(_shim "${CMAKE_BINARY_DIR}/gomp_shim")
+  file(MAKE_DIRECTORY "${_shim}")
+
+  execute_process(COMMAND ${CMAKE_COMMAND} -E rm -f "${_shim}/libgomp.so")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E rm -f "${_shim}/libgomp.so.1")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink "${_VLLM_TORCH_GOMP_PATH}" "${_shim}/libgomp.so")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink "${_VLLM_TORCH_GOMP_PATH}" "${_shim}/libgomp.so.1")
+
+  set(${TORCH_GOMP_SHIM_DIR} "${_shim}" PARENT_SCOPE)
+endfunction()
+
 # Macro for converting a `gencode` version number to a cmake version number.
+# Preserves architecture-specific suffixes (a/f) needed for correct
+# __CUDA_ARCH_FAMILY_SPECIFIC__ definition. E.g. "121a" -> "12.1a".
 macro(string_to_ver OUT_VER IN_STR)
-  string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
+  string(REGEX REPLACE "\([0-9]+\)\([0-9][af]?\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
 endmacro()
 
 #
@@ -140,11 +220,11 @@ endmacro()
 #
 # Example:
 #   CMAKE_CUDA_FLAGS="-Wall -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75"
-#   clear_cuda_arches(CUDA_ARCH_FLAGS)
+#   clear_cuda_gencode_flags(CUDA_ARCH_FLAGS)
 #   CUDA_ARCH_FLAGS="-gencode arch=compute_70,code=sm_70;-gencode arch=compute_75,code=sm_75"
 #   CMAKE_CUDA_FLAGS="-Wall"
 #
-macro(clear_cuda_arches CUDA_ARCH_FLAGS)
+macro(clear_cuda_gencode_flags CUDA_ARCH_FLAGS)
     # Extract all `-gencode` flags from `CMAKE_CUDA_FLAGS`
     string(REGEX MATCHALL "-gencode arch=[^ ]+" CUDA_ARCH_FLAGS
       ${CMAKE_CUDA_FLAGS})
@@ -156,19 +236,40 @@ macro(clear_cuda_arches CUDA_ARCH_FLAGS)
 endmacro()
 
 #
+# Warn when a caller requested PTX code generation through global CUDA arch
+# flags. vLLM removes those flags and reapplies per-source gencode flags, so the
+# user's global PTX request will not be preserved.
+#
+function(warn_if_ptx_arch_requested CUDA_ARCH_FLAGS)
+  foreach(_ARCH_FLAG ${CUDA_ARCH_FLAGS})
+    if(_ARCH_FLAG MATCHES "code=.*compute_[0-9]+[af]?")
+      message(WARNING
+        "PTX code generation requested in CUDA architecture flags "
+        "(${_ARCH_FLAG}), but vLLM does not preserve global PTX requests "
+        "when normalizing per-source CUDA architectures. Remove '+PTX' from "
+        "TORCH_CUDA_ARCH_LIST or rely on vLLM's built-in per-kernel PTX "
+        "selection.")
+      return()
+    endif()
+  endforeach()
+endfunction()
+
+
+#
 # Extract unique CUDA architectures from a list of compute capabilities codes in 
 # the form `<major><minor>[<letter>]`, convert them to the form sort 
 # `<major>.<minor>`, dedupes them and then sorts them in ascending order and 
 # stores them in `OUT_ARCHES`.
 #
-# Example:
-#   CUDA_ARCH_FLAGS="-gencode arch=compute_75,code=sm_75;...;-gencode arch=compute_90a,code=sm_90a" 
-#   extract_unique_cuda_archs_ascending(OUT_ARCHES CUDA_ARCH_FLAGS)
-#   OUT_ARCHES="7.5;...;9.0"
+# Prefer `code=sm_*`; fall back to `arch=compute_*` for PTX-only flags.
+# This handles mismatches such as `arch=compute_20,code=sm_121`.
 function(extract_unique_cuda_archs_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
   set(_CUDA_ARCHES)
   foreach(_ARCH ${CUDA_ARCH_FLAGS})
-    string(REGEX MATCH "arch=compute_\([0-9]+a?\)" _COMPUTE ${_ARCH})
+    string(REGEX MATCH "code=sm_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    if (NOT _COMPUTE)
+      string(REGEX MATCH "arch=compute_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    endif()
     if (_COMPUTE)
       set(_COMPUTE ${CMAKE_MATCH_1})
     endif()
@@ -310,15 +411,60 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   list(REMOVE_DUPLICATES _PTX_ARCHS)
   list(REMOVE_DUPLICATES _SRC_CUDA_ARCHS)
 
-  # if x.0a is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
-  # remove x.0a from SRC_CUDA_ARCHS and add x.0a to _CUDA_ARCHS
+  # Handle architecture-specific suffixes (a/f) for SRC entries.
+  # First try exact base match (x.y), then cross-suffix match (x.ya / x.yf).
+  # For 'f' (family) suffix: if no exact/cross match, fall back to major-version
+  # match — e.g. SRC="12.0f" matches TGT="12.1a" since SM121 is in the SM12x
+  # family. The output uses TGT's value to preserve the user's compilation flags.
   set(_CUDA_ARCHS)
+  # Resolve exact base matches before family fallbacks so a generic entry such
+  # as 10.0f cannot consume a 10.7 target that has a 10.7f source entry.
   foreach(_arch ${_SRC_CUDA_ARCHS})
-    if(_arch MATCHES "\\a$")
-      list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
-      string(REPLACE "a" "" _base "${_arch}")
-      if ("${_base}" IN_LIST TGT_CUDA_ARCHS)
+    if(_arch MATCHES "[af]$")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
+      if("${_base}" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(APPEND _CUDA_ARCHS "${_arch}")
+      endif()
+    endif()
+  endforeach()
+
+  foreach(_arch ${_SRC_CUDA_ARCHS})
+    if(_arch MATCHES "[af]$")
+      list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
+      if("${_base}a" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}a")
+        list(APPEND _CUDA_ARCHS "${_base}a")
+      elseif("${_base}f" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}f")
+        list(APPEND _CUDA_ARCHS "${_base}f")
+      elseif(_arch MATCHES "f$")
+        # Family suffix: match any TGT entry in the same major version family.
+        string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" _src_major "${_base}")
+        foreach(_tgt ${_TGT_CUDA_ARCHS})
+          string(REGEX REPLACE "[af]$" "" _tgt_base "${_tgt}")
+          string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" _tgt_major "${_tgt_base}")
+          if(_tgt_major STREQUAL _src_major)
+            list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_tgt}")
+            list(APPEND _CUDA_ARCHS "${_tgt}")
+            break()
+          endif()
+        endforeach()
+      endif()
+    endif()
+  endforeach()
+
+  # Symmetric handling: if TGT has x.ya/f and SRC has x.y (without suffix),
+  # preserve TGT's suffix in the output.
+  set(_tgt_copy ${_TGT_CUDA_ARCHS})
+  foreach(_arch ${_tgt_copy})
+    if(_arch MATCHES "[af]$")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
+      if ("${_base}" IN_LIST _SRC_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_arch}")
+        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_base}")
         list(APPEND _CUDA_ARCHS "${_arch}")
       endif()
     endif()
@@ -369,6 +515,16 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
 endfunction()
 
+
+function(cuda_archs_sm90plus OUT_CUDA_ARCHS TGT_CUDA_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(_archs "9.0a;10.0f;10.7f;11.0f;12.0f" "${TGT_CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(_archs "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${TGT_CUDA_ARCHS}")
+  endif()
+  set(${OUT_CUDA_ARCHS} ${_archs} PARENT_SCOPE)
+endfunction()
+
 #
 # Override the GPU architectures detected by cmake/torch and filter them by
 # `GPU_SUPPORTED_ARCHES`. Sets the final set of architectures in
@@ -415,21 +571,20 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
 endmacro()
 
 #
-# Define a target named `GPU_MOD_NAME` for a single extension. The
+# Define a target named `MOD_NAME` for a single extension. The
 # arguments are:
 #
 # DESTINATION <dest>         - Module destination directory.
-# LANGUAGE <lang>            - The GPU language for this module, e.g CUDA, HIP,
-#                              etc.
+# LANGUAGE <lang>            - The language for this module, e.g. CUDA, HIP,
+#                              CXX, etc.
 # SOURCES <sources>          - List of source files relative to CMakeLists.txt
 #                              directory.
 #
 # Optional arguments:
 #
-# ARCHITECTURES <arches>     - A list of target GPU architectures in cmake
-#                              format.
-#                              Refer `CMAKE_CUDA_ARCHITECTURES` documentation
-#                              and `CMAKE_HIP_ARCHITECTURES` for more info.
+# ARCHITECTURES <arches>     - A list of target architectures in cmake format.
+#                              For GPU, refer to CMAKE_CUDA_ARCHITECTURES and
+#                              CMAKE_HIP_ARCHITECTURES for more info.
 #                              ARCHITECTURES will use cmake's defaults if
 #                              not provided.
 # COMPILE_FLAGS <flags>      - Extra compiler flags passed to NVCC/hip.
@@ -440,64 +595,67 @@ endmacro()
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
-function (define_gpu_extension_target GPU_MOD_NAME)
+function (define_extension_target MOD_NAME)
   cmake_parse_arguments(PARSE_ARGV 1
-    GPU
+    ARG
     "WITH_SOABI"
     "DESTINATION;LANGUAGE;USE_SABI"
     "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
 
   # Add hipify preprocessing step when building with HIP/ROCm.
-  if (GPU_LANGUAGE STREQUAL "HIP")
-    hipify_sources_target(GPU_SOURCES ${GPU_MOD_NAME} "${GPU_SOURCES}")
+  if (ARG_LANGUAGE STREQUAL "HIP")
+    hipify_sources_target(ARG_SOURCES ${MOD_NAME} "${ARG_SOURCES}")
   endif()
 
-  if (GPU_WITH_SOABI)
-    set(GPU_WITH_SOABI WITH_SOABI)
+  if (ARG_WITH_SOABI)
+    set(SOABI_KEYWORD WITH_SOABI)
   else()
-    set(GPU_WITH_SOABI)
+    set(SOABI_KEYWORD "")
   endif()
 
-  if (GPU_USE_SABI)
-    Python_add_library(${GPU_MOD_NAME} MODULE USE_SABI ${GPU_USE_SABI} ${GPU_WITH_SOABI} "${GPU_SOURCES}")
+  run_python(IS_FREETHREADED_PYTHON
+    "import sysconfig; print(1 if sysconfig.get_config_var(\"Py_GIL_DISABLED\") else 0)"
+    "Failed to determine whether interpreter is free-threaded")
+
+  # Free-threaded Python doesn't yet support the stable ABI (see PEP 803/809),
+  # so avoid using the stable ABI under free-threading only.
+  if (ARG_USE_SABI AND NOT IS_FREETHREADED_PYTHON)
+    Python_add_library(${MOD_NAME} MODULE USE_SABI ${ARG_USE_SABI} ${SOABI_KEYWORD} "${ARG_SOURCES}")
   else()
-    Python_add_library(${GPU_MOD_NAME} MODULE ${GPU_WITH_SOABI} "${GPU_SOURCES}")
+    Python_add_library(${MOD_NAME} MODULE ${SOABI_KEYWORD} "${ARG_SOURCES}")
   endif()
 
-  if (GPU_LANGUAGE STREQUAL "HIP")
+  if (ARG_LANGUAGE STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.
-    add_dependencies(${GPU_MOD_NAME} hipify${GPU_MOD_NAME})
+    add_dependencies(${MOD_NAME} hipify_all)
     # Make sure we include the hipified versions of the headers, and avoid conflicts with the ones in the original source folder
-    target_include_directories(${GPU_MOD_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc
-      ${GPU_INCLUDE_DIRECTORIES})
+    target_include_directories(${MOD_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc
+      ${ARG_INCLUDE_DIRECTORIES})
   else()
-    target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
-      ${GPU_INCLUDE_DIRECTORIES})
+    target_include_directories(${MOD_NAME} PRIVATE csrc
+      ${ARG_INCLUDE_DIRECTORIES})
   endif()
 
-  if (GPU_ARCHITECTURES)
-    set_target_properties(${GPU_MOD_NAME} PROPERTIES
-      ${GPU_LANGUAGE}_ARCHITECTURES "${GPU_ARCHITECTURES}")
+  if (ARG_ARCHITECTURES)
+    set_target_properties(${MOD_NAME} PROPERTIES
+      ${ARG_LANGUAGE}_ARCHITECTURES "${ARG_ARCHITECTURES}")
   endif()
 
-  set_property(TARGET ${GPU_MOD_NAME} PROPERTY CXX_STANDARD 17)
+  target_compile_options(${MOD_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:${ARG_LANGUAGE}>:${ARG_COMPILE_FLAGS}>)
 
-  target_compile_options(${GPU_MOD_NAME} PRIVATE
-    $<$<COMPILE_LANGUAGE:${GPU_LANGUAGE}>:${GPU_COMPILE_FLAGS}>)
+  target_compile_definitions(${MOD_NAME} PRIVATE
+    "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
 
-  target_compile_definitions(${GPU_MOD_NAME} PRIVATE
-    "-DTORCH_EXTENSION_NAME=${GPU_MOD_NAME}")
-
-
-  target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${GPU_LIBRARIES})
+  target_link_libraries(${MOD_NAME} PRIVATE torch ${ARG_LIBRARIES})
 
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
-  if (GPU_LANGUAGE STREQUAL "CUDA")
-    target_link_libraries(${GPU_MOD_NAME} PRIVATE CUDA::cudart CUDA::cuda_driver)
+  if (ARG_LANGUAGE STREQUAL "CUDA")
+    target_link_libraries(${MOD_NAME} PRIVATE torch CUDA::cudart CUDA::cuda_driver ${ARG_LIBRARIES})
   else()
-    target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
+    target_link_libraries(${MOD_NAME} PRIVATE torch ${TORCH_LIBRARIES} ${ARG_LIBRARIES})
   endif()
 
-  install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION} COMPONENT ${GPU_MOD_NAME})
+  install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${MOD_NAME})
 endfunction()

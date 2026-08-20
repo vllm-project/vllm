@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-
-from vllm import LLM
+import torch
 
 from ...utils import create_new_process_for_each_test
 
@@ -11,7 +10,9 @@ from ...utils import create_new_process_for_each_test
 @pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize("backend", ["mp", "ray"])
 @create_new_process_for_each_test()
-def test_collective_rpc(tp_size, backend, monkeypatch):
+def test_collective_rpc(tp_size, backend, monkeypatch, vllm_runner):
+    if torch.accelerator.device_count() < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
     if tp_size == 1 and backend == "ray":
         pytest.skip("Skip duplicate test case")
     if tp_size == 1:
@@ -23,9 +24,11 @@ def test_collective_rpc(tp_size, backend, monkeypatch):
         return self.rank
 
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
-              enforce_eager=True,
-              load_format="dummy",
-              tensor_parallel_size=tp_size,
-              distributed_executor_backend=backend)
-    assert llm.collective_rpc(echo_rank) == list(range(tp_size))
+    with vllm_runner(
+        "hmellor/tiny-random-LlamaForCausalLM",
+        enforce_eager=True,
+        load_format="dummy",
+        tensor_parallel_size=tp_size,
+        distributed_executor_backend=backend,
+    ) as runner:
+        assert runner.llm.collective_rpc(echo_rank) == list(range(tp_size))

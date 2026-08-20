@@ -3,22 +3,20 @@
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, ClassVar, Literal
 
-import cv2
 import numpy as np
 import numpy.typing as npt
-from huggingface_hub import hf_hub_download
 from PIL import Image
 
-from vllm.utils import PlaceholderModule
+from vllm.multimodal.media.audio import load_audio_pyav
+from vllm.transformers_utils.repo_utils import hf_api
 
 from .base import get_cache_dir
 
-try:
-    import librosa
-except ImportError:
-    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
+
+def _sample_frame_indices(total_frames: int, num_frames: int) -> npt.NDArray:
+    return np.linspace(0, total_frames - 1, num_frames, dtype=int)
 
 
 @lru_cache
@@ -33,7 +31,7 @@ def download_video_asset(filename: str) -> str:
     video_path = video_directory / filename
     video_path_str = str(video_path)
     if not video_path.exists():
-        video_path_str = hf_hub_download(
+        video_path_str = hf_api().hf_hub_download(
             repo_id="raushan-testing-hf/videos-test",
             filename=filename,
             repo_type="dataset",
@@ -43,6 +41,8 @@ def download_video_asset(filename: str) -> str:
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
+    import cv2
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
@@ -51,7 +51,7 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
     frames = []
 
     num_frames = num_frames if num_frames > 0 else total_frames
-    frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+    frame_indices = _sample_frame_indices(total_frames, num_frames)
     for idx in range(total_frames):
         ok = cap.grab()  # next img
         if not ok:
@@ -65,18 +65,21 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
 
     frames = np.stack(frames)
     if len(frames) < num_frames:
-        raise ValueError(f"Could not read enough frames from video file {path}"
-                         f" (expected {num_frames} frames, got {len(frames)})")
+        raise ValueError(
+            f"Could not read enough frames from video file {path}"
+            f" (expected {num_frames} frames, got {len(frames)})"
+        )
     return frames
 
 
-def video_to_pil_images_list(path: str,
-                             num_frames: int = -1) -> list[Image.Image]:
+def video_to_pil_images_list(path: str, num_frames: int = -1) -> list[Image.Image]:
     frames = video_to_ndarrays(path, num_frames)
     return [Image.fromarray(frame) for frame in frames]
 
 
-def video_get_metadata(path: str) -> dict[str, Any]:
+def video_get_metadata(path: str, num_frames: int = -1) -> dict[str, Any]:
+    import cv2
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
@@ -85,11 +88,19 @@ def video_get_metadata(path: str) -> dict[str, Any]:
     fps = cap.get(cv2.CAP_PROP_FPS)
     duration = total_frames / fps if fps > 0 else 0
 
+    if num_frames == -1 or num_frames > total_frames:
+        num_frames = total_frames
+    frame_indices = _sample_frame_indices(total_frames, num_frames)
+
     metadata = {
-        "total_num_frames": total_frames,
+        "total_num_frames": num_frames,
         "fps": fps,
         "duration": duration,
-        "video_backend": "opencv"
+        "video_backend": "opencv",
+        "frames_indices": frame_indices.tolist(),
+        # extra field used to control hf processor's video
+        # sampling behavior
+        "do_sample_frames": num_frames == total_frames,
     }
     return metadata
 
@@ -111,28 +122,28 @@ class VideoAsset:
         return self._NAME_TO_FILE[self.name]
 
     @property
+    def video_path(self) -> str:
+        return download_video_asset(self.filename)
+
+    @property
     def pil_images(self) -> list[Image.Image]:
-        video_path = download_video_asset(self.filename)
-        ret = video_to_pil_images_list(video_path, self.num_frames)
+        ret = video_to_pil_images_list(self.video_path, self.num_frames)
         return ret
 
     @property
     def np_ndarrays(self) -> npt.NDArray:
-        video_path = download_video_asset(self.filename)
-        ret = video_to_ndarrays(video_path, self.num_frames)
+        ret = video_to_ndarrays(self.video_path, self.num_frames)
         return ret
 
     @property
     def metadata(self) -> dict[str, Any]:
-        video_path = download_video_asset(self.filename)
-        ret = video_get_metadata(video_path)
+        ret = video_get_metadata(self.video_path, self.num_frames)
         return ret
 
-    def get_audio(self, sampling_rate: Optional[float] = None) -> npt.NDArray:
+    def get_audio(self, sampling_rate: float | None = None) -> npt.NDArray:
         """
         Read audio data from the video asset, used in Qwen2.5-Omni examples.
-        
-        See also: examples/offline_inference/qwen2_5_omni/only_thinker.py
+
+        See also: examples/generate/multimodal/qwen2_5_omni/only_thinker.py
         """
-        video_path = download_video_asset(self.filename)
-        return librosa.load(video_path, sr=sampling_rate)[0]
+        return load_audio_pyav(self.video_path, sr=sampling_rate)[0]

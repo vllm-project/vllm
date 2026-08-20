@@ -1,0 +1,36 @@
+group: Benchmarks
+depends_on: 
+  - image-build
+steps:
+- label: ":nvidia: (H200) Benchmarks CLI"
+  key: benchmarks-cli-test
+  timeout_in_minutes: 45
+  device: h200_18gb
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - rust/src/bench/tests/python_serve_flags.txt
+  - tests/benchmarks/
+  commands:
+  - pytest -v -s benchmarks/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Benchmarks CLI"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (B200) Attention Benchmark Smoke"
+  key: attention-benchmarks-smoke-test-b200
+  device: b200-k8s
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/"
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - benchmarks/attention_benchmarks/
+  - vllm/v1/attention/
+  commands:
+  - python3 benchmarks/attention_benchmarks/benchmark.py --backends flash flashinfer --batch-specs "8q1s1k"

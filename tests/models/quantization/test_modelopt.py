@@ -5,6 +5,7 @@
 """Tests Model Optimizer fp8 models against ground truth generation
 Note: these tests will only pass on H100
 """
+
 import os
 
 import pytest
@@ -22,13 +23,13 @@ MODELS = ["nvidia/Llama-3.1-8B-Instruct-FP8"]
 EXPECTED_STRS_MAP = {
     "nvidia/Llama-3.1-8B-Instruct-FP8": [
         "You're referring to VLLM, a high-performance Large Language Model (LLM) inference and",
-        'Here are the major milestones in the development of artificial intelligence (AI) from 1950 to ',
-        'The comparison between artificial intelligence (AI) and human intelligence in terms of processing information is a complex and',
+        "Here are the major milestones in the development of artificial intelligence (AI) from 1950 to ",
+        "The comparison between artificial intelligence (AI) and human intelligence in terms of processing information is a complex and",
         'A neural network is a complex system modeled after the human brain, consisting of interconnected nodes or "ne',
-        '**The Spark of Imagination**\n\nZeta-5, a sleek and efficient robot, whir',
-        'The COVID-19 pandemic has had a profound impact on global economic structures and business models, leading to',
-        'The Mona Lisa, painted by Leonardo da Vinci in the early 16th century, is one of',
-        'Here are the translations:\n\n**Japanese:** 「早起きは早く獲物をとる'
+        "**The Spark of Imagination**\n\nZeta-5, a sleek and efficient robot, whir",
+        "The COVID-19 pandemic has had a profound impact on global economic structures and business models, leading to",
+        "The Mona Lisa, painted by Leonardo da Vinci in the early 16th century, is one of",
+        "Here are the translations:\n\n**Japanese:** 「早起きは早く獲物をとる",
     ]
 }
 
@@ -39,10 +40,12 @@ EXPECTED_STRS_MAP = {
 # the hardware being run on.
 # Disabled to prevent it from breaking the build
 @pytest.mark.skip(
-    reason=
-    "Prevent unstable test based on golden strings from breaking the build.")
-@pytest.mark.skipif(not is_quant_method_supported("fp8"),
-                    reason="fp8 is not supported on this GPU type.")
+    reason="Prevent unstable test based on golden strings from breaking the build."
+)
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="fp8 is not supported on this GPU type.",
+)
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(example_prompts, model_name) -> None:
     llm = LLM(
@@ -55,12 +58,11 @@ def test_models(example_prompts, model_name) -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     formatted_prompts = [
-        tokenizer.apply_chat_template([{
-            "role": "user",
-            "content": prompt
-        }],
-                                      tokenize=False,
-                                      add_generation_prompt=True)
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
         for prompt in example_prompts
     ]
     params = SamplingParams(max_tokens=20, temperature=0)
@@ -78,4 +80,5 @@ def test_models(example_prompts, model_name) -> None:
         generated_str = generations[i]
         expected_str = expected_strs[i]
         assert expected_str == generated_str, (
-            f"Test{i}:\nExpected: {expected_str!r}\nvLLM: {generated_str!r}")
+            f"Test{i}:\nExpected: {expected_str!r}\nvLLM: {generated_str!r}"
+        )

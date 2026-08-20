@@ -5,7 +5,7 @@ The `vllm serve` command is used to launch the OpenAI-compatible server.
 ## CLI Arguments
 
 The `vllm serve` command is used to launch the OpenAI-compatible server.
-To see the available options, take a look at the [CLI Reference](../cli/README.md#options)!
+To see the available options, take a look at the [CLI Reference](../cli/README.md)!
 
 ## Configuration file
 
@@ -26,6 +26,19 @@ uvicorn-log-level: "info"
 To use the above config file:
 
 ```bash
+vllm serve --config config.yaml
+```
+
+### Generate a configuration from vLLM Recipes
+
+[vLLM Recipes](https://recipes.vllm.ai/) can be converted into `config.yaml`
+and `env.sh`. See the
+[Recipes conversion tool README](../../tools/recipes/README.md) for usage.
+
+Source the generated environment before starting vLLM:
+
+```bash
+source env.sh
 vllm serve --config config.yaml
 ```
 

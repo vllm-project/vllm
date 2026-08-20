@@ -60,11 +60,27 @@ the failure?
 
 ## Logs Wrangling
 
-Download the full log file from Buildkite locally.
+Logs are public; no Buildkite login needed.
+[.buildkite/scripts/ci-fetch-log.sh](../../../.buildkite/scripts/ci-fetch-log.sh)
+saves each log as `ci-<build>-<job-name>.log`, stripped of timestamps and
+ANSI codes:
 
-Strip timestamps and colorization:
+```bash
+# All failed jobs in a PR's latest build (current branch's PR if omitted):
+.buildkite/scripts/ci-fetch-log.sh --pr <PR>
 
-<gh-file:.buildkite/scripts/ci-clean-log.sh>
+# All failed jobs in a build (--soft also includes soft-failed jobs;
+# --all fetches every finished job):
+.buildkite/scripts/ci-fetch-log.sh "https://buildkite.com/vllm/ci/builds/<N>"
+
+# One job — `gh pr checks` URLs (#<job_uuid>) and web UI URLs (?sid=) both
+# work; pass "-" as a second argument to stream to stdout:
+.buildkite/scripts/ci-fetch-log.sh "https://buildkite.com/vllm/ci/builds/<N>#<job_uuid>"
+```
+
+To clean an already-downloaded log:
+
+[.buildkite/scripts/ci-clean-log.sh](../../../.buildkite/scripts/ci-clean-log.sh)
 
 ```bash
 ./ci-clean-log.sh ci.log
@@ -87,7 +103,7 @@ tail -525 ci_build.log | wl-copy
 
 CI test failures may be flaky. Use a bash loop to run repeatedly:
 
-<gh-file:.buildkite/scripts/rerun-test.sh>
+[.buildkite/scripts/rerun-test.sh](../../../.buildkite/scripts/rerun-test.sh)
 
 ```bash
 ./rerun-test.sh tests/v1/engine/test_engine_core_client.py::test_kv_cache_events[True-tcp]

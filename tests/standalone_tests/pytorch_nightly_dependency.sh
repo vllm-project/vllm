@@ -4,6 +4,11 @@
 set -e
 set -x
 
+if command -v rocminfo >/dev/null 2>&1; then
+  echo "Skipping test for ROCm platform"
+  exit 0
+fi
+
 cd /vllm-workspace/
 
 rm -rf .venv
@@ -23,8 +28,8 @@ uv pip freeze | grep -E '^torch|^torchvision|^torchaudio' | sort > before.txt
 echo "Before:"
 cat before.txt
 
-echo ">>> Installing requirements/nightly_torch_test.txt"
-uv pip install --quiet -r requirements/nightly_torch_test.txt
+echo ">>> Installing requirements/test/nightly-torch.txt"
+uv pip install --quiet -r requirements/test/nightly-torch.txt
 
 echo ">>> Capturing torch-related versions after requirements install"
 uv pip freeze | grep -E '^torch|^torchvision|^torchaudio' | sort > after.txt
@@ -35,8 +40,8 @@ echo ">>> Comparing versions"
 if diff before.txt after.txt; then
   echo "torch version not overridden."
 else
-  echo "torch version overridden by nightly_torch_test.txt, \
-  if the dependency is not triggered by the pytroch nightly test,\
-  please add the dependency to the list 'white_list'  in tools/generate_nightly_torch_test.py"
+  echo "torch version overridden by test/nightly-torch.txt, \
+  if the dependency is not triggered by the pytorch nightly test,\
+  please add the dependency to the list 'white_list' in tools/pre_commit/generate_nightly_torch_test.py"
   exit 1
 fi

@@ -4,28 +4,35 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    BatchedDeepGemmExperts)
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize, BatchedTritonExperts)
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel)
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+    BatchedDeepGemmExperts,
+)
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+    BatchedTritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
+    BatchedPrepareAndFinalize,
+)
 from vllm.utils.deep_gemm import calc_diff, is_deep_gemm_supported
 
 from .test_deepgemm import make_block_quant_fp8_weights
+from .utils import make_dummy_moe_config
 
 BLOCK_SIZE = [128, 128]
 
 
-@pytest.mark.skipif(not is_deep_gemm_supported(),
-                    reason="Requires deep_gemm kernels")
+@pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
 @pytest.mark.parametrize("E", [16, 32])  # number of experts
 @pytest.mark.parametrize("T", [256, 512])  # tokens per expert
 @pytest.mark.parametrize("K", [128, 256])  # hidden dim
 @pytest.mark.parametrize("N", [512, 1024])  # intermediate dim per expert
 @pytest.mark.parametrize("topk", [2, 4])
-def test_batched_deepgemm_vs_triton(E: int, T: int, K: int, N: int, topk: int,
-                                    monkeypatch):
+def test_batched_deepgemm_vs_triton(
+    E: int, T: int, K: int, N: int, topk: int, monkeypatch, workspace_init
+):
     """Compare BatchedDeepGemmExperts to BatchedTritonExperts."""
 
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
@@ -56,47 +63,59 @@ def test_batched_deepgemm_vs_triton(E: int, T: int, K: int, N: int, topk: int,
         rank=0,
     )
 
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+        per_act_token_quant=False,
+        block_shape=BLOCK_SIZE,
+    )
+
     # triton (reference)
     triton_experts = BatchedTritonExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
-        use_fp8_w8a8=True,
-        per_act_token_quant=False,
-        block_shape=BLOCK_SIZE,
+        quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
-    mk_triton = FusedMoEModularKernel(prep_finalize, triton_experts)
+    mk_triton = FusedMoEKernel(
+        prep_finalize,
+        triton_experts,
+    )
 
-    out_triton = mk_triton(
+    out_triton = mk_triton.apply(
         hidden_states=a,
         w1=w1,
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
-        w1_scale=w1_s,
-        w2_scale=w2_s,
+        activation=MoEActivation.SILU,
         global_num_experts=E,
+        expert_map=None,
+        apply_router_weight_on_input=False,
     )
 
     # deepgemm
     deepgemm_experts = BatchedDeepGemmExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
-        block_shape=BLOCK_SIZE,
-        per_act_token_quant=False,
+        quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
-    mk_deepgemm = FusedMoEModularKernel(prep_finalize, deepgemm_experts)
+    mk_deepgemm = FusedMoEKernel(
+        prep_finalize,
+        deepgemm_experts,
+    )
 
-    out_deepgemm = mk_deepgemm(
+    out_deepgemm = mk_deepgemm.apply(
         hidden_states=a,
         w1=w1,
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
-        w1_scale=w1_s,
-        w2_scale=w2_s,
+        activation=MoEActivation.SILU,
         global_num_experts=E,
+        expert_map=None,
+        apply_router_weight_on_input=False,
     )
 
     diff = calc_diff(out_deepgemm, out_triton)

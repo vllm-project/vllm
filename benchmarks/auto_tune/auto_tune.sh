@@ -18,6 +18,11 @@ MIN_CACHE_HIT_PCT=${MIN_CACHE_HIT_PCT:-0}
 MAX_LATENCY_ALLOWED_MS=${MAX_LATENCY_ALLOWED_MS:-100000000000}
 NUM_SEQS_LIST=${NUM_SEQS_LIST:-"128 256"}
 NUM_BATCHED_TOKENS_LIST=${NUM_BATCHED_TOKENS_LIST:-"512 1024 2048 4096"}
+HOSTNAME=$(hostname)
+if [[ -z "$HOSTNAME" ]]; then
+    echo "Error: Failed to determine hostname." >&2
+    exit 1
+fi
 
 LOG_FOLDER="$BASE/auto-benchmark/$TAG"
 RESULT="$LOG_FOLDER/result.txt"
@@ -41,10 +46,10 @@ echo "VLLM_LOGGING_LEVEL=$VLLM_LOGGING_LEVEL"
 echo "RESULT_FILE=$RESULT"
 echo "====================== AUTO TUNEPARAMETERS ===================="
 
-rm -rf $LOG_FOLDER
-rm -rf $PROFILE_PATH
-mkdir -p $LOG_FOLDER
-mkdir -p $PROFILE_PATH
+rm -rf "$LOG_FOLDER"
+rm -rf "$PROFILE_PATH"
+mkdir -p "$LOG_FOLDER"
+mkdir -p "$PROFILE_PATH"
 
 cd "$BASE/vllm"
 
@@ -74,14 +79,14 @@ start_server() {
     local vllm_log=$4
     local profile_dir=$5
 
-    pkill -if vllm
+    pkill -if "vllm serve" || true
 
     # Define the common arguments as a bash array.
     # Each argument and its value are separate elements.
     local common_args_array=(
         "$MODEL"
-        "--disable-log-requests"
         "--port" "8004"
+        "--host" "$HOSTNAME"
         "--gpu-memory-utilization" "$gpu_memory_utilization"
         "--max-num-seqs" "$max_num_seqs"
         "--max-num-batched-tokens" "$max_num_batched_tokens"
@@ -96,18 +101,24 @@ start_server() {
     # This correctly passes each element as a separate argument.
     if [[ -n "$profile_dir" ]]; then
         # Start server with profiling enabled
-        VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 VLLM_TORCH_PROFILER_DIR=$profile_dir \
-            vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
+        local profile_config_json="{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$profile_dir\"}"
+        VLLM_SERVER_DEV_MODE=1 \
+            vllm serve --profiler-config "$profile_config_json" "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     else
         # Start server without profiling
-        VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 \
+        VLLM_SERVER_DEV_MODE=1 \
             vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     fi
+    local server_pid=$!
 
     # wait for 10 minutes...
     server_started=0
-    for i in {1..60}; do
-        RESPONSE=$(curl -s -X GET "http://0.0.0.0:8004/health" -w "%{http_code}" -o /dev/stdout)
+    for _ in {1..60}; do
+        # This line checks whether the server is still alive or not,
+        # since that we should always have permission to send signal to the server process.
+        kill -0 $server_pid 2> /dev/null || break
+
+        RESPONSE=$(curl -s -X GET "http://${HOSTNAME}:8004/health" -w "%{http_code}" -o /dev/stdout)
         STATUS_CODE=$(echo "$RESPONSE" | tail -n 1)
         if [[ "$STATUS_CODE" -eq 200 ]]; then
             server_started=1
@@ -118,7 +129,7 @@ start_server() {
     done
 
     if (( ! server_started )); then
-        echo "server did not start within 10 minutes. Please check server log at $vllm_log".
+        echo "server did not start within 10 minutes or crashed. Please check server log at $vllm_log".
         return 1
     else
         return 0
@@ -133,12 +144,12 @@ run_benchmark() {
     local vllm_log="$LOG_FOLDER/vllm_log_${max_num_seqs}_${max_num_batched_tokens}.txt"
     echo "vllm_log: $vllm_log"
     echo
-    rm -f $vllm_log
-    pkill -if vllm
+    rm -f "$vllm_log"
+    pkill -if "vllm serve" || true
 
     echo "starting server..."
     # Call start_server without a profile_dir to avoid profiling overhead
-    start_server $gpu_memory_utilization $max_num_seqs $max_num_batched_tokens $vllm_log ""
+    start_server "$gpu_memory_utilization" "$max_num_seqs" "$max_num_batched_tokens" "$vllm_log" ""
     result=$?
     if [[ "$result" -eq 1 ]]; then
         echo "server failed to start. gpu_memory_utilization:$gpu_memory_utilization, max_num_seqs:$max_num_seqs, max_num_batched_tokens: $max_num_batched_tokens"
@@ -156,17 +167,18 @@ run_benchmark() {
     # --profile flag is removed from this call
     vllm bench serve \
         --backend vllm \
-        --model $MODEL  \
+        --model "$MODEL"  \
         --dataset-name random \
         --random-input-len $adjusted_input_len \
-        --random-output-len $OUTPUT_LEN \
+        --random-output-len "$OUTPUT_LEN" \
         --ignore-eos \
         --disable-tqdm \
         --request-rate inf \
         --percentile-metrics ttft,tpot,itl,e2el \
-        --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
+        --goodput e2el:"$MAX_LATENCY_ALLOWED_MS" \
         --num-prompts 1000 \
         --random-prefix-len $prefix_len \
+        --host "$HOSTNAME" \
         --port 8004 &> "$bm_log"
     throughput=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
     e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
@@ -182,22 +194,23 @@ run_benchmark() {
         request_rate=$((${throughput%.*} + 1))
         while ((request_rate > 0)); do
             # clear prefix cache
-            curl -X POST http://0.0.0.0:8004/reset_prefix_cache
+            curl -X POST http://"${HOSTNAME}":8004/reset_prefix_cache
             sleep 5
             bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_${request_rate}.txt"
             vllm bench serve \
                 --backend vllm \
-                --model $MODEL  \
+                --model "$MODEL"  \
                 --dataset-name random \
                 --random-input-len $adjusted_input_len \
-                --random-output-len $OUTPUT_LEN \
+                --random-output-len "$OUTPUT_LEN" \
                 --ignore-eos \
                 --disable-tqdm \
                 --request-rate $request_rate \
                 --percentile-metrics ttft,tpot,itl,e2el \
-                --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
+                --goodput e2el:"$MAX_LATENCY_ALLOWED_MS" \
                 --num-prompts 100 \
                 --random-prefix-len $prefix_len \
+                --host "$HOSTNAME" \
                 --port 8004 &> "$bm_log"
             throughput=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
             e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
@@ -227,7 +240,7 @@ run_benchmark() {
 
     echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput"
 
-    pkill -if vllm
+    pkill -if "vllm serve" || true
     sleep 10
     echo "===================="
     return 0
@@ -241,7 +254,7 @@ gpu_memory_utilization=0.98
 find_gpu_memory_utilization=0
 while (( $(echo "$gpu_memory_utilization >= 0.9" | bc -l) )); do
     # Pass empty string for profile_dir argument
-    start_server $gpu_memory_utilization "${num_seqs_list[-1]}" "${num_batched_tokens_list[-1]}" "$LOG_FOLDER/vllm_log_gpu_memory_utilization_$gpu_memory_utilization.log" ""
+    start_server "$gpu_memory_utilization" "${num_seqs_list[-1]}" "${num_batched_tokens_list[-1]}" "$LOG_FOLDER/vllm_log_gpu_memory_utilization_$gpu_memory_utilization.log" ""
     result=$?
     if [[ "$result" -eq 0 ]]; then
         find_gpu_memory_utilization=1
@@ -260,7 +273,7 @@ fi
 
 for num_seqs in "${num_seqs_list[@]}"; do
     for num_batched_tokens in "${num_batched_tokens_list[@]}"; do
-        run_benchmark $num_seqs $num_batched_tokens $gpu_memory_utilization
+        run_benchmark "$num_seqs" "$num_batched_tokens" "$gpu_memory_utilization"
     done
 done
 echo "finish permutations"
@@ -271,7 +284,7 @@ echo "finish permutations"
 if (( $(echo "$best_throughput > 0" | bc -l) )); then
     echo
     echo "Benchmark tuning finished. Now running profiling on the best configuration found..."
-    echo "Best config: max_num_seqs: $best_max_num_seqs, max_num_batched_tokens: $best_num_batched_tokens, throughput: $best_throughput"
+    echo "Best config: max_num_seqs: $best_max_num_seqs, max_num_batched_tokens: $best_num_batched_tokens, throughput: $best_throughput, goodput: $best_goodput"
     echo
 
     vllm_log="$LOG_FOLDER/vllm_log_BEST_PROFILE.txt"
@@ -279,7 +292,7 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
 
     # Start server with the best params and profiling ENABLED
     echo "Starting server for profiling..."
-    start_server $gpu_memory_utilization $best_max_num_seqs $best_num_batched_tokens "$vllm_log" "$PROFILE_PATH"
+    start_server "$gpu_memory_utilization" "$best_max_num_seqs" "$best_num_batched_tokens" "$vllm_log" "$PROFILE_PATH"
 
     # Run benchmark with the best params and the --profile flag
     echo "Running benchmark with profiling..."
@@ -287,22 +300,23 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
     adjusted_input_len=$(( INPUT_LEN - prefix_len ))
     vllm bench serve \
         --backend vllm \
-        --model $MODEL \
+        --model "$MODEL" \
         --dataset-name random \
         --random-input-len $adjusted_input_len \
-        --random-output-len $OUTPUT_LEN \
+        --random-output-len "$OUTPUT_LEN" \
         --ignore-eos \
         --disable-tqdm \
-        --request-rate $best_request_rate \
+        --request-rate "$best_request_rate" \
         --percentile-metrics ttft,tpot,itl,e2el \
-        --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
+        --goodput e2el:"$MAX_LATENCY_ALLOWED_MS" \
         --num-prompts 100 \
         --random-prefix-len $prefix_len \
+        --host "$HOSTNAME" \
         --port 8004 \
         --profile &> "$bm_log"
 else
     echo "No configuration met the latency requirements. Skipping final profiling run."
 fi
-pkill -if vllm
+pkill -if "vllm serve" || true
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH" >> "$RESULT"

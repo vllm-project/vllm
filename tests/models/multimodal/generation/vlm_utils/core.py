@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Core test implementation to be shared across modalities."""
-from typing import Any, Callable, Optional
+
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from vllm.config import RunnerOption
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.config.model import RunnerOption
+from vllm.tokenizers import TokenizerLike
 
 from .....conftest import HfRunner, VllmRunner
 from ....registry import HF_EXAMPLE_MODELS
@@ -26,21 +28,22 @@ def run_test(
     enforce_eager: bool,
     max_model_len: int,
     max_num_seqs: int,
-    hf_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]],
-    vllm_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]],
+    hf_output_post_proc: Callable[[RunnerOutput, str], Any] | None,
+    vllm_output_post_proc: Callable[[RunnerOutput, str], Any] | None,
     auto_cls: type[_BaseAutoModelClass],
     use_tokenizer_eos: bool,
     comparator: Callable[..., None],
-    get_stop_token_ids: Optional[Callable[[AnyTokenizer], list[int]]],
-    stop_str: Optional[list[str]],
+    get_stop_token_ids: Callable[[TokenizerLike], list[int]] | None,
+    stop_str: list[str] | None,
     limit_mm_per_prompt: dict[str, int],
-    vllm_runner_kwargs: Optional[dict[str, Any]],
-    hf_model_kwargs: Optional[dict[str, Any]],
-    patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
+    vllm_runner_kwargs: dict[str, Any] | None,
+    hf_model_kwargs: dict[str, Any] | None,
+    hf_processor: Callable[[str], Any] | None,
+    patch_hf_runner: Callable[[HfRunner], HfRunner] | None,
     runner: RunnerOption = "auto",
-    distributed_executor_backend: Optional[str] = None,
+    distributed_executor_backend: str | None = None,
     tensor_parallel_size: int = 1,
-    vllm_embeddings: Optional[torch.Tensor] = None,
+    vllm_embeddings: torch.Tensor | None = None,
 ):
     """Modality agnostic test executor for comparing HF/vLLM outputs."""
     # In the case of embeddings, vLLM takes separate input tensors
@@ -69,23 +72,32 @@ def run_test(
         vllm_runner_kwargs_["tokenizer_mode"] = model_info.tokenizer_mode
     if model_info.hf_overrides:
         vllm_runner_kwargs_["hf_overrides"] = model_info.hf_overrides
-    if model_info.skip_tokenizer_init:
-        vllm_runner_kwargs_[
-            "skip_tokenizer_init"] = model_info.skip_tokenizer_init
+    if model_info.require_embed_inputs:
+        for k in ("skip_tokenizer_init", "enable_prompt_embeds", "enable_mm_embeds"):
+            vllm_runner_kwargs_[k] = model_info.require_embed_inputs
+    if not model_info.enable_prefix_caching:
+        vllm_runner_kwargs_["enable_prefix_caching"] = False
 
     if vllm_runner_kwargs:
         vllm_runner_kwargs_.update(vllm_runner_kwargs)
 
-    with vllm_runner(model,
-                     max_model_len=max_model_len,
-                     max_num_seqs=max_num_seqs,
-                     dtype=dtype,
-                     limit_mm_per_prompt=limit_mm_per_prompt,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=enforce_eager,
-                     runner=runner,
-                     **vllm_runner_kwargs_) as vllm_model:
+    # Avoid passing limit_mm_per_prompt twice when vllm_runner_kwargs
+    # already contains it (e.g. gemma4 sets it via vllm_runner_kwargs).
+    if "limit_mm_per_prompt" in vllm_runner_kwargs_:
+        limit_mm_per_prompt = vllm_runner_kwargs_.pop("limit_mm_per_prompt")
+
+    with vllm_runner(
+        model,
+        max_model_len=max_model_len,
+        max_num_seqs=max_num_seqs,
+        dtype=dtype,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
+        enforce_eager=enforce_eager,
+        runner=runner,
+        **vllm_runner_kwargs_,
+    ) as vllm_model:
         tokenizer = vllm_model.llm.get_tokenizer()
 
         vllm_kwargs: dict[str, Any] = {}
@@ -95,21 +107,29 @@ def run_test(
             vllm_kwargs["stop"] = stop_str
 
         for prompts, image_data, video_data, audio_data in vllm_inputs:
-            mm_data = dict(images=image_data,
-                           videos=video_data,
-                           audios=audio_data)
+            mm_data = dict(images=image_data, videos=video_data, audios=audio_data)
             vllm_kwargs_with_mm_data = vllm_kwargs | mm_data
             vllm_output = vllm_model.generate_greedy_logprobs(
                 prompts,
                 max_tokens,
                 num_logprobs=num_logprobs,
-                **vllm_kwargs_with_mm_data)
+                **vllm_kwargs_with_mm_data,
+            )
             vllm_outputs_per_mm.append(vllm_output)
 
-    hf_model = hf_runner(model,
-                         dtype=dtype,
-                         auto_cls=auto_cls,
-                         model_kwargs=hf_model_kwargs)
+    hf_runner_kwargs: dict[str, Any] = {}
+    if model_info.tokenizer:
+        hf_runner_kwargs["tokenizer_name"] = model_info.tokenizer
+    if hf_processor is not None:
+        hf_runner_kwargs["processor"] = hf_processor(model)
+
+    hf_model = hf_runner(
+        model,
+        dtype=dtype,
+        auto_cls=auto_cls,
+        model_kwargs=hf_model_kwargs,
+        **hf_runner_kwargs,
+    )
 
     # Some models need to patch things like the model processor, e.g., internvl
     if patch_hf_runner is not None:
@@ -129,16 +149,15 @@ def run_test(
             hf_kwargs["stop_strings"] = stop_str
 
         for prompts, image_data, video_data, audio_data in inputs:
-            mm_data = dict(images=image_data,
-                           videos=video_data,
-                           audios=audio_data)
+            mm_data = dict(images=image_data, videos=video_data, audios=audio_data)
             hf_kwargs_with_mm_data = hf_kwargs | mm_data
             hf_output = hf_model.generate_greedy_logprobs_limit(
                 prompts,
                 max_tokens,
                 num_logprobs=num_logprobs,
                 tokenizer=tokenizer,
-                **hf_kwargs_with_mm_data)
+                **hf_kwargs_with_mm_data,
+            )
             hf_outputs_per_mm.append(hf_output)
 
     # Apply output processing / sanitation to the vLLM and HF runner results
@@ -150,8 +169,7 @@ def run_test(
         second_runner_processor=vllm_output_post_proc,
     )
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_mm,
-                                        vllm_outputs_per_mm):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_mm, vllm_outputs_per_mm):
         # This is usually check_logprobs_close, but it's passed through to
         # allow things like check_outputs_equal where needed
         comparator(
@@ -171,15 +189,19 @@ def process_runner_outputs(
 ):
     """Applies the runner processor(s) to the runner outputs, if any."""
     if first_runner_processor is not None:
-        first_runner_outputs = process_outputs(first_runner_processor, model,
-                                               first_runner_outputs)
+        first_runner_outputs = process_outputs(
+            first_runner_processor, model, first_runner_outputs
+        )
     if second_runner_processor is not None:
-        second_runner_outputs = process_outputs(second_runner_processor, model,
-                                                second_runner_outputs)
+        second_runner_outputs = process_outputs(
+            second_runner_processor, model, second_runner_outputs
+        )
     return first_runner_outputs, second_runner_outputs
 
 
 def process_outputs(output_processor, model, outputs_per_image):
     """Applies a model specific post-processor function to a runner's output"""
-    return [[output_processor(res, model) for res in outputs]
-            for outputs in outputs_per_image]
+    return [
+        [output_processor(res, model) for res in outputs]
+        for outputs in outputs_per_image
+    ]

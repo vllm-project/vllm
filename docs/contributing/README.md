@@ -16,123 +16,152 @@ Finally, one of the most impactful ways to support us is by raising awareness ab
 Unsure on where to start? Check out the following links for tasks to work on:
 
 - [Good first issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
-    - [Selected onboarding tasks](gh-project:6)
+    - [Selected onboarding tasks](https://github.com/orgs/vllm-project/projects/6)
 - [New model requests](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22new-model%22)
-    - [Models with multi-modal capabilities](gh-project:10)
+    - [Models with multi-modal capabilities](https://github.com/orgs/vllm-project/projects/10)
 
 ## License
 
-See <gh-file:LICENSE>.
+See [LICENSE](../../LICENSE).
 
 ## Developing
 
---8<-- "docs/getting_started/installation/python_env_setup.inc.md"
-
-Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation.
-Check out the [building from source][build-from-source] documentation for details.
-
-For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
-
-### Building the docs with MkDocs
-
-#### Introduction to MkDocs
-
-[MkDocs](https://github.com/mkdocs/mkdocs) is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file.
-
-#### Install MkDocs and Plugins
-
-Install MkDocs along with the [plugins](https://github.com/vllm-project/vllm/blob/main/mkdocs.yaml) used in the vLLM documentation, as well as required dependencies:
-
-```bash
-uv pip install -r requirements/docs.txt
-```
-
-!!! note
-    Ensure that your Python version is compatible with the plugins (e.g., `mkdocs-awesome-nav` requires Python 3.10+)
-
-#### Verify Installation
-
-Confirm that MkDocs is correctly installed:
-
-```bash
-mkdocs --version
-```
-
-Example output:
-
-```console
-mkdocs, version 1.6.1 from /opt/miniconda3/envs/mkdoc/lib/python3.10/site-packages/mkdocs (Python 3.10)
-```
-
-#### Clone the `vLLM` repository
+The first step of contributing to vLLM is to clone the GitHub repository:
 
 ```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 ```
 
-#### Start the Development Server
+Then, configure your Python virtual environment.
 
-MkDocs comes with a built-in dev-server that lets you preview your documentation as you work on it. Make sure you're in the same directory as the `mkdocs.yml` configuration file, and then start the server by running the `mkdocs serve` command:
+--8<-- "docs/getting_started/installation/python_env_setup.inc.md"
+
+If you are only developing vLLM's Python code, install vLLM using:
 
 ```bash
-mkdocs serve
+VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
-Example output:
+To rebuild only the Rust frontend binary:
 
-```console
-INFO    -  Documentation built in 106.83 seconds
-INFO    -  [22:02:02] Watching paths for changes: 'docs', 'mkdocs.yaml'
-INFO    -  [22:02:02] Serving on http://127.0.0.1:8000/
+```bash
+./build_rust.sh          # release build
+./build_rust.sh --debug  # faster build for development
 ```
 
-#### View in Your Browser
+If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
-Open up [http://127.0.0.1:8000/](http://127.0.0.1:8000/) in your browser to see a live preview:.
+```bash
+uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
+```
 
-#### Learn More
+Then install the necessary build dependencies from `requirements/build/cuda.txt`, skipping `torch` as it was installed in the previous step:
 
-For additional features and advanced configurations, refer to the official [MkDocs Documentation](https://www.mkdocs.org/).
+```bash
+grep -v '^torch==' requirements/build/cuda.txt | uv pip install -r -
+```
 
-## Testing
+Finally install vLLM using:
 
-??? console "Commands"
+```bash
+uv pip install -e . --no-build-isolation
+```
 
-    ```bash
-    # These commands are only for Nvidia CUDA platforms.
-    uv pip install -r requirements/common.txt -r requirements/dev.txt --torch-backend=auto
+For more details about installing from source and installing for other hardware, check out the [installation instructions](../getting_started/installation/README.md) for your hardware and head to the "Build wheel from source" section.
 
-    # Linting, formatting and static type checking
-    pre-commit install
-
-    # You can manually run pre-commit with
-    pre-commit run --all-files --show-diff-on-failure
-
-    # To manually run something from CI that does not run
-    # locally by default, you can run:
-    pre-commit run mypy-3.9 --hook-stage manual --all-files
-
-    # Unit tests
-    pytest tests/
-
-    # Run tests for a single test file with detailed output
-    pytest -s -v tests/test_logger.py
-    ```
+For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
+For JIT kernel warmup conventions, see [JIT Kernel Warmup](./jit_kernel_warmup.md).
 
 !!! tip
-    Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
+    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
 
     Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 
-!!! note "Install python3-dev if Python.h is missing"
+### Linting
+
+vLLM uses `pre-commit` to lint and format the codebase. See <https://pre-commit.com/#usage> if `pre-commit` is new to you. Setting up `pre-commit` is as easy as:
+
+```bash
+uv pip install pre-commit>=4.5.1
+pre-commit install
+```
+
+vLLM's `pre-commit` hooks will now run automatically every time you commit.
+
+!!! tip "Tips"
+    You can manually run the `pre-commit` hooks using:
+
+    ```bash
+    pre-commit run     # runs on staged files
+    pre-commit run -a  # runs on all files (short for --all-files)
+    ```
+
+    ---
+
+    Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
+
+    ```bash
+    pre-commit run --hook-stage manual mypy-3.11
+    ```
+
+### Documentation
+
+MkDocs is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file, [mkdocs.yaml](../../mkdocs.yaml).
+
+Get started with:
+
+```bash
+uv pip install -r requirements/docs.txt
+```
+
+!!! tip
+    Ensure that your Python version is compatible with the plugins
+    (e.g., `mkdocs-awesome-nav` requires Python 3.10+)
+
+MkDocs comes with a built-in dev-server that lets you preview your documentation as you work on it.
+From the root of the repository, run:
+
+```bash
+mkdocs serve                           # with API ref (~10 minutes)
+API_AUTONAV_EXCLUDE=vllm mkdocs serve  # API ref off (~15 seconds)
+```
+
+Once you see `Serving on http://127.0.0.1:8000/` in the logs, the live preview is ready!
+Open <http://127.0.0.1:8000/> in your browser to see it.
+
+For additional features and advanced configurations, refer to the:
+
+- [MkDocs documentation](https://www.mkdocs.org/)
+- [Material for MkDocs documentation](https://squidfunk.github.io/mkdocs-material/) (the MkDocs theme we use)
+
+### Testing
+
+vLLM uses `pytest` to test the codebase.
+
+```bash
+# Install the test dependencies used in CI (CUDA only)
+uv pip install -r requirements/common.txt -r requirements/dev.txt --torch-backend=auto
+
+# Install some common test dependencies (hardware agnostic)
+uv pip install pytest pytest-asyncio
+
+# Run all tests
+pytest tests/
+
+# Run tests for a single test file with detailed output
+pytest -s -v tests/test_logger.py
+```
+
+!!! tip "Install python3-dev if Python.h is missing"
     If any of the above commands fails with `Python.h: No such file or directory`, install
     `python3-dev` with `sudo apt install python3-dev`.
 
-!!! note
+!!! warning "Warnings"
     Currently, the repository is not fully checked by `mypy`.
 
-!!! note
+    ---
+
     Currently, not all unit tests pass when run on CPU platforms. If you don't have access to a GPU
     platform to run unit tests locally, rely on the continuous integration system to run the tests for
     now.
@@ -142,7 +171,7 @@ For additional features and advanced configurations, refer to the official [MkDo
 If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
 !!! important
-    If you discover a security vulnerability, please follow the instructions [here](gh-file:SECURITY.md#reporting-a-vulnerability).
+    If you discover a security vulnerability, please follow the instructions [here](../../SECURITY.md).
 
 ## Pull Requests & Code Reviews
 
@@ -152,7 +181,7 @@ code quality and improve the efficiency of the review process.
 
 ### DCO and Signed-off-by
 
-When contributing changes to this project, you must agree to the <gh-file:DCO>.
+When contributing changes to this project, you must agree to the [DCO](../../DCO).
 Commits must include a `Signed-off-by:` header which certifies agreement with
 the terms of the DCO.
 
@@ -165,6 +194,30 @@ Using `-s` with `git commit` will automatically add this header.
       It will bring up a `git` window where you can modify the `Author` and enable `Sign-off commit`.
     - **VSCode**: Open the [Settings editor](https://code.visualstudio.com/docs/configure/settings)
       and enable the `Git: Always Sign Off` (`git.alwaysSignOff`) field.
+
+### AI Assisted Contributions
+
+Before making an AI assisted contribution, you must:
+
+1. **Be involved**: Do not submit "pure agent" PRs. The human submitter is responsible for reviewing all changed lines, validating behavior end-to-end, and running relevant tests.
+2. **Ensure significance**: Avoid one-off "busywork" PRs (single typo, isolated style cleanup, one mutable default fix, etc.). Bundle mechanical cleanups into a clear, systematic scope.
+
+When AI tools provide non-trivial assistance in generating or modifying code, you must:
+
+1. **Review thoroughly**: You remain responsible for all code you submit. Review and understand AI-generated code with the same care as code you write manually.
+2. **Disclose in PR**: Always mention when a pull request includes AI-generated code. Add a note in the PR description.
+3. **Mark commits**: Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
+
+   ```text
+   Your commit message here
+
+   Co-authored-by: GitHub Copilot
+   Co-authored-by: Claude
+   Co-authored-by: gemini-code-assist
+   Signed-off-by: Your Name <your.email@example.com>
+   ```
+
+AI-assisted code must meet all quality standards: proper testing, documentation, adherence to style guides, and thorough review. Attribution helps reviewers evaluate contributions in context and maintains legal clarity for the project.
 
 ### PR Title and Classification
 
@@ -194,8 +247,7 @@ appropriately to indicate the type of change. Please use one of the following:
 The PR needs to meet the following code quality standards:
 
 - We adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html) and [Google C++ style guide](https://google.github.io/styleguide/cppguide.html).
-- Pass all linter checks. Please use `pre-commit` to format your code. See
-  <https://pre-commit.com/#usage> if `pre-commit` is new to you.
+- Pass all linter checks.
 - The code needs to be well-documented to ensure future contributors can easily
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This
@@ -250,8 +302,30 @@ review process:
   isn't clear or you disagree with a suggestion, feel free to ask for
   clarification or discuss the suggestion.
 - Note that not all CI checks will be executed due to limited computational
-  resources. The reviewer will add `ready` label to the PR when the PR is
-  ready to merge or a full CI run is needed.
+  resources. Reviewers with write access and configured trusted contributors
+  can comment `/ci run` for upstream CI or `/amd-ci run` for AMD CI only when
+  CI signals are needed before a PR is ready. After the PR is approved or has
+  the `ready` label, the PR author can use `/ci run`, `/ci retry`, `/ci cancel`,
+  or the corresponding `/amd-ci` variants. New commits do not start upstream
+  CI automatically.
+
+### Pull Request Limits and Escalation
+
+vLLM uses GitHub's [pull request limit](https://github.blog/open-source/maintainers/how-pull-request-limits-are-cutting-down-the-noise/)
+for contributors without write access. The current cap is 6 open PRs. If this
+blocks well-intentioned critical work, contact a committer to request bypass
+list access.
+
+If you need an expedited review for an important contribution, please email us
+at:
+
+<pr-review-request@vllm.ai>
+
+Using a verifiable company or university email, include:
+
+- your production or research use case
+- the problem you encountered
+- how your contribution addresses it
 
 ## Thank You
 

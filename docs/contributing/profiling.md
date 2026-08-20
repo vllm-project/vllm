@@ -3,16 +3,25 @@
 !!! warning
     Profiling is only intended for vLLM developers and maintainers to understand the proportion of time spent in different parts of the codebase. **vLLM end-users should never turn on profiling** as it will significantly slow down the inference.
 
+!!! tip "Choosing a profiler"
+    - Use **Nsight Systems** for low-overhead, performance-critical profiling.
+    - Use **PyTorch Profiler** for medium-overhead profiling with richer debugging information (e.g., stack traces, memory, shapes). Note that enabling these features adds overhead and is not recommended for benchmarking.
+
 ## Profile with PyTorch Profiler
 
-We support tracing vLLM workers using the `torch.profiler` module. You can enable tracing by setting the `VLLM_TORCH_PROFILER_DIR` environment variable to the directory where you want to save the traces: `VLLM_TORCH_PROFILER_DIR=/mnt/traces/`. Additionally, you can control the profiling content by specifying the following environment variables:
+We support tracing vLLM workers using different profilers. You can enable profiling by setting the `--profiler-config` flag when launching the server.
 
-- `VLLM_TORCH_PROFILER_RECORD_SHAPES=1` to enable recording Tensor Shapes, off by default
-- `VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1` to record memory, off by default
-- `VLLM_TORCH_PROFILER_WITH_STACK=1` to enable recording stack information, on by default
-- `VLLM_TORCH_PROFILER_WITH_FLOPS=1` to enable recording FLOPs, off by default
+!!! note
+    The `--profiler-config` flag is available in vLLM v0.13.0 and later. If you are using an earlier version, please upgrade to use this feature.
 
-The OpenAI server also needs to be started with the `VLLM_TORCH_PROFILER_DIR` environment variable set.
+To use the `torch.profiler` module, set the `profiler` entry to `'torch'` and `torch_profiler_dir` to the directory where you want to save the traces. Additionally, you can control the profiling content by specifying the following additional arguments in the config:
+
+- `torch_profiler_record_shapes` to enable recording Tensor Shapes, off by default
+- `torch_profiler_with_memory` to record memory, off by default
+- `torch_profiler_with_stack` to enable recording stack information, on by default
+- `torch_profiler_with_flops` to enable recording FLOPs, off by default
+- `torch_profiler_use_gzip` to control gzip-compressing profiling files, on by default
+- `torch_profiler_dump_cuda_time_total` to control dumping and printing the aggregated CUDA self time table, on by default
 
 When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 
@@ -26,21 +35,18 @@ Traces can be visualized using <https://ui.perfetto.dev/>.
 
 !!! tip
     To stop the profiler - it flushes out all the profile trace files to the directory. This takes time, for example for about 100 requests worth of data for a llama 70b, it takes about 10 minutes to flush out on a H100.
-    Set the env variable VLLM_RPC_TIMEOUT to a big number before you start the server. Say something like 30 minutes.
-    `export VLLM_RPC_TIMEOUT=1800000`
+    The engine client waits for this flush to complete without timing out, so simply allow the stop call to run to completion.
 
 ### Example commands and usage
 
 #### Offline Inference
 
-Refer to <gh-file:examples/offline_inference/simple_profiling.py> for an example.
+Refer to [examples/features/profiling/simple_profiling_offline.py](../../examples/features/profiling/simple_profiling_offline.py) for an example.
 
 #### OpenAI Server
 
 ```bash
-VLLM_TORCH_PROFILER_DIR=./vllm_profile \
-    python -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3-70B
+vllm serve meta-llama/Llama-3.1-8B-Instruct --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile"}'
 ```
 
 vllm bench command:
@@ -48,12 +54,99 @@ vllm bench command:
 ```bash
 vllm bench serve \
     --backend vllm \
-    --model meta-llama/Meta-Llama-3-70B \
+    --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name sharegpt \
     --dataset-path sharegpt.json \
     --profile \
     --num-prompts 2
 ```
+
+Or use http request:
+
+```shell
+# We need first call /start_profile api to start profile.
+$ curl -X POST http://localhost:8000/start_profile
+
+# Call model generate.
+curl -X POST http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+                "model": "meta-llama/Llama-3.1-8B-Instruct",
+                "messages": [
+                        {
+                                "role": "user",
+                                "content": "San Francisco is a"
+                        }
+                ]
+    }'
+
+# After need call /stop_profile api to stop profile.
+$ curl -X POST http://localhost:8000/stop_profile
+```
+
+## Profile with Triton Proton
+
+[Proton](https://github.com/triton-lang/triton/tree/main/third_party/proton)
+is Triton's GPU profiler. It can collect a low-overhead aggregate tree or a
+Chrome trace and works through the same vLLM profiling controls as the PyTorch
+and CUDA profilers. Proton currently supports NVIDIA GPUs through CUPTI and
+requires eager execution.
+
+Start a server with a local output directory:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --enforce-eager \
+    --profiler-config '{
+        "profiler": "proton",
+        "proton_profiler_dir": "./proton_profile",
+        "proton_output_format": "hatchet",
+        "proton_hook": "triton"
+    }'
+```
+
+Then use `/start_profile` and `/stop_profile` as shown above, or pass
+`--profile` to a vLLM benchmark. Each worker uses a topology- and
+rank-qualified output name, such as
+`proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet`,
+so distributed workers, restarted servers, and repeated profiling runs do not
+overwrite one another. A `profile_prefix` is included when supplied. Each
+profile is finalized by `/stop_profile` and is ready to inspect immediately.
+
+The Proton-specific options are:
+
+- `proton_context`: `shadow` (default) or `python`
+- `proton_data`: `tree` (default) or `trace`
+- `proton_backend`: `cupti` or automatic
+- `proton_mode`: an optional backend mode string
+- `proton_hook`: `triton` to record Triton launch metadata, or unset
+- `proton_output_format`: `hatchet`, `hatchet_msgpack`, `chrome_trace`, or unset
+
+`hatchet` and `hatchet_msgpack` require `proton_data: "tree"`, while
+`chrome_trace` requires `proton_data: "trace"`. CUDA graph profiling is not yet
+supported, so `--enforce-eager` is required for every Proton mode.
+
+Automatic backend selection is recommended. vLLM currently supports Proton's
+`cupti` backend on NVIDIA GPUs. ROCm support is not yet available. vLLM does not
+expose Proton's experimental instrumentation backend because current upstream
+Triton builds can produce profiles without timing metrics. Backend-specific
+modes, including `pcsampling`, can be selected with `proton_mode`.
+
+Triton 3.6 supports explicit `hatchet` and `chrome_trace` output. The
+`hatchet_msgpack` format and `periodic_flushing` mode require Triton 3.7 or
+newer; vLLM rejects these options with the detected version before starting a
+session.
+
+Inspect tree profiles with:
+
+```bash
+proton-viewer -m time/ns \
+    proton_profile/proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet
+```
+
+Chrome traces (`proton_data: "trace"`) can be opened in
+<https://ui.perfetto.dev/>. Proton is imported lazily, so selecting another
+profiler does not require a Proton-capable Triton installation.
 
 ## Profile with NVIDIA Nsight Systems
 
@@ -71,18 +164,21 @@ apt update
 apt install nsight-systems-cli
 ```
 
-### Example commands and usage
+!!! tip
+    When profiling with `nsys`, it is advisable to set the environment variable `VLLM_WORKER_MULTIPROC_METHOD=spawn`. The default is to use the `fork` method instead of `spawn`. More information on the topic can be found in the [Nsight Systems release notes](https://docs.nvidia.com/nsight-systems/ReleaseNotes/index.html#general-issues).
 
-When profiling with `nsys`, it is advisable to set the environment variable `VLLM_WORKER_MULTIPROC_METHOD=spawn`. The default is to use the `fork` method instead of `spawn`. More information on the topic can be found in the [Nsight Systems release notes](https://docs.nvidia.com/nsight-systems/ReleaseNotes/index.html#general-issues).
+The Nsight Systems profiler can be launched with `nsys profile ...`, with a few recommended flags for vLLM: `--trace-fork-before-exec=true --cuda-graph-trace=node`.
+
+### Example commands and usage
 
 #### Offline Inference
 
-For basic usage, you can just append `nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node` before any existing script you would run for offline inference.
+For basic usage, you can just append the profiling command before any existing script you would run for offline inference.
 
 The following is an example using the `vllm bench latency` script:
 
 ```bash
-nsys profile -o report.nsys-rep \
+nsys profile  \
     --trace-fork-before-exec=true \
     --cuda-graph-trace=node \
 vllm bench latency \
@@ -96,40 +192,28 @@ vllm bench latency \
 
 #### OpenAI Server
 
-To profile the server, you will want to prepend your `vllm serve` command with `nsys profile` just like for offline inference, however you must specify `--delay XX --duration YY` parameters according to the needs of your benchmark. After the duration time has been used up, the server will be killed.
+To profile the server, you will want to prepend your `vllm serve` command with `nsys profile` just like for offline inference, but you will need to specify a few other arguments to enable dynamic capture similarly to the Torch Profiler:
 
 ```bash
 # server
-nsys profile -o report.nsys-rep \
+nsys profile \
     --trace-fork-before-exec=true \
     --cuda-graph-trace=node \
-    --delay 30 \
-    --duration 60 \
-    vllm serve meta-llama/Llama-3.1-8B-Instruct
+    --capture-range=cudaProfilerApi \
+    --capture-range-end repeat \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct --profiler-config.profiler cuda
 
 # client
 vllm bench serve \
     --backend vllm \
     --model meta-llama/Llama-3.1-8B-Instruct \
-    --num-prompts 1 \
-    --dataset-name random \
-    --random-input 1024 \
-    --random-output 512
+    --dataset-name sharegpt \
+    --dataset-path sharegpt.json \
+    --profile \
+    --num-prompts 2
 ```
 
-In practice, you should set the `--duration` argument to a large value. Whenever you want the server to stop profiling, run:
-
-```bash
-nsys sessions list
-```
-
-to get the session id in the form of `profile-XXXXX`, then run:
-
-```bash
-nsys stop --session=profile-XXXXX
-```
-
-to manually kill the profiler and generate your `nsys-rep` report.
+With `--profile`, vLLM will capture a profile for each run of `vllm bench serve`. Once the server is killed, the profiles will all be saved.
 
 #### Analysis
 
@@ -160,43 +244,65 @@ GUI example:
 
 <img width="1799" alt="Screenshot 2025-03-05 at 11 48 42 AM" src="https://github.com/user-attachments/assets/c7cff1ae-6d6f-477d-a342-bd13c4fc424c" />
 
+## Continuous Profiling
+
+There is a [GitHub CI workflow](https://github.com/pytorch/pytorch-integration-testing/actions/workflows/vllm-profiling.yml) in the PyTorch infrastructure repository that provides continuous profiling for different models on vLLM. This automated profiling helps track performance characteristics over time and across different model configurations.
+
+### How It Works
+
+The workflow currently runs weekly profiling sessions for selected models, generating detailed performance traces that can be analyzed using different tools to identify performance regressions or optimization opportunities. But, it can be triggered manually as well, using the Github Action tool.
+
+### Adding New Models
+
+To extend the continuous profiling to additional models, you can modify the [profiling-tests.json](https://github.com/pytorch/pytorch-integration-testing/blob/main/vllm-profiling/cuda/profiling-tests.json) configuration file in the PyTorch integration testing repository. Simply add your model specifications to this file to include them in the automated profiling runs.
+
+### Viewing Profiling Results
+
+The profiling traces generated by the continuous profiling workflow are publicly available on the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm). Look for the **Profiling traces** table to access and download the traces for different models and runs.
+
 ## Profiling vLLM Python Code
 
 The Python standard library includes
 [cProfile](https://docs.python.org/3/library/profile.html) for profiling Python
-code. vLLM includes a couple of helpers that make it easy to apply it to a section of vLLM.
-Both the `vllm.utils.cprofile` and `vllm.utils.cprofile_context` functions can be
-used to profile a section of code.
+code.
 
-### Example usage - decorator
+### Example usage - function call
 
-The first helper is a Python decorator that can be used to profile a function.
-If a filename is specified, the profile will be saved to that file. If no filename is
-specified, profile data will be printed to stdout.
+If a filename is specified, the profile will be saved to that file. If no
+filename is specified, profile data can be printed to stdout.
 
 ```python
-import vllm.utils
+import cProfile
 
-@vllm.utils.cprofile("expensive_function.prof")
+
 def expensive_function():
     # some expensive code
     pass
+
+
+profiler = cProfile.Profile()
+profiler.runcall(expensive_function)
+profiler.dump_stats("expensive_function.prof")
 ```
 
-### Example Usage - context manager
-
-The second helper is a context manager that can be used to profile a block of
-code. Similar to the decorator, the filename is optional.
+### Example usage - context manager style
 
 ```python
-import vllm.utils
+import cProfile
+
 
 def another_function():
     # more expensive code
     pass
 
-with vllm.utils.cprofile_context("another_function.prof"):
+
+profiler = cProfile.Profile()
+profiler.enable()
+try:
     another_function()
+finally:
+    profiler.disable()
+    profiler.dump_stats("another_function.prof")
 ```
 
 ### Analyzing Profile Results
@@ -208,3 +314,11 @@ One example is [snakeviz](https://jiffyclub.github.io/snakeviz/).
 pip install snakeviz
 snakeviz expensive_function.prof
 ```
+
+### Analyzing Garbage Collection Costs
+
+Leverage VLLM_GC_DEBUG environment variable to debug GC costs.
+
+- VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elapsed times
+- VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger to log top 5
+  collected objects for each gc.collect

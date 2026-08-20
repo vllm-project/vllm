@@ -9,7 +9,7 @@ import pytest
 from tests.v1.shutdown.utils import SHUTDOWN_TEST_TIMEOUT_SEC
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import ExplicitEncoderDecoderPrompt
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineGenerateError
@@ -29,10 +29,15 @@ async def test_async_llm_processor_error(model: str) -> None:
     async_llm = AsyncLLM.from_engine_args(engine_args)
 
     async def generate(request_id: str):
-        # [] is not allowed and will raise a ValueError in Processor.
-        generator = async_llm.generate(TokensPrompt([]),
-                                       request_id=request_id,
-                                       sampling_params=SamplingParams())
+        # An encoder/decoder prompt is rejected by the Processor for a
+        # decoder only model.
+        generator = async_llm.generate(
+            ExplicitEncoderDecoderPrompt(
+                encoder_prompt="Hello my name is", decoder_prompt=None
+            ),
+            request_id=request_id,
+            sampling_params=SamplingParams(),
+        )
         try:
             async for _ in generator:
                 pass
@@ -55,11 +60,12 @@ async def test_async_llm_processor_error(model: str) -> None:
     EXPECTED_TOKENS = 5
     outputs = []
     async for out in async_llm.generate(
-            "Hello my name is",
-            request_id="abc",
-            sampling_params=SamplingParams(
-                max_tokens=EXPECTED_TOKENS,
-                output_kind=RequestOutputKind.DELTA)):
+        "Hello my name is",
+        request_id="abc",
+        sampling_params=SamplingParams(
+            max_tokens=EXPECTED_TOKENS, output_kind=RequestOutputKind.DELTA
+        ),
+    ):
         outputs.append(out)
 
     generated_tokens = []

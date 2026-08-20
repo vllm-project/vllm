@@ -2,6 +2,17 @@
 
 set -euox pipefail
 
+# To detect ROCm
+# Check multiple indicators:
+if [ -e /dev/kfd ] || \
+    [ -d /opt/rocm ] || \
+    command -v rocm-smi &> /dev/null || \
+    [ -n "${ROCM_HOME:-}" ]; then
+    IS_ROCM=1
+else
+    IS_ROCM=0
+fi
+
 if [[ $# -lt 4 ]]; then
     echo "Usage: .buildkite/scripts/run-multi-node-test.sh WORKING_DIR NUM_NODES NUM_GPUS DOCKER_IMAGE COMMAND1 COMMAND2 ... COMMANDN"
     exit 1
@@ -26,21 +37,28 @@ for command in "${COMMANDS[@]}"; do
     echo "$command"
 done
 
+
 start_network() {
     docker network create --subnet=192.168.10.0/24 docker-net
 }
 
 start_nodes() {
     for node in $(seq 0 $(($NUM_NODES-1))); do
-        GPU_DEVICES='"device='
+        DEVICE_LIST=""
         for node_gpu in $(seq 0 $(($NUM_GPUS - 1))); do
             DEVICE_NUM=$(($node * $NUM_GPUS + $node_gpu))
-            GPU_DEVICES+=$(($DEVICE_NUM))
+            DEVICE_LIST+=$(($DEVICE_NUM))
             if [ "$node_gpu" -lt $(($NUM_GPUS - 1)) ]; then
-                GPU_DEVICES+=','
+                DEVICE_LIST+=','
             fi
         done
-        GPU_DEVICES+='"'
+        if [ "$IS_ROCM" -eq 1 ]; then
+            GPU_DEVICES=(--device /dev/kfd --device /dev/dri -e "HIP_VISIBLE_DEVICES=${DEVICE_LIST}")
+        else
+            # The literal quotes around device=... are required by docker's
+            # --gpus value parser when the device list itself contains commas.
+            GPU_DEVICES=(--gpus "\"device=${DEVICE_LIST}\"")
+        fi
 
         # start the container in detached mode
         # things to note:
@@ -49,7 +67,7 @@ start_nodes() {
         # 3. map the huggingface cache directory to the container
         # 3. assign ip addresses to the containers (head node: 192.168.10.10, worker nodes:
         #    starting from 192.168.10.11)
-        docker run -d --gpus "$GPU_DEVICES" --shm-size=10.24gb -e HF_TOKEN \
+        docker run -d "${GPU_DEVICES[@]}" --shm-size=10.24gb -e HF_TOKEN \
             -v ~/.cache/huggingface:/root/.cache/huggingface --name "node$node" \
             --network docker-net --ip 192.168.10.$((10 + $node)) --rm "$DOCKER_IMAGE" \
             /bin/bash -c "tail -f /dev/null"
@@ -78,20 +96,21 @@ run_nodes() {
     # we start the worker nodes first, in detached mode, and then start the head node
     # in the foreground, so that the output of the head node is visible in the buildkite logs
     for node in $(seq $(($NUM_NODES - 1)) -1 0); do
-        GPU_DEVICES='"device='
+        DEVICE_LIST=""
         for node_gpu in $(seq 0 $(($NUM_GPUS - 1))); do
             DEVICE_NUM=$(($node * $NUM_GPUS + $node_gpu))
-            GPU_DEVICES+=$(($DEVICE_NUM))
+            DEVICE_LIST+=$(($DEVICE_NUM))
             if [ "$node_gpu" -lt $(($NUM_GPUS - 1)) ]; then
-                GPU_DEVICES+=','
+                DEVICE_LIST+=','
             fi
         done
-        GPU_DEVICES+='"'
-        echo "Running node$node with GPU devices: $GPU_DEVICES"
+        echo "Running node$node with GPU devices: $DEVICE_LIST"
         if [ "$node" -ne 0 ]; then
             docker exec -d "node$node" /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
         else
-            docker exec "node$node" /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
+            # Allocate a TTY (-t -i) for the foreground head node so its output
+            # keeps ANSI color in the Buildkite log (see run-amd-test.sh).
+            docker exec -t -i "node$node" /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
         fi
     done
 }

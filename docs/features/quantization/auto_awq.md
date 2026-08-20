@@ -1,5 +1,9 @@
 # AutoAWQ
 
+> ⚠️ **Warning:**
+    The `AutoAWQ` library is deprecated. This functionality has been adopted by the vLLM project in [`llm-compressor`](https://github.com/vllm-project/llm-compressor/tree/main/examples/awq).
+    For the recommended quantization workflow, please see the AWQ examples in [`llm-compressor`](https://github.com/vllm-project/llm-compressor/tree/main/examples/awq). For more details on the deprecation, refer to the original [AutoAWQ repository](https://github.com/casper-hansen/AutoAWQ).
+
 To create a new 4-bit quantized model, you can leverage [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
 Quantization reduces the model's precision from BF16/FP16 to INT4 which effectively reduces the total model memory footprint.
 The main benefits are lower latency and memory usage.
@@ -18,13 +22,15 @@ After installing AutoAWQ, you are ready to quantize a model. Please refer to the
     from awq import AutoAWQForCausalLM
     from transformers import AutoTokenizer
 
-    model_path = 'mistralai/Mistral-7B-Instruct-v0.2'
-    quant_path = 'mistral-instruct-v0.2-awq'
-    quant_config = { "zero_point": True, "q_group_size": 128, "w_bit": 4, "version": "GEMM" }
+    model_path = "mistralai/Mistral-7B-Instruct-v0.2"
+    quant_path = "mistral-instruct-v0.2-awq"
+    quant_config = {"zero_point": True, "q_group_size": 128, "w_bit": 4, "version": "GEMM"}
 
     # Load model
     model = AutoAWQForCausalLM.from_pretrained(
-        model_path, **{"low_cpu_mem_usage": True, "use_cache": False}
+        model_path,
+        low_cpu_mem_usage=True,
+        use_cache=False,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
@@ -41,9 +47,9 @@ After installing AutoAWQ, you are ready to quantize a model. Please refer to the
 To run an AWQ model with vLLM, you can use [TheBloke/Llama-2-7b-Chat-AWQ](https://huggingface.co/TheBloke/Llama-2-7b-Chat-AWQ) with the following command:
 
 ```bash
-python examples/offline_inference/llm_engine_example.py \
+python examples/deployment/llm_engine_example.py \
     --model TheBloke/Llama-2-7b-Chat-AWQ \
-    --quantization awq
+    --quantization auto_awq
 ```
 
 AWQ models are also supported directly through the LLM entrypoint:
@@ -64,7 +70,7 @@ AWQ models are also supported directly through the LLM entrypoint:
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Create an LLM.
-    llm = LLM(model="TheBloke/Llama-2-7b-Chat-AWQ", quantization="AWQ")
+    llm = LLM(model="TheBloke/Llama-2-7b-Chat-AWQ", quantization="auto_awq")
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)

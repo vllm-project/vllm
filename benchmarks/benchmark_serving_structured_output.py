@@ -31,28 +31,27 @@ import time
 import uuid
 import warnings
 from collections.abc import AsyncGenerator
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Optional
 
 import datasets
 import numpy as np
 import pandas as pd
-from tqdm.asyncio import tqdm
-from transformers import PreTrainedTokenizerBase
-
 from backend_request_func import (
     ASYNC_REQUEST_FUNCS,
     RequestFuncInput,
     RequestFuncOutput,
 )
+from tqdm.asyncio import tqdm
+from transformers import PreTrainedTokenizerBase
 
 try:
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 except ImportError:
     from backend_request_func import get_tokenizer
 
 try:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
@@ -116,6 +115,39 @@ class SampleRequest:
 def sample_requests(
     tokenizer: PreTrainedTokenizerBase, args: argparse.Namespace
 ) -> list[SampleRequest]:
+    def _apply_random_prefix(
+        tokenizer: PreTrainedTokenizerBase,
+        requests: list[SampleRequest],
+        prefix_len: int,
+        seed: int,
+    ) -> list[SampleRequest]:
+        if prefix_len <= 0:
+            return requests
+        rng = np.random.default_rng(seed)
+        vocab_size = tokenizer.vocab_size
+        prohibited = getattr(tokenizer, "all_special_ids", None) or []
+        allowed = np.array([i for i in range(vocab_size) if i not in prohibited])
+        if len(allowed) == 0:
+            return requests
+        prefix_ids = rng.integers(0, len(allowed), size=prefix_len)
+        prefix_token_ids = allowed[prefix_ids].tolist()
+        out = []
+        for req in requests:
+            prompt_ids = tokenizer(req.prompt, add_special_tokens=False).input_ids
+            full_ids = prefix_token_ids + prompt_ids
+            full_prompt = tokenizer.decode(full_ids, skip_special_tokens=False)
+            out.append(
+                SampleRequest(
+                    prompt=full_prompt,
+                    prompt_len=len(tokenizer(full_prompt).input_ids),
+                    expected_output_len=req.expected_output_len,
+                    schema=req.schema,
+                    structure_type=req.structure_type,
+                    completion=req.completion,
+                )
+            )
+        return out
+
     if args.dataset == "json" or args.dataset == "json-unique":
         if args.json_schema_path is None:
             dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -262,6 +294,9 @@ def sample_requests(
                 )
             )
 
+    requests = _apply_random_prefix(
+        tokenizer, requests, args.random_prefix_len, args.seed
+    )
     return requests
 
 
@@ -317,7 +352,7 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
-    goodput_config_dict: Optional[dict[str, float]] = None,
+    goodput_config_dict: dict[str, float] | None = None,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
     total_input = 0
@@ -437,9 +472,9 @@ async def benchmark(
     selected_percentile_metrics: list[str],
     selected_percentiles: list[str],
     ignore_eos: bool,
-    max_concurrency: Optional[int],
+    max_concurrency: int | None,
     structured_output_ratio: float,
-    goodput_config_dict: Optional[dict[str, float]] = None,
+    goodput_config_dict: dict[str, float] | None = None,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -449,7 +484,8 @@ async def benchmark(
     def prepare_extra_body(request) -> dict:
         extra_body = {}
         # Add the schema to the extra_body
-        extra_body[request.structure_type] = request.schema
+        extra_body["structured_outputs"] = {}
+        extra_body["structured_outputs"][request.structure_type] = request.schema
         return extra_body
 
     print("Starting initial single prompt test run...")
@@ -502,15 +538,9 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    # This can be used once the minimum Python version is 3.10 or higher,
-    # and it will simplify the code in limited_request_func.
-    #    semaphore = (asyncio.Semaphore(max_concurrency)
-    #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else nullcontext()
 
     async def limited_request_func(request_func_input, pbar):
-        if semaphore is None:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
         async with semaphore:
             return await request_func(request_func_input=request_func_input, pbar=pbar)
 
@@ -580,7 +610,7 @@ async def benchmark(
     )
     print(
         "{:<40} {:<10.2f}".format(
-            "Total Token throughput (tok/s):", metrics.total_token_throughput
+            "Total token throughput (tok/s):", metrics.total_token_throughput
         )
     )
 
@@ -696,11 +726,11 @@ def evaluate(ret, args):
         return re.match(args.regex, actual) is not None
 
     def _eval_correctness(expected, actual):
-        if args.structure_type == "guided_json":
+        if args.structure_type == "json":
             return _eval_correctness_json(expected, actual)
-        elif args.structure_type == "guided_regex":
+        elif args.structure_type == "regex":
             return _eval_correctness_regex(expected, actual)
-        elif args.structure_type == "guided_choice":
+        elif args.structure_type == "choice":
             return _eval_correctness_choice(expected, actual)
         else:
             return None
@@ -780,18 +810,18 @@ def main(args: argparse.Namespace):
     )
 
     if args.dataset == "grammar":
-        args.structure_type = "guided_grammar"
+        args.structure_type = "grammar"
     elif args.dataset == "regex":
-        args.structure_type = "guided_regex"
+        args.structure_type = "regex"
     elif args.dataset == "choice":
-        args.structure_type = "guided_choice"
+        args.structure_type = "choice"
     else:
-        args.structure_type = "guided_json"
+        args.structure_type = "json"
 
     if args.no_structured_output:
         args.structured_output_ratio = 0
     if args.save_results:
-        result_file_name = f"{args.structured_output_ratio}guided"
+        result_file_name = f"{args.structured_output_ratio}so"
         result_file_name += f"_{backend}"
         result_file_name += f"_{args.request_rate}qps"
         result_file_name += f"_{args.model.split('/')[-1]}"
@@ -909,13 +939,13 @@ def create_argument_parser():
     parser.add_argument(
         "--tokenizer",
         type=str,
-        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+        help="Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--tokenizer-mode",
         type=str,
         default="auto",
-        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+        help="Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--num-prompts",
@@ -952,6 +982,15 @@ def create_argument_parser():
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--random-prefix-len",
+        type=int,
+        default=0,
+        help=(
+            "Number of prefix tokens to prepend to every prompt. "
+            "The same prefix is used for all prompts to enable prefix caching."
+        ),
+    )
+    parser.add_argument(
         "--trust-remote-code",
         action="store_true",
         help="Trust remote code from huggingface",
@@ -969,8 +1008,7 @@ def create_argument_parser():
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Use Torch Profiler. The endpoint must be launched with "
-        "VLLM_TORCH_PROFILER_DIR to enable profiler.",
+        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
     )
     parser.add_argument(
         "--result-dir",

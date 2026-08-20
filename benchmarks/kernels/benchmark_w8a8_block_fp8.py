@@ -11,19 +11,20 @@ from datetime import datetime
 from typing import Any
 
 import torch
-import triton
 from tqdm import tqdm
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    _w8a8_block_fp8_matmul,
+    _w8a8_triton_block_scaled_mm,
 )
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.triton_utils import triton
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.platform_utils import get_device_name_as_file_name
 
 mp.set_start_method("spawn", force=True)
 
-assert current_platform.is_cuda(), (
-    "Only support tune w8a8 block fp8 kernel on CUDA device."
+assert current_platform.is_cuda() or current_platform.is_rocm(), (
+    "Only support tune w8a8 block fp8 kernel on CUDA/ROCm device."
 )
 
 DTYPE_MAP = {
@@ -56,7 +57,7 @@ def w8a8_block_matmul(
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization.
                     It should be 2-dim, e.g., [128, 128].
-        output_dytpe: The dtype of the returned tensor.
+        output_dtype: The dtype of the returned tensor.
 
     Returns:
         torch.Tensor: The result of matmul.
@@ -83,7 +84,7 @@ def w8a8_block_matmul(
         )
 
     if A.dtype == torch.float8_e4m3fn:
-        kernel = _w8a8_block_fp8_matmul
+        kernel = _w8a8_triton_block_scaled_mm
     else:
         raise RuntimeError("Currently, only support tune w8a8 block fp8 kernel.")
 
@@ -177,18 +178,18 @@ def benchmark_config(
     def run():
         w8a8_block_matmul(A, B, As, Bs, block_size, config, out_dtype)
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     # JIT complication & warmup
     for _ in range(5):
         run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch.Event(enable_timing=True)
+    end_event = torch.Event(enable_timing=True)
 
     latencies: list[float] = []
     for i in range(num_iters):
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start_event.record()
         run()
         end_event.record()
@@ -264,7 +265,7 @@ def save_configs(
     input_type="fp8",
 ) -> None:
     os.makedirs(save_path, exist_ok=True)
-    device_name = current_platform.get_device_name().replace(" ", "_")
+    device_name = get_device_name_as_file_name()
     json_file_name = (
         f"N={N},K={K},device_name={device_name},dtype={input_type}_w8a8,"
         f"block_shape=[{block_n},{block_k}].json"
@@ -285,7 +286,7 @@ def tune_on_gpu(args_dict):
     weight_shapes = args_dict["weight_shapes"]
     args = args_dict["args"]
 
-    torch.cuda.set_device(gpu_id)
+    torch.accelerator.set_device_index(gpu_id)
     print(f"Starting tuning on GPU {gpu_id} with batch sizes {batch_sizes}")
 
     block_n = args.block_n
@@ -334,7 +335,7 @@ def distribute_batch_sizes(batch_sizes, num_gpus):
 
 def main(args):
     print(args)
-    num_gpus = torch.cuda.device_count()
+    num_gpus = torch.accelerator.device_count()
     if num_gpus == 0:
         raise RuntimeError("No GPU available for tuning")
     print(f"Found {num_gpus} GPUs for parallel tuning")

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, triton, use_tensor_descriptor
+from vllm.triton_utils.allocation import set_triton_allocator
+
+_TD_ALLOCATOR_DEVICES: set[torch.device] = set()
 
 
 def is_weak_contiguous(x: torch.Tensor):
@@ -17,13 +19,31 @@ def is_weak_contiguous(x: torch.Tensor):
 
 
 @triton.jit
-def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
-                     M, N, K, stride_am, stride_ak, stride_bk, stride_bn,
-                     stride_cm, stride_cn, ACCUMULATOR_DTYPE: tl.constexpr,
-                     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
-                     BLOCK_SIZE_K: tl.constexpr,
-                     BLOCK_SIZE_SCALE_A: tl.constexpr,
-                     BLOCK_SIZE_SCALE_B: tl.constexpr):
+def scaled_mm_kernel(
+    a_ptr,
+    b_ptr,
+    scale_a_ptr,
+    scale_b_ptr,
+    c_ptr,
+    bias_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    ACCUMULATOR_DTYPE: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_SCALE_A: tl.constexpr,
+    BLOCK_SIZE_SCALE_B: tl.constexpr,
+    USE_TD: tl.constexpr = False,
+    B_T: tl.constexpr = False,
+):
     pid = tl.program_id(axis=0)
 
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -32,8 +52,7 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     pid_n = pid % num_pid_n
 
     accumulator_dtype = ACCUMULATOR_DTYPE
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N),
-                           dtype=accumulator_dtype)
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=accumulator_dtype)
 
     # NOTE: Some tensor inputs are so large, they will cause int32 overflow
     # so it is necessary to use tl.int64 for all the offsets, else SEGV will
@@ -47,20 +66,22 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     masks_bn = offsets_bn < N
 
     offsets_k = tl.arange(0, BLOCK_SIZE_K).to(tl.int64)
-    offsets_a = (stride_am * offsets_am[:, None] +
-                 stride_ak * offsets_k[None, :])
-    offsets_b = (stride_bk * offsets_k[:, None] +
-                 stride_bn * offsets_bn[None, :])
+    offsets_a = stride_am * offsets_am[:, None] + stride_ak * offsets_k[None, :]
+    offsets_b = stride_bk * offsets_k[:, None] + stride_bn * offsets_bn[None, :]
 
     # NOTE: BLOCK_SIZE_SCALE_A could be 1 or BLOCK_SIZE_M, so need to create
     # appropriate offsets and masks for each case. Same goes for
     # BLOCK_SIZE_SCALE_B.
-    offsets_scale_am = (tl.arange(0, BLOCK_SIZE_SCALE_A) +
-                        (BLOCK_SIZE_SCALE_A > 1) * pid_m * BLOCK_SIZE_M)
+    offsets_scale_am = (
+        tl.arange(0, BLOCK_SIZE_SCALE_A)
+        + (BLOCK_SIZE_SCALE_A > 1) * pid_m * BLOCK_SIZE_M
+    )
     masks_scale_am = offsets_scale_am < M
 
-    offsets_scale_bn = (tl.arange(0, BLOCK_SIZE_SCALE_B) +
-                        (BLOCK_SIZE_SCALE_B > 1) * pid_n * BLOCK_SIZE_N)
+    offsets_scale_bn = (
+        tl.arange(0, BLOCK_SIZE_SCALE_B)
+        + (BLOCK_SIZE_SCALE_B > 1) * pid_n * BLOCK_SIZE_N
+    )
     masks_scale_bn = offsets_scale_bn < N
 
     a_ptrs = a_ptr + offsets_a
@@ -69,13 +90,44 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     scale_a_ptrs = scale_a_ptr + offsets_scale_am
     scale_b_ptrs = scale_b_ptr + offsets_scale_bn
 
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        masks_k = offsets_k < K
-        masks_a = masks_am[:, None] & masks_k[None, :]
-        a = tl.load(a_ptrs, mask=masks_a)
+    if USE_TD:
+        a_desc = tl.make_tensor_descriptor(
+            a_ptr,
+            shape=[M, K],
+            strides=[stride_am, 1],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+        )
+        if B_T:
+            # Checkpoint weights arrive as a transposed [N, K] view, so describe
+            # the underlying N-major buffer and transpose each tile.
+            b_desc = tl.make_tensor_descriptor(
+                b_ptr,
+                shape=[N, K],
+                strides=[stride_bn, 1],
+                block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K],
+            )
+        else:
+            b_desc = tl.make_tensor_descriptor(
+                b_ptr,
+                shape=[K, N],
+                strides=[stride_bk, 1],
+                block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
+            )
 
-        masks_b = masks_k[:, None] & masks_bn[None, :]
-        b = tl.load(b_ptrs, mask=masks_b)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        if USE_TD:
+            a = a_desc.load([pid_m * BLOCK_SIZE_M, k * BLOCK_SIZE_K])
+            if B_T:
+                b = tl.trans(b_desc.load([pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K]))
+            else:
+                b = b_desc.load([k * BLOCK_SIZE_K, pid_n * BLOCK_SIZE_N])
+        else:
+            masks_k = offsets_k < K
+            masks_a = masks_am[:, None] & masks_k[None, :]
+            a = tl.load(a_ptrs, mask=masks_a)
+
+            masks_b = masks_k[:, None] & masks_bn[None, :]
+            b = tl.load(b_ptrs, mask=masks_b)
 
         # Accumulate results.
         accumulator = tl.dot(a, b, accumulator, out_dtype=accumulator_dtype)
@@ -114,8 +166,7 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)
     offs_cm = offs_cm.to(tl.int64)
     offs_cn = offs_cn.to(tl.int64)
-    c_ptrs = (c_ptr + stride_cm * offs_cm[:, None] +
-              stride_cn * offs_cn[None, :])
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
     tl.store(c_ptrs, c, mask=c_mask)
@@ -123,16 +174,19 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
 
 # input   - [M, K]
 # weight - [K, N]
-def triton_scaled_mm(input: torch.Tensor,
-                     weight: torch.Tensor,
-                     scale_a: torch.Tensor,
-                     scale_b: torch.Tensor,
-                     out_dtype: type[torch.dtype],
-                     bias: Optional[torch.Tensor] = None,
-                     block_size_m: int = 32,
-                     block_size_n: int = 32,
-                     block_size_k: int = 32,
-                     use_heuristic=True) -> torch.Tensor:
+def triton_scaled_mm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: type[torch.dtype],
+    bias: torch.Tensor | None = None,
+    block_size_m: int = 32,
+    block_size_n: int = 32,
+    block_size_k: int = 32,
+    use_heuristic=True,
+    use_td: bool | None = None,
+) -> torch.Tensor:
     M, K = input.shape
     N = weight.shape[1]
 
@@ -144,17 +198,16 @@ def triton_scaled_mm(input: torch.Tensor,
     scale_b = scale_b.reshape(-1, 1) if scale_b.dim() <= 1 else scale_b
 
     assert scale_a.dtype == scale_b.dtype and scale_a.is_floating_point()
-    assert scale_a.shape[1] == 1 and (scale_a.shape[0] == 1
-                                      or scale_a.shape[0] == M)
-    assert scale_b.shape[1] == 1 and (scale_b.shape[0] == 1
-                                      or scale_b.shape[0] == N)
+    assert scale_a.shape[1] == 1 and (scale_a.shape[0] == 1 or scale_a.shape[0] == M)
+    assert scale_b.shape[1] == 1 and (scale_b.shape[0] == 1 or scale_b.shape[0] == N)
     assert out_dtype.is_floating_point
     assert bias is None or bias.is_floating_point()
     assert is_weak_contiguous(input)
     assert is_weak_contiguous(weight)
 
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(
-        N, META['BLOCK_SIZE_N']), )
+    grid = lambda META: (
+        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    )
 
     result = torch.empty((M, N), dtype=out_dtype, device=input.device)
 
@@ -179,28 +232,51 @@ def triton_scaled_mm(input: torch.Tensor,
 
     accumulator_dtype = tl.float32 if input.is_floating_point() else tl.int32
 
+    # TD operand loads; gated on inner-dim contiguity and 16-byte tile alignment.
+    # Checkpoint weights are a transposed [N, K] view, so accept either
+    # orientation and let the kernel transpose per tile.
+    b_t = weight.stride(1) != 1 and weight.stride(0) == 1
+    b_inner = K if b_t else N
+    use_td = (
+        use_tensor_descriptor(use_td)
+        and input.stride(1) == 1
+        and (weight.stride(1) == 1 or b_t)
+        and (K * input.element_size()) % 16 == 0
+        and (b_inner * weight.element_size()) % 16 == 0
+        and (block_size_m & (block_size_m - 1)) == 0
+        and (block_size_n & (block_size_n - 1)) == 0
+        and (block_size_k & (block_size_k - 1)) == 0
+    )
+    if use_td and input.device not in _TD_ALLOCATOR_DEVICES:
+        set_triton_allocator(input.device)
+        _TD_ALLOCATOR_DEVICES.add(input.device)
+
     # A = input, B = weight, C = result
     # A = M x K, B = K x N, C = M x N
-    scaled_mm_kernel[grid](input,
-                           weight,
-                           scale_a,
-                           scale_b,
-                           result,
-                           bias,
-                           M,
-                           N,
-                           K,
-                           input.stride(0),
-                           input.stride(1),
-                           weight.stride(0),
-                           weight.stride(1),
-                           result.stride(0),
-                           result.stride(1),
-                           accumulator_dtype,
-                           BLOCK_SIZE_M=block_size_m,
-                           BLOCK_SIZE_N=block_size_n,
-                           BLOCK_SIZE_K=block_size_k,
-                           BLOCK_SIZE_SCALE_A=block_size_sa,
-                           BLOCK_SIZE_SCALE_B=block_size_sb)
+    scaled_mm_kernel[grid](
+        input,
+        weight,
+        scale_a,
+        scale_b,
+        result,
+        bias,
+        M,
+        N,
+        K,
+        input.stride(0),
+        input.stride(1),
+        weight.stride(0),
+        weight.stride(1),
+        result.stride(0),
+        result.stride(1),
+        accumulator_dtype,
+        BLOCK_SIZE_M=block_size_m,
+        BLOCK_SIZE_N=block_size_n,
+        BLOCK_SIZE_K=block_size_k,
+        BLOCK_SIZE_SCALE_A=block_size_sa,
+        BLOCK_SIZE_SCALE_B=block_size_sb,
+        USE_TD=use_td,
+        B_T=b_t,
+    )
 
     return result.to(out_dtype)

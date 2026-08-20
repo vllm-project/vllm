@@ -7,8 +7,8 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.v1.attention.backends.utils import (
-    make_local_attention_virtual_batches)
+from vllm.platforms import current_platform
+from vllm.v1.attention.backends.utils import make_local_attention_virtual_batches
 
 
 @dataclass
@@ -22,6 +22,8 @@ class LocalAttentionTestData:
     expected_k_seqlens: list[int]
     expected_local_block_table: list[list[int]]
 
+
+DEVICE_TYPE = current_platform.device_type
 
 test_data_list = [
     # Same as example in docstring of make_local_attention_virtual_batches
@@ -46,21 +48,24 @@ test_data_list = [
             [17, 17],  # local-batch 5, (batch 1, starting from k[16])
             [20, 21],  # local-batch 6, (batch 2, starting from k[4])
             [22, 23],  # local-batch 7, (batch 2, starting from k[8])
-        ]),
+        ],
+    ),
     # Case where block indices are not clipped to block table ncols-1
     # because tokens_in_last_block == attn_chunk_size
-    LocalAttentionTestData(batch_spec=BatchSpec(
-        query_lens=[8],
-        seq_lens=[12],
+    LocalAttentionTestData(
+        batch_spec=BatchSpec(
+            query_lens=[8],
+            seq_lens=[12],
+        ),
+        attn_chunk_size=4,
+        block_size=2,
+        expected_q_seqlens=[4, 4],
+        expected_k_seqlens=[4, 4],
+        expected_local_block_table=[
+            [2, 3],
+            [4, 5],
+        ],
     ),
-                           attn_chunk_size=4,
-                           block_size=2,
-                           expected_q_seqlens=[4, 4],
-                           expected_k_seqlens=[4, 4],
-                           expected_local_block_table=[
-                               [2, 3],
-                               [4, 5],
-                           ]),
     # Case where all kv_seq positions are involved in attn
     LocalAttentionTestData(
         batch_spec=BatchSpec(
@@ -76,7 +81,8 @@ test_data_list = [
             [0, 1],
             [2, 3],
             [4, 4],
-        ]),
+        ],
+    ),
     # Case where attn_chunk_size > kv_seq_len
     # so no extra mini virtual batches are created
     LocalAttentionTestData(
@@ -97,7 +103,8 @@ test_data_list = [
         # is calculated as (attn_chunk_size // block_size)
         expected_local_block_table=[
             [0, 1, 2, 2, 2],
-        ]),
+        ],
+    ),
     # Block size equal to chunk size
     # Expect single page per batch in local batch table
     LocalAttentionTestData(
@@ -118,7 +125,8 @@ test_data_list = [
             [1],  # local-batch 1, (batch 0, starting from k[4])
             [2],  # local-batch 1, (batch 0, starting from k[0])
             [3],  # local-batch 1, (batch 0, starting from k[4])
-        ]),
+        ],
+    ),
     # Case where query falls in the second attention chunk
     #  k_toks >   0 1 2 3 4
     #  q_toks v  _____________
@@ -128,23 +136,25 @@ test_data_list = [
     #         3 | 1 1 1 1
     #         4 |         1
     #  where tokens 0,1,2,3 have been pre-computed
-    LocalAttentionTestData(batch_spec=BatchSpec(
-        query_lens=[1],
-        seq_lens=[5],
+    LocalAttentionTestData(
+        batch_spec=BatchSpec(
+            query_lens=[1],
+            seq_lens=[5],
+        ),
+        attn_chunk_size=4,
+        block_size=2,
+        expected_q_seqlens=[1],
+        expected_k_seqlens=[1],
+        expected_local_block_table=[
+            [2, 2],
+        ],
     ),
-                           attn_chunk_size=4,
-                           block_size=2,
-                           expected_q_seqlens=[1],
-                           expected_k_seqlens=[1],
-                           expected_local_block_table=[
-                               [2, 2],
-                           ]),
 ]
 
 
 @pytest.mark.parametrize("test_data", test_data_list)
 def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     batch_spec = test_data.batch_spec
     attn_chunk_size = test_data.attn_chunk_size
     block_size = test_data.block_size
@@ -165,9 +175,9 @@ def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
     )
 
     # Call the function
-    result = make_local_attention_virtual_batches(attn_chunk_size,
-                                                  common_attn_metadata,
-                                                  block_size)
+    result, _ = make_local_attention_virtual_batches(
+        attn_chunk_size, common_attn_metadata, block_size
+    )
 
     # Convert to numpy for easier comparison
     actual_q_seqlens = np.diff(result.query_start_loc_cpu.numpy())
@@ -184,13 +194,11 @@ def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
     np.testing.assert_array_equal(actual_q_seqlens, expected_q_seqlens)
     np.testing.assert_array_equal(actual_k_seqlens, expected_k_seqlens)
 
-    expected_block_table_tensor =\
-        torch.tensor(expected_local_block_table,
-        dtype=torch.int32,
-        device=device)
+    expected_block_table_tensor = torch.tensor(
+        expected_local_block_table, dtype=torch.int32, device=device
+    )
 
     print(f"Expected block table:\n{expected_block_table_tensor}")
     print(f"Actual block table:\n{result.block_table_tensor}")
 
-    torch.testing.assert_close(result.block_table_tensor,
-                               expected_block_table_tensor)
+    torch.testing.assert_close(result.block_table_tensor, expected_block_table_tensor)

@@ -3,7 +3,6 @@
 
 import inspect
 from collections.abc import Sequence
-from typing import Optional
 
 import numpy as np
 import pytest
@@ -11,31 +10,27 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
 MAX_PROMPT_SIZE = 100
-CUDA_DEVICES = [
-    f"{current_platform.device_type}:{i}"
-    for i in range(min(current_platform.device_count(), 2))
-]
+DEVICE_TYPE = current_platform.device_type
+DEVICES = [f"{DEVICE_TYPE}:{i}" for i in range(min(current_platform.device_count(), 2))]
 MAX_NUM_PROMPT_TOKENS = 64
 
 
-def _compare_objs(obj1,
-                  obj2,
-                  skip: Sequence = ("logitsprocs", "batch_update_builder")):
+def _compare_objs(obj1, obj2, skip: Sequence = ("logitsprocs", "batch_update_builder")):
     attrs = inspect.getmembers(obj1, lambda a: not (inspect.isroutine(a)))
-    attr_names = set([
-        a[0] for a in attrs
-        if not (a[0].startswith('__') and a[0].endswith('__'))
-    ])
+    attr_names = set(
+        [a[0] for a in attrs if not (a[0].startswith("__") and a[0].endswith("__"))]
+    )
     for attr_name in attr_names:
         if attr_name in skip:
             continue
@@ -45,8 +40,8 @@ def _compare_objs(obj1,
 
         is_same = False
         if isinstance(a, torch.Tensor):
-            if (a.numel() == 0 or b.numel() == 0):
-                is_same = (a.numel() == 0 and b.numel() == 0)
+            if a.numel() == 0 or b.numel() == 0:
+                is_same = a.numel() == 0 and b.numel() == 0
             elif torch.allclose(a, b):
                 is_same = True
         elif isinstance(a, np.ndarray):
@@ -61,12 +56,16 @@ def _compare_objs(obj1,
             is_same = True  # if we make it here must be same
         elif a == b:
             is_same = True
-        assert is_same, f"Attribute {attr_name} is different"\
-            f" in {obj1} and {obj2}: {a} != {b}"
+        elif isinstance(a, CpuGpuBuffer):
+            is_same = np.allclose(a.np, b.np) and torch.allclose(a.gpu, b.gpu)
+        assert is_same, (
+            f"Attribute {attr_name} is different in {obj1} and {obj2}: {a} != {b}"
+        )
 
 
-def _remove_requests(input_batch: InputBatch, batch_size: int,
-                     reqs: list[CachedRequestState]) -> set[str]:
+def _remove_requests(
+    input_batch: InputBatch, batch_size: int, reqs: list[CachedRequestState]
+) -> set[str]:
     """
     Remove some requests randomly from the batch and returns
     set of request removed
@@ -106,10 +105,9 @@ def _construct_expected_sampling_metadata(
     temperature = [0.0 for _ in range(num_reqs)]
     min_tokens = {}
     logit_bias = [None] * num_reqs
-    allowed_token_ids_mask = torch.zeros(num_reqs,
-                                         VOCAB_SIZE,
-                                         dtype=torch.bool,
-                                         device=device)
+    allowed_token_ids_mask = torch.zeros(
+        num_reqs, VOCAB_SIZE, dtype=torch.bool, device=device
+    )
     bad_words_token_ids = {}
     for req in reqs:
         if req.req_id not in req_ids_retained:
@@ -117,35 +115,40 @@ def _construct_expected_sampling_metadata(
         index_in_input_batch = req_id_index_in_input_batch[req.req_id]
         output_token_ids[index_in_input_batch] = req.output_token_ids
         prompt_token_ids[index_in_input_batch] = req.prompt_token_ids
-        presence_penalties[
-            index_in_input_batch] = req.sampling_params.presence_penalty
+        presence_penalties[index_in_input_batch] = req.sampling_params.presence_penalty
         frequency_penalties[index_in_input_batch] = (
-            req.sampling_params.frequency_penalty)
+            req.sampling_params.frequency_penalty
+        )
         repetition_penalties[index_in_input_batch] = (
-            req.sampling_params.repetition_penalty)
+            req.sampling_params.repetition_penalty
+        )
         top_k[index_in_input_batch] = req.sampling_params.top_k
         top_p[index_in_input_batch] = req.sampling_params.top_p
         temperature[index_in_input_batch] = req.sampling_params.temperature
         min_tokens[index_in_input_batch] = (
             req.sampling_params.min_tokens,
-            req.sampling_params.all_stop_token_ids)
+            req.sampling_params.all_stop_token_ids,
+        )
         logit_bias[index_in_input_batch] = req.sampling_params.logit_bias
         if req.sampling_params.allowed_token_ids:
             allowed_token_ids_mask[index_in_input_batch][
-                req.sampling_params.allowed_token_ids] = True
+                req.sampling_params.allowed_token_ids
+            ] = True
         if req.sampling_params.bad_words_token_ids:
-            bad_words_token_ids[
-                index_in_input_batch] = req.sampling_params.bad_words_token_ids
+            bad_words_token_ids[index_in_input_batch] = (
+                req.sampling_params.bad_words_token_ids
+            )
 
     return SamplingMetadata(
-        temperature=torch.tensor(temperature, dtype=torch.float,
-                                 device=device),
+        temperature=torch.tensor(temperature, dtype=torch.float, device=device),
         all_greedy=False,
         all_random=True,
-        top_p=None if all(x == 1.0 for x in top_p) else torch.tensor(
-            top_p, dtype=torch.float, device=device),
-        top_k=None if all(x == 0 for x in top_k) else torch.tensor(
-            top_k, dtype=torch.int, device=device),
+        top_p=None
+        if all(x == 1.0 for x in top_p)
+        else torch.tensor(top_p, dtype=torch.float, device=device),
+        top_k=None
+        if all(x == 0 for x in top_k)
+        else torch.tensor(top_k, dtype=torch.int, device=device),
         generators={},
         max_num_logprobs=0,
         prompt_token_ids=make_tensor_with_pad(
@@ -154,19 +157,22 @@ def _construct_expected_sampling_metadata(
             device=torch.device(device),
             dtype=torch.int64,
         ),
-        frequency_penalties=torch.tensor(frequency_penalties,
-                                         dtype=torch.float,
-                                         device=device),
-        presence_penalties=torch.tensor(presence_penalties,
-                                        dtype=torch.float,
-                                        device=device),
-        repetition_penalties=torch.tensor(repetition_penalties,
-                                          dtype=torch.float,
-                                          device=device),
+        frequency_penalties=torch.tensor(
+            frequency_penalties, dtype=torch.float, device=device
+        ),
+        presence_penalties=torch.tensor(
+            presence_penalties, dtype=torch.float, device=device
+        ),
+        repetition_penalties=torch.tensor(
+            repetition_penalties, dtype=torch.float, device=device
+        ),
         output_token_ids=output_token_ids,
-        no_penalties=(all(x == 0 for x in presence_penalties)
-                      and all(x == 0 for x in frequency_penalties)
-                      and all(x == 1 for x in repetition_penalties)),
+        spec_token_ids=[[] for _ in range(len(output_token_ids))],
+        no_penalties=(
+            all(x == 0 for x in presence_penalties)
+            and all(x == 0 for x in frequency_penalties)
+            and all(x == 1 for x in repetition_penalties)
+        ),
         allowed_token_ids_mask=allowed_token_ids_mask,
         bad_words_token_ids=bad_words_token_ids,
         logitsprocs=LogitsProcessors(),
@@ -182,8 +188,7 @@ def _create_sampling_params():
         frequency_penalty=np.random.uniform(-2.0, 2.0),
         min_tokens=np.random.randint(1, 10),
         stop_token_ids=[
-            np.random.randint(0, VOCAB_SIZE)
-            for _ in range(np.random.randint(10))
+            np.random.randint(0, VOCAB_SIZE) for _ in range(np.random.randint(10))
         ],
         logit_bias={0: np.random.uniform(-3.0, 3.0)},
     )
@@ -203,17 +208,15 @@ def _construct_cached_request_state(req_id_suffix: int):
         prompt_token_ids=prompt_token_ids,
         sampling_params=_create_sampling_params(),
         pooling_params=None,
-        mm_kwargs=[],
-        mm_positions=[],
-        mm_hashes=[],
-        block_ids=([], ),
+        mm_features=[],
+        block_ids=([],),
         generator=None,
         num_computed_tokens=len(output_token_ids),
         output_token_ids=output_token_ids,
     )
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32, 64])
 def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     """
@@ -232,9 +235,10 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
     )
     reqs: list[CachedRequestState] = []
     req_id_reqs = {}
@@ -261,19 +265,18 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
 
     # Create expected output.
     expected_sampling_metadata = _construct_expected_sampling_metadata(
-        reqs,
-        req_ids_retained,
-        input_batch.req_id_to_index,
-        device=torch.device(device))
+        reqs, req_ids_retained, input_batch.req_id_to_index, device=torch.device(device)
+    )
 
-    def same(t1: Optional[torch.Tensor], t2: Optional[torch.Tensor]) -> bool:
-        return (t1 is None
-                and t2 is None) or (t1 is not None and t2 is not None
-                                    and torch.allclose(t1, t2))
+    def same(t1: torch.Tensor | None, t2: torch.Tensor | None) -> bool:
+        return (t1 is None and t2 is None) or (
+            t1 is not None and t2 is not None and torch.allclose(t1, t2)
+        )
 
     # Assert the actual and expected output.
-    assert torch.allclose(expected_sampling_metadata.temperature,
-                          sampling_metadata.temperature)
+    assert torch.allclose(
+        expected_sampling_metadata.temperature, sampling_metadata.temperature
+    )
     assert same(expected_sampling_metadata.top_p, sampling_metadata.top_p)
     assert same(expected_sampling_metadata.top_k, sampling_metadata.top_k)
     assert torch.allclose(
@@ -288,25 +291,29 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         expected_sampling_metadata.repetition_penalties,
         sampling_metadata.repetition_penalties,
     )
-    assert torch.allclose(expected_sampling_metadata.prompt_token_ids,
-                          sampling_metadata.prompt_token_ids)
-    assert (expected_sampling_metadata.output_token_ids ==
-            sampling_metadata.output_token_ids)
-    assert expected_sampling_metadata.no_penalties == \
-           sampling_metadata.no_penalties
+    assert torch.allclose(
+        expected_sampling_metadata.prompt_token_ids, sampling_metadata.prompt_token_ids
+    )
+    assert (
+        expected_sampling_metadata.output_token_ids
+        == sampling_metadata.output_token_ids
+    )
+    assert expected_sampling_metadata.no_penalties == sampling_metadata.no_penalties
     if sampling_metadata.allowed_token_ids_mask:
         assert torch.allclose(
             expected_sampling_metadata.allowed_token_ids_mask,
-            sampling_metadata.allowed_token_ids_mask)
-    assert expected_sampling_metadata.bad_words_token_ids == \
-        sampling_metadata.bad_words_token_ids
+            sampling_metadata.allowed_token_ids_mask,
+        )
+    assert (
+        expected_sampling_metadata.bad_words_token_ids
+        == sampling_metadata.bad_words_token_ids
+    )
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [32])
-@pytest.mark.parametrize("swap_list", [((0, 1), )])
-def test_swap_states_in_input_batch(device: str, batch_size: int,
-                                    swap_list: list):
+@pytest.mark.parametrize("swap_list", [((0, 1),)])
+def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: list):
     """
     Tests the logic for managing sampling metadata in the InputBatch.
 
@@ -323,18 +330,20 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
     )
     ref_input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
     )
 
     reqs: list[CachedRequestState] = []
@@ -351,8 +360,10 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
 
     reordered_reqs = reqs.copy()
     for swap_pair in swap_list:
-        reordered_reqs[swap_pair[0]], reordered_reqs[swap_pair[1]] = \
-            reordered_reqs[swap_pair[1]], reordered_reqs[swap_pair[0]]
+        reordered_reqs[swap_pair[0]], reordered_reqs[swap_pair[1]] = (
+            reordered_reqs[swap_pair[1]],
+            reordered_reqs[swap_pair[0]],
+        )
         input_batch.swap_states(swap_pair[0], swap_pair[1])
 
     for req_index in range(batch_size):
@@ -364,3 +375,145 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
     ref_input_batch.refresh_metadata()
 
     _compare_objs(input_batch, ref_input_batch)
+
+
+def _construct_pooling_request(req_id_suffix: int, pooling_params=None):
+    from vllm.pooling_params import PoolingParams
+
+    prompt_token_ids = [
+        np.random.randint(0, VOCAB_SIZE)
+        for _ in range(np.random.randint(10, MAX_PROMPT_SIZE))
+    ]
+    return CachedRequestState(
+        req_id=f"pool_req_{req_id_suffix}",
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=None,
+        pooling_params=pooling_params or PoolingParams(task="classify"),
+        mm_features=[],
+        block_ids=([],),
+        generator=None,
+        num_computed_tokens=0,
+        output_token_ids=[],
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_pooling_prompt_lens_not_aliased(device: str):
+    """Verify that prompt_lens in PoolingMetadata does not share memory
+    with the internal num_prompt_tokens pinned buffer. Guards against possible
+    non-determinism in pooling metadata due to mutations to the internal buffer.
+    """
+    batch_size = 4
+    input_batch = InputBatch(
+        max_num_reqs=batch_size * 2,
+        max_model_len=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
+        max_num_batched_tokens=batch_size * (MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS),
+        device=torch.device(device),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
+        is_pooling_model=True,
+    )
+
+    reqs = []
+    # Add requests
+    for i in range(batch_size):
+        req = _construct_pooling_request(i)
+        input_batch.add_request(req)
+        reqs.append(req)
+    input_batch.refresh_metadata()
+
+    # prompt_lens must be a snapshot
+    metadata = input_batch.get_pooling_metadata()
+    prompt_lens_snapshot = metadata.prompt_lens.clone()
+
+    # Mutate the internal buffer (simulates next batch adding new requests)
+    input_batch.num_prompt_tokens_cpu_tensor.fill_(999)
+
+    # prompt_lens must be unaffected by the mutation
+    assert torch.equal(metadata.prompt_lens, prompt_lens_snapshot), (
+        "prompt_lens shares memory with internal pinned buffer; "
+        "mutations to num_prompt_tokens_cpu_tensor corrupted prompt_lens. "
+        f"Expected {prompt_lens_snapshot}, got {metadata.prompt_lens}"
+    )
+
+
+def test_placeholder_spec_token_ids_written_verbatim():
+    input_batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=8,
+        max_num_batched_tokens=8,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[1],
+    )
+    req = CachedRequestState(
+        req_id="req",
+        prompt_token_ids=[10, 11],
+        mm_features=[],
+        sampling_params=SamplingParams(),
+        block_ids=([],),
+        generator=None,
+        num_computed_tokens=3,
+        output_token_ids=[12],
+    )
+    input_batch.add_request(req)
+
+    input_batch.update_req_spec_token_ids(
+        req,
+        {"req": [13, -1, -1]},
+    )
+
+    # Placeholders (-1) are kept verbatim in both the spec_token_ids list and
+    # the token buffer; they are clamped to 0 only at the embedding boundary
+    # (GPUModelRunner._preprocess).
+    assert input_batch.spec_token_ids[0] == [13, -1, -1]
+    assert input_batch.token_ids_cpu[0, 3:6].tolist() == [13, -1, -1]
+
+
+@pytest.mark.parametrize(
+    ("pooling_params", "expect_device_prompt_token_ids", "expect_cpu_prompt_token_ids"),
+    [
+        ({"task": "classify"}, False, False),
+        ({"task": "classify", "requires_token_ids": True}, True, True),
+    ],
+)
+def test_pooling_metadata_token_id_buffers(
+    pooling_params: dict[str, object],
+    expect_device_prompt_token_ids: bool,
+    expect_cpu_prompt_token_ids: bool,
+):
+    from vllm.pooling_params import PoolingParams
+
+    input_batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
+        max_num_batched_tokens=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
+        is_pooling_model=True,
+    )
+    req = _construct_pooling_request(0, PoolingParams(**pooling_params))
+    input_batch.add_request(req)
+    input_batch.refresh_metadata()
+
+    metadata = input_batch.get_pooling_metadata()
+    if expect_device_prompt_token_ids:
+        assert input_batch.sampling_metadata.prompt_token_ids is not None
+        assert metadata.prompt_token_ids is not None
+        assert metadata.get_prompt_token_ids()[0].tolist() == req.prompt_token_ids
+    else:
+        assert input_batch.sampling_metadata.prompt_token_ids is None
+        assert metadata.prompt_token_ids is None
+
+    if expect_cpu_prompt_token_ids:
+        assert metadata.prompt_token_ids_cpu is not None
+        assert metadata.get_prompt_token_ids_cpu()[0].tolist() == req.prompt_token_ids
+    else:
+        assert metadata.prompt_token_ids_cpu is None

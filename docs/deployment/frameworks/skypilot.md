@@ -4,7 +4,7 @@
   <img src="https://imgur.com/yxtzPEu.png" alt="vLLM"/>
 </p>
 
-vLLM can be **run and scaled to multiple service replicas on clouds and Kubernetes** with [SkyPilot](https://github.com/skypilot-org/skypilot), an open-source framework for running LLMs on any cloud. More examples for various open models, such as Llama-3, Mixtral, etc, can be found in [SkyPilot AI gallery](https://skypilot.readthedocs.io/en/latest/gallery/index.html).
+vLLM can be **run and scaled to multiple service replicas on clouds and Kubernetes** with [SkyPilot](https://github.com/skypilot-org/skypilot), an open-source framework for running LLMs on any cloud. More examples for various open models, such as Llama-3, Mixtral, etc., can be found in [SkyPilot AI gallery](https://skypilot.readthedocs.io/en/latest/gallery/index.html).
 
 ## Prerequisites
 
@@ -32,6 +32,7 @@ See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypil
       ports: 8081  # Expose to internet traffic.
 
     envs:
+      PYTHONUNBUFFERED: 1
       MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
@@ -47,9 +48,8 @@ See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypil
     run: |
       conda activate vllm
       echo 'Starting vllm api server...'
-      python -u -m vllm.entrypoints.openai.api_server \
+      vllm serve $MODEL_NAME \
         --port 8081 \
-        --model $MODEL_NAME \
         --trust-remote-code \
         --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
         2>&1 | tee api_server.log &
@@ -59,7 +59,7 @@ See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypil
 
       echo 'Starting gradio server...'
       git clone https://github.com/vllm-project/vllm.git || true
-      python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
+      python vllm/examples/applications/chatbot/gradio_openai_chatbot_webserver.py \
         -m $MODEL_NAME \
         --port 8811 \
         --model-url http://localhost:8081/v1 \
@@ -131,6 +131,7 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
       ports: 8081  # Expose to internet traffic.
 
     envs:
+      PYTHONUNBUFFERED: 1
       MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
@@ -146,9 +147,8 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
     run: |
       conda activate vllm
       echo 'Starting vllm api server...'
-      python -u -m vllm.entrypoints.openai.api_server \
+      vllm serve $MODEL_NAME \
         --port 8081 \
-        --model $MODEL_NAME \
         --trust-remote-code \
         --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
         2>&1 | tee api_server.log
@@ -243,6 +243,7 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
       ports: 8081  # Expose to internet traffic.
 
     envs:
+      PYTHONUNBUFFERED: 1
       MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
@@ -258,9 +259,8 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
     run: |
       conda activate vllm
       echo 'Starting vllm api server...'
-      python -u -m vllm.entrypoints.openai.api_server \
+      vllm serve $MODEL_NAME \
         --port 8081 \
-        --model $MODEL_NAME \
         --trust-remote-code \
         --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
         2>&1 | tee api_server.log
@@ -305,7 +305,7 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
 
       echo 'Starting gradio server...'
       git clone https://github.com/vllm-project/vllm.git || true
-      python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
+      python vllm/examples/applications/api_client/gradio_openai_chatbot_webserver.py \
         -m $MODEL_NAME \
         --port 8811 \
         --model-url http://$ENDPOINT/v1 \

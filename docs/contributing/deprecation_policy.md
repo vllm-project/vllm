@@ -46,7 +46,7 @@ warning (e.g., "This will be removed in v0.10.0").
     - GitHub Issue (RFC) for feedback
     - Documentation and use of the `@typing_extensions.deprecated` decorator for Python APIs
 
-### 2.Deprecated (Off By Default)
+### 2. Deprecated (Off By Default)
 
 - **Action**: Feature is disabled by default, but can still be re-enabled via a
 CLI flag or environment variable. Feature throws an error when used without
@@ -66,7 +66,7 @@ stages will be removed.
 Assume a feature is deprecated in `v0.9.0`.
 
 | Release       | Status                                                                                          |
-|---------------|-------------------------------------------------------------------------------------------------|
+| ------------- | ----------------------------------------------------------------------------------------------- |
 | `v0.9.0`      | Feature is deprecated with clear removal version listed.                                        |
 | `v0.10.0`     | Feature is now off by default, throws an error when used, and can be re-enabled for legacy use. |
 | `v0.11.0`     | Feature is removed.                                                                             |

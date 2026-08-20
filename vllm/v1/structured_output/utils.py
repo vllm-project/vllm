@@ -1,39 +1,179 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from __future__ import annotations
 
 import hashlib
 import importlib.metadata
 import os
-from typing import TYPE_CHECKING
+import sqlite3
+import tempfile
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from typing import TYPE_CHECKING, TypeVar
 
 import regex as re
+import torch
 from cachetools import LRUCache
-from diskcache import Cache
+from transformers import MistralCommonBackend
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:
     import outlines_core as oc
+    import transformers.convert_slow_tokenizer as convert_slow_tokenizer
     import transformers.file_utils as file_utils
-    import transformers.models.gpt2.tokenization_gpt2 as tokenization_gpt2
+    import xgrammar as xgr
 
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
+    from vllm.tokenizers import TokenizerLike
+    from vllm.v1.worker.gpu_input_batch import InputBatch
 else:
+    xgr = LazyLoader("xgr", globals(), "xgrammar")
     oc = LazyLoader("oc", globals(), "outlines_core")
     file_utils = LazyLoader("file_utils", globals(), "transformers.file_utils")
-    tokenization_gpt2 = LazyLoader(
-        "tokenization_gpt2",
-        globals(),
-        "transformers.models.gpt2.tokenization_gpt2",
+    convert_slow_tokenizer = LazyLoader(
+        "convert_slow_tokenizer", globals(), "transformers.convert_slow_tokenizer"
     )
+
 
 logger = init_logger(__name__)
 
+_T = TypeVar("_T")
+
 CACHE = None
+
+
+def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
+    """Run a regex compilation callable with a timeout.
+
+    Prevents ReDoS attacks where adversarial regex patterns (e.g. nested
+    quantifiers like ``(a+)+b``) cause exponential DFA state-space explosion,
+    hanging the inference worker indefinitely.
+
+    Args:
+        fn: Single-argument callable that takes the pattern and performs
+            the regex compilation.
+        pattern: The regex pattern string, passed to *fn* and included in
+            timeout error messages.
+
+    Raises:
+        ValueError: If compilation exceeds the configured timeout.
+    """
+    timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
+    if timeout <= 0:
+        return fn(pattern)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, pattern)
+    try:
+        result = future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise ValueError(
+            f"Regex compilation timed out after {timeout}s. "
+            "The pattern may be too complex or contain constructs that "
+            "cause exponential state-space explosion (e.g. nested "
+            f"quantifiers). Pattern: {pattern[:200]}"
+        ) from None
+    else:
+        executor.shutdown(wait=False)
+        return result
+
+
+def apply_grammar_bitmask(
+    scheduler_output: SchedulerOutput,
+    grammar_output: GrammarOutput,
+    input_batch: InputBatch,
+    logits: torch.Tensor,
+) -> None:
+    """
+    Apply grammar bitmask to output logits of the model with xgrammar function.
+
+    Args:
+        scheduler_output (SchedulerOutput): The result of engine scheduling.
+        input_batch (InputBatch): The input of model runner.
+        logits (torch.Tensor): The output logits of model forward.
+    """
+    # Serialization of np.ndarray is much more efficient than a tensor,
+    # so we receive it in that format.
+    grammar_bitmask = grammar_output.grammar_bitmask
+
+    # We receive the structured output bitmask from the scheduler,
+    # compacted to contain bitmasks only for structured output requests.
+    # The order of the requests in the bitmask is not guaranteed to be the
+    # same as the order of the requests in the gpu runner's batch. We need
+    # to sort the bitmask to match the order of the requests used here.
+
+    # Get the batch indices of the structured output requests.
+    # Keep track of the number of speculative tokens scheduled for every
+    # request in the batch, as the logit indices are offset by this amount.
+    struct_out_req_batch_indices: dict[str, int] = {}
+    cumulative_offset = 0
+    spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+    struct_out_req_ids = set(grammar_output.structured_output_request_ids)
+    for batch_index, req_id in enumerate(input_batch.req_ids):
+        logit_index = batch_index + cumulative_offset
+        cumulative_offset += len(spec_tokens.get(req_id, ()))
+        if req_id in struct_out_req_ids:
+            struct_out_req_batch_indices[req_id] = logit_index
+
+    out_indices = []
+
+    # Reorder the bitmask to match the order of the requests in the batch.
+    sorted_bitmask_tensor = torch.full(
+        (logits.shape[0], grammar_bitmask.shape[1]),
+        -1,
+        dtype=torch.from_numpy(grammar_bitmask[:0]).dtype,
+        pin_memory=PIN_MEMORY,
+    )
+    sorted_bitmask = sorted_bitmask_tensor.numpy()
+    cumulative_index = 0
+    for req_id in grammar_output.structured_output_request_ids:
+        num_spec_tokens = len(spec_tokens.get(req_id, ()))
+        if (logit_idx := struct_out_req_batch_indices.get(req_id)) is not None:
+            for i in range(1 + num_spec_tokens):
+                bitmask_index = logit_idx + i
+                sorted_bitmask[bitmask_index] = grammar_bitmask[cumulative_index + i]
+                out_indices.append(bitmask_index)
+        cumulative_index += 1 + num_spec_tokens
+
+    # Copy async to device.
+    grammar_bitmask = sorted_bitmask_tensor.to(logits.device, non_blocking=True)
+
+    # If the length of out indices and the logits have the same shape
+    # we don't need to pass indices to the kernel,
+    # since the bitmask is already aligned with the logits.
+    skip_out_indices = len(out_indices) == logits.shape[0]
+
+    if not logits.is_cpu:
+        index_tensor = None
+        if not skip_out_indices:
+            # xgrammar expects a python list of indices but it will actually work with
+            # a tensor. If we copy the tensor ourselves here we can do it in a
+            # non_blocking manner and there should be no cpu sync within xgrammar.
+            index_tensor = async_tensor_h2d(
+                out_indices, dtype=torch.int32, device=logits.device
+            )
+
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        return
+
+    # CPU case, use list for indices.
+    indices = None if skip_out_indices else out_indices
+    # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
+    # See: https://github.com/vllm-project/vllm/issues/31901
+    if logits.dtype != torch.float32:
+        # Convert to float32, apply bitmask, then convert back
+        logits_fp32 = logits.to(torch.float32)
+        xgr.apply_token_bitmask_inplace(logits_fp32, grammar_bitmask, indices=indices)
+        # Copy the modified values back to the original tensor
+        logits.copy_(logits_fp32.to(logits.dtype))
+    else:
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=indices)
 
 
 class OutlinesVocabulary:
@@ -47,8 +187,7 @@ class OutlinesVocabulary:
         self.inner = vocabulary
         # Have to do abs(hash()) because python hashes can
         # be negative, and we are using hash as a cache key.
-        hex_str = hashlib.sha256(
-            vocabulary.__repr__().encode('utf-8')).hexdigest()
+        hex_str = hashlib.sha256(vocabulary.__repr__().encode("utf-8")).hexdigest()
         hash_int = int(hex_str, 16)
         self._hash = hash_int
 
@@ -62,21 +201,83 @@ def get_outlines_cache_path() -> str:
     if outlines_cache_dir:
         # OUTLINES_CACHE_DIR takes precedence
         return outlines_cache_dir
-    elif xdg_cache_home:
+    if xdg_cache_home:
         return os.path.join(xdg_cache_home, ".cache", "outlines")
     # If homedir is "/", we may be inside a container, and thus writing to
     # root would be problematic, so we fall back to using a tempfile.
     # Also validate the path exists, since os.path.expanduser does
     # not guarantee existence.
-    elif os.path.isdir(home_dir) and home_dir != "/":
+    if os.path.isdir(home_dir) and home_dir != "/":
         # Default Unix fallback: ~/.cache/outlines
         return os.path.join(home_dir, ".cache", "outlines")
-    else:
-        import tempfile
 
-        # home_dir may be / inside a docker container without existing user
-        tempdir = tempfile.gettempdir()
-        return os.path.join(tempdir, ".cache", "outlines")
+    # home_dir may be / inside a docker container without existing user
+    tempdir = tempfile.gettempdir()
+    return os.path.join(tempdir, ".cache", "outlines")
+
+
+class OutlinesDiskCache:
+    """SQLite-backed cache for outlines_core.Index objects.
+
+    Uses outlines_core's native binary serialization (via Rust serde)
+    instead of pickle, eliminating arbitrary code execution risk on
+    deserialization.
+    """
+
+    _TYPE_INDEX = "I"
+    _TYPE_STRING = "S"
+
+    def __init__(self, path: str):
+        os.makedirs(path, exist_ok=True)
+        db_path = os.path.join(path, "outlines_cache.db")
+        self._db = sqlite3.connect(db_path, check_same_thread=False)
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS cache "
+            "(key TEXT PRIMARY KEY, type_tag TEXT NOT NULL, value BLOB NOT NULL)"
+        )
+        self._db.commit()
+
+    def __contains__(self, key: str) -> bool:
+        row = self._db.execute("SELECT 1 FROM cache WHERE key=?", (key,)).fetchone()
+        return row is not None
+
+    def __getitem__(self, key: str):
+        row = self._db.execute(
+            "SELECT type_tag, value FROM cache WHERE key=?", (key,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(key)
+        type_tag, data = row
+        if type_tag == self._TYPE_STRING:
+            return data.decode("utf-8")
+        return oc.Index.from_binary(data)
+
+    def __setitem__(self, key: str, value):
+        if isinstance(value, str):
+            type_tag = self._TYPE_STRING
+            data = value.encode("utf-8")
+        else:
+            type_tag = self._TYPE_INDEX
+            data = value.__reduce__()[1][0]
+        self._db.execute(
+            "INSERT OR REPLACE INTO cache (key, type_tag, value) VALUES (?, ?, ?)",
+            (key, type_tag, data),
+        )
+        self._db.commit()
+
+    def get(self, key: str, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def set(self, key: str, value):
+        self[key] = value
+
+    def clear(self):
+        self._db.execute("DELETE FROM cache")
+        self._db.commit()
 
 
 def get_outlines_cache():
@@ -84,48 +285,60 @@ def get_outlines_cache():
 
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
-        logger.warning("Enabling outlines cache. This is an unbounded on-disk "
-                       "cache. It may consume a lot of disk space and should "
-                       "not be used with untrusted clients.")
-        cache = Cache(cache_dir, eviction_policy="none", cull_limit=0)
+        logger.warning(
+            "Enabling outlines cache. This is an unbounded on-disk "
+            "cache. It may consume a lot of disk space and should "
+            "not be used with untrusted clients."
+        )
+        cache = OutlinesDiskCache(cache_dir)
         outlines_version = importlib.metadata.version("outlines_core")
 
-        cached_version = cache.get('__version__', None)
+        cached_version = cache.get("__version__", None)
         if cached_version != outlines_version:
             cache.clear()
-        cache.set('__version__', outlines_version)
+        cache.set("__version__", outlines_version)
         return cache
-    else:
-        return LRUCache(maxsize=128)
+
+    return LRUCache(maxsize=128)
 
 
 re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
 re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
-def _reduced_vocabulary(
-    tokenizer: AnyTokenizer,
-    eos_token_id: int,
-) -> dict[bytes, list[int]]:
+def maybe_wrap_mistral_common_tokenizer(tokenizer: TokenizerLike) -> TokenizerLike:
+    """The grammar backends cannot consume a `MistralCommonBackend` directly."""
+    if not isinstance(tokenizer, MistralCommonBackend):
+        return tokenizer
+
+    # Deferred: `vllm.tokenizers.mistral` pulls in a large dependency tree, and
+    # this module is imported by `vllm.v1.worker.gpu_model_runner`.
+    from vllm.tokenizers.mistral import MistralTokenizer
+
+    return MistralTokenizer(tokenizer)
+
+
+def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
 
     Returns:
         A Dict of token string -> equivalent token ids
     """
+    eos_token_id = tokenizer.eos_token_id
 
     unicode_to_bytes = {
-        v: k
-        for k, v in tokenization_gpt2.bytes_to_unicode().items()
+        v: k for k, v in convert_slow_tokenizer.bytes_to_unicode().items()
     }
 
     def convert_token_to_string(token: str) -> str:
-
         string = tokenizer.convert_tokens_to_string([token])
 
         # A hack to handle missing spaces to HF's Llama tokenizers
-        if (type(token) is str
-                and token.startswith(file_utils.SPIECE_UNDERLINE)
-                or token == "<0x20>"):
+        if (
+            type(token) is str
+            and token.startswith(file_utils.SPIECE_UNDERLINE)
+            or token == "<0x20>"
+        ):
             return " " + string
 
         return string
@@ -133,7 +346,7 @@ def _reduced_vocabulary(
     vocabulary: dict[bytes, list[int]] = {}
     empty_token_ids: list[int] = []
     for token, token_idx in tokenizer.get_vocab().items():
-        if token in tokenizer.all_special_tokens:  # type: ignore
+        if token in tokenizer.all_special_tokens:
             continue
 
         token_str = convert_token_to_string(token)
@@ -145,8 +358,9 @@ def _reduced_vocabulary(
                 # by this point.
                 token_bytes = bytes(token_str)  # type: ignore[arg-type]
 
-            elif "\ufffd" in token_str and not re_replacement_seq.match(
-                    token_str):
+            elif (token_str == "\ufffd" and token != "\ufffd") or (
+                "\ufffd" in token_str and not re_replacement_seq.match(token_str)
+            ):
                 # Handle tokens with invalid UTF-8 sequences.
                 if re_llama_byte_token.match(token):
                     # Llama-like tokenizers use <0xXX> for incomplete sequences.
@@ -157,12 +371,13 @@ def _reduced_vocabulary(
                     if None in byte_vals:
                         raise RuntimeError(
                             f"Cannot convert token `{token}`"
-                            f" ({token_idx}) to bytes: {token_str}")
+                            f" ({token_idx}) to bytes: {token_str}"
+                        )
                     # safe to ignore, since if None in byte_vals,
                     # an error is thrown.
                     token_bytes = bytes(byte_vals)  # type: ignore[arg-type]
             else:
-                token_bytes = token_str.encode('utf-8')
+                token_bytes = token_str.encode("utf-8")
 
             if token_idx != eos_token_id:
                 vocabulary.setdefault(token_bytes, []).append(token_idx)
@@ -172,36 +387,18 @@ def _reduced_vocabulary(
     return vocabulary
 
 
-def get_outlines_vocabulary(tokenizer: AnyTokenizer) -> oc.Vocabulary:
-    """Get the `Vocabulary` object for a given tokenizer.
-    """
+def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
+    """Get the `Vocabulary` object for a given tokenizer."""
     if hasattr(tokenizer, "_outlines_vocabulary"):
         return tokenizer._outlines_vocabulary  # type: ignore
 
-    try:
-        if hasattr(
-                tokenizer,
-                "eos_token_id",
-        ) and tokenizer.eos_token_id is not None:
-            eos_token_id = tokenizer.eos_token_id
-        else:
-            raise ValueError(
-                f"Error during structured outputs setup for outlines: Tokenizer ({type(tokenizer)}) has no `eos_token_id` property, but `eos_token_id` is required for structured outputs to work properly."  # noqa: E501
-            )
+    reduced_vocab = _reduced_vocabulary(tokenizer)
+    vocabulary = OutlinesVocabulary(
+        oc.Vocabulary(tokenizer.eos_token_id, reduced_vocab)
+    )
+    tokenizer._outlines_vocabulary = vocabulary  # type: ignore
 
-        reduced_vocab = _reduced_vocabulary(
-            tokenizer,
-            eos_token_id  #type: ignore
-        )
-        vocabulary = OutlinesVocabulary(
-            oc.Vocabulary(eos_token_id, reduced_vocab))
-        tokenizer._outlines_vocabulary = vocabulary  # type: ignore
-
-        return vocabulary
-    except AttributeError as e:
-        raise ValueError(f"Cannot get the vocabulary of the tokenizer "
-                         f"({type(tokenizer)}). The tokenizer should have a "
-                         "get_vocab method.") from e
+    return vocabulary
 
 
 def grammar_is_likely_lark(grammar_str: str) -> bool:
@@ -223,14 +420,14 @@ def grammar_is_likely_lark(grammar_str: str) -> bool:
     if not grammar_str or not isinstance(grammar_str, str):
         return False
 
-    for line in grammar_str.split('\n'):
+    for line in grammar_str.split("\n"):
         # Remove both comment styles
-        line = re.sub(r'(#|//).*$', '', line).strip()
+        line = re.sub(r"(#|//).*$", "", line).strip()
         if not line:
             continue
 
         # Look for EBNF rule definition
-        if '::=' in line:
+        if "::=" in line:
             return False
 
     return True
@@ -267,40 +464,41 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
 
     def clean_line(line: str) -> str:
         """Remove comments and whitespace from line."""
-        return re.sub(r'(#|//).*$', '', line).strip()
+        return re.sub(r"(#|//).*$", "", line).strip()
 
     def check_quotes(text: str, rule_name: str, line_num: int) -> None:
         """Validate quote matching in text."""
         if text.count("'") % 2 != 0 or text.count('"') % 2 != 0:
-            raise ValueError(
-                f"Mismatched quotes in {rule_name} on line {line_num}")
+            raise ValueError(f"Mismatched quotes in {rule_name} on line {line_num}")
 
     def extract_references(text: str) -> set[str]:
         """Extract rule references from text."""
         # Remove quoted strings and special characters
-        text = re.sub(r'"[^"]*"', '', text)
-        text = re.sub(r'[+*?()|\[\]{}]', ' ', text)
-        return set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', text))
+        text = re.sub(r'"[^"]*"', "", text)
+        text = re.sub(r"[+*?()|\[\]{}]", " ", text)
+        return set(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", text))
 
     # First pass: Find root rule and validate rule definitions
-    lines = [clean_line(line) for line in grammar_str.split('\n')]
+    lines = [clean_line(line) for line in grammar_str.split("\n")]
     first_rule = None
 
     for line_num, line in enumerate(lines, 1):
-        if not line or line.startswith('|'):
+        if not line or line.startswith("|"):
             continue
 
-        if ':' in line:
+        if ":" in line:
             try:
-                name = line.split(':', 1)[0].strip().strip('?')
+                name = line.split(":", 1)[0].strip().strip("?")
                 defined_rules.add(name)
                 if first_rule is None:
                     first_rule = name
-                if name == 'start':
-                    first_rule = 'start'
+                if name == "start":
+                    first_rule = "start"
             except IndexError as e:
-                raise ValueError(f"Invalid rule format on line {line_num}. "
-                                 "Expected 'rule_name: definition'") from e
+                raise ValueError(
+                    f"Invalid rule format on line {line_num}. "
+                    "Expected 'rule_name: definition'"
+                ) from e
 
     if not defined_rules:
         raise ValueError("No valid rules found in grammar")
@@ -317,29 +515,33 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
             continue
 
         try:
-            if ':' in line and not line.startswith('|'):
+            if ":" in line and not line.startswith("|"):
                 # Save previous rule if exists
                 if current_rule:
                     output_lines.append(
-                        f"{current_rule} ::= {' | '.join(current_definition)}")
+                        f"{current_rule} ::= {' | '.join(current_definition)}"
+                    )
 
                 # Process new rule
-                name, definition = line.split(':', 1)
-                current_rule = name.strip().strip('?')
+                name, definition = line.split(":", 1)
+                current_rule = name.strip().strip("?")
 
                 check_quotes(definition, f"rule '{current_rule}'", line_num)
                 definition = re.sub(r"'([^']*)'", r'"\1"', definition)
                 referenced_rules.update(extract_references(definition))
                 current_definition = [definition.strip()]
 
-            elif line.startswith('|'):
+            elif line.startswith("|"):
                 if not current_rule:
-                    raise ValueError(f"Alternative '|' on line {line_num} "
-                                     "without a preceding rule definition")
+                    raise ValueError(
+                        f"Alternative '|' on line {line_num} "
+                        "without a preceding rule definition"
+                    )
 
                 alt_def = line[1:].strip()
-                check_quotes(alt_def, f"alternative for rule '{current_rule}'",
-                             line_num)
+                check_quotes(
+                    alt_def, f"alternative for rule '{current_rule}'", line_num
+                )
                 alt_def = re.sub(r"'([^']*)'", r'"\1"', alt_def)
                 referenced_rules.update(extract_references(alt_def))
                 current_definition.append(alt_def)
@@ -349,25 +551,24 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
 
     # Add final rule if exists
     if current_rule:
-        output_lines.append(
-            f"{current_rule} ::= {' | '.join(current_definition)}")
+        output_lines.append(f"{current_rule} ::= {' | '.join(current_definition)}")
 
     # Validate all rules are defined
-    undefined_rules = referenced_rules - defined_rules - {'root'}
+    undefined_rules = referenced_rules - defined_rules - {"root"}
     if undefined_rules:
-        raise ValueError("Referenced rules are not defined: "
-                         f"{', '.join(sorted(undefined_rules))}")
+        raise ValueError(
+            f"Referenced rules are not defined: {', '.join(sorted(undefined_rules))}"
+        )
 
-    return '\n'.join(output_lines)
+    return "\n".join(output_lines)
 
 
 def choice_as_grammar(choice: list[str]) -> str:
-
     def escape_ebnf_string(s: str) -> str:
         """Escape special characters in a EBNF string."""
         # Escape double quotes and backslashes
-        return re.sub(r'(["\\])', r'\\\1', s)
+        return re.sub(r'(["\\])', r"\\\1", s)
 
     escaped_choices = (escape_ebnf_string(c) for c in choice)
-    grammar = ('root ::= ' + ' | '.join(f'"{c}"' for c in escaped_choices))
+    grammar = "root ::= " + " | ".join(f'"{c}"' for c in escaped_choices)
     return grammar

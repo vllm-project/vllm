@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
-
-def dummy_platform_plugin() -> Optional[str]:
+def dummy_platform_plugin() -> str | None:
     return "vllm_add_dummy_platform.dummy_platform.DummyPlatform"
 
 

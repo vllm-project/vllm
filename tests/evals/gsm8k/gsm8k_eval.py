@@ -10,9 +10,9 @@ import ast
 import asyncio
 import json
 import os
+import tempfile
 import time
 from collections.abc import Generator
-from typing import Optional, Union
 
 import aiohttp
 import numpy as np
@@ -20,13 +20,15 @@ import regex as re
 import requests
 from tqdm.asyncio import tqdm
 
+from vllm.assets.base import VLLM_S3_BUCKET_URL
+
 INVALID = -9999999
 
 
-def download_and_cache_file(url: str, filename: Optional[str] = None) -> str:
+def download_and_cache_file(url: str, filename: str | None = None) -> str:
     """Download and cache a file from a URL."""
     if filename is None:
-        filename = os.path.join("/tmp", url.split("/")[-1])
+        filename = os.path.join(tempfile.gettempdir(), url.split("/")[-1])
 
     if os.path.exists(filename):
         return filename
@@ -44,8 +46,8 @@ def download_and_cache_file(url: str, filename: Optional[str] = None) -> str:
 
 def load_gsm8k_data() -> tuple[list[dict], list[dict]]:
     """Load GSM8K train and test data"""
-    train_url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl"
-    test_url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
+    train_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/train.jsonl"
+    test_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/test.jsonl"
 
     train_file = download_and_cache_file(train_url)
     test_file = download_and_cache_file(test_url)
@@ -76,14 +78,20 @@ def get_answer_value(answer_str: str) -> int:
         return INVALID
 
 
-async def call_vllm_api(session: aiohttp.ClientSession,
-                        prompt: str,
-                        temperature: float,
-                        max_tokens: int,
-                        stop: Optional[list[str]] = None,
-                        url: Optional[str] = None,
-                        seed: Optional[int] = None) -> str:
-    """Call vLLM's OpenAI-compatible completions endpoint."""
+async def call_vllm_api(
+    session: aiohttp.ClientSession,
+    prompt: str,
+    temperature: float,
+    max_tokens: int,
+    stop: list[str] | None = None,
+    url: str | None = None,
+    seed: int | None = None,
+) -> tuple[str, int]:
+    """Call vLLM's OpenAI-compatible completions endpoint.
+
+    Returns:
+        Tuple of (response_text, completion_tokens)
+    """
     data = {
         "prompt": prompt,
         "temperature": temperature,
@@ -94,133 +102,269 @@ async def call_vllm_api(session: aiohttp.ClientSession,
         data["seed"] = seed
 
     try:
-        async with session.post(f"{url}/v1/completions",
-                                json=data) as response:
+        async with session.post(f"{url}/v1/completions", json=data) as response:
             response.raise_for_status()
             result = await response.json()
-            return result["choices"][0]["text"]
+            text = result["choices"][0]["text"]
+            completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
+            return text, completion_tokens
     except Exception as e:
-        print(f"Error calling vLLM API: {e}")
-        return ""
+        print(f"Error calling vLLM API ({type(e).__name__}): {e}")
+        return "", 0
 
 
-def evaluate_gsm8k(num_questions: int = 1319,
-                   num_shots: int = 5,
-                   max_tokens: int = 256,
-                   host: str = "http://127.0.0.1",
-                   port: int = 8000,
-                   temperature: float = 0.0,
-                   seed: Optional[int] = 42) -> dict[str, Union[float, int]]:
-    """
-    Evaluate GSM8K accuracy using vLLM serve endpoint.
-    
-    Returns dict with accuracy, invalid_rate, latency, etc.
-    """
-    base_url = f"{host}:{port}"
+async def call_vllm_chat_api(
+    session: aiohttp.ClientSession,
+    model: str,
+    prompt: str,
+    temperature: float,
+    max_tokens: int,
+    stop: list[str] | None = None,
+    url: str | None = None,
+    seed: int | None = None,
+) -> tuple[str, int]:
+    """Call vLLM's OpenAI-compatible chat completions endpoint."""
+    data = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stop": stop,
+    }
+    if seed is not None:
+        data["seed"] = seed
 
-    # Load GSM8K train and test data
+    try:
+        async with session.post(f"{url}/v1/chat/completions", json=data) as response:
+            response.raise_for_status()
+            result = await response.json()
+            text = result["choices"][0]["message"]["content"] or ""
+            completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
+            return text, completion_tokens
+    except Exception as e:
+        print(f"Error calling vLLM chat API ({type(e).__name__}): {e}")
+        return "", 0
+
+
+def _build_gsm8k_prompts(
+    num_questions: int = 1319,
+    num_shots: int = 5,
+    gen_prefix: str = "",
+) -> tuple[list[str], list[int]]:
+    """Build few-shot GSM8K completion prompts and ground-truth labels."""
+    if num_questions == 0:
+        return [], []
     train_data, test_data = load_gsm8k_data()
-
-    # Limit to available test questions
     num_questions = min(num_questions, len(test_data))
 
-    # Build few-shot examples from train split (like lm-eval does)
     few_shot_examples = ""
     for i in range(num_shots):
-        few_shot_examples += (f"Question: {train_data[i]['question']}\n"
-                              f"Answer: {train_data[i]['answer']}\n\n")
+        few_shot_examples += (
+            f"Question: {train_data[i]['question']}\n"
+            f"Answer:{gen_prefix} {train_data[i]['answer']}\n\n"
+        )
 
-    # Prepare test questions and labels from test split
-    questions = []
+    prompts = []
     labels = []
     for i in range(num_questions):
-        questions.append(f"Question: {test_data[i]['question']}\nAnswer:")
+        prompts.append(
+            few_shot_examples
+            + f"Question: {test_data[i]['question']}\nAnswer:{gen_prefix}"
+        )
         labels.append(get_answer_value(test_data[i]["answer"]))
 
     assert all(label != INVALID for label in labels), "Some labels are invalid"
+    return prompts, labels
 
-    # Run evaluation
-    async def run_async_evaluation():
-        states: list[str] = [""] * num_questions
 
-        async def get_answer(session: aiohttp.ClientSession, i: int) -> str:
-            prompt = few_shot_examples + questions[i]
-            answer = await call_vllm_api(
-                session=session,
-                prompt=prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stop=["Question", "Assistant:", "<|separator|>"],
-                url=base_url,
-                seed=seed,
-            )
-            states[i] = answer
-            return answer
-
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(
-                total=600)) as session:
-            tasks = [get_answer(session, i) for i in range(num_questions)]
-            await tqdm.gather(*tasks, desc="Evaluating")
-
-        return states
-
-    print(f"Running GSM8K evaluation: {num_questions} questions, "
-          f"{num_shots}-shot")
-
-    tic = time.perf_counter()
-    states = asyncio.run(run_async_evaluation())
-    latency = time.perf_counter() - tic
-
-    # Compute metrics
+def _score_gsm8k(
+    states: list[str],
+    output_tokens: list[int],
+    labels: list[int],
+    num_shots: int,
+    max_tokens: int,
+    latency: float,
+) -> dict[str, float | int]:
+    """Score GSM8K responses and return a results dict."""
+    num_questions = len(labels)
     preds = [get_answer_value(state) for state in states]
     accuracy = np.mean(np.array(preds) == np.array(labels))
     invalid_rate = np.mean(np.array(preds) == INVALID)
+    total_output_tokens = sum(output_tokens)
+    tokens_per_second = total_output_tokens / latency if latency > 0 else 0.0
 
-    result = {
+    return {
         "accuracy": accuracy,
         "invalid_rate": invalid_rate,
         "latency": latency,
-        "questions_per_second": num_questions / latency,
+        "questions_per_second": num_questions / latency if latency > 0 else 0.0,
+        "total_output_tokens": total_output_tokens,
+        "tokens_per_second": tokens_per_second,
         "num_questions": num_questions,
         "num_shots": num_shots,
         "max_tokens": max_tokens,
         "timestamp": time.time(),
     }
 
-    return result
+
+def evaluate_gsm8k(
+    num_questions: int = 1319,
+    num_shots: int = 5,
+    max_tokens: int = 256,
+    model: str | None = None,
+    use_chat_completions: bool = False,
+    host: str = "http://127.0.0.1",
+    port: int = 8000,
+    temperature: float = 0.0,
+    seed: int | None = 42,
+    request_timeout_seconds: float = 600,
+    gen_prefix: str = "",
+    max_concurrency: int | None = None,
+) -> dict[str, float | int]:
+    """
+    Evaluate GSM8K accuracy using vLLM serve endpoint.
+
+    Returns dict with accuracy, invalid_rate, latency, etc.
+    """
+    base_url = f"{host}:{port}"
+    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots, gen_prefix)
+    num_questions = len(prompts)
+
+    async def run_async_evaluation():
+        states: list[str] = [""] * num_questions
+        output_tokens: list[int] = [0] * num_questions
+
+        async def get_answer(session: aiohttp.ClientSession, i: int) -> tuple[str, int]:
+            stop = ["Question", "Assistant:", "<|separator|>"]
+            if use_chat_completions:
+                if model is None:
+                    raise ValueError("model is required for chat completions")
+                answer, tokens = await call_vllm_chat_api(
+                    session=session,
+                    model=model,
+                    prompt=prompts[i],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stop=stop,
+                    url=base_url,
+                    seed=seed,
+                )
+            else:
+                answer, tokens = await call_vllm_api(
+                    session=session,
+                    prompt=prompts[i],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stop=stop,
+                    url=base_url,
+                    seed=seed,
+                )
+            states[i] = answer
+            output_tokens[i] = tokens
+            return answer, tokens
+
+        timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
+        connector = (
+            aiohttp.TCPConnector(limit=max_concurrency)
+            if max_concurrency is not None
+            else None
+        )
+        async with aiohttp.ClientSession(
+            timeout=timeout, connector=connector
+        ) as session:
+            tasks = [get_answer(session, i) for i in range(num_questions)]
+            await tqdm.gather(*tasks, desc="Evaluating")
+
+        return states, output_tokens
+
+    print(f"Running GSM8K evaluation: {num_questions} questions, {num_shots}-shot")
+
+    tic = time.perf_counter()
+    states, output_tokens = asyncio.run(run_async_evaluation())
+    latency = time.perf_counter() - tic
+
+    return _score_gsm8k(states, output_tokens, labels, num_shots, max_tokens, latency)
+
+
+def evaluate_gsm8k_offline(
+    llm,
+    num_questions: int = 1319,
+    num_shots: int = 5,
+    max_tokens: int = 256,
+    temperature: float = 0.0,
+    gen_prefix: str = "",
+    use_chat_completions: bool = False,
+    chat_template_kwargs: dict[str, object] | None = None,
+) -> dict[str, float | int]:
+    """Evaluate GSM8K accuracy using an offline vllm.LLM object.
+
+    Same prompts and scoring as evaluate_gsm8k(), but runs generation
+    directly via llm.generate() instead of calling a server over HTTP.
+
+    When ``use_chat_completions=True``, prompts go through the chat template via
+    ``llm.chat()`` instead of raw completion (for instruction-tuned models).
+    ``chat_template_kwargs`` are forwarded to ``llm.chat()`` when provided.
+    """
+    from vllm import SamplingParams
+
+    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots, gen_prefix)
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stop=["Question", "Assistant:", "<|separator|>"],
+    )
+    mode = "chat" if use_chat_completions else "completion"
+    print(
+        f"Running offline GSM8K evaluation: {len(prompts)} questions, "
+        f"{num_shots}-shot, {mode}"
+    )
+
+    tic = time.perf_counter()
+    if use_chat_completions:
+        conversations = [[{"role": "user", "content": p}] for p in prompts]
+        outputs = llm.chat(
+            conversations,
+            sampling_params,
+            chat_template_kwargs=chat_template_kwargs,
+        )
+    else:
+        outputs = llm.generate(prompts, sampling_params)
+    latency = time.perf_counter() - tic
+
+    states = [o.outputs[0].text for o in outputs]
+    output_tokens = [len(o.outputs[0].token_ids) for o in outputs]
+
+    return _score_gsm8k(states, output_tokens, labels, num_shots, max_tokens, latency)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="GSM8K evaluation for vLLM serve")
-    parser.add_argument("--num-shots",
-                        type=int,
-                        default=5,
-                        help="Number of few-shot examples")
-    parser.add_argument("--num-questions",
-                        type=int,
-                        default=1319,
-                        help="Number of questions to evaluate")
-    parser.add_argument("--max-tokens",
-                        type=int,
-                        default=256,
-                        help="Max tokens for generation")
-    parser.add_argument("--host",
-                        type=str,
-                        default="http://127.0.0.1",
-                        help="Host URL")
+    parser = argparse.ArgumentParser(description="GSM8K evaluation for vLLM serve")
+    parser.add_argument(
+        "--num-shots", type=int, default=5, help="Number of few-shot examples"
+    )
+    parser.add_argument(
+        "--num-questions",
+        type=int,
+        default=1319,
+        help="Number of questions to evaluate",
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=256, help="Max tokens for generation"
+    )
+    parser.add_argument("--host", type=str, default="http://127.0.0.1", help="Host URL")
     parser.add_argument("--port", type=int, default=8000, help="Port number")
-    parser.add_argument("--temperature",
-                        type=float,
-                        default=0.0,
-                        help="Temperature for generation")
-    parser.add_argument("--seed",
-                        type=int,
-                        default=42,
-                        help="Random seed for reproducibility")
-    parser.add_argument("--save-results",
-                        type=str,
-                        help="Save results to JSON file")
+    parser.add_argument(
+        "--temperature", type=float, default=0.0, help="Temperature for generation"
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for reproducibility"
+    )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        help="Maximum number of concurrent requests",
+    )
+    parser.add_argument("--save-results", type=str, help="Save results to JSON file")
 
     args = parser.parse_args()
 
@@ -232,6 +376,7 @@ def main() -> None:
         port=args.port,
         temperature=args.temperature,
         seed=args.seed,
+        max_concurrency=args.max_concurrency,
     )
 
     # Print results to terminal
@@ -240,6 +385,8 @@ def main() -> None:
     print(f"Invalid responses: {result['invalid_rate']:.3f}")
     print(f"Total latency: {result['latency']:.3f} s")
     print(f"Questions per second: {result['questions_per_second']:.3f}")
+    print(f"Total output tokens: {result['total_output_tokens']}")
+    print(f"Output tokens per second: {result['tokens_per_second']:.3f}")
 
     # Optional file saving
     if args.save_results:

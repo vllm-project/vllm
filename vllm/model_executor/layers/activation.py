@@ -1,24 +1,74 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom activation functions."""
+
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm.distributed import (divide, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
-from vllm.utils import LazyDict
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.triton_utils import tl, triton
+from vllm.utils.collection_utils import LazyDict
 
 logger = init_logger(__name__)
 
 
+@triton.jit
+def _swiglustep_and_mul_kernel(
+    o_ptr,
+    o_stride,
+    x_ptr,
+    x_stride,
+    limit: tl.constexpr,
+    d: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    i = tl.program_id(axis=0).to(tl.int64)
+    j = tl.program_id(axis=1)
+    o_row_ptr = o_ptr + o_stride * i
+    x_row_ptr = x_ptr + x_stride * i
+    offsets = j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < d
+
+    gate = tl.load(x_row_ptr + offsets, mask=mask).to(tl.float32)
+    up = tl.load(x_row_ptr + offsets + d, mask=mask).to(tl.float32)
+
+    gate_silu = tl.sigmoid(gate) * gate
+    gate_clamped = tl.minimum(gate_silu, limit)
+    up_clamped = tl.minimum(tl.maximum(up, -limit), limit)
+
+    result = gate_clamped * up_clamped
+    result = result.to(x_ptr.dtype.element_ty)
+    tl.store(o_row_ptr + offsets, result, mask=mask)
+
+
+def swiglustep_and_mul_triton(
+    output: torch.Tensor, input: torch.Tensor, limit: float = 7.0
+):
+    b, n = input.shape
+    assert input.ndim == 2
+    assert n % 2 == 0
+    d = n // 2
+
+    def grid(meta):
+        return (b, triton.cdiv(d, meta["BLOCK_SIZE"]))
+
+    _swiglustep_and_mul_kernel[grid](
+        output,
+        output.stride(0),
+        input,
+        input.stride(0),
+        limit=limit,
+        d=d,
+        BLOCK_SIZE=1024,
+    )
+
+
+# --8<-- [start:fatrelu_and_mul]
 @CustomOp.register("fatrelu_and_mul")
 class FatreluAndMul(CustomOp):
     """An activation function for FATReLU.
@@ -32,7 +82,9 @@ class FatreluAndMul(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
-    def __init__(self, threshold: float = 0.):
+    # --8<-- [end:fatrelu_and_mul]
+
+    def __init__(self, threshold: float = 0.0):
         super().__init__()
         self.threshold = threshold
         if current_platform.is_cuda_alike():
@@ -49,12 +101,13 @@ class FatreluAndMul(CustomOp):
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
+        output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         self.op(out, x, self.threshold)
         return out
 
 
+# --8<-- [start:silu_and_mul]
 @CustomOp.register("silu_and_mul")
 class SiluAndMul(CustomOp):
     """An activation function for SwiGLU.
@@ -66,36 +119,144 @@ class SiluAndMul(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
-    def __init__(self):
-        super().__init__()
-        if current_platform.is_cuda_alike():
-            self.op = torch.ops._C.silu_and_mul
-        elif current_platform.is_xpu():
-            from vllm._ipex_ops import ipex_ops
-            self.op = ipex_ops.silu_and_mul
-        elif current_platform.is_cpu():
-            self._forward_method = self.forward_native
+    # --8<-- [end:silu_and_mul]
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+    def __init__(self, *, compile_native: bool = True):
+        super().__init__(compile_native=compile_native)
+        if (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ):
+            self.op = torch.ops._C.silu_and_mul
+
+    @staticmethod
+    def forward_native(x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
+        output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         self.op(out, x)
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_cuda(x)
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+            return self.forward_cuda(x)
+        return self.forward_native(x)
+
+
+@CustomOp.register("situ_and_mul")
+class SituAndMul(CustomOp):
+    """SituGLU activation used by Kimi models.
+
+    Computes beta * tanh(gate / beta) * sigmoid(gate) * up.  When
+    ``linear_beta`` is set, the up projection is also softly clipped with
+    linear_beta * tanh(up / linear_beta).
+    """
+
+    def __init__(
+        self,
+        beta: float = 1.0,
+        linear_beta: float | None = None,
+        *,
+        compile_native: bool = True,
+    ):
+        super().__init__(compile_native=compile_native)
+        self.beta = float(beta)
+        self.linear_beta = None if linear_beta is None else float(linear_beta)
+        if current_platform.is_cuda_alike():
+            self.op = torch.ops._C.situ_and_mul
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        self.op(out, x)
+        gate = x[..., :d].float()
+        up = x[..., d:].float()
+        gate = self.beta * torch.tanh(gate / self.beta) * torch.sigmoid(gate)
+        if self.linear_beta is not None:
+            up = self.linear_beta * torch.tanh(up / self.linear_beta)
+        return (gate * up).to(x.dtype)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        # Fused CUDA kernel: writes straight to `out`, no fp32 temporaries.
+        # linear_beta<=0 signals "unset" to the kernel (up passed through).
+        d = x.shape[-1] // 2
+        out = torch.empty(x.shape[:-1] + (d,), dtype=x.dtype, device=x.device)
+        self.op(
+            out, x, self.beta, -1.0 if self.linear_beta is None else self.linear_beta
+        )
         return out
 
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
 
+
+@CustomOp.register("silu_and_mul_with_clamp")
+class SiluAndMulWithClamp(CustomOp):
+    """SwiGLU activation with input clamping (used by some MoE shared experts).
+
+    Computes:
+        gate = clamp(x[..., :d], max=swiglu_limit)
+        up   = clamp(x[..., d:], min=-swiglu_limit, max=swiglu_limit)
+        out  = gate * sigmoid(alpha * gate) * (up + beta)
+    where d = x.shape[-1] // 2. The defaults alpha=1.0, beta=0.0 reduce this to
+    ``silu(gate) * up``; SwiGLU-OAI style models pass alpha (sigmoid scale) and
+    beta=1.0 (up bias).
+
+    Shapes:
+        x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
+        return: (num_tokens, d) or (batch_size, seq_len, d)
+    """
+
+    def __init__(
+        self,
+        swiglu_limit: float,
+        alpha: float = 1.0,
+        beta: float = 0.0,
+        *,
+        compile_native: bool = True,
+    ):
+        super().__init__(compile_native=compile_native)
+        self.swiglu_limit = float(swiglu_limit)
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            self._forward_method = self.forward_native
+        elif current_platform.is_cuda_alike():
+            self.op = torch.ops._C.silu_and_mul_with_clamp
+        elif current_platform.is_cpu():
+            self._forward_method = self.forward_native
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        gate = torch.clamp(x[..., :d], max=self.swiglu_limit)
+        up = torch.clamp(x[..., d:], min=-self.swiglu_limit, max=self.swiglu_limit)
+        return gate * torch.sigmoid(self.alpha * gate) * (up + self.beta)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        output_shape = x.shape[:-1] + (d,)
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        self.op(out, x, self.swiglu_limit, self.alpha, self.beta)
+        return out
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+    def extra_repr(self) -> str:
+        return (
+            f"swiglu_limit={self.swiglu_limit!r}, "
+            f"alpha={self.alpha!r}, beta={self.beta!r}"
+        )
+
+
+# --8<-- [start:mul_and_silu]
 @CustomOp.register("mul_and_silu")
 class MulAndSilu(CustomOp):
     """An activation function for SwiGLU.
@@ -107,13 +268,12 @@ class MulAndSilu(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
+    # --8<-- [end:mul_and_silu]
+
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike():
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
             self.op = torch.ops._C.mul_and_silu
-        elif current_platform.is_xpu():
-            from vllm._ipex_ops import ipex_ops
-            self.op = ipex_ops.silu_and_mul
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
@@ -124,15 +284,16 @@ class MulAndSilu(CustomOp):
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
+        output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         self.op(out, x)
         return out
 
-    # TODO implement forward_xpu for MulAndSilu
-    # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_cuda(x)
 
 
+# --8<-- [start:gelu_and_mul_sparse]
 @CustomOp.register("gelu_and_mul_sparse")
 class GeluAndMulSparse(CustomOp):
     """An activation function for GeluAndMulSparse.
@@ -147,19 +308,26 @@ class GeluAndMulSparse(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
+    # --8<-- [end:gelu_and_mul_sparse]
+
     def __init__(self, activation_sparsity: float, approximate: str = "none"):
         super().__init__()
         # Gelu.
         self.approximate = approximate
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
+        if current_platform.is_rocm() and approximate == "tanh":
+            # TODO:[ROCm] PyTorch native GELU with tanh is unstable with torch.compile
+            logger.warning_once(
+                "[ROCm] Pytorch's native GELU with tanh approximation is currently "
+                "unstable and produces garbage. Fallback to 'none' approximation."
+            )
+            self.approximate = "none"
 
         # Sparsity.
         if activation_sparsity == 0.0:
-            raise ValueError(
-                "activation_sparsity is 0.0. Please use GeluAndMul.")
-        target_sparsity_tensor = torch.tensor(activation_sparsity,
-                                              dtype=torch.float32)
+            raise ValueError("activation_sparsity is 0.0. Please use GeluAndMul.")
+        target_sparsity_tensor = torch.tensor(activation_sparsity, dtype=torch.float32)
         normal_dist = torch.distributions.normal.Normal(0, 1)
         self.std_multiplier = normal_dist.icdf(target_sparsity_tensor)
 
@@ -184,6 +352,67 @@ class GeluAndMulSparse(CustomOp):
         return self.forward_native(x)
 
 
+# --8<-- [start:gelu]
+@CustomOp.register("gelu")
+class GELU(CustomOp):
+    # --8<-- [end:gelu]
+
+    def __init__(self):
+        super().__init__()
+        if (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            and hasattr(torch.ops._C, "activation_lut_bf16")
+        ):
+            self.op = torch.ops._C.activation_lut_bf16
+        else:
+            self.op = None
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        return F.gelu(x, approximate="none")
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if self.op and x.dtype == torch.bfloat16 and x.is_contiguous():
+            out = torch.empty_like(x)
+            self.op(out, x, "gelu")
+            return out
+        return self.forward_native(x)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+
+# --8<-- [start:gelu_tanh]
+@CustomOp.register("gelu_tanh")
+class GELUTanh(CustomOp):
+    # --8<-- [end:gelu_tanh]
+
+    def __init__(self):
+        super().__init__()
+        if (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            and hasattr(torch.ops._C, "gelu_tanh")
+        ):
+            self.op = torch.ops._C.gelu_tanh
+        else:
+            self.op = None
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        return F.gelu(x, approximate="tanh")
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if self.op:
+            out = torch.empty_like(x)
+            self.op(out, x)
+            return out
+        return self.forward_native(x)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+
+# --8<-- [start:gelu_and_mul]
 @CustomOp.register("gelu_and_mul")
 class GeluAndMul(CustomOp):
     """An activation function for GeGLU.
@@ -195,49 +424,63 @@ class GeluAndMul(CustomOp):
         return: (batch_size, seq_len, d) or (num_tokens, d)
     """
 
+    # --8<-- [end:gelu_and_mul]
+
     def __init__(self, approximate: str = "none"):
         super().__init__()
         self.approximate = approximate
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ):
             if approximate == "none":
                 self.op = torch.ops._C.gelu_and_mul
             elif approximate == "tanh":
                 self.op = torch.ops._C.gelu_tanh_and_mul
-        elif current_platform.is_xpu():
-            from vllm._ipex_ops import ipex_ops
-            if approximate == "none":
-                self.op = ipex_ops.gelu_and_mul
-            else:
-                self.op = ipex_ops.gelu_tanh_and_mul
+        if current_platform.is_rocm() and approximate == "tanh":
+            logger.warning_once(
+                "[ROCm] PyTorch's native GELU with tanh approximation is unstable "
+                "with torch.compile. For native implementation, fallback to 'none' "
+                "approximation. The custom kernel implementation is unaffected."
+            )
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
+        # TODO: [ROCm] PyTorch's native GELU with tanh is unstable with torch.compile
+        approximate = self.approximate
+        if current_platform.is_rocm() and approximate == "tanh":
+            approximate = "none"
         d = x.shape[-1] // 2
-        return F.gelu(x[..., :d], approximate=self.approximate) * x[..., d:]
+        return F.gelu(x[..., :d], approximate=approximate) * x[..., d:]
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
+        output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         self.op(out, x)
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        self.op(out, x)
-        return out
+        return self.forward_cuda(x)
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+            return self.forward_cuda(x)
+        return self.forward_native(x)
 
     def extra_repr(self) -> str:
-        return f'approximate={repr(self.approximate)}'
+        return f"approximate={repr(self.approximate)}"
 
 
+# --8<-- [start:swigluoai_and_mul]
 @CustomOp.register("swigluoai_and_mul")
 class SwigluOAIAndMul(CustomOp):
     # https://github.com/huggingface/transformers/blob/v4.55.0/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L106-L110
+    # --8<-- [end:swigluoai_and_mul]
+
     def __init__(self, alpha: float = 1.702, limit: float = 7.0):
         super().__init__()
         self.alpha = alpha
@@ -255,7 +498,7 @@ class SwigluOAIAndMul(CustomOp):
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
+        output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         torch.ops._C.swigluoai_and_mul(out, x, self.alpha, self.limit)
         return out
@@ -264,22 +507,62 @@ class SwigluOAIAndMul(CustomOp):
         return f"alpha={repr(self.alpha)}, limit={repr(self.limit)}"
 
 
+# --8<-- [start:swiglustep_and_mul]
+@CustomOp.register("swiglustep_and_mul")
+class SwigluStepAndMul(CustomOp):
+    """An activation function for SwiGLU with clamping.
+
+    Computes x -> silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
+    where d = x.shape[-1] // 2.
+
+    Shapes:
+        x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
+        return: (num_tokens, d) or (batch_size, seq_len, d)
+    """
+
+    def __init__(self, limit: float = 7.0):
+        super().__init__()
+        if limit is None:
+            raise ValueError("SwigluStepAndMul requires limit to be set.")
+        self.limit = limit
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        gate, up = x.chunk(2, dim=-1)
+        gate = F.silu(gate)
+        gate = gate.clamp(max=self.limit)
+        up = up.clamp(min=-self.limit, max=self.limit)
+        return gate * up
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        output_shape = x.shape[:-1] + (d,)
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        swiglustep_and_mul_triton(out, x, self.limit)
+        return out
+
+    def extra_repr(self) -> str:
+        return f"limit={repr(self.limit)}"
+
+
+# --8<-- [start:gelu_new]
 @CustomOp.register("gelu_new")
 class NewGELU(CustomOp):
+    # --8<-- [end:gelu_new]
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ):
             self.op = torch.ops._C.gelu_new
-        elif current_platform.is_xpu():
-            from vllm._ipex_ops import ipex_ops
-            self.op = ipex_ops.gelu_new
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         c = math.sqrt(2.0 / math.pi)
-        return 0.5 * x * (1.0 + torch.tanh(c *
-                                           (x + 0.044715 * torch.pow(x, 3.0))))
+        return 0.5 * x * (1.0 + torch.tanh(c * (x + 0.044715 * torch.pow(x, 3.0))))
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
@@ -287,24 +570,31 @@ class NewGELU(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.op(x)
+        return self.forward_cuda(x)
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+            return self.forward_cuda(x)
+        return self.forward_native(x)
 
 
+# --8<-- [start:gelu_fast]
 @CustomOp.register("gelu_fast")
 class FastGELU(CustomOp):
+    # --8<-- [end:gelu_fast]
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ):
             self.op = torch.ops._C.gelu_fast
-        elif current_platform.is_xpu():
-            from vllm._ipex_ops import ipex_ops
-            self.op = ipex_ops.gelu_fast
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
-        return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 *
-                                           (1.0 + 0.044715 * x * x)))
+        return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
@@ -312,19 +602,28 @@ class FastGELU(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.op(x)
+        return self.forward_cuda(x)
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+            return self.forward_cuda(x)
+        return self.forward_native(x)
 
 
+# --8<-- [start:quick_gelu]
 @CustomOp.register("quick_gelu")
 class QuickGELU(CustomOp):
     # https://github.com/huggingface/transformers/blob/main/src/transformers/activations.py#L90
+    # --8<-- [end:quick_gelu]
+
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ):
             self.op = torch.ops._C.gelu_quick
-        elif current_platform.is_xpu():
-            from vllm._ipex_ops import ipex_ops
-            self.op = ipex_ops.gelu_quick
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -336,29 +635,39 @@ class QuickGELU(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.empty_like(x)
-        self.op(out, x)
-        return out
+        return self.forward_cuda(x)
 
-    # TODO implement forward_xpu for QuickGELU
-    # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+            return self.forward_cuda(x)
+        return self.forward_native(x)
 
 
+# --8<-- [start:relu2]
 @CustomOp.register("relu2")
 class ReLUSquaredActivation(CustomOp):
     """
     Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
     """
 
+    # --8<-- [end:relu2]
+
+    def __init__(self, *, compile_native: bool = True):
+        super().__init__(compile_native=compile_native)
+        if current_platform.is_cuda_alike():
+            self.op = torch.ops._C.relu_squared
+
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         return torch.square(F.relu(x))
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        #TODO : implement cuda kernels
-        return self.forward_native(x)
+        out = torch.empty_like(x)
+        self.op(out, x)
+        return out
 
 
+# --8<-- [start:xielu]
 @CustomOp.register("xielu")
 class XIELU(CustomOp):
     """
@@ -366,6 +675,8 @@ class XIELU(CustomOp):
     If the user has installed the nickjbrowning/XIELU, we import xIELU CUDA
     Otherwise, we emit a single warning and use xIELU Python
     """
+
+    # --8<-- [end:xielu]
 
     def __init__(
         self,
@@ -378,12 +689,15 @@ class XIELU(CustomOp):
     ):
         super().__init__()
         self.alpha_p = nn.Parameter(
-            torch.log(torch.exp(torch.tensor(alpha_p_init, dtype=dtype)) -
-                      1).unsqueeze(0))
+            torch.log(torch.exp(torch.tensor(alpha_p_init, dtype=dtype)) - 1).unsqueeze(
+                0
+            )
+        )
         self.alpha_n = nn.Parameter(
             torch.log(
-                torch.exp(torch.tensor(alpha_n_init - beta, dtype=dtype)) -
-                1).unsqueeze(0))
+                torch.exp(torch.tensor(alpha_n_init - beta, dtype=dtype)) - 1
+            ).unsqueeze(0)
+        )
         self.register_buffer("beta", torch.tensor(beta, dtype=dtype))
         self.register_buffer("eps", torch.tensor(eps, dtype=dtype))
         self.with_vector_loads = with_vector_loads
@@ -403,8 +717,10 @@ class XIELU(CustomOp):
                 self._xielu_cuda_fn = allow_in_graph(self._xielu_cuda)
                 msg += " Enabled torch._dynamo for xIELU CUDA."
             except Exception as err:
-                msg += (f" Could not enable torch._dynamo for xIELU ({err}) - "
-                        "this may result in slower performance.")
+                msg += (
+                    f" Could not enable torch._dynamo for xIELU ({err}) - "
+                    "this may result in slower performance."
+                )
                 self._xielu_cuda_fn = self._xielu_cuda
             logger.warning_once(msg)
         except Exception as err:
@@ -421,14 +737,12 @@ class XIELU(CustomOp):
         return torch.where(
             x > 0,
             alpha_p * x * x + self.beta * x,
-            (torch.expm1(torch.min(x, self.eps)) - x) * alpha_n +
-            self.beta * x,
+            (torch.expm1(torch.min(x, self.eps)) - x) * alpha_n + self.beta * x,
         )
 
     def _xielu_cuda(self, x: torch.Tensor) -> torch.Tensor:
         """Firewall function to prevent torch.compile from seeing .item()"""
-        assert self._xielu_cuda_obj is not None, (
-            "XIELU CUDA object must not be None")
+        assert self._xielu_cuda_obj is not None, "XIELU CUDA object must not be None"
         original_shape = x.shape
         # CUDA kernel expects 3D tensors, reshape if needed
         while x.dim() < 3:
@@ -454,7 +768,7 @@ class XIELU(CustomOp):
         )
         return result.view(original_shape)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, input: torch.Tensor) -> torch.Tensor:
         if self._xielu_cuda_obj is not None and input.is_cuda:
             if not torch._dynamo.is_compiling():
                 return self._xielu_cuda_fn(input)
@@ -464,73 +778,44 @@ class XIELU(CustomOp):
                 )
         return self._xielu_python(input)
 
+    def forward_cuda(self, input: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(input)
 
-class ScaledActivation(nn.Module):
-    """An activation function with post-scale parameters.
 
-    This is used for some quantization methods like AWQ.
-    """
+_ACTIVATION_REGISTRY = LazyDict(
+    {
+        "gelu": lambda: GELU(),
+        "gelu_fast": lambda: FastGELU(),
+        "gelu_new": lambda: NewGELU(),
+        "gelu_pytorch_tanh": lambda: _get_gelu_pytorch_tanh(),
+        "relu": lambda: nn.ReLU(),
+        "relu2": lambda: ReLUSquaredActivation(),
+        "silu": lambda: nn.SiLU(),
+        "swish": lambda: nn.SiLU(),
+        "quick_gelu": lambda: QuickGELU(),
+        "tanh": lambda: nn.Tanh(),
+        "sigmoid": lambda: nn.Sigmoid(),
+        "xielu": lambda: XIELU(),
+    }
+)
 
-    def __init__(
-        self,
-        act_module: nn.Module,
-        intermediate_size: int,
-        input_is_parallel: bool = True,
-        params_dtype: Optional[torch.dtype] = None,
+
+def _get_gelu_pytorch_tanh() -> nn.Module:
+    """Get PyTorch GELU with tanh approximation, with ROCm fallback
+    and fast GELU for ARM."""
+    if current_platform.is_rocm():
+        # TODO:[ROCm] PyTorch native GELU with tanh is unstable with torch.compile
+        logger.warning_once(
+            "[ROCm] PyTorch's native GELU with tanh approximation is unstable. "
+            "Falling back to GELU(approximate='none')."
+        )
+        return nn.GELU(approximate="none")
+    if (
+        current_platform.is_cpu()
+        and current_platform.get_cpu_architecture() == CpuArchEnum.ARM
     ):
-        super().__init__()
-        self.act = act_module
-        self.input_is_parallel = input_is_parallel
-        if input_is_parallel:
-            tp_size = get_tensor_model_parallel_world_size()
-            intermediate_size_per_partition = divide(intermediate_size,
-                                                     tp_size)
-        else:
-            intermediate_size_per_partition = intermediate_size
-        if params_dtype is None:
-            params_dtype = torch.get_default_dtype()
-        self.scales = nn.Parameter(
-            torch.empty(intermediate_size_per_partition, dtype=params_dtype))
-        set_weight_attrs(self.scales, {"weight_loader": self.weight_loader})
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.act(x) / self.scales
-
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        param_data = param.data
-        if self.input_is_parallel:
-            tp_rank = get_tensor_model_parallel_rank()
-            shard_size = param_data.shape[0]
-            start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
-
-
-_ACTIVATION_REGISTRY = LazyDict({
-    "gelu":
-    lambda: nn.GELU(),
-    "gelu_fast":
-    lambda: FastGELU(),
-    "gelu_new":
-    lambda: NewGELU(),
-    "gelu_pytorch_tanh":
-    lambda: nn.GELU(approximate="tanh"),
-    "relu":
-    lambda: nn.ReLU(),
-    "relu2":
-    lambda: ReLUSquaredActivation(),
-    "silu":
-    lambda: nn.SiLU(),
-    "quick_gelu":
-    lambda: QuickGELU(),
-    "tanh":
-    lambda: nn.Tanh(),
-    "sigmoid":
-    lambda: nn.Sigmoid(),
-    "xielu":
-    lambda: XIELU(),
-})
+        return GELUTanh()
+    return nn.GELU(approximate="tanh")
 
 
 def get_act_fn(act_fn_name: str) -> nn.Module:
@@ -544,29 +829,33 @@ def get_act_fn(act_fn_name: str) -> nn.Module:
         act_fn_name = activation_name
 
     if act_fn_name not in _ACTIVATION_REGISTRY:
-        raise ValueError(
-            f"Activation function {act_fn_name!r} is not supported.")
+        raise ValueError(f"Activation function {act_fn_name!r} is not supported.")
 
     return _ACTIVATION_REGISTRY[act_fn_name]
 
 
-_ACTIVATION_AND_MUL_REGISTRY = LazyDict({
-    "gelu":
-    lambda: GeluAndMul(),
-    "silu":
-    lambda: SiluAndMul(),
-    "geglu":
-    lambda: GeluAndMul(),
-    "swigluoai":
-    lambda *args, **kwargs: SwigluOAIAndMul(*args, **kwargs),
-})
+_ACTIVATION_AND_MUL_REGISTRY: LazyDict[nn.Module] = LazyDict(
+    {
+        "gelu": lambda: GeluAndMul(),
+        "gelu_pytorch_tanh": lambda: GeluAndMul(approximate="tanh"),
+        "silu": lambda: SiluAndMul(),
+        "swish": lambda: SiluAndMul(),
+        "geglu": lambda: GeluAndMul(),
+        "swigluoai": lambda: SwigluOAIAndMul(),
+    }
+)
 
 
-def get_act_and_mul_fn(act_fn_name: str) -> nn.Module:
+def get_act_and_mul_fn(act_fn_name: str, *, compile_native: bool = True) -> nn.Module:
     """Get an activation-and-mul (i.e. SiluAndMul) function by name."""
     act_fn_name = act_fn_name.lower()
-    if act_fn_name not in _ACTIVATION_AND_MUL_REGISTRY:
-        raise ValueError(
-            f"Activation function {act_fn_name!r} is not supported.")
 
-    return _ACTIVATION_AND_MUL_REGISTRY[act_fn_name]
+    if not compile_native and act_fn_name in ("silu", "swish"):
+        return SiluAndMul(compile_native=False)
+
+    try:
+        return _ACTIVATION_AND_MUL_REGISTRY[act_fn_name]
+    except KeyError:
+        raise ValueError(
+            f"Activation function {act_fn_name!r} is not supported."
+        ) from None

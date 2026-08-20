@@ -6,6 +6,7 @@
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import dataclasses
+import functools
 import os
 import pickle
 import socket
@@ -15,27 +16,31 @@ import uuid
 from collections import deque
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Any
 
 import torch
-from torch.distributed import ProcessGroup, TCPStore
-from torch.distributed.distributed_c10d import (Backend, PrefixStore,
-                                                _get_default_timeout,
-                                                _unregister_process_group)
+from torch.distributed import ProcessGroup, Store, TCPStore
+from torch.distributed.distributed_c10d import (
+    Backend,
+    PrefixStore,
+    _get_default_timeout,
+    _unregister_process_group,
+)
 from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import get_tcp_uri, is_torch_equal_or_newer
+from vllm.utils.network_utils import get_tcp_uri
+from vllm.utils.system_utils import suppress_stdout
 
 logger = init_logger(__name__)
 
 # We prefer to use os.sched_yield as it results in tighter polling loops,
 # measured to be around 3e-7 seconds. However on earlier versions of Python
 # os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
-USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
-                   or (sys.version_info[:2] == (3, 10)
-                       and sys.version_info[2] >= 8))
+USE_SCHED_YIELD = (sys.version_info[:3] >= (3, 11, 1)) or (
+    sys.version_info[:2] == (3, 10) and sys.version_info[2] >= 8
+)
 
 
 def sched_yield():
@@ -48,7 +53,8 @@ def sched_yield():
 def ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
     assert numerator % denominator == 0, "{} is not divisible by {}".format(
-        numerator, denominator)
+        numerator, denominator
+    )
 
 
 def divide(numerator, denominator):
@@ -58,21 +64,53 @@ def divide(numerator, denominator):
     return numerator // denominator
 
 
+def verify_group_size_divides_partition(
+    input_size_per_partition: int,
+    group_size: int,
+    layer_name: str | None = None,
+    extra_suggestion: str = "",
+) -> None:
+    """Validate that a TP-sharded layer holds a whole number of quant groups."""
+    if input_size_per_partition % group_size == 0:
+        return
+    location = f" for layer '{layer_name}'" if layer_name else ""
+    raise ValueError(
+        f"Weight {input_size_per_partition=}{location} is not divisible by "
+        f"{group_size=}. This happens when tensor_parallel_size splits the layer input "
+        "into shards that are not a whole number of quant groups. Consider reducing "
+        f"tensor_parallel_size{extra_suggestion}."
+    )
+
+
+def is_weak_contiguous(inp: torch.Tensor) -> bool:
+    """Check that *inp* occupies a single contiguous block of memory.
+
+    Unlike ``torch.Tensor.is_contiguous()``, this also accepts tensors
+    whose strides are not strictly C-contiguous (e.g. column-major) as
+    long as the underlying storage from the tensor's offset onward is
+    exactly ``numel * element_size`` bytes.
+    """
+    return inp.is_contiguous() or (
+        inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
+        == inp.numel() * inp.element_size()
+    )
+
+
 def split_tensor_along_last_dim(
     tensor: torch.Tensor,
     num_partitions: int,
     contiguous_split_chunks: bool = False,
 ) -> Sequence[torch.Tensor]:
-    """ Split a tensor along its last dimension.
+    """Split a tensor along its last dimension.
 
-        Arguments:
-            tensor: input tensor.
-            num_partitions: number of partitions to split the tensor
-            contiguous_split_chunks: If True, make each chunk contiguous
-                                     in memory.
+    Arguments:
+        tensor: input tensor.
+        num_partitions: number of partitions to split the tensor
+        contiguous_split_chunks: If True, make each chunk contiguous
+                                 in memory.
 
-        Returns:
-            A list of Tensors
+    Returns:
+        A list of Tensors
     """
     # Get the size and dimension.
     last_dim = tensor.dim() - 1
@@ -86,8 +124,9 @@ def split_tensor_along_last_dim(
     return tensor_list
 
 
-def get_pp_indices(num_hidden_layers: int, pp_rank: int,
-                   pp_size: int) -> tuple[int, int]:
+def get_pp_indices(
+    num_hidden_layers: int, pp_rank: int, pp_size: int
+) -> tuple[int, int]:
     """Try to evenly distribute layers across partitions.
 
     If the number of layers is not divisible by the number of partitions,
@@ -104,17 +143,15 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
     partition_list_str = envs.VLLM_PP_LAYER_PARTITION
     if partition_list_str is not None:
         try:
-            partitions = [
-                int(layer) for layer in partition_list_str.split(",")
-            ]
+            partitions = [int(layer) for layer in partition_list_str.split(",")]
         except ValueError as err:
-            raise ValueError("Invalid partition string: {}".format(
-                partition_list_str)) from err
+            raise ValueError(
+                "Invalid partition string: {}".format(partition_list_str)
+            ) from err
         if len(partitions) != pp_size:
             raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
         if sum(partitions) != num_hidden_layers:
-            raise ValueError(
-                f"{sum(partitions)=} does not match {num_hidden_layers=}.")
+            raise ValueError(f"{sum(partitions)=} does not match {num_hidden_layers=}.")
     else:
         layers_per_partition = num_hidden_layers // pp_size
         partitions = [layers_per_partition for _ in range(pp_size)]
@@ -126,12 +163,36 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
                 "Hidden layers were unevenly partitioned: [%s]. "
                 "This can be manually overridden using the "
                 "VLLM_PP_LAYER_PARTITION environment variable",
-                ",".join(str(p) for p in partitions))
+                ",".join(str(p) for p in partitions),
+            )
 
     start_layer = sum(partitions[:pp_rank])
     end_layer = start_layer + partitions[pp_rank]
 
     return (start_layer, end_layer)
+
+
+def create_tcp_store(
+    host: str,
+    port: int,
+    listen_socket: socket.socket | None = None,
+    **kwargs: Any,
+) -> TCPStore:
+    """Create a TCPStore, optionally taking ownership of ``listen_socket``."""
+    if listen_socket is None:
+        return TCPStore(host_name=host, port=port, **kwargs)
+
+    listen_fd = listen_socket.detach()
+    try:
+        return TCPStore(
+            host_name=host,
+            port=port,
+            master_listen_fd=listen_fd,
+            **kwargs,
+        )
+    except Exception:
+        socket.close(listen_fd)
+        raise
 
 
 @dataclasses.dataclass
@@ -140,12 +201,10 @@ class StatelessProcessGroup:
     group. Only use it to communicate metadata between processes.
     For data-plane communication, create NCCL-related objects.
     """
+
     rank: int
     world_size: int
     store: torch._C._distributed_c10d.Store
-
-    # stores a reference to the socket so that the file descriptor stays alive
-    socket: Optional[socket.socket]
 
     data_expiration_seconds: int = 3600  # 1 hour
 
@@ -154,21 +213,16 @@ class StatelessProcessGroup:
     # src rank -> counter
     recv_src_counter: dict[int, int] = dataclasses.field(default_factory=dict)
     broadcast_send_counter: int = 0
-    broadcast_recv_src_counter: dict[int, int] = dataclasses.field(
-        default_factory=dict)
+    broadcast_recv_src_counter: dict[int, int] = dataclasses.field(default_factory=dict)
 
     # A deque to store the data entries, with key and timestamp.
-    entries: deque[tuple[str,
-                         float]] = dataclasses.field(default_factory=deque)
+    entries: deque[tuple[str, float]] = dataclasses.field(default_factory=deque)
 
     def __post_init__(self):
         assert self.rank < self.world_size
         self.send_dst_counter = {i: 0 for i in range(self.world_size)}
         self.recv_src_counter = {i: 0 for i in range(self.world_size)}
-        self.broadcast_recv_src_counter = {
-            i: 0
-            for i in range(self.world_size)
-        }
+        self.broadcast_recv_src_counter = {i: 0 for i in range(self.world_size)}
 
     def send_obj(self, obj: Any, dst: int):
         """Send an object to a destination rank."""
@@ -192,27 +246,25 @@ class StatelessProcessGroup:
     def recv_obj(self, src: int) -> Any:
         """Receive an object from a source rank."""
         obj = pickle.loads(
-            self.store.get(
-                f"send_to/{self.rank}/{self.recv_src_counter[src]}"))
+            self.store.get(f"send_to/{self.rank}/{self.recv_src_counter[src]}")
+        )
         self.recv_src_counter[src] += 1
         return obj
 
-    def broadcast_obj(self, obj: Optional[Any], src: int) -> Any:
+    def broadcast_obj(self, obj: Any | None, src: int) -> Any:
         """Broadcast an object from a source rank to all other ranks.
         It does not clean up after all ranks have received the object.
         Use it for limited times, e.g., for initialization.
         """
         if self.rank == src:
             self.expire_data()
-            key = (f"broadcast_from/{src}/"
-                   f"{self.broadcast_send_counter}")
+            key = f"broadcast_from/{src}/{self.broadcast_send_counter}"
             self.store.set(key, pickle.dumps(obj))
             self.broadcast_send_counter += 1
             self.entries.append((key, time.time()))
             return obj
         else:
-            key = (f"broadcast_from/{src}/"
-                   f"{self.broadcast_recv_src_counter[src]}")
+            key = f"broadcast_from/{src}/{self.broadcast_recv_src_counter[src]}"
             recv_obj = pickle.loads(self.store.get(key))
             self.broadcast_recv_src_counter[src] += 1
             return recv_obj
@@ -228,6 +280,55 @@ class StatelessProcessGroup:
                 recv_obj = self.broadcast_obj(None, src=i)
                 gathered_objs.append(recv_obj)
         return gathered_objs
+
+    def broadcast(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
+        """Broadcast a tensor from source rank to all other ranks."""
+        if self.rank == src:
+            tensor_bytes = pickle.dumps(tensor)
+            self.expire_data()
+            key = f"broadcast_tensor/{src}/{self.broadcast_send_counter}"
+            self.store.set(key, tensor_bytes)
+            self.broadcast_send_counter += 1
+            self.entries.append((key, time.time()))
+            return tensor
+        else:
+            key = f"broadcast_tensor/{src}/{self.broadcast_recv_src_counter[src]}"
+            tensor = pickle.loads(self.store.get(key))
+            self.broadcast_recv_src_counter[src] += 1
+            return tensor
+
+    def send(self, tensor: torch.Tensor, dst: int):
+        """Send a tensor to a destination rank."""
+        self.expire_data()
+        key = f"send_tensor/{dst}/{self.send_dst_counter[dst]}"
+        self.store.set(key, pickle.dumps(tensor))
+        self.send_dst_counter[dst] += 1
+        self.entries.append((key, time.time()))
+
+    def recv(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
+        """Receive a tensor from a source rank."""
+        key = f"send_tensor/{self.rank}/{self.recv_src_counter[src]}"
+        received = pickle.loads(self.store.get(key))
+        self.recv_src_counter[src] += 1
+        tensor.copy_(received)
+        return tensor
+
+    def all_reduce(
+        self, tensor: torch.Tensor, op=torch.distributed.ReduceOp.SUM
+    ) -> torch.Tensor:
+        """All-reduce a tensor across all ranks."""
+        tensors = self.all_gather_obj(tensor)
+        result = tensors[0].clone()
+        for t in tensors[1:]:
+            if op == torch.distributed.ReduceOp.SUM:
+                result.add_(t)
+            elif op == torch.distributed.ReduceOp.PRODUCT:
+                result.mul_(t)
+            elif op == torch.distributed.ReduceOp.MAX:
+                result = torch.maximum(result, t)
+            elif op == torch.distributed.ReduceOp.MIN:
+                result = torch.minimum(result, t)
+        return result
 
     def barrier(self, timeout: float = 30.0):
         """A robust barrier to synchronize all ranks.
@@ -278,8 +379,7 @@ class StatelessProcessGroup:
             # Check for timeout
             cur_time = time.time()
             if cur_time - start_time > timeout:
-                raise RuntimeError("Barrier timed out after %f seconds",
-                                   timeout)
+                raise RuntimeError(f"Barrier timed out after {timeout:.2f} seconds")
 
             # Check for each process
             for i in range(self.world_size):
@@ -326,8 +426,9 @@ class StatelessProcessGroup:
         while len(processes_departed) < self.world_size:
             # Check for timeout
             if time.time() - start_time > timeout:
-                raise RuntimeError("Barrier departure timed out after %f s",
-                                   timeout)
+                raise RuntimeError(
+                    f"Barrier departure timed out after {timeout:.2f} seconds"
+                )
 
             # Check for each process
             for i in range(self.world_size):
@@ -356,14 +457,12 @@ class StatelessProcessGroup:
             try:
                 self.store.delete_key(f"arrival_{barrier_id}_{i}")
             except Exception:
-                logger.debug("Error deleting key: %s",
-                             f'arrival_{barrier_id}_{i}')
+                logger.debug("Error deleting key: %s", f"arrival_{barrier_id}_{i}")
 
             try:
                 self.store.delete_key(f"departure_{barrier_id}_{i}")
             except Exception:
-                logger.debug("Error deleting key: %s",
-                             f'departure_{barrier_id}_{i}')
+                logger.debug("Error deleting key: %s", f"departure_{barrier_id}_{i}")
 
     @staticmethod
     def create(
@@ -373,6 +472,7 @@ class StatelessProcessGroup:
         world_size: int,
         data_expiration_seconds: int = 3600,
         store_timeout: int = 300,
+        listen_socket: socket.socket | None = None,
     ) -> "StatelessProcessGroup":
         """A replacement for `torch.distributed.init_process_group` that does not
         pollute the global state.
@@ -388,77 +488,101 @@ class StatelessProcessGroup:
         used for exchanging metadata. With this function, process A and process B
         can call `StatelessProcessGroup.create` to form a group, and then process A, B,
         C, and D can call `StatelessProcessGroup.create` to form another group.
-        """ # noqa
+        """  # noqa
         launch_server = rank == 0
-        if launch_server:
-            # listen on the specified interface (instead of 0.0.0.0)
+        if launch_server and listen_socket is None:
             listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listen_socket.bind((host, port))
             listen_socket.listen()
-            listen_fd = listen_socket.fileno()
-        else:
-            listen_socket = None
-            listen_fd = None
-
-        store = TCPStore(
-            host_name=host,
-            port=port,
+        store = create_tcp_store(
+            host,
+            port,
+            listen_socket=listen_socket,
             world_size=world_size,
             is_master=launch_server,
             timeout=timedelta(seconds=store_timeout),
             use_libuv=False,  # for now: github.com/pytorch/pytorch/pull/150215
-            master_listen_fd=listen_fd,
         )
 
         return StatelessProcessGroup(
             rank=rank,
             world_size=world_size,
             store=store,
-            socket=listen_socket,
-            data_expiration_seconds=data_expiration_seconds)
+            data_expiration_seconds=data_expiration_seconds,
+        )
 
 
-def init_gloo_process_group(backend: Backend, prefix_store: PrefixStore,
-                            group_rank: int, group_size: int,
-                            timeout: timedelta) -> ProcessGroup:
+@functools.lru_cache(maxsize=1)
+def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
+    """Return a cached TCPStore client.
+
+    Cached so that every call with the same ``(host, port)`` reuses the
+    same connection.  A new ``(host, port)`` evicts the old entry.
     """
-    Stateless init ProcessGroup with gloo backend compatible with 
+    return TCPStore(host, port, is_master=False, wait_for_workers=False)
+
+
+def get_cpu_distributed_timeout_or_none() -> timedelta | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    timeout_seconds = vllm_config.parallel_config.cpu_distributed_timeout_seconds
+    return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
+
+
+def get_distributed_timeout_or_none() -> timedelta | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    timeout_seconds = vllm_config.parallel_config.distributed_timeout_seconds
+    return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
+
+
+def init_gloo_process_group(
+    prefix_store: PrefixStore,
+    group_rank: int,
+    group_size: int,
+    timeout: timedelta,
+) -> ProcessGroup:
+    """
+    Stateless init ProcessGroup with gloo backend compatible with
     different torch versions.
     """
-    if is_torch_equal_or_newer("2.6"):
+    with suppress_stdout():
         pg = ProcessGroup(
             prefix_store,
             group_rank,
             group_size,
         )
-    else:
-        options = ProcessGroup.Options(backend=backend)
-        pg = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-            options,
-        )
-    from torch.distributed.distributed_c10d import ProcessGroupGloo
-    backend_class = ProcessGroupGloo(prefix_store,
-                                     group_rank,
-                                     group_size,
-                                     timeout=timeout)
-    backend_type = ProcessGroup.BackendType.GLOO
-    device = torch.device("cpu")
-    if is_torch_equal_or_newer("2.6"):
-        # _set_default_backend is supported in torch >= 2.6
-        pg._set_default_backend(backend_type)
-    backend_class._set_sequence_number_for_group()
+        from torch.distributed.distributed_c10d import ProcessGroupGloo
 
-    pg._register_backend(device, backend_type, backend_class)
+        backend_class = ProcessGroupGloo(
+            prefix_store, group_rank, group_size, timeout=timeout
+        )
+        backend_type = ProcessGroup.BackendType.GLOO
+        device = torch.device("cpu")
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(device, backend_type, backend_class)
     return pg
 
 
 def stateless_init_torch_distributed_process_group(
-        host: str, port: int, rank: int, world_size: int,
-        backend: str) -> ProcessGroup:
+    host: str,
+    port: int,
+    rank: int,
+    world_size: int,
+    backend: str,
+    group_name: str | None = None,
+    return_store: bool = False,
+    listen_socket: socket.socket | None = None,
+) -> ProcessGroup | tuple[ProcessGroup, Store]:
     """
     A replacement for `torch.distributed.init_process_group` that does not
     pollute the global state. The created ProcessGroup object can be used for
@@ -489,13 +613,38 @@ def stateless_init_torch_distributed_process_group(
     are the same as process 1 and 5, the main communication channel is
     always formed with process 1, 2, ..., 8, and the additional communication
     channel is formed with process 9 and 10.
+
+    When *listen_socket* is provided, the rendezvous step
+    is skipped and a ``TCPStore`` server is created directly using the
+    pre-bound socket.  This is useful for eliminating TOCTOU races
+    between port allocation and binding.
     """
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
+    if backend == "gloo":
+        gloo_timeout = get_cpu_distributed_timeout_or_none()
+        if gloo_timeout is not None:
+            timeout = gloo_timeout
+    else:
+        device_timeout = get_distributed_timeout_or_none()
+        if device_timeout is not None:
+            timeout = device_timeout
 
-    store, rank, world_size = next(
-        rendezvous(init_method, rank, world_size, timeout=timeout))
+    if listen_socket is not None:
+        store = create_tcp_store(
+            host,
+            port,
+            listen_socket=listen_socket,
+            world_size=world_size,
+            is_master=True,
+            timeout=timeout,
+            multi_tenant=True,
+        )
+    else:
+        store, rank, world_size = next(
+            rendezvous(init_method, rank, world_size, timeout=timeout)
+        )
     store.set_timeout(timeout)
 
     group_rank = rank
@@ -506,31 +655,79 @@ def stateless_init_torch_distributed_process_group(
     prefix_store = PrefixStore(init_method, store)
 
     if backend == "gloo":
-        return init_gloo_process_group(backend=backend,
-                                       prefix_store=prefix_store,
-                                       group_rank=group_rank,
-                                       group_size=group_size,
-                                       timeout=timeout)
-    from vllm.platforms import current_platform
-    return current_platform.stateless_init_device_torch_dist_pg(
-        backend=backend,
-        prefix_store=prefix_store,
-        group_rank=group_rank,
-        group_size=group_size,
-        timeout=timeout)
+        pg = init_gloo_process_group(
+            prefix_store=prefix_store,
+            group_rank=group_rank,
+            group_size=group_size,
+            timeout=timeout,
+        )
+    else:
+        from vllm.platforms import current_platform
+
+        pg = current_platform.stateless_init_device_torch_dist_pg(
+            backend=backend,
+            prefix_store=prefix_store,
+            group_rank=group_rank,
+            group_size=group_size,
+            timeout=timeout,
+        )
+
+    if group_name is not None:
+        from torch._C._distributed_c10d import _register_process_group
+
+        pg._set_group_name(group_name)
+        _register_process_group(group_name, pg)
+
+    if return_store:
+        return pg, store
+    else:
+        return pg
 
 
-def stateless_destroy_torch_distributed_process_group(
-        pg: ProcessGroup) -> None:
+def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     """
     Destroy ProcessGroup returned by
         stateless_init_torch_distributed_process_group().
     """
-    if is_torch_equal_or_newer("2.7"):
-        pg.shutdown()
-    else:
-        # Lazy import for non-CUDA backends.
-        from torch.distributed.distributed_c10d import _shutdown_backend
-        _shutdown_backend(pg)
-
+    pg.shutdown()
     _unregister_process_group(pg.group_name)
+
+
+def get_worker_rank_suffix(global_rank: int | None = None) -> str:
+    """Generate a descriptive rank suffix for worker identification.
+
+    Returns a string like 'dp0_pp0_tp0_dcp0_ep0_rank0' including all
+    parallel dimensions: DP, PP, TP, DCP, EP.
+
+    Args:
+        global_rank: Optional global rank to append. If not provided,
+                     only parallel dimension ranks are included.
+
+    Returns:
+        A string suffix identifying the worker's position in the
+        distributed topology.
+    """
+    from vllm.distributed.parallel_state import (
+        get_dcp_group,
+        get_dp_group,
+        get_ep_group,
+        get_pp_group,
+        get_tp_group,
+    )
+
+    try:
+        dp_rank = get_dp_group().rank_in_group
+        pp_rank = get_pp_group().rank_in_group
+        tp_rank = get_tp_group().rank_in_group
+        dcp_rank = get_dcp_group().rank_in_group
+        ep_rank = get_ep_group().rank_in_group
+
+        suffix = f"dp{dp_rank}_pp{pp_rank}_tp{tp_rank}_dcp{dcp_rank}_ep{ep_rank}"
+        if global_rank is not None:
+            suffix = f"{suffix}_rank{global_rank}"
+        return suffix
+    except Exception:
+        # Fallback if parallel state not initialized
+        if global_rank is not None:
+            return f"rank{global_rank}"
+        return ""

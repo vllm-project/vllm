@@ -1,475 +1,467 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
-import importlib.metadata
-from dataclasses import dataclass
-from typing import Optional
+"""Tests for SM100 CUTLASS MXFP4 x MXFP4 grouped MoE kernels."""
+
+import random
 
 import pytest
 import torch
-from packaging import version
 
+from tests.kernels.utils import torch_moe_single
+from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
-QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
-    "quark") is not None and version.parse(
-        importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
+random.seed(42)
+set_random_seed(42)
 
-TRTLLM_GEN_MXFP4_AVAILABLE = current_platform.is_cuda(
-) and current_platform.is_device_capability(100)
-
-if TRTLLM_GEN_MXFP4_AVAILABLE:
-    from flashinfer import (fp4_quantize, mxfp8_quantize,
-                            next_positive_power_of_2,
-                            reorder_rows_for_gated_act_gemm, shuffle_matrix_a,
-                            shuffle_matrix_sf_a, trtllm_fp4_block_scale_moe)
+MXFP4_BLOCK_SIZE = 32
 
 
-@dataclass
-class ModelCase:
-    model_id: str
-    tp: int
+def align(val: int, alignment: int = 128) -> int:
+    return int((val + alignment - 1) // alignment * alignment)
 
 
-@pytest.mark.parametrize('model_case', [
-    ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=1),
-    ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
-    ModelCase("fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1)
-])
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
-                    reason="amd-quark>=0.9 is not available")
-def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
-    if torch.cuda.device_count() < model_case.tp:
-        pytest.skip(f"This test requires >={model_case.tp} gpus, got only "
-                    f"{torch.cuda.device_count()}")
-
-    with vllm_runner(model_case.model_id,
-                     tensor_parallel_size=model_case.tp,
-                     load_format="dummy") as llm:
-
-        # TODO: llm.apply_model(check_model) currently relies on V0 internals.
-        # Re-enable this later.
-        # def check_model(model):
-        #     layer = model.model.layers[0]
-
-        #     qkv_proj = layer.self_attn.qkv_proj
-
-        #     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-        #     assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
-
-        #     assert isinstance(layer.mlp.experts.quant_method,
-        #                       QuarkW4A4MXFp4MoEMethod)
-
-        # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
-        #     llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Today I am in the French Alps and",
-                                     max_tokens=20)
-        assert output
+def calc_diff(x, y):
+    x, y = x.double(), y.double()
+    denominator = (x * x + y * y).sum()
+    sim = 2 * (x * y).sum() / denominator
+    return 1 - sim
 
 
-def swiglu(x,
-           alpha: float = 1.702,
-           beta: float = 1.0,
-           limit: Optional[float] = None):
-    # Note we add an extra bias of 1 to the linear layer
-    x_glu, x_linear = torch.chunk(x, 2, dim=-1)
-    if limit is not None:
-        x_glu = x_glu.clamp(max=limit)
-        x_linear = x_linear.clamp(min=-limit, max=limit)
-    out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-    return out_glu * (x_linear + beta)
+def is_sm100_supported() -> bool:
+    return current_platform.is_cuda() and current_platform.is_device_capability_family(
+        100
+    )
 
 
-fp4_lookup_table = [
-    0, 0.5, 1, 1.5, 2, 3, 4, 6, -0, -0.5, -1, -1.5, -2, -3, -4, -6
-]
-
-
-def mxfp4_dequantize(x, scale):
-    assert x.dtype == torch.uint8
-    x = x.view(torch.uint8).to(torch.int32)
-    x_unpacked = torch.zeros(*x.shape[:-1],
-                             x.shape[-1] * 2,
-                             dtype=torch.int32,
-                             device=x.device)
-    x_unpacked[..., 0::2].copy_(x & 0xF)
-    x_unpacked[..., 1::2].copy_((x >> 4) & 0xF)
-
-    x_float = torch.zeros(x_unpacked.shape,
-                          dtype=torch.float32,
-                          device=x.device)
-    for i, val in enumerate(fp4_lookup_table):
-        x_float[x_unpacked == i] = val
-
-    scale = scale.view(torch.uint8).to(torch.int32)
-    scale = (scale << 23).view(torch.float32)
-    scale = scale.reshape(*x.shape[:-1], -1)
-    scale = torch.stack([scale] * 32, dim=-1).reshape(*x_float.shape)
-
-    return x_float * scale
-
-
-def mxfp8_dequantize(x, scale):
-    assert x.dtype == torch.float8_e4m3fn
-    x_float = x.to(torch.float32)
-
-    scale = scale.view(torch.uint8).to(torch.int32)
-    scale = (scale << 23).view(torch.float32)
-    scale = scale.reshape(*x.shape[:-1], -1)
-    scale = torch.stack([scale] * 32, dim=-1).reshape(*x_float.shape)
-
-    return x_float * scale
-
-
-def reference_moe(
-    roouting_logits,
-    topk,
-    num_experts,
-    hidden_states,
-    w13,
-    bias13,
-    w2,
-    bias2,
-    alpha,
-    beta,
-    limit,
-    act_type,
-):
-    # renormalize routing
-    experts = torch.topk(roouting_logits, k=topk, dim=-1, sorted=True)
-    expert_weights = torch.nn.functional.softmax(experts.values, dim=1)
-    expert_indices = experts.indices
-    t = hidden_states.clone()
-    # MLP #1
-    mlp1_weight = w13[expert_indices, ...]
-    mlp1_bias = bias13[expert_indices, ...]
-    t = torch.einsum("beck,bk->bec", mlp1_weight, t) + mlp1_bias
-    t = swiglu(t, alpha=alpha, beta=beta, limit=limit)
-
-    if act_type == 'mxfp8':
-        t_quantized, t_scale = mxfp8_quantize(t.to(torch.bfloat16),
-                                              is_sf_swizzled_layout=False)
-        t = mxfp8_dequantize(t_quantized, t_scale)
-    # MLP #2
-    mlp2_weight = w2[expert_indices, ...]
-    mlp2_bias = bias2[expert_indices, ...]
-    t = torch.einsum("beck,bek->bec", mlp2_weight, t) + mlp2_bias
-    # Weighted sum of experts
-    t = torch.einsum("bec,be->bc", t, expert_weights)
-    assert t.shape == hidden_states.shape
-    return t.to(torch.bfloat16)
-
-
-def get_tile_tokens_dim(x: torch.Tensor, top_k: int, num_experts: int):
-    # Number of tokens in the input tensor.
-    num_tokens = x.shape[0]
-    # Factor to account for the imbalance of the experts.
-    # factor equals to the
-    # max_real_num_tokens_per_expert / perfect_num_tokens_per_expert
-    # - 1.0 means perfect expert distribution.
-    # - > 1.0 means some experts have more
-    #     tokens than the perfect distribution.
-    # - < 1.0 does not make sense.
-    imbalance_factor = 1.3
-    # Calculate the number of tokens per expert
-    # assuming perfect distribution.
-    num_tokens_per_expert = (num_tokens * top_k) // num_experts
-    # Apply the imbalance factor.
-    num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
-    # And pad the number to the next power of 2.
-    tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
-    # Cap to 8-64 tokens per CTA tile
-    # as it's the range supported by the kernel.
-    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-    return tile_tokens_dim
-
-
-def tg_mxfp4_moe(
-    router_logits,
-    topk,
-    num_experts,
-    intermediate_size,
-    hidden_size,
-    hidden_states,
-    hidden_states_scale,
-    w13_weight,
-    w13_weight_scale,
-    w13_bias,
-    w2_weight,
-    w2_weight_scale,
-    w2_bias,
-    act_type,
-    alpha,
-    beta,
-    limit,
-) -> torch.Tensor:
-    sf_block_size = 32
-    assert (w13_weight.dim() == 3 and w13_weight.shape[0] == num_experts
-            and w13_weight.shape[1] == intermediate_size * 2
-            and w13_weight.shape[2] == hidden_size // 2)
-    assert (w13_weight_scale.dim() == 3
-            and w13_weight_scale.shape[0] == num_experts
-            and w13_weight_scale.shape[1] == intermediate_size * 2
-            and w13_weight_scale.shape[2] == hidden_size // sf_block_size)
-    assert (w2_weight.dim() == 3 and w2_weight.shape[0] == num_experts
-            and w2_weight.shape[1] == hidden_size
-            and w2_weight.shape[2] == intermediate_size // 2)
-    assert (w2_weight_scale.dim() == 3
-            and w2_weight_scale.shape[1] == hidden_size
-            and w2_weight_scale.shape[2] == intermediate_size // sf_block_size)
-    assert (w13_bias.dim() == 2 and w13_bias.shape[0] == num_experts
-            and w13_bias.shape[1] == intermediate_size * 2)
-    assert (w2_bias.dim() == 2 and w2_bias.shape[0] == num_experts
-            and w2_bias.shape[1] == hidden_size)
-
-    # Swap w1 and w3 as the definition of
-    # swiglu is different in the trtllm-gen
-    w13_weight_scale_ = w13_weight_scale.clone()
-    w13_weight_ = w13_weight.clone()
-    w13_bias_ = w13_bias.clone()
-    w13_weight[:, :intermediate_size, :].copy_(
-        w13_weight_[:, intermediate_size:, :])
-    w13_weight[:, intermediate_size:, :].copy_(
-        w13_weight_[:, :intermediate_size, :])
-    w13_weight_scale[:, :intermediate_size, :].copy_(
-        w13_weight_scale_[:, intermediate_size:, :])
-    w13_weight_scale[:, intermediate_size:, :].copy_(
-        w13_weight_scale_[:, :intermediate_size, :])
-    w13_bias[:, :intermediate_size].copy_(w13_bias_[:, intermediate_size:])
-    w13_bias[:, intermediate_size:].copy_(w13_bias_[:, :intermediate_size])
-
-    # Interleave the weights and scaling factors for activation
-    w13_weight_interleaved = []
-    w13_weight_scale_interleaved = []
-    w13_bias_interleaved = []
-    for i in range(num_experts):
-        w13_weight_interleaved.append(
-            reorder_rows_for_gated_act_gemm(w13_weight[i].clone()))
-        w13_weight_scale_interleaved.append(
-            reorder_rows_for_gated_act_gemm(w13_weight_scale[i].clone()))
-        w13_bias_interleaved.append(
-            reorder_rows_for_gated_act_gemm(w13_bias[i].clone().reshape(-1,
-                                                                        1)))
-    w13_weight = torch.stack(w13_weight_interleaved).reshape(
-        num_experts, 2 * intermediate_size, hidden_size // 2)
-    w13_weight_scale = torch.stack(w13_weight_scale_interleaved).reshape(
-        num_experts, 2 * intermediate_size, hidden_size // 32)
-    w13_bias = torch.stack(w13_bias_interleaved).reshape(
-        num_experts, 2 * intermediate_size)
-
-    # Shuffle weights and scaling factors for transposed mma output
-    gemm1_weights_shuffled = []
-    gemm1_scales_shuffled = []
-    gemm2_weights_shuffled = []
-    gemm2_scales_shuffled = []
-    gemm1_bias_shuffled = []
-    gemm2_bias_shuffled = []
-    epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
-    for i in range(num_experts):
-        gemm1_weights_shuffled.append(
-            shuffle_matrix_a(w13_weight[i].view(torch.uint8), epilogue_tile_m))
-        gemm1_scales_shuffled.append(
-            shuffle_matrix_sf_a(w13_weight_scale[i].view(torch.uint8),
-                                epilogue_tile_m))
-
-        gemm2_weights_shuffled.append(
-            shuffle_matrix_a(w2_weight[i].view(torch.uint8), epilogue_tile_m))
-        gemm2_scales_shuffled.append(
-            shuffle_matrix_sf_a(w2_weight_scale[i].view(torch.uint8),
-                                epilogue_tile_m))
-        gemm1_bias_shuffled.append(
-            shuffle_matrix_a(w13_bias[i].reshape(-1, 1), epilogue_tile_m))
-        gemm2_bias_shuffled.append(
-            shuffle_matrix_a(w2_bias[i].reshape(-1, 1), epilogue_tile_m))
-
-    w13_weight = torch.stack(gemm1_weights_shuffled)
-    w13_weight_scale = torch.stack(gemm1_scales_shuffled).reshape(
-        num_experts, 2 * intermediate_size,
-        hidden_size // sf_block_size).view(torch.float8_e4m3fn)
-    w13_bias = torch.stack(gemm1_bias_shuffled).reshape(num_experts, -1)
-
-    w2_weight = torch.stack(gemm2_weights_shuffled)
-    w2_weight_scale = torch.stack(gemm2_scales_shuffled).reshape(
-        num_experts, hidden_size,
-        intermediate_size // sf_block_size).view(torch.float8_e4m3fn)
-    w2_bias = torch.stack(gemm2_bias_shuffled).reshape(num_experts, -1)
-
-    tg_result = trtllm_fp4_block_scale_moe(
-        routing_logits=router_logits.to(torch.bfloat16),
-        routing_bias=None,
-        hidden_states=hidden_states,
-        hidden_states_scale=hidden_states_scale,
-        gemm1_weights=w13_weight,
-        gemm1_weights_scale=w13_weight_scale,
-        gemm1_bias=w13_bias,
-        gemm1_alpha=alpha,
-        gemm1_beta=beta,
-        gemm1_clamp_limit=limit,
-        gemm2_weights=w2_weight,
-        gemm2_weights_scale=w2_weight_scale,
-        gemm2_bias=w2_bias,
-        output1_scale_scalar=None,
-        output1_scale_gate_scalar=None,
-        output2_scale_scalar=None,
-        num_experts=num_experts,
-        top_k=topk,
-        n_group=None,
-        topk_group=None,
-        intermediate_size=intermediate_size,
-        local_expert_offset=0,
-        local_num_experts=num_experts,
-        routed_scaling_factor=None,
-        tile_tokens_dim=get_tile_tokens_dim(hidden_states, topk, num_experts),
-        routing_method_type=1,  # renormalize
-        do_finalize=True)[0]
-    return tg_result
-
-
-def check_accuracy(a, b, atol, rtol, percent):
-    """Allow a mismatch percentage of 1 - percent."""
-    if torch.any(torch.isnan(a)):
-        raise Exception("NaN in reference output")
-    if torch.any(torch.isnan(b)):
-        raise Exception("NaN in actual output")
-    if torch.any(torch.isinf(a)):
-        raise Exception("Inf in reference output")
-    if torch.any(torch.isinf(b)):
-        raise Exception("Inf in actual output")
-    assert a.shape == b.shape, f"Shape mismatch: {a.shape} vs {b.shape}"
-
-    left = torch.abs(a - b)
-    right = atol + rtol * torch.abs(b)
-    count = torch.sum(left > right)
-    mismatch_percent = count / a.numel()
-    if mismatch_percent > 1 - percent:
-        raise Exception(
-            f"Mismatch percentage is {mismatch_percent:.4f} for rtol {rtol} "
-            f"(threshold: {1-percent:.4f})")
-
-
-@pytest.mark.parametrize("topk", [1, 4])
-@pytest.mark.parametrize("num_experts", [32, 128])
-@pytest.mark.parametrize("num_tokens", [1, 128, 1024])
-@pytest.mark.parametrize("intermediate_size,hidden_size", [(3072, 3072)])
-@pytest.mark.parametrize("alpha,beta,limit", [(1.0, 1.0, None),
-                                              (1.702, 1.0, 7.0)])
-@pytest.mark.parametrize("act_type", ['mxfp8', 'bf16'])
-@pytest.mark.skipif(
-    not TRTLLM_GEN_MXFP4_AVAILABLE,
-    reason="nvidia gpu and compute capability sm100 is required for this test")
-def test_trtllm_gen_mxfp4_fused_moe(
-    topk: int,
+def compute_ref_output(
+    input_tensor: torch.Tensor,
+    weight_list: list[torch.Tensor],
+    expert_offsets: list[int],
+    expert_offset: int,
     num_experts: int,
-    num_tokens: int,
-    intermediate_size: int,
-    hidden_size: int,
-    alpha: float,
-    beta: float,
-    limit: Optional[float],
-    act_type: str,
-):
-    seed = 42
-    torch.manual_seed(seed)
-    hidden_states = torch.randn(num_tokens,
-                                hidden_size,
-                                device="cuda:0",
-                                dtype=torch.bfloat16)
-    w13 = (torch.randn(num_experts,
-                       intermediate_size * 2,
-                       hidden_size,
-                       device="cuda:0",
-                       dtype=torch.bfloat16))
-    w2 = (torch.randn(num_experts,
-                      hidden_size,
-                      intermediate_size,
-                      device="cuda:0",
-                      dtype=torch.bfloat16))
-    bias13 = torch.randn(num_experts, intermediate_size * 2,
-                         device="cuda:0") * 10
-    bias2 = torch.randn(num_experts, hidden_size, device="cuda:0") * 10
-    router_logits = torch.rand(num_tokens, num_experts,
-                               dtype=torch.float32).cuda()
+) -> torch.Tensor:
+    """Reference output using torch_moe_single with top-1 routing."""
+    score = torch.full(
+        (expert_offset, num_experts),
+        -1e9,
+        device=input_tensor.device,
+        dtype=torch.float32,
+    )
+    for g in range(num_experts):
+        start = expert_offsets[g]
+        end = expert_offsets[g + 1] if g + 1 < num_experts else expert_offset
+        score[start:end, g] = 0.0
 
-    w13, w13_scale = fp4_quantize(w13,
-                                  torch.tensor(1.0, device="cuda:0"),
-                                  32,
-                                  sf_use_ue8m0=True,
-                                  is_sf_swizzled_layout=False)
-    w13_scale = w13_scale.view(torch.float8_e4m3fn).reshape(
-        num_experts, intermediate_size * 2, hidden_size // 32)
-    w2, w2_scale = fp4_quantize(w2,
-                                torch.tensor(1.0, device="cuda:0"),
-                                32,
-                                sf_use_ue8m0=True,
-                                is_sf_swizzled_layout=False)
-    w2_scale = w2_scale.view(torch.float8_e4m3fn).reshape(
-        num_experts, hidden_size, intermediate_size // 32)
-    if act_type == 'mxfp8':
-        hidden_states, hidden_states_scale = mxfp8_quantize(
-            hidden_states, is_sf_swizzled_layout=False)
-        hidden_states_scale = hidden_states_scale.view(
-            torch.float8_e4m3fn).reshape(-1)
-    else:
-        hidden_states_scale = None
+    return torch_moe_single(
+        input_tensor, torch.stack(weight_list, dim=0), score, topk=1
+    )
 
-    # reference result
-    ref_result = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-    w13_ref = mxfp4_dequantize(w13.clone(), w13_scale.clone())
-    w2_ref = mxfp4_dequantize(w2.clone(), w2_scale.clone())
-    bias13_ref = bias13
-    bias2_ref = bias2
-    if act_type == 'mxfp8':
-        hidden_states_ref = mxfp8_dequantize(
-            hidden_states, hidden_states_scale).to(torch.float32)
-    else:
-        hidden_states_ref = hidden_states.to(torch.float32)
-    # Process tokens in chunks of 32 to reduce memory usage
-    chunk_size = 32
-    num_chunks = (num_tokens + chunk_size - 1) // chunk_size
-    for i in range(num_chunks):
-        start_idx = i * chunk_size
-        end_idx = min(start_idx + chunk_size, num_tokens)
-        chunk_result = reference_moe(
-            router_logits[start_idx:end_idx].to(torch.float32),
-            topk,
-            num_experts,
-            hidden_states_ref[start_idx:end_idx],
-            w13_ref,
-            bias13_ref,
-            w2_ref,
-            bias2_ref,
-            alpha,
-            beta,
-            limit,
-            act_type,
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="cutlass_mxfp4_group_mm requires CUDA SM100",
+)
+@pytest.mark.parametrize("num_experts", [8, 16, 32])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16])
+def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
+    """
+    Test the MXFP4 grouped GEMM kernel by:
+    1. Creating random per-expert inputs and weights
+    2. Quantizing both to MXFP4 using the CUDA kernel
+    3. Running the CUTLASS grouped GEMM
+    4. Comparing against BF16 reference
+    """
+    device = "cuda"
+    alignment = 128
+    # N and K must be multiples of 128 for clean swizzle layout
+    n_g = random.randint(1, 16) * alignment
+    k_g = random.randint(1, 16) * alignment
+
+    expert_offset = 0
+    expert_offsets_input = []
+    problem_sizes = []
+    input_list = []
+    weight_list = []
+
+    for g in range(num_experts):
+        m_g = random.randint(1, 256)
+        expert_offsets_input.append(expert_offset)
+        expert_offset += m_g
+        problem_sizes.append([m_g, n_g, k_g])
+
+        input_list.append(
+            torch.normal(0.0, std=0.5, size=(m_g, k_g), device=device, dtype=out_dtype)
         )
-        ref_result[start_idx:end_idx].copy_(chunk_result)
+        weight_list.append(
+            torch.normal(0.0, std=0.5, size=(n_g, k_g), device=device, dtype=out_dtype)
+        )
 
-    # trtllm-gen result
-    if alpha is not None:
-        alpha = torch.full((num_experts, ), alpha, device=hidden_states.device)
-    if limit is not None:
-        limit = torch.full((num_experts, ), limit, device=hidden_states.device)
-    if beta is not None:
-        beta = torch.full((num_experts, ), beta, device=hidden_states.device)
-    tg_result = tg_mxfp4_moe(router_logits,
-                             topk,
-                             num_experts,
-                             intermediate_size,
-                             hidden_size,
-                             hidden_states,
-                             hidden_states_scale,
-                             w13,
-                             w13_scale,
-                             bias13,
-                             w2,
-                             w2_scale,
-                             bias2,
-                             act_type,
-                             alpha=alpha,
-                             beta=beta,
-                             limit=limit)
-    # relatively loose check since the mxfp4 quantization is less accurate
-    check_accuracy(ref_result, tg_result, atol=0, rtol=0.3, percent=0.8)
+    input_tensor = torch.concat(input_list, dim=0)  # [M_total, K]
+
+    # --- Quantize INPUTS via mxfp4_experts_quant ---
+    input_bs_offsets = []
+    tot = 0
+    for g in range(num_experts):
+        input_bs_offsets.append(tot)
+        tot += align(problem_sizes[g][0], 128)
+    input_bs_offsets.append(tot)
+
+    _inp_expert_offsets = torch.tensor(
+        expert_offsets_input + [expert_offset], device=device, dtype=torch.int32
+    )
+    _inp_bs_offsets = torch.tensor(input_bs_offsets, device=device, dtype=torch.int32)
+
+    input_quant, input_sf = ops.mxfp4_experts_quant(
+        input_tensor,
+        _inp_expert_offsets,
+        _inp_bs_offsets,
+        num_experts,
+        topk=1,
+    )
+
+    # --- Quantize WEIGHTS via mxfp4_experts_quant ---
+    # Treat each expert's N weight rows as an "expert" with N tokens
+    weight_tensor = torch.concat(weight_list, dim=0)  # [E*N, K]
+    weight_expert_offsets = [g * n_g for g in range(num_experts)] + [num_experts * n_g]
+    # N is always multiple of 128, so blockscale offsets are clean
+    weight_bs_offsets = [g * n_g for g in range(num_experts)] + [num_experts * n_g]
+
+    _wt_expert_offsets = torch.tensor(
+        weight_expert_offsets, device=device, dtype=torch.int32
+    )
+    _wt_bs_offsets = torch.tensor(weight_bs_offsets, device=device, dtype=torch.int32)
+
+    weight_quant, weight_sf = ops.mxfp4_experts_quant(
+        weight_tensor,
+        _wt_expert_offsets,
+        _wt_bs_offsets,
+        num_experts,
+        topk=1,
+    )
+
+    # Reshape weight quantized data to [E, N, K//2]
+    weight_quant = weight_quant[: num_experts * n_g].view(num_experts, n_g, k_g // 2)
+
+    # Reshape weight scale factors to [E, N, K//32]
+    # The quant kernel produces uint8 SF buffer. Each row has K//32 SFs.
+    scales_per_row = k_g // MXFP4_BLOCK_SIZE
+    weight_sf_flat = weight_sf.view(-1)[: num_experts * n_g * scales_per_row]
+    weight_sf_3d = weight_sf_flat.view(num_experts, n_g, scales_per_row)
+
+    # Output
+    output = torch.empty((expert_offset, n_g), device=device, dtype=out_dtype)
+
+    _problem_sizes = torch.tensor(problem_sizes, device=device, dtype=torch.int32)
+    _expert_offsets = torch.tensor(
+        expert_offsets_input, device=device, dtype=torch.int32
+    )
+    _input_bs = torch.tensor(input_bs_offsets[:-1], device=device, dtype=torch.int32)
+
+    # Run the MXFP4 grouped GEMM
+    ops.cutlass_mxfp4_moe_mm(
+        output,
+        input_quant,
+        weight_quant,
+        input_sf,
+        weight_sf_3d,
+        _problem_sizes,
+        _expert_offsets,
+        _input_bs,
+    )
+
+    # Reference: BF16 matmul
+    ref_output = compute_ref_output(
+        input_tensor=input_tensor,
+        weight_list=weight_list,
+        expert_offsets=expert_offsets_input,
+        expert_offset=expert_offset,
+        num_experts=num_experts,
+    )
+
+    # Compare per-expert
+    for g in range(num_experts):
+        start = expert_offsets_input[g]
+        end = expert_offsets_input[g + 1] if g + 1 < num_experts else expert_offset
+        if start == end:
+            continue
+        baseline = ref_output[start:end]
+        actual = output[start:end]
+        diff = calc_diff(actual, baseline)
+        print(
+            f"m_g={end - start} n_g={n_g} k_g={k_g} "
+            f"num_experts={num_experts}, "
+            f"out_dtype={out_dtype}, diff={diff:.5f}"
+        )
+        # FP4 quantization is very lossy (~4 bits precision)
+        # Comparing quantized vs full-precision gives cosine diff of 0.05-0.15
+        assert diff < 0.15, f"Expert {g}: diff={diff:.5f} exceeds threshold"
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+def test_mxfp4_experts_quant_basic():
+    """
+    Basic smoke test for the MXFP4 experts quantization kernel.
+    """
+    device = "cuda"
+    num_experts = 4
+    k = 256
+    tokens_per_expert = 16
+
+    total_tokens = tokens_per_expert * num_experts
+    input_tensor = torch.randn(total_tokens, k, device=device, dtype=torch.bfloat16) / 5
+
+    expert_offsets = [i * tokens_per_expert for i in range(num_experts + 1)]
+    blockscale_offsets = [
+        align(i * tokens_per_expert, 128) for i in range(num_experts + 1)
+    ]
+
+    _expert_offsets = torch.tensor(expert_offsets, device=device, dtype=torch.int32)
+    _blockscale_offsets = torch.tensor(
+        blockscale_offsets, device=device, dtype=torch.int32
+    )
+
+    output, output_sf = ops.mxfp4_experts_quant(
+        input_tensor,
+        _expert_offsets,
+        _blockscale_offsets,
+        num_experts,
+        topk=1,
+    )
+
+    assert output.shape == (total_tokens, k // 2)
+    assert output.dtype == torch.uint8
+    assert output_sf.dtype == torch.uint8
+    assert output.any(), "Quantized output is all zeros"
+    print(
+        f"MXFP4 experts quant: output shape={output.shape}, sf shape={output_sf.shape}"
+    )
+    print("PASSED")
+
+
+def untile_cutlass_scale(scale_raw: torch.Tensor, rows: int, K: int) -> torch.Tensor:
+    """Convert CUTLASS tiled scale back to flat [M, K//32] layout.
+
+    CUTLASS tiled layout: [numMTiles, numKTiles, 32(outerM), 4(innerM), 4(innerK)]
+    Produced by: padded.reshape(numMTiles, 4, 32, numKTiles, 4).permute(0,3,2,1,4)
+    To undo: tiled.permute(0, 3, 2, 1, 4).reshape(padded_M, padded_sK)
+    """
+    num_scale_cols = K // MXFP4_BLOCK_SIZE
+    num_m_tiles = (rows + 127) // 128
+    num_k_tiles = (num_scale_cols + 3) // 4
+    padded_M = num_m_tiles * 128
+    padded_sK = num_k_tiles * 4
+
+    scale_bytes = scale_raw.view(torch.uint8).flatten()
+    total_bytes = padded_M * padded_sK
+    tiled = scale_bytes[:total_bytes].reshape(num_m_tiles, num_k_tiles, 32, 4, 4)
+    undone = tiled.permute(0, 3, 2, 1, 4).contiguous()
+    return undone.reshape(padded_M, padded_sK)[:rows, :num_scale_cols]
+
+
+def compute_reference_e8m0_scale(block_max: float) -> int:
+    """Compute the expected OCP MX spec E8M0 scale for a given block max.
+
+    The CUTLASS kernel uses round-to-nearest on the mantissa:
+      rounded_bits = (float_bits + (1 << 21)) & 0xFF800000
+      biased_exp = (rounded_bits >> 23) & 0xFF
+      scale_exp = max(biased_exp - 2, 0)
+
+    This ensures max_val / scale <= 6.0 for most inputs.
+    """
+    import struct
+
+    if block_max <= 0:
+        return 0
+    # Replicate the kernel's rounding logic in Python
+    float_bytes = struct.pack("f", block_max)
+    max_bits = struct.unpack("I", float_bytes)[0]
+    rounded_bits = (max_bits + (1 << 21)) & 0xFF800000
+    biased_exp = (rounded_bits >> 23) & 0xFF
+    scale_exp = max(int(biased_exp) - 2, 0)
+    scale_exp = min(scale_exp, 254)
+    return scale_exp
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+@pytest.mark.parametrize("k", [256, 7168])
+@pytest.mark.parametrize("m", [16, 64])
+def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
+    """
+    Test that mxfp4_experts_quant computes E8M0 block scales correctly
+    per OCP MX spec (not the NVFP4 formula).
+
+    The old buggy kernel used: floor(log2(max/6)) + 127
+    The fixed kernel uses:     round_nearest_exp(max) - 2
+
+    This test verifies:
+    1. Scales match the expected OCP MX formula for all blocks
+    2. No block max exceeds the representable range (no unexpected saturation)
+    3. Reconstruction error is within expected bounds for MXFP4
+    """
+    device = "cuda"
+
+    # Generate input with controlled range
+    input_tensor = torch.randn(m, k, device=device, dtype=torch.bfloat16) * 0.5
+
+    # Quantize
+    num_experts = 1
+    expert_offsets = torch.tensor([0, m], device=device, dtype=torch.int32)
+    num_k_tiles = (k // MXFP4_BLOCK_SIZE + 3) // 4
+    blockscale_offsets = torch.tensor(
+        [0, align(m, 128) * num_k_tiles], device=device, dtype=torch.int32
+    )
+
+    output_fp4, output_sf = ops.mxfp4_experts_quant(
+        input_tensor, expert_offsets, blockscale_offsets, num_experts, topk=1
+    )
+
+    # Untile scale to flat layout for verification
+    scale_flat = untile_cutlass_scale(output_sf, m, k)
+    assert scale_flat.shape == (m, k // MXFP4_BLOCK_SIZE)
+
+    # Verify each block's scale matches the OCP MX spec formula
+    num_blocks = k // MXFP4_BLOCK_SIZE
+    mismatches = 0
+    buggy_pattern = 0  # count blocks where scale is 1-2 lower than expected
+
+    for row in range(m):
+        for blk in range(num_blocks):
+            block_start = blk * MXFP4_BLOCK_SIZE
+            block_end = block_start + MXFP4_BLOCK_SIZE
+            block_max = (
+                input_tensor[row, block_start:block_end].float().abs().max().item()
+            )
+
+            actual_scale = scale_flat[row, blk].item()
+            expected_scale = compute_reference_e8m0_scale(block_max)
+
+            if actual_scale != expected_scale:
+                mismatches += 1
+                if actual_scale < expected_scale:
+                    buggy_pattern += 1
+
+    total_blocks = m * num_blocks
+    match_rate = (total_blocks - mismatches) / total_blocks
+
+    print(
+        f"  m={m}, k={k}: scale match rate = {match_rate * 100:.2f}% "
+        f"({mismatches}/{total_blocks} mismatches)"
+    )
+
+    # The fixed kernel should match the reference formula exactly
+    assert match_rate > 0.99, (
+        f"E8M0 scale match rate too low: {match_rate * 100:.2f}%. "
+        f"Buggy pattern (scale too low): {buggy_pattern}/{mismatches}. "
+        f"This suggests the NVFP4 formula bug is present."
+    )
+
+    # Extra check: if most mismatches show scale < expected, it's the old bug
+    if mismatches > 0:
+        assert buggy_pattern / mismatches < 0.5, (
+            f"Most scale mismatches show scale too LOW ({buggy_pattern}/{mismatches}). "
+            "This is the signature of the NVFP4 formula bug in nvfp4_utils.cuh."
+        )
+
+    # Verify reconstruction error is within MXFP4 expected bounds
+    # Dequantize and check cosine similarity
+    fp4_lut = torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6],
+        device=device,
+        dtype=torch.float32,
+    )
+    lo = (output_fp4 & 0x0F).long()
+    hi = ((output_fp4 >> 4) & 0x0F).long()
+    unpacked = torch.stack([lo, hi], dim=-1).reshape(m, k)
+    fp4_vals = fp4_lut[unpacked]
+
+    scales_expanded = 2.0 ** (scale_flat.float() - 127.0)
+    scales_expanded = scales_expanded.unsqueeze(-1).expand(-1, -1, MXFP4_BLOCK_SIZE)
+    scales_expanded = scales_expanded.reshape(m, k)
+    recon = (fp4_vals * scales_expanded).bfloat16()
+
+    # Cosine similarity should be > 0.99 for well-behaved MXFP4 quantization
+    cos_sim = torch.nn.functional.cosine_similarity(
+        recon.float().flatten().unsqueeze(0),
+        input_tensor.float().flatten().unsqueeze(0),
+    ).item()
+    max_abs_diff = (recon.float() - input_tensor.float()).abs().max().item()
+
+    print(
+        f"  Reconstruction: cosine_sim={cos_sim:.6f}, max_abs_diff={max_abs_diff:.4f}"
+    )
+
+    assert cos_sim > 0.99, (
+        f"Reconstruction cosine similarity too low: {cos_sim:.6f}. "
+        f"Expected > 0.99 for correct MXFP4 quantization."
+    )
+    # With correct E8M0, max abs diff should be bounded by scale * 6
+    # (worst case: value just below threshold rounds to wrong FP4 code)
+    assert max_abs_diff < 1.0, (
+        f"Max reconstruction error too large: {max_abs_diff:.4f}. "
+        "Likely caused by incorrect E8M0 scale (values saturating to ±6)."
+    )
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+def test_mxfp4_experts_quant_no_saturation():
+    """
+    Test that the E8M0 scale is large enough to avoid unexpected saturation.
+
+    With the buggy NVFP4 formula, the scale was too small causing most values
+    to saturate to ±6 in FP4. The fixed OCP MX formula should ensure that
+    block_max / scale <= 6.0 (the max E2M1 value) in almost all cases.
+    """
+    device = "cuda"
+
+    m, k = 128, 1024
+    # Use inputs with known range to make saturation detectable
+    input_tensor = torch.randn(m, k, device=device, dtype=torch.bfloat16) * 0.5
+
+    num_experts = 1
+    expert_offsets = torch.tensor([0, m], device=device, dtype=torch.int32)
+    num_k_tiles = (k // MXFP4_BLOCK_SIZE + 3) // 4
+    blockscale_offsets = torch.tensor(
+        [0, align(m, 128) * num_k_tiles], device=device, dtype=torch.int32
+    )
+
+    output_fp4, output_sf = ops.mxfp4_experts_quant(
+        input_tensor, expert_offsets, blockscale_offsets, num_experts, topk=1
+    )
+
+    # Check saturation rate: count FP4 values that are ±6 (codes 7 and 15)
+    lo = output_fp4 & 0x0F
+    hi = (output_fp4 >> 4) & 0x0F
+    # Code 7 = +6.0, code 15 = -6.0
+    saturated = ((lo == 7) | (lo == 15) | (hi == 7) | (hi == 15)).sum().item()
+    total_values = m * k
+    saturation_rate = saturated / total_values
+
+    print(
+        f"  Saturation rate: {saturation_rate * 100:.2f}% "
+        f"({saturated}/{total_values} values at ±6)"
+    )
+
+    # For Gaussian input with std=0.5, saturation should be very rare
+    # (±6 * scale is far from the typical range).
+    # The buggy kernel had ~30-50% saturation; fixed should be < 5%.
+    assert saturation_rate < 0.05, (
+        f"FP4 saturation rate too high: {saturation_rate * 100:.2f}%. "
+        "This suggests the E8M0 scale is too small (NVFP4 formula bug). "
+        "Expected < 5% for Gaussian(0, 0.5) input with correct OCP MX scale."
+    )
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"])

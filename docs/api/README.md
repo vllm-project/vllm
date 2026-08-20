@@ -14,13 +14,12 @@ API documentation for vLLM's configuration classes.
 - [vllm.config.LoRAConfig][]
 - [vllm.config.MultiModalConfig][]
 - [vllm.config.PoolerConfig][]
-- [vllm.config.DecodingConfig][]
+- [vllm.config.StructuredOutputsConfig][]
+- [vllm.config.ProfilerConfig][]
 - [vllm.config.ObservabilityConfig][]
 - [vllm.config.KVTransferConfig][]
 - [vllm.config.CompilationConfig][]
 - [vllm.config.VllmConfig][]
-
-[](){ #offline-inference-api }
 
 ## Offline Inference
 
@@ -28,11 +27,9 @@ LLM Class.
 
 - [vllm.LLM][]
 
-LLM Inputs.
+Prompt schema for LLM APIs.
 
-- [vllm.inputs.PromptType][]
-- [vllm.inputs.TextPrompt][]
-- [vllm.inputs.TokensPrompt][]
+- [vllm.inputs.llm][]
 
 ## vLLM Engines
 
@@ -45,32 +42,21 @@ Engine classes for offline and online inference.
 
 Inference parameters for vLLM APIs.
 
-[](){ #sampling-params }
-[](){ #pooling-params }
-
 - [vllm.SamplingParams][]
 - [vllm.PoolingParams][]
-
-[](){ #multi-modality }
 
 ## Multi-Modality
 
 vLLM provides experimental support for multi-modal models through the [vllm.multimodal][] package.
 
-Multi-modal inputs can be passed alongside text and token prompts to [supported models][supported-mm-models]
+Multi-modal inputs can be passed alongside text and token prompts to [supported models](../models/supported_models.md#list-of-multimodal-language-models)
 via the `multi_modal_data` field in [vllm.inputs.PromptType][].
 
 Looking to add your own multi-modal model? Please follow the instructions listed [here](../contributing/model/multimodal.md).
 
 - [vllm.multimodal.MULTIMODAL_REGISTRY][]
 
-### Inputs
-
-User-facing inputs.
-
-- [vllm.multimodal.inputs.MultiModalDataDict][]
-
-Internal data structures.
+### Internal data structures
 
 - [vllm.multimodal.inputs.PlaceholderRange][]
 - [vllm.multimodal.inputs.NestedTensors][]
@@ -78,8 +64,6 @@ Internal data structures.
 - [vllm.multimodal.inputs.MultiModalFieldConfig][]
 - [vllm.multimodal.inputs.MultiModalKwargsItem][]
 - [vllm.multimodal.inputs.MultiModalKwargsItems][]
-- [vllm.multimodal.inputs.MultiModalKwargs][]
-- [vllm.multimodal.inputs.MultiModalInputs][]
 
 ### Data Parsing
 
@@ -88,10 +72,6 @@ Internal data structures.
 ### Data Processing
 
 - [vllm.multimodal.processing][]
-
-### Memory Profiling
-
-- [vllm.multimodal.profiling][]
 
 ### Registry
 

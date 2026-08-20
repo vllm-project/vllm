@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only HF format GLM-4 model compatible with THUDM weights."""
+
 from vllm.config import VllmConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 
@@ -8,9 +9,9 @@ from .utils import PPMissingLayer
 
 
 class GlmForCausalLM(LlamaForCausalLM):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        vllm_config.model_config.hf_config.partial_rotary_factor = 0.5
+        hf_config = vllm_config.model_config.hf_config
+        hf_config.rope_parameters["partial_rotary_factor"] = 0.5
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # Hack Llama model to fit HF format GLM implementation
         # Attention difference between GLM and Llama:

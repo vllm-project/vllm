@@ -4,7 +4,7 @@
 import torch
 
 from vllm.model_executor.layers.utils import apply_penalties
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.utils.torch_utils import PIN_MEMORY, make_tensor_with_pad
 
 
 def apply_all_penalties(
@@ -19,15 +19,28 @@ def apply_all_penalties(
     Applies presence, frequency and repetition penalties to the logits.
     """
     _, vocab_size = logits.shape
-    output_tokens_t = _convert_to_tensors(output_token_ids, vocab_size,
-                                          logits.device)
-    return apply_penalties(logits, prompt_token_ids, output_tokens_t,
-                           presence_penalties, frequency_penalties,
-                           repetition_penalties)
+    output_tokens_t = _convert_to_tensors(output_token_ids, vocab_size, logits.device)
+
+    # In the async scheduling case, rows that won't have penalties applied may contain
+    # -1 placeholder token ids. We must replace these with valid token ids so that the
+    # scatter done in apply_penalties is valid.
+    # NOTE(nick): The penalties implementation is currently quite inefficient and
+    # will be reworked anyhow.
+    output_tokens_t.masked_fill_(output_tokens_t == -1, vocab_size)
+
+    return apply_penalties(
+        logits,
+        prompt_token_ids,
+        output_tokens_t,
+        presence_penalties,
+        frequency_penalties,
+        repetition_penalties,
+    )
 
 
-def _convert_to_tensors(output_token_ids: list[list[int]], vocab_size: int,
-                        device: torch.device) -> torch.Tensor:
+def _convert_to_tensors(
+    output_token_ids: list[list[int]], vocab_size: int, device: torch.device
+) -> torch.Tensor:
     """
     Convert the different list data structures to tensors.
     """
@@ -38,6 +51,6 @@ def _convert_to_tensors(output_token_ids: list[list[int]], vocab_size: int,
         pad=vocab_size,
         device="cpu",
         dtype=torch.int64,
-        pin_memory=is_pin_memory_available(),
+        pin_memory=PIN_MEMORY,
     )
     return output_tokens_tensor.to(device, non_blocking=True)

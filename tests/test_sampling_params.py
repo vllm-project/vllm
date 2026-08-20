@@ -1,84 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the SamplingParams class.
-"""
+from dataclasses import dataclass
 
 import pytest
 
 from vllm import SamplingParams
-from vllm.config import ModelConfig
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
-
-MODEL_NAME = "Qwen/Qwen1.5-7B"
+from vllm.exceptions import VLLMValidationError
 
 
-def test_max_tokens_none():
-    """max_tokens=None should be allowed"""
-    SamplingParams(temperature=0.01, top_p=0.1, max_tokens=None)
+@dataclass
+class MockModelConfig:
+    is_diffusion: bool = False
+    max_logprobs: int = 20
+    logits_processors: list | None = None
+
+    def get_vocab_size(self) -> int:
+        return 1024
 
 
-@pytest.fixture(scope="module")
-def model_config():
-    return ModelConfig(
-        MODEL_NAME,
-        seed=0,
-        dtype="float16",
-    )
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"temperature": 0.7},
+        {"temperature": 0.0},
+        {"min_p": 0.1},
+        {"seed": 42},
+        {"min_tokens": 5},
+        {"logit_bias": {0: 1.0}},
+        {"bad_words": ["foo"]},
+        {"allowed_token_ids": [0, 1]},
+    ],
+)
+def test_diffusion_rejects_unsupported_params(kwargs: dict):
+    params = SamplingParams(**kwargs)
+    with pytest.raises(VLLMValidationError, match="not yet supported with diffusion"):
+        params.verify(MockModelConfig(is_diffusion=True), None, None, None)
 
 
-@pytest.fixture(scope="module")
-def default_max_tokens():
-    return 4096
+def test_diffusion_accepts_default_params():
+    SamplingParams().verify(MockModelConfig(is_diffusion=True), None, None, None)
 
 
-def test_sampling_params_from_request_with_no_guided_decoding_backend(
-        model_config, default_max_tokens):
-    # guided_decoding_backend is not present at request level
-    request = ChatCompletionRequest.model_validate({
-        'messages': [{
-            'role': 'user',
-            'content': 'Hello'
-        }],
-        'model':
-        MODEL_NAME,
-        'response_format': {
-            'type': 'json_object',
-        },
-    })
-
-    sampling_params = request.to_sampling_params(
-        default_max_tokens,
-        model_config.logits_processor_pattern,
-    )
-    # we do not expect any backend to be present and the default
-    # guided_decoding_backend at engine level will be used.
-    assert sampling_params.guided_decoding.backend is None
+def test_diffusion_accepts_top_k_top_p():
+    params = SamplingParams(top_p=0.9, top_k=10)
+    params.verify(MockModelConfig(is_diffusion=True), None, None, None)
 
 
-@pytest.mark.parametrize("request_level_guided_decoding_backend,expected",
-                         [("xgrammar", "xgrammar"), ("guidance", "guidance"),
-                          ("outlines", "outlines")])
-def test_sampling_params_from_request_with_guided_decoding_backend(
-        request_level_guided_decoding_backend: str, expected: str,
-        model_config, default_max_tokens):
-
-    request = ChatCompletionRequest.model_validate({
-        'messages': [{
-            'role': 'user',
-            'content': 'Hello'
-        }],
-        'model':
-        MODEL_NAME,
-        'response_format': {
-            'type': 'json_object',
-        },
-        'guided_decoding_backend':
-        request_level_guided_decoding_backend,
-    })
-
-    sampling_params = request.to_sampling_params(
-        default_max_tokens,
-        model_config.logits_processor_pattern,
-    )
-    # backend correctly identified in resulting sampling_params
-    assert sampling_params.guided_decoding.backend == expected
+def test_non_diffusion_models_unaffected():
+    params = SamplingParams(temperature=0.7, top_k=10, seed=42)
+    params.verify(MockModelConfig(), None, None, None)

@@ -13,22 +13,28 @@ from typing import TYPE_CHECKING
 import torch
 from regex import escape as regex_escape
 
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
-from vllm.utils import LazyLoader
-from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
-                                                     StructuredOutputGrammar,
-                                                     StructuredOutputOptions)
-from vllm.v1.structured_output.utils import (OutlinesVocabulary,
-                                             get_outlines_cache,
-                                             get_outlines_vocabulary)
+from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputBackend,
+    StructuredOutputGrammar,
+    StructuredOutputOptions,
+)
+from vllm.v1.structured_output.utils import (
+    OutlinesVocabulary,
+    compile_regex_with_timeout,
+    get_outlines_cache,
+    get_outlines_vocabulary,
+)
 
 if TYPE_CHECKING:
     import outlines_core as oc
     import outlines_core.json_schema as json_schema
 else:
     oc = LazyLoader("oc", globals(), "outlines_core")
-    json_schema = LazyLoader("json_schema", globals(),
-                             "outlines_core.json_schema")
+    json_schema = LazyLoader("json_schema", globals(), "outlines_core.json_schema")
 
 # Python 3.11+ sre_parse and sre_constants
 # are deprecated, so we must import them from re
@@ -46,24 +52,31 @@ else:
 
 @dataclass
 class OutlinesBackend(StructuredOutputBackend):
-
     def __post_init__(self):
         self.vocabulary = get_outlines_vocabulary(self.tokenizer)
         self.cache = get_outlines_cache()
 
-    def _compile_index(self, regex_string: str,
-                       vocabulary: OutlinesVocabulary) -> oc.Index:
+    def _compile_index(
+        self, regex_string: str, vocabulary: OutlinesVocabulary
+    ) -> oc.Index:
         cache_key = f"{vocabulary._hash}_{regex_string}"
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        index = oc.Index(regex_string, vocabulary.inner)
+        index = compile_regex_with_timeout(
+            lambda pat: oc.Index(pat, vocabulary.inner),
+            regex_string,
+        )
         self.cache[cache_key] = index
 
         return index
 
-    def compile_grammar(self, request_type: StructuredOutputOptions,
-                        grammar_spec: str) -> StructuredOutputGrammar:
+    def compile_grammar(
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        stop_token_ids: set[int] | None = None,
+    ) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
             regex = json_schema.build_regex_from_schema(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
@@ -79,17 +92,20 @@ class OutlinesBackend(StructuredOutputBackend):
         index = self._compile_index(regex, self.vocabulary)
         max_rollback_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
-            if self.vllm_config.speculative_config is not None else 0)
-        return OutlinesGrammar(vocab_size=self.vocab_size,
-                               guide=oc.Guide(
-                                   index, max_rollback=max_rollback_tokens))
+            if self.vllm_config.speculative_config is not None
+            else 0
+        )
+        return OutlinesGrammar(
+            vocab_size=self.vocab_size,
+            guide=oc.Guide(index, max_rollback=max_rollback_tokens),
+        )
 
     def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
         return torch.full(
             (max_num_seqs, (self.vocab_size + 31) // 32),
             -1,
             dtype=torch.int32,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=PIN_MEMORY,
         )
 
     def destroy(self):
@@ -98,20 +114,15 @@ class OutlinesBackend(StructuredOutputBackend):
 
 @dataclass
 class OutlinesGrammar(StructuredOutputGrammar):
-
     vocab_size: int
     guide: oc.Guide = field(hash=False)
-    num_processed_tokens: int = field(default_factory=lambda: 0,
-                                      repr=False,
-                                      hash=False,
-                                      init=False)
+    num_processed_tokens: int = field(
+        default_factory=lambda: 0, repr=False, hash=False, init=False
+    )
 
     # outlines_core signals done on DFA accept; vLLM expects done after EOS.
     # We delay the finished flag by one step so EOS can still be emitted.
-    _prev_finished: bool = field(default=False,
-                                 init=False,
-                                 repr=False,
-                                 hash=False)
+    _prev_finished: bool = field(default=False, init=False, repr=False, hash=False)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
@@ -120,7 +131,12 @@ class OutlinesGrammar(StructuredOutputGrammar):
         Returns False if the FSM failed to advance.
         """
         if self.guide.accepts_tokens(tokens):
-            # Advance cannot fail because we checked Guide.accepts_tokens()
+            # Advance can fail when the next state reached after advancing with
+            # the current tokens is a dead state. This is because Guide.accepts_tokens()
+            # only checks whether the current tokens can be accepted,
+            # whereas guide.advance() additionally checks the next state
+            # after all tokens are accepted.
+            # We need to be aware that the FSM must be prepared without dead states.
             for t in tokens:
                 self.guide.advance(t)
                 self.num_processed_tokens += 1
@@ -142,8 +158,7 @@ class OutlinesGrammar(StructuredOutputGrammar):
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         mask = bitmask[idx]
-        self.guide.write_mask_into(mask.data_ptr(), mask.numel(),
-                                   mask.element_size())
+        self.guide.write_mask_into(mask.data_ptr(), mask.numel(), mask.element_size())
 
     def is_terminated(self) -> bool:
         curr = self.guide.is_finished()
@@ -158,37 +173,44 @@ class OutlinesGrammar(StructuredOutputGrammar):
 
 
 def validate_structured_output_request_outlines(params: SamplingParams):
-    if params.guided_decoding is None:
+    if params.structured_outputs is None:
         return
 
-    gd_params = params.guided_decoding
+    so_params = params.structured_outputs
 
-    if gd_params.regex:
-        validate_regex_is_buildable(gd_params.regex)
-    elif gd_params.json:
-        if isinstance(gd_params.json, str):
+    if so_params.regex:
+        validate_regex_is_buildable(so_params.regex)
+    elif so_params.json:
+        if isinstance(so_params.json, str):
             try:
                 # make sure schema is valid json
-                json.loads(gd_params.json)
-                schema = gd_params.json
+                json.loads(so_params.json)
+                schema = so_params.json
             except json.JSONDecodeError as e:
-                raise ValueError("Invalid JSON grammar specification.") from e
+                raise VLLMValidationError("Invalid JSON grammar specification.") from e
         else:
             try:
-                schema = json.dumps(gd_params.json)
+                schema = json.dumps(so_params.json)
             except Exception as e:
-                raise ValueError(
-                    f"Error serializing guided decoding jsonschema: {e}"
+                raise VLLMValidationError(
+                    f"Error serializing structured outputs jsonschema: {e}"
                 ) from e
-        pattern = json_schema.build_regex_from_schema(schema)
+        try:
+            pattern = json_schema.build_regex_from_schema(schema)
+        except Exception as e:
+            raise VLLMValidationError(
+                f"Failed to transform json schema into a regex: {e}"
+            ) from e
         validate_regex_is_buildable(pattern)
-    elif gd_params.choice:
-        choices = [regex_escape(str(choice)) for choice in gd_params.choice]
+    elif so_params.choice:
+        choices = [regex_escape(str(choice)) for choice in so_params.choice]
         regex = "(" + "|".join(choices) + ")"
         validate_regex_is_buildable(regex)
-    elif gd_params.grammar:
-        raise ValueError("Outlines guided decoding backend "
-                         "does not support grammar specifications")
+    elif so_params.grammar:
+        raise VLLMValidationError(
+            "Outlines structured outputs backend "
+            "does not support grammar specifications"
+        )
 
 
 def _prefix_needs_context(parsed) -> bool:
@@ -196,7 +218,7 @@ def _prefix_needs_context(parsed) -> bool:
 
     def subpattern_consumes(parsed) -> bool:
         """Return True if subpattern can consume at least one character."""
-        tokens = parsed.data if hasattr(parsed, 'data') else parsed
+        tokens = parsed.data if hasattr(parsed, "data") else parsed
         for ttype, tval in tokens:
             # literal, character class, or dot always consumes
             if ttype in (sre_parse.LITERAL, sre_parse.IN, sre_parse.ANY):
@@ -212,17 +234,18 @@ def _prefix_needs_context(parsed) -> bool:
                 if any(subpattern_consumes(br) for br in branches):
                     return True
             # grouped subpattern: recurse into its contents
-            elif ttype == sre_parse.SUBPATTERN and subpattern_consumes(
-                    tval[3]):
+            elif ttype == sre_parse.SUBPATTERN and subpattern_consumes(tval[3]):
                 return True
         # No consumers, return False
         return False
 
-    tokens = parsed.data if hasattr(parsed, 'data') else parsed
+    tokens = parsed.data if hasattr(parsed, "data") else parsed
     for ttype, tval in tokens:
         # Direct anchors or look-around
-        if ttype == sre_parse.AT or ttype in (sre_constants.ASSERT,
-                                              sre_constants.ASSERT_NOT):
+        if ttype == sre_parse.AT or ttype in (
+            sre_constants.ASSERT,
+            sre_constants.ASSERT_NOT,
+        ):
             return True
 
         # Nested subpattern: check
@@ -261,9 +284,8 @@ def _prefix_needs_context(parsed) -> bool:
 
 def _check_unsupported(parsed) -> None:
     """Check for regex features unsupported by regex-automata"""
-    tokens = parsed.data if hasattr(parsed, 'data') else parsed
+    tokens = parsed.data if hasattr(parsed, "data") else parsed
     for ttype, tval in tokens:
-
         # backreference
         if ttype in (sre_parse.GROUPREF, sre_parse.GROUPREF_EXISTS):
             raise ValueError("Backreferences are unsupported.")
@@ -274,8 +296,7 @@ def _check_unsupported(parsed) -> None:
 
         # unicode word boundaries
         elif ttype == sre_parse.AT:
-            if tval in (sre_constants.AT_BOUNDARY,
-                        sre_constants.AT_NON_BOUNDARY):
+            if tval in (sre_constants.AT_BOUNDARY, sre_constants.AT_NON_BOUNDARY):
                 raise ValueError("Unicode word boundaries are unsupported.")
 
         elif ttype == sre_parse.BRANCH:
@@ -300,21 +321,23 @@ def validate_regex_is_buildable(pattern: str) -> None:
         parsed = sre_parse.parse(pattern)
 
     except sre_constants.error as e:
-        raise ValueError(f"Error parsing regex: {e}") from e
+        raise VLLMValidationError(f"Error parsing regex: {e}") from e
 
     try:
         _check_unsupported(parsed)
     except ValueError as e:
-        raise ValueError(
-            f"Regex uses unsupported feature for guided decoding: {e}. "
+        raise VLLMValidationError(
+            f"Regex uses unsupported feature for structured outputs: {e}. "
             "Only basic matching constructs are supported—lookarounds, "
-            "backreferences, and unicode boundaries are not.") from e
+            "backreferences, and unicode boundaries are not."
+        ) from e
 
     if _prefix_needs_context(parsed):
-        raise ValueError(
+        raise VLLMValidationError(
             "Regex does not have a anchored universal start state"
             "This means that the Regex uses anchors (^) or look-arounds "
             "in a way which requires context before any token is matched."
-            "Guided decoding needs regexes that can match without needing "
+            "structured outputs needs regexes that can match without needing "
             "that context. Try rewriting the pattern without using these "
-            f"constructs. Pattern:\n{pattern}")
+            f"constructs. Pattern:\n{pattern}"
+        )

@@ -2,6 +2,4 @@ nav:
   - README.md
   - gpu.md
   - cpu.md
-  - google_tpu.md
-  - intel_gaudi.md
-  - aws_neuron.md
+  - TPU: https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/
