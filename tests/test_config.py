@@ -5,6 +5,7 @@ import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import pydantic
@@ -261,6 +262,20 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
     SpeculativeConfig.hf_config_override(hf_config)
 
     assert hf_config.architectures == [expected_architecture]
+
+
+def test_v2_model_runner_supports_extract_hidden_states():
+    config = VllmConfig()
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="extract_hidden_states",
+            parallel_drafting=False,
+            enable_adaptive_verification=False,
+        ),
+    )
+
+    assert config._get_v2_model_runner_unsupported_features() == []
 
 
 @pytest.mark.parametrize(
