@@ -16,14 +16,8 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (
-    ReplicatedLinear,
-    UnquantizedLinearMethod,
-)
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
-)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -295,10 +289,7 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
         self.input_embedding_scale = float(
             draft_config.get("input_embedding_scale", 1.0)
         )
-        # The selector carries its own @support_torch_compile, but it is built
-        # while the active model tag is still the draft's, so without a tag of its
-        # own the two share a compile-cache namespace and the selector loads the
-        # draft's graph -- a different input signature, within the same startup.
+        # Without its own tag the selector shares the draft head's compile cache.
         with set_model_tag("dflash2_candidate_selector"):
             self.candidate_selector = CandidateSelector(
                 hidden_size=self.config.hidden_size,
@@ -326,15 +317,6 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     def compute_candidates(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if not isinstance(
-            self.lm_head.quant_method,
-            (UnquantizedEmbeddingMethod, UnquantizedLinearMethod),
-        ):
-            raise ValueError(
-                "DFlash2 requires an unquantized target LM head for candidate TopK; "
-                f"got {type(self.lm_head.quant_method).__name__}."
-            )
-
         selector = self.model.candidate_selector
         logits = self.lm_head.quant_method.apply(self.lm_head, hidden_states, bias=None)
         num_pad = self.lm_head.shard_indices.num_org_vocab_padding
