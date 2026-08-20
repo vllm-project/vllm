@@ -14,7 +14,6 @@ from vllm.inputs import (
     SingletonInput,
     split_enc_dec_input,
 )
-from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -24,6 +23,7 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -67,12 +67,6 @@ class InputProcessor:
                 mm_budget.processor.info.skip_prompt_length_check
             )
             mm_budget.reset_cache()  # Not used anymore
-
-        self.input_preprocessor = InputPreprocessor(
-            vllm_config,
-            renderer=renderer,
-            mm_registry=mm_registry,
-        )
 
         # Raw-prompt preprocessing (tokenization and multimodal processing)
         # is blocking, so async callers should run it on the renderer's
@@ -281,44 +275,45 @@ class InputProcessor:
             )
 
         if isinstance(prompt, dict) and "type" in prompt:
-            if tokenization_kwargs:
-                logger.warning_once(
-                    "Passing tokenization_kwargs to InputProcessor is deprecated "
-                    "and will be removed in v0.18. You should instead pass "
-                    "them to Renderer.render_cmpl() or Renderer.render_chat()."
-                )
-
             if arrival_time is None:
                 arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
 
-            processed_inputs: EngineInput = prompt  # type: ignore[assignment]
+            engine_input: EngineInput = prompt  # type: ignore[assignment]
         else:
             logger.warning_once(
                 "Passing raw prompts to InputProcessor is deprecated "
-                "and will be removed in v0.18. You should instead pass "
+                "and will be removed in the future. You should instead pass "
                 "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
             )
 
             if arrival_time is None:
                 arrival_time = time.time()
 
-            processed_inputs = self.input_preprocessor.preprocess(
-                prompt,
-                tokenization_kwargs=tokenization_kwargs,
+            renderer = self.renderer
+            model_config = self.model_config
+
+            parsed_prompt = parse_model_prompt(model_config, prompt)
+            tok_params = renderer.default_cmpl_tok_params.with_kwargs(
+                **(tokenization_kwargs or {})
             )
 
-        current_platform.validate_request(processed_inputs, params)
+            (engine_input,) = renderer.render_cmpl(
+                [parsed_prompt],
+                tok_params,
+            )
 
-        encoder_inputs, decoder_inputs = split_enc_dec_input(processed_inputs)
-        self._validate_model_inputs(encoder_inputs, decoder_inputs)
+        current_platform.validate_request(engine_input, params)
+
+        encoder_input, decoder_input = split_enc_dec_input(engine_input)
+        self._validate_model_inputs(encoder_input, decoder_input)
 
         # Mypy can be conservative for TypedDict unions; normalize access.
-        if decoder_inputs["type"] == "embeds":
-            prompt_embeds = decoder_inputs["prompt_embeds"]
-            prompt_token_ids = decoder_inputs.get("prompt_token_ids")
-            prompt_is_token_ids = decoder_inputs.get("is_token_ids")
+        if decoder_input["type"] == "embeds":
+            prompt_embeds = decoder_input["prompt_embeds"]
+            prompt_token_ids = decoder_input.get("prompt_token_ids")
+            prompt_is_token_ids = decoder_input.get("is_token_ids")
         else:
-            prompt_token_ids = decoder_inputs["prompt_token_ids"]
+            prompt_token_ids = decoder_input["prompt_token_ids"]
             prompt_embeds = None
             prompt_is_token_ids = None
 
@@ -346,10 +341,10 @@ class InputProcessor:
         # Multimodal related.
         mm_features: list[MultiModalFeatureSpec] | None = None
 
-        if decoder_inputs["type"] == "multimodal":
-            decoder_mm_inputs = decoder_inputs["mm_kwargs"]
-            decoder_mm_positions = decoder_inputs["mm_placeholders"]
-            decoder_mm_hashes = decoder_inputs["mm_hashes"]
+        if decoder_input["type"] == "multimodal":
+            decoder_mm_inputs = decoder_input["mm_kwargs"]
+            decoder_mm_positions = decoder_input["mm_placeholders"]
+            decoder_mm_hashes = decoder_input["mm_hashes"]
 
             if not all(
                 isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
@@ -391,7 +386,7 @@ class InputProcessor:
             pooling_params=pooling_params,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            cache_salt=decoder_inputs.get("cache_salt"),
+            cache_salt=decoder_input.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
