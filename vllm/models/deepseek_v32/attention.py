@@ -13,10 +13,6 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
-from vllm.model_executor.layers.attention.pcp import (
-    finalize_mla_pcp_decode,
-    maybe_gather_mla_latent_cache_inputs,
-)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -42,6 +38,10 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.attention.ops.pcp import (
+    finalize_mla_pcp_decode,
+    maybe_gather_mla_latent_cache_inputs,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
@@ -170,7 +170,6 @@ class DeepseekV32Attention(MLAAttention):
     indexer: "DeepseekV32Indexer | None"
     indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
 
-    require_fp8_kv_cache: bool = True
     supports_dense_mha_prefill = False
 
     def __init__(
@@ -283,21 +282,9 @@ class DeepseekV32Attention(MLAAttention):
             self.layer_name if enable_short_prefill_scoring_skip else ""
         )
 
-        if self.require_fp8_kv_cache:
-            assert is_quantized_kv_cache(self.kv_cache_dtype), (
-                "deepseek_v32 (nvidia) requires an fp8 KV cache served by a sparse "
-                "MLA backend. Launch with --kv-cache-dtype fp8 (FlashInfer sparse) "
-                "or --kv-cache-dtype fp8_ds_mla (FlashMLA sparse)."
-            )
-            self._fp8_query = self.impl.supports_quant_query_input
-            if not self._fp8_query:
-                assert self.kv_cache_dtype == "fp8_ds_mla", (
-                    "deepseek_v32 (nvidia) on a bf16-query sparse MLA backend "
-                    "(FlashMLA sparse) requires the fp8_ds_mla KV cache layout. "
-                    "Launch with --kv-cache-dtype fp8_ds_mla."
-                )
-
-            self._fp8_kv_needs_view = self.kv_cache_dtype != "fp8_ds_mla"
+        fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
+        self._fp8_query = fp8_attention and self.impl.supports_quant_query_input
+        self._fp8_kv_needs_view = fp8_attention and self.kv_cache_dtype != "fp8_ds_mla"
 
         self._index_rope_interleave = getattr(config, "indexer_rope_interleave", False)
 

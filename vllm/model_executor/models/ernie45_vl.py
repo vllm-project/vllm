@@ -1726,7 +1726,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # Eager fallback: run the full pipeline (ViT + resampler). The result
         # is scattered directly, so it must be the post-merge embeddings.
         pixel_values = mm_kwargs["pixel_values"].type(self.vision_model.dtype)
-        grid_thw = mm_kwargs["image_grid_thw"].to(self.vision_model.device)
+        grid_thw = mm_kwargs["image_grid_thw"].to(
+            self.vision_model.device, non_blocking=True
+        )
         image_features = self.vision_model(pixel_values, grid_thw)
         return self.resampler_model(image_features, grid_thw)
 
@@ -1744,11 +1746,13 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # the actual batch grid_thw, then scatter the post-merge embeddings.
         # Ernie only uses the single "default" encoder path.
         output = outputs["default"]
-        grid_thw = batch_mm_kwargs["image_grid_thw"].to(output.device)
+        grid_thw_cpu = batch_mm_kwargs["image_grid_thw"]
+        grid_thw = grid_thw_cpu.to(output.device, non_blocking=True)
         # The valid token count slices the graph output for the eager
         # resampler call, so it has to come back to the host.
-        with gpu_sync_allowed():
-            num_valid = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum())
+        num_valid = int(
+            (grid_thw_cpu[:, 0] * grid_thw_cpu[:, 1] * grid_thw_cpu[:, 2]).sum()
+        )
         image_embeds = self.resampler_model(output[:num_valid], grid_thw)
         scatter_output_slices(image_embeds, indices, per_item_out_tokens, dest, clone)
 
