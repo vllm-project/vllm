@@ -60,12 +60,13 @@ pre-commit install
 ### Installing dependencies
 
 ```bash
-# If you are only making Python changes:
+# Start with precompiled artifacts for an editable install:
 VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
-
-# If you are also making C/C++ changes:
-uv pip install -e . --torch-backend=auto
 ```
+
+For C/C++ or CUDA changes, follow the
+[incremental compilation workflow](docs/contributing/incremental_build.md) to
+configure and perform incremental builds.
 
 ### Tests
 
