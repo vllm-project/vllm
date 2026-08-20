@@ -9,10 +9,13 @@ import torch
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
+from vllm.models.deepseek_v4.nvidia.dspark import DSparkDeepseekV4ForCausalLM
 from vllm.models.deepseek_v4.nvidia.model import (
+    DeepseekV4ForCausalLM,
     DeepseekV4MegaMoEExperts,
     make_deepseek_v4_expert_params_mapping,
 )
+from vllm.models.deepseek_v4.nvidia.mtp import DeepSeekV4MTP
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 
@@ -241,6 +244,37 @@ def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
         fused_topk_weights.view(torch.uint8),
         ref_topk_weights.view(torch.uint8),
     )
+
+
+def test_deepseek_v4_pwal_hook_finalizes_mega_moe_and_mhc_broadcast():
+    """The loader invokes the model-level PWAL hook for every load format,
+    so it must finalize megamoe + mhc broadcast weights to cover dummy
+    load, which skips load_weights()."""
+    calls = []
+    stub = SimpleNamespace(
+        model=SimpleNamespace(
+            finalize_mega_moe_weights=lambda: calls.append("mega_moe"),
+            finalize_mhc_broadcast_weights=lambda: calls.append("mhc"),
+        )
+    )
+
+    DeepseekV4ForCausalLM.process_weights_after_loading(stub)
+
+    assert calls == ["mega_moe", "mhc"]
+
+
+def test_deepseek_v4_drafter_pwal_hooks_finalize_mega_moe():
+    """MTP/DSpark drafters load as their own top-level models, so each needs
+    its own PWAL hook now that the megamoe forward no longer finalizes
+    weights lazily on first use."""
+    calls = []
+    mtp = SimpleNamespace(finalize_mega_moe_weights=lambda: calls.append("mtp"))
+    DeepSeekV4MTP.process_weights_after_loading(mtp)
+
+    dspark = SimpleNamespace(_finalize_moe=lambda: calls.append("dspark"))
+    DSparkDeepseekV4ForCausalLM.process_weights_after_loading(dspark)
+
+    assert calls == ["mtp", "dspark"]
 
 
 @pytest.mark.skipif(
