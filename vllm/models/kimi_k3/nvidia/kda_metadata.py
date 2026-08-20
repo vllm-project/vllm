@@ -21,7 +21,7 @@ from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
@@ -296,6 +296,13 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
 
 
 class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    # The KDA spec-decode kernels run off device per-request query_start_loc +
+    # num_accepted_tokens within a fixed k+1 window, and build stages that into the
+    # persistent decode-cudagraph buffers, so a graph captured at the uniform k+1
+    # promise replays any 1..k+1 ragged mix. Overrides the UNIFORM_BATCH default
+    # inherited from GDN.
+    _cudagraph_support = AttentionCGSupport.ALWAYS
+
     def __init__(
         self,
         kv_cache_spec: MambaSpec,
@@ -658,3 +665,14 @@ class KimiK3KDAAttentionBackend(GDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[KimiK3KDAMetadataBuilder]:
         return KimiK3KDAMetadataBuilder
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Unlike the generic SSM opt-out, a pure spec-decode batch reads its plan
+        # from the DEVICE offsets: build slices spec_query_start_loc out of the
+        # device query_start_loc by a request count trimming does not change, and
+        # pairs it with device num_accepted_tokens. The mixed spec/non-spec branch,
+        # however, still partitions tokens by CPU totals (num_query_tokens as the
+        # repeat_interleave output_size, num_non_spec_tokens as the split), so it
+        # assumes those totals match the device offsets.
+        return True
