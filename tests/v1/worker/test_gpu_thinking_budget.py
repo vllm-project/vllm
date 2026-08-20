@@ -84,18 +84,21 @@ def _apply(
     return logits.cpu()
 
 
-def test_v2_thinking_budget_forces_end_after_budget_reached():
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_v2_thinking_budget_forces_end_after_budget_reached(dtype: torch.dtype):
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
     state = ThinkingBudgetState(req_states, MockReasoningConfig())
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 
-    logits = torch.arange(VOCAB_SIZE, dtype=torch.float32, device=DEVICE).view(1, -1)
+    logits = torch.arange(VOCAB_SIZE, dtype=dtype, device=DEVICE).view(1, -1)
     expected = logits.cpu()
     out = _apply(state, logits, input_ids=[12], local_pos=[0])
 
-    expected[0, END] = 1.0e9
+    expected[0, END] = min(1.0e9, torch.finfo(dtype).max)
     torch.testing.assert_close(out, expected)
+    assert torch.isfinite(out[0, END])
+    assert torch.isfinite(out.float().logsumexp(dim=-1)).all()
 
 
 def test_v2_thinking_budget_restores_masked_end_token():
