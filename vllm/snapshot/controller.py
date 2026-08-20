@@ -23,7 +23,7 @@ def _remove_snapshot_option(argv: tuple[str, ...]) -> tuple[str, ...]:
     for item in iterator:
         if item == "--snapshot-dir":
             next(iterator, None)
-        elif item.startswith("--snapshot-dir=") or item == "--include-model-state":
+        elif item.startswith("--snapshot-dir="):
             continue
         else:
             remaining.append(item)
@@ -60,14 +60,9 @@ def create_snapshot(
     root_pid: int | None = None
     try:
         child_argv = _remove_snapshot_option(engine_argv or _current_engine_argv(args))
-        include_model_state = bool(getattr(args, "include_model_state", False))
-        if not include_model_state and "--enable-sleep-mode" not in child_argv:
+        if "--enable-sleep-mode" not in child_argv:
             child_argv = (*child_argv, "--enable-sleep-mode")
-        root_pid = toolset.launch_child(
-            target,
-            child_argv,
-            include_model_state=include_model_state,
-        )
+        root_pid = toolset.launch_child(target, child_argv)
         oracle = toolset.wait_ready(target, root_pid)
         inventory = toolset.inventory(root_pid)
         toolset.dump(target, inventory)

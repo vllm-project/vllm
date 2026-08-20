@@ -17,40 +17,36 @@ else:
 
 
 def validate_create_args(args: argparse.Namespace) -> None:
-    include_model_state = bool(getattr(args, "include_model_state", False))
     model = str(getattr(args, "model_tag", None) or args.model)
     revision = str(getattr(args, "revision", None) or "")
-    if not include_model_state and (
+    if (
         Path(model).exists()
         or len(revision) != 40
         or any(character not in "0123456789abcdefABCDEF" for character in revision)
     ):
         raise ValueError(
-            "snapshot create compact mode requires an immutable remote model "
-            "and 40-character --revision; use --include-model-state for local "
-            "or mutable sources"
+            "snapshot create requires an immutable remote model and "
+            "40-character --revision"
         )
-    if args.tensor_parallel_size != 1:
-        raise ValueError("snapshot create currently requires tensor parallel size 1")
-    if args.pipeline_parallel_size != 1:
-        raise ValueError("snapshot create currently requires pipeline parallel size 1")
-    if args.data_parallel_size != 1:
-        raise ValueError("snapshot create currently requires data parallel size 1")
-    if args.prefill_context_parallel_size != 1:
-        raise ValueError(
-            "snapshot create currently requires prefill context parallel size 1"
-        )
-    if args.api_server_count not in (None, 1):
-        raise ValueError("snapshot create currently supports one API server")
-    if args.grpc:
-        raise ValueError("snapshot create currently supports the HTTP frontend only")
-    if args.headless:
-        raise ValueError("snapshot create requires an API frontend")
-    if args.api_key or os.environ.get("VLLM_API_KEY"):
-        raise ValueError("snapshot create does not support API authentication")
-    if args.uds:
-        raise ValueError("snapshot create does not support Unix domain sockets")
-    if any(
+    parallel_sizes = (
+        ("tensor parallel", args.tensor_parallel_size),
+        ("pipeline parallel", args.pipeline_parallel_size),
+        ("data parallel", args.data_parallel_size),
+        ("prefill context parallel", args.prefill_context_parallel_size),
+    )
+    for name, size in parallel_sizes:
+        if size != 1:
+            raise ValueError(f"snapshot create currently requires {name} size 1")
+    unsupported_frontend = (
+        args.api_server_count not in (None, 1)
+        or args.grpc
+        or args.headless
+        or args.api_key
+        or os.environ.get("VLLM_API_KEY")
+        or args.uds
+        or args.middleware
+    )
+    if unsupported_frontend or any(
         (
             args.ssl_keyfile,
             args.ssl_certfile,
@@ -59,19 +55,13 @@ def validate_create_args(args: argparse.Namespace) -> None:
             args.ssl_ciphers,
         )
     ):
-        raise ValueError("snapshot create does not support TLS")
-    if args.middleware:
-        raise ValueError("snapshot create does not support custom middleware")
+        raise ValueError(
+            "snapshot create requires one unauthenticated plaintext HTTP server"
+        )
     if args.logprobs_mode in {"raw_logits", "processed_logits"}:
         raise ValueError("snapshot canary requires a log-probability mode")
-    if (
-        not include_model_state
-        and getattr(args, "speculative_config", None) is not None
-    ):
-        raise ValueError(
-            "snapshot create with speculative decoding currently requires "
-            "--include-model-state"
-        )
+    if getattr(args, "speculative_config", None) is not None:
+        raise ValueError("snapshot create does not support speculative decoding")
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ValueError("snapshot create requires Linux x86_64")
 
@@ -133,14 +123,6 @@ class SnapshotSubcommand(CLISubcommand):
         else:
             create_parser.add_argument("model_tag", nargs="?")
         create_parser.add_argument("--snapshot-dir", required=True)
-        create_parser.add_argument(
-            "--include-model-state",
-            action="store_true",
-            help=(
-                "Include initialized model and KV state in the snapshot instead "
-                "of releasing reloadable allocations before capture."
-            ),
-        )
         create_parser.set_defaults(snapshot_dispatch=run_create)
 
         inspect_parser = actions.add_parser(
