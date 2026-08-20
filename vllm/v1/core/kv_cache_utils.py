@@ -1769,7 +1769,7 @@ def _annotate_eagle_groups_deepseek_v4(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> None:
     spec_config = vllm_config.speculative_config
-    if spec_config is None or not spec_config.use_eagle():
+    if spec_config is None or not spec_config.use_eagle_block_drop():
         return
     # Detection uses the merged MLA spec's model_version.
     if not any(

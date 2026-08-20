@@ -76,13 +76,13 @@ def _make_hybrid_kv_cache_manager() -> KVCacheManager:
 def _split(
     request: Request,
     num_new_tokens: int,
-    use_eagle: bool = True,
+    use_eagle_block_drop: bool = True,
     partial_hit: bool = False,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     stub = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
-        use_eagle=use_eagle,
+        use_eagle_block_drop=use_eagle_block_drop,
         max_num_scheduled_tokens=16384,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
@@ -90,6 +90,16 @@ def _split(
         hash_block_size=ATTN_BLOCK_SIZE,
     )
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
+
+
+def test_disabling_eagle_block_drop_keeps_the_trailing_cache_boundary() -> None:
+    (request,) = create_requests(1, num_tokens=3602, block_size=ATTN_BLOCK_SIZE)
+
+    with_drop = _split(request, request.num_tokens, use_eagle_block_drop=True)
+    without_drop = _split(request, request.num_tokens, use_eagle_block_drop=False)
+
+    assert with_drop == MAMBA_BLOCK_SIZE
+    assert without_drop == 2 * MAMBA_BLOCK_SIZE
 
 
 def _run_chunked_prefill(
