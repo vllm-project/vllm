@@ -231,6 +231,7 @@ impl ChatRenderer for HfChatRenderer {
 // TODO: borrow more fields directly from the original `ChatMessage`.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Serialize)]
+#[serde_with::skip_serializing_none]
 struct TemplateMessage {
     role: &'static str,
     content: TemplateContent,
@@ -286,6 +287,7 @@ pub(super) struct TemplateTool {
 }
 
 #[derive(Debug, Serialize)]
+#[serde_with::skip_serializing_none]
 struct TemplateToolDefinition {
     name: String,
     description: Option<String>,
