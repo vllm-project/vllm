@@ -66,6 +66,7 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
+from vllm.transformers_utils.repo_utils import with_retry
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -283,19 +284,18 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 def workspace_init():
     """Initialize the workspace manager for tests that need it.
 
-    This fixture initializes the workspace manager with a CUDA device
-    if available, and resets it after the test completes. Tests that
-    create a full vLLM engine should NOT use this fixture as the engine
-    will initialize the workspace manager itself.
+    This fixture initializes the workspace manager with the current
+    platform's accelerator device if available, and resets it after the test
+    completes. Tests that create a full vLLM engine should NOT use this
+    fixture as the engine will initialize the workspace manager itself.
     """
     from vllm.v1.worker.workspace import (
         init_workspace_manager,
         reset_workspace_manager,
     )
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda:0")
-        init_workspace_manager(device)
+    if torch.accelerator.is_available():
+        init_workspace_manager(torch.device(0))
     yield
     reset_workspace_manager()
 
@@ -520,10 +520,7 @@ class HfRunner:
             ):
                 model = model.to(dtype=self.dtype)
 
-            if (
-                getattr(model, "quantization_method", None) != "bitsandbytes"
-                and len({p.device for p in model.parameters()}) < 2
-            ):
+            if len({p.device for p in model.parameters()}) < 2:
                 model = model.to(device=self.device)
 
             self.model = model
@@ -543,9 +540,15 @@ class HfRunner:
             # it will call torch.accelerator.device_count()
             from transformers import AutoProcessor
 
-            self.processor = AutoProcessor.from_pretrained(
-                model_name,
-                trust_remote_code=trust_remote_code,
+            # A concurrent refresh of the shared HF cache can briefly hide
+            # processor configuration files. Retry just as model config loading
+            # does in vllm.transformers_utils.config.
+            self.processor = with_retry(
+                lambda: AutoProcessor.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                ),
+                f"Error loading processor for {model_name}",
             )
         if skip_tokenizer_init:
             if self.processor is None:
@@ -889,12 +892,15 @@ class HfRunner:
         return self.model.predict(prompts, *args, convert_to_tensor=True, **kwargs)
 
     def __enter__(self):
-        if current_platform.is_rocm():
-            # Record starting memory usage stats on ROCm so that we can wait for
-            # memory to roughly settle back below these levels on shutdown. This is
-            # helpful in cases where the HfRunner is initialized after significant GPU
-            # memory is already occupied, e.g. in
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            # Record starting memory usage stats on ROCm/XPU so that we can
+            # wait for memory to roughly settle back below these levels on
+            # shutdown. This is helpful in cases where the HfRunner is
+            # initialized after significant GPU memory is already occupied,
+            # e.g. in
             # tests/basic_correctness/test_basic_correctness.py::test_models_distributed
+            # where vllm worker processes are still alive and holding GPU
+            # memory when hf_runner.__exit__ is called.
             from tests.utils import (
                 get_physical_device_indices,
                 record_gpu_memory_usage_stats,
@@ -910,13 +916,13 @@ class HfRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        from tests.utils import wait_for_rocm_memory_to_settle
+        from tests.utils import wait_for_memory_to_settle
 
         del self.model
         cleanup_dist_env_and_memory()
-        # ROCm frees VRAM lazily; wait so a runner started right after this HF
-        # model exits does not OOM on its startup memory guard.
-        wait_for_rocm_memory_to_settle(
+        # ROCm/XPU free VRAM lazily; wait so a runner started right after this
+        # HF model exits does not OOM on its startup memory guard.
+        wait_for_memory_to_settle(
             threshold_ratio=getattr(self, "threshold_ratios", None)
         )
         if hasattr(self, "threshold_ratios"):
@@ -994,9 +1000,24 @@ class VllmRunner:
             # V1 startup requires free_memory >= total * gpu_memory_utilization.
             # ROCm CI can hand a test a device that is still lazily releasing
             # VRAM from a previous process, so wait before constructing LLM.
-            from tests.utils import wait_for_rocm_memory_to_settle
+            from tests.utils import wait_for_memory_to_settle
 
-            wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+            wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+        elif current_platform.is_xpu():
+            # The XPU/oneAPI runtime keeps ~1 GiB of context resident in the
+            # parent pytest process for its whole lifetime (grown by in-process
+            # HfRunner models), and distributed tests additionally allocate a
+            # CCL context in the engine subprocess. The default utilization of
+            # 0.92 leaves too little headroom for both, so lower it on XPU when
+            # the caller did not request an explicit value.
+            if "gpu_memory_utilization" not in kwargs:
+                kwargs["gpu_memory_utilization"] = 0.9
+            gpu_memory_utilization = kwargs["gpu_memory_utilization"]
+            # XPU (Level Zero) can also release device memory lazily after a
+            # previous engine shuts down, so wait before constructing LLM.
+            from tests.utils import wait_for_memory_to_settle
+
+            wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
         with init_ctx:
             self.llm = LLM(
@@ -1322,14 +1343,14 @@ class VllmRunner:
     def __enter__(self):
         return self
 
-    def _wait_for_rocm_memory_release(self, gpu_memory_utilization: float) -> None:
-        from tests.utils import wait_for_rocm_memory_to_settle
+    def _wait_for_memory_release(self, gpu_memory_utilization: float) -> None:
+        from tests.utils import wait_for_memory_to_settle
 
         # V1 startup requires free_memory >= total * gpu_memory_utilization.
         # Wait for the complementary used-memory ratio so the next runner does
         # not fail the startup guard immediately after this runner exits. The
         # wait is bounded so cleanup failures fail this test instead of hanging.
-        wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+        wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Explicitly shutdown the engine core to release GPU resources
@@ -1355,7 +1376,7 @@ class VllmRunner:
         del self.llm
         torch._dynamo.reset()
         cleanup_dist_env_and_memory()
-        self._wait_for_rocm_memory_release(gpu_memory_utilization)
+        self._wait_for_memory_release(gpu_memory_utilization)
 
 
 @pytest.fixture(scope="session")
@@ -1742,7 +1763,7 @@ def clean_gpu_memory_between_tests():
 
     import gc
 
-    from tests.utils import wait_for_gpu_memory_to_clear, wait_for_rocm_memory_to_settle
+    from tests.utils import wait_for_gpu_memory_to_clear, wait_for_memory_to_settle
 
     num_gpus = torch.accelerator.device_count()
 
@@ -1751,7 +1772,7 @@ def clean_gpu_memory_between_tests():
             return
         try:
             if current_platform.is_rocm():
-                wait_for_rocm_memory_to_settle()
+                wait_for_memory_to_settle()
             else:
                 wait_for_gpu_memory_to_clear(
                     devices=list(range(num_gpus)),

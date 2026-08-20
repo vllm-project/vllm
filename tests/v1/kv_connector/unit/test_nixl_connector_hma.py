@@ -314,7 +314,10 @@ def test_apply_prefix_caching_mamba_hybrid(
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
     aligned_local, aligned_remote = worker._apply_prefix_caching(
-        local_block_ids, remote_block_ids, remote_physical_per_logical
+        local_block_ids,
+        remote_block_ids,
+        local_physical_per_logical,
+        remote_physical_per_logical,
     )
 
     assert aligned_local == expected_local, (
@@ -365,6 +368,28 @@ def test_apply_prefix_caching_mamba_hybrid(
             [[6, 7, 8, 9], [99]],
             id="fa_prefix_hit_and_ssm_trim",
         ),
+        # Multi-slot SSM ("all" mode): a local prefix hit leaves fewer local
+        # slots; the earlier remote slots are covered locally → remote tail.
+        pytest.param(
+            10,
+            10,
+            [list(range(10)), [5, 6]],
+            [list(range(10)), [1, 2, 3]],
+            [list(range(10)), [5, 6]],
+            [list(range(10)), [2, 3]],
+            id="ssm_multi_block_local_hit_tail",
+        ),
+        # Multi-slot SSM ("all" mode): the one trailing local position holds
+        # the token D recomputes itself → local head-clip.
+        pytest.param(
+            10,
+            10,
+            [list(range(10)), [4, 5, 6]],
+            [list(range(10)), [8, 9]],
+            [list(range(10)), [4, 5]],
+            [list(range(10)), [8, 9]],
+            id="ssm_multi_block_local_extra_head_clip",
+        ),
     ],
 )
 def test_apply_prefix_caching_ssm_prefix_cache_hit(
@@ -391,7 +416,10 @@ def test_apply_prefix_caching_ssm_prefix_cache_hit(
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
     aligned_local, aligned_remote = worker._apply_prefix_caching(
-        local_block_ids, remote_block_ids, remote_physical_per_logical
+        local_block_ids,
+        remote_block_ids,
+        local_physical_per_logical,
+        remote_physical_per_logical,
     )
 
     assert aligned_local == expected_local, (
@@ -400,6 +428,28 @@ def test_apply_prefix_caching_ssm_prefix_cache_hit(
     assert aligned_remote == expected_remote, (
         f"Expected remote {expected_remote}, got {aligned_remote}"
     )
+
+
+@pytest.mark.cpu_test
+def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
+    """Local SSM slots can only exceed the remote ones by the position D
+    recomputes itself. A larger excess means the lists aren't
+    position-aligned: fail loudly rather than transfer into wrong slots."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._physical_blocks_per_logical_kv_block = 10
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
+
+    with pytest.raises(AssertionError, match="unpairable SSM state slots"):
+        worker._apply_prefix_caching(
+            [list(range(10)), [4, 5, 6, 7]], [list(range(10)), [8, 9]], 10, 10
+        )
 
 
 @pytest.mark.cpu_test
@@ -483,6 +533,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
     aligned_local, aligned_remote = worker._apply_prefix_caching(
         local_block_ids,
         remote_block_ids,
+        local_physical_per_logical,
         remote_physical_per_logical,
     )
 
@@ -1380,6 +1431,47 @@ def test_logical_to_kernel_block_ids_with_remote_ratio(
     assert list(result) == expected_kernel_block_ids, (
         f"Expected {expected_kernel_block_ids}, got {result}"
     )
+
+
+@pytest.mark.cpu_test
+def test_exchange_clipped_blocks_ssm_single_state():
+    """In single-state cache modes, SSM lists are reduced to the running
+    state slot: speculative scratch slots, null placeholders and the previous
+    step's state carry nothing. Attention groups pass through untouched."""
+    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+    sched.blocks_per_sw = [0, 0]
+    sched._ssm_spec_blocks = [None, 2]
+    sched._ssm_state_slots_are_positional = False
+
+    # Align-mode list: null placeholders, state block, 2 speculative slots.
+    clipped = sched.get_exchange_clipped_blocks(([1, 2, 3], [0, 0, 7, 8, 9]))
+    assert clipped == ([1, 2, 3], [7])
+
+    # Same, still holding the previous step's state block (freed a step later).
+    assert sched.get_exchange_clipped_blocks(([1], [0, 6, 7, 8, 9]))[1] == [7]
+
+    # Default (mamba_block_size=max_model_len): state block, 2 scratch slots.
+    assert sched.get_exchange_clipped_blocks(([1], [7, 8, 9]))[1] == [7]
+
+    # Scratch slots not allocated: the state slot still survives.
+    assert sched.get_exchange_clipped_blocks(([1], [5]))[1] == [5]
+
+    # Non-mamba models pass through unchanged.
+    fa_sched = make_nixl_scheduler(has_mamba=False)
+    assert fa_sched.get_exchange_clipped_blocks(([1, 2],)) == ([1, 2],)
+
+
+@pytest.mark.cpu_test
+def test_exchange_clipped_blocks_ssm_positional_states():
+    """In "all" mode every position holds a state, so only the speculative
+    slots go; placeholders stay to keep the list position-indexed."""
+    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+    sched.blocks_per_sw = [0, 0]
+    sched._ssm_spec_blocks = [None, 2]
+    sched._ssm_state_slots_are_positional = True
+
+    clipped = sched.get_exchange_clipped_blocks(([1, 2, 3], [0, 5, 6, 7, 8, 9]))
+    assert clipped == ([1, 2, 3], [0, 5, 6, 7])
 
 
 # ── Hybrid MLA+SSM (KimiLinear-shaped KDA+MLA) tests ─────────────────────

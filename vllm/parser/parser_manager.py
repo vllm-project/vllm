@@ -9,6 +9,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.parser.abstract_parser import Parser
+    from vllm.parser.engine.parser_engine import ParserEngine
     from vllm.reasoning import ReasoningParser
     from vllm.tool_parsers import ToolParser
 
@@ -17,9 +18,29 @@ logger = init_logger(__name__)
 
 class ParserManager:
     """
-    Provides a unified Parser by composing individual reasoning and tool
-    parsers from their respective registries.
+    Provides a unified Parser from the reasoning and tool parser registries.
+
+    Parser engine adapters backed by the same engine are collapsed back into
+    that engine. Other parser pairs are composed through ``DelegatingParser``.
     """
+
+    @staticmethod
+    def _get_parser_engine_cls(
+        parser_cls: type[object] | None,
+    ) -> type[ParserEngine] | None:
+        if parser_cls is None:
+            return None
+        parser_engine_cls = getattr(parser_cls, "_parser_engine_cls", None)
+        if parser_engine_cls is None:
+            return None
+
+        from vllm.parser.engine.parser_engine import ParserEngine
+
+        if not isinstance(parser_engine_cls, type) or not issubclass(
+            parser_engine_cls, ParserEngine
+        ):
+            return None
+        return parser_engine_cls
 
     @classmethod
     def get_tool_parser(
@@ -84,8 +105,8 @@ class ParserManager:
         """
         Get a Parser that handles both reasoning and tool parsing.
 
-        Composes individual reasoning and tool parsers into a single
-        DelegatingParser subclass.
+        Reuses a shared parser engine when possible, otherwise composes the
+        individual parsers into a ``DelegatingParser`` subclass.
 
         Args:
             tool_parser_name: The name of the tool parser.
@@ -109,8 +130,6 @@ class ParserManager:
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
-        from vllm.utils.mistral import is_mistral_tool_parser
-
         if is_harmony:
             from vllm.parser.harmony import HarmonyParser
 
@@ -118,12 +137,22 @@ class ParserManager:
             HarmonyParser.tool_parser_cls = tool_parser_cls
             return HarmonyParser
 
-        if is_mistral_tool_parser(tool_parser_cls):
-            from vllm.parser.mistral import MistralParser
+        reasoning_engine_cls = cls._get_parser_engine_cls(reasoning_parser_cls)
+        tool_engine_cls = cls._get_parser_engine_cls(tool_parser_cls)
+        if reasoning_engine_cls is not None and reasoning_engine_cls is tool_engine_cls:
+            return reasoning_engine_cls
 
-            MistralParser.reasoning_parser_cls = reasoning_parser_cls
-            MistralParser.tool_parser_cls = tool_parser_cls
-            return MistralParser
+        if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
+            from vllm.parser.kimi_k3 import KimiK3Parser
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _KimiK3Parser(KimiK3Parser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+
+            return _KimiK3Parser
 
         from vllm.parser.abstract_parser import DelegatingParser
 

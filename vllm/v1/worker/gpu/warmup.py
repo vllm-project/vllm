@@ -18,11 +18,59 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec, MambaSpec
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
+
+
+def _reserved_block_count(
+    num_tokens: int,
+    kvcache_spec: KVCacheSpec,
+    *,
+    num_lookahead_tokens: int,
+    max_model_len: int,
+    max_encoder_len: int,
+) -> int:
+    """Number of blocks the scheduler would hold for a request of `num_tokens`.
+
+    Warmup hand-builds its `SchedulerOutput`s, so it must reserve what
+    `KVCacheManager.allocate_slots` reserves: the token range plus
+    `num_lookahead_tokens`, where the speculator writes the KV of its drafts.
+    """
+    if isinstance(kvcache_spec, CrossAttentionSpec):
+        # Cross-attention blocks cover the encoder sequence only.
+        return cdiv(max_encoder_len, kvcache_spec.block_size)
+    num_speculative_blocks = 0
+    if isinstance(kvcache_spec, MambaSpec):
+        # MambaManager appends speculative running-state blocks in every cache
+        # mode; align mode sizes from the uncapped, lookahead-free token range.
+        num_speculative_blocks = kvcache_spec.num_speculative_blocks
+        if kvcache_spec.mamba_cache_mode == "align":
+            return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
+    num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
+    return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
+
+
+def _warmup_block_counter(
+    model_runner: GPUModelRunner,
+) -> Callable[[int, KVCacheSpec], int]:
+    """Bind `_reserved_block_count` to `model_runner`'s reservation policy."""
+    num_lookahead_tokens = model_runner.vllm_config.num_lookahead_tokens
+    max_model_len = model_runner.max_model_len
+    max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
+
+    def block_count(num_tokens: int, kvcache_spec: KVCacheSpec) -> int:
+        return _reserved_block_count(
+            num_tokens,
+            kvcache_spec,
+            num_lookahead_tokens=num_lookahead_tokens,
+            max_model_len=max_model_len,
+            max_encoder_len=max_encoder_len,
+        )
+
+    return block_count
 
 
 def run_mixed_prefill_decode_warmup(
@@ -48,21 +96,20 @@ def run_mixed_prefill_decode_warmup(
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
     num_kv_cache_groups = len(kv_cache_groups)
-    group_block_sizes = [g.kv_cache_spec.block_size for g in kv_cache_groups]
+    block_count = _warmup_block_counter(model_runner)
+    kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
     decode_prefill_block_counts = [
-        cdiv(decode_prompt_len, block_size) for block_size in group_block_sizes
+        block_count(decode_prompt_len, s) for s in kv_cache_specs
     ]
     decode_block_counts = [
-        cdiv(decode_prompt_len + decode_scheduled_tokens, block_size)
-        for block_size in group_block_sizes
+        block_count(decode_prompt_len + decode_scheduled_tokens, s)
+        for s in kv_cache_specs
     ]
     decode_block_deltas = [
         decode - prefill
         for decode, prefill in zip(decode_block_counts, decode_prefill_block_counts)
     ]
-    prefill_block_counts = [
-        cdiv(prefill_len, block_size) for block_size in group_block_sizes
-    ]
+    prefill_block_counts = [block_count(prefill_len, s) for s in kv_cache_specs]
     required_blocks = sum(decode_block_counts) + sum(prefill_block_counts)
     if model_runner.kv_cache_config.num_blocks <= required_blocks:
         logger.warning(
@@ -162,6 +209,9 @@ def warmup_kernels(
     We must call the provided worker's execute_model for pipeline parallel
     coordination.
     """
+    if model_runner.is_encoder_only:
+        return
+
     num_spec_steps = model_runner.num_speculative_steps
     decode_query_len = model_runner.decode_query_len
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query
@@ -197,19 +247,10 @@ def warmup_kernels(
         ]
 
     # Compute per-request block counts for each KV cache group.
-    def _warmup_block_count(num_tokens: int, spec: Any) -> int:
-        if isinstance(spec, CrossAttentionSpec):
-            num_tokens = max_encoder_len
-        num_blocks = cdiv(num_tokens, spec.block_size)
-        if isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align":
-            # Align mode reserves extra blocks beyond the token range for the
-            # speculative-decode running-state snapshots.
-            num_blocks += spec.num_speculative_blocks
-        return num_blocks
-
+    block_count = _warmup_block_counter(model_runner)
     kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
-    prefill_block_counts = [_warmup_block_count(prompt_len, s) for s in kv_cache_specs]
-    decode_block_counts = [_warmup_block_count(decode_len, s) for s in kv_cache_specs]
+    prefill_block_counts = [block_count(prompt_len, s) for s in kv_cache_specs]
+    decode_block_counts = [block_count(decode_len, s) for s in kv_cache_specs]
     max_blocks_per_req = sum(decode_block_counts)
 
     num_reqs = min(
@@ -230,7 +271,11 @@ def warmup_kernels(
     # SamplingParams exercising all sampling features.
     if model_runner.is_pooling_model:
         sampling_params = None
-        pooling_params = PoolingParams()
+        pooling_task = model_runner.model_config.get_pooling_task(
+            model_runner.get_supported_tasks()
+        )
+        pooling_params = PoolingParams(task=pooling_task)
+        pooling_params.verify(model_runner.model_config)
     else:
         sampling_params = SamplingParams.for_sampler_warmup()
         pooling_params = None
@@ -309,7 +354,7 @@ def warmup_kernels(
                 num_tokens = decode_query_len if use_spec else 1
                 after = req_computed[i] + num_tokens
                 deltas = [
-                    _warmup_block_count(after, spec) - held
+                    block_count(after, spec) - held
                     for spec, held in zip(kv_cache_specs, req_blocks[i])
                 ]
                 cached_req_data.new_block_ids.append(
