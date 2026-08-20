@@ -88,12 +88,7 @@ class WorkerSentinel:
         self._clean_worker_state()
         reset_eplb_async_state(self.worker.model_runner)
         if self.worker.parallel_config.data_parallel_size > 1:
-            mgr = get_ep_all2all_manager()
-            mgr.clean_buffers()
-            # clean_buffers wiped the mask; replay masks for the cumulative dead set.
-            tp_size = self.worker.parallel_config.tensor_parallel_size
-            for ep_rank in compute_dead_ep_ranks(params["dead_dp_ranks"], tp_size):
-                mgr.update_mask(ep_rank, masked=True)
+            get_ep_all2all_manager().clean_buffers()
             world_size = self.worker.parallel_config.world_size
             port = params["new_stateless_dp_group_ports"][self.worker.rank % world_size]
             _reinit_cpu_group(
@@ -105,6 +100,12 @@ class WorkerSentinel:
                 timeout=self.worker.parallel_config.cpu_distributed_timeout,
             )
             get_dp_group().dead_dp_ranks = set(params["dead_dp_ranks"])
+
+            # clean_buffers wiped the mask; replay masks for the cumulative dead set.
+            tp_size = self.worker.parallel_config.tensor_parallel_size
+            for ep_rank in compute_dead_ep_ranks(params["dead_dp_ranks"], tp_size):
+                get_ep_all2all_manager().update_mask(ep_rank, masked=True)
+
             if (
                 self.worker.parallel_config.enable_eplb
                 and not self.worker.model_runner.eep_eplb_suppressed
