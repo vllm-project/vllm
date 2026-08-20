@@ -10,6 +10,7 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    ObservabilityConfig,
     ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
@@ -71,6 +72,8 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
+    log_stats: bool = True,
+    kv_cache_metrics: bool = False,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -175,6 +178,7 @@ def create_scheduler(
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
+        observability_config=ObservabilityConfig(kv_cache_metrics=kv_cache_metrics),
     )
     if kv_cache_spec is None:
         kv_cache_spec = FullAttentionSpec(
@@ -195,7 +199,7 @@ def create_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=block_size,
-        log_stats=True,
+        log_stats=log_stats,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     if use_v2_model_runner is None:
