@@ -40,6 +40,64 @@ impl RoutedExperts {
         self.data.append(&mut other.data);
         Ok(())
     }
+
+    /// Serialize the tensor using NumPy's version 1.0 `.npy` format.
+    pub fn to_npy_bytes(&self) -> Result<Vec<u8>> {
+        if self.shape.len() != 3 {
+            bail_ext_value_decode!(
+                "routed_experts: expected a rank-3 ndarray, got shape {:?}",
+                self.shape
+            );
+        }
+        let (descriptor, item_size) = match self.dtype.as_str() {
+            "uint8" => ("|u1", 1usize),
+            "uint16" => ("<u2", 2usize),
+            other => bail_ext_value_decode!(
+                "routed_experts: expected normalized uint8 or uint16 dtype, got {other:?}"
+            ),
+        };
+        let expected = self
+            .shape
+            .checked_numel()
+            .and_then(|numel| numel.checked_mul(item_size))
+            .ok_or_else(|| {
+                ext_value_decode!(
+                    "routed_experts: shape byte length overflowed usize: {:?}",
+                    self.shape
+                )
+            })?;
+        if self.data.len() != expected {
+            bail_ext_value_decode!(
+                "routed_experts: byte length mismatch: expected {expected}, got {}",
+                self.data.len()
+            );
+        }
+
+        let dictionary = format!(
+            "{{'descr': '{descriptor}', 'fortran_order': False, 'shape': ({}, {}, {}), }}",
+            self.shape[0], self.shape[1], self.shape[2]
+        );
+        const PREAMBLE_LEN: usize = 10;
+        const ARRAY_ALIGNMENT: usize = 64;
+        let padding = ARRAY_ALIGNMENT - ((PREAMBLE_LEN + dictionary.len() + 1) % ARRAY_ALIGNMENT);
+        let header_len = dictionary
+            .len()
+            .checked_add(padding)
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| ext_value_decode!("routed_experts: NumPy header length overflow"))?;
+        let header_len = u16::try_from(header_len).map_err(|_| {
+            ext_value_decode!("routed_experts: NumPy v1 header does not fit in uint16")
+        })?;
+
+        let mut encoded = Vec::with_capacity(PREAMBLE_LEN + usize::from(header_len) + expected);
+        encoded.extend_from_slice(b"\x93NUMPY\x01\x00");
+        encoded.extend_from_slice(&header_len.to_le_bytes());
+        encoded.extend_from_slice(dictionary.as_bytes());
+        encoded.resize(encoded.len() + padding, b' ');
+        encoded.push(b'\n');
+        encoded.extend_from_slice(&self.data);
+        Ok(encoded)
+    }
 }
 
 /// Routed-experts output is initially decoded from Python's ndarray wire
@@ -160,5 +218,33 @@ mod tests {
         .expect_err("rank must be checked");
 
         assert!(error.to_string().contains("expected a rank-3 ndarray"));
+    }
+
+    #[test]
+    fn serializes_uint8_as_numpy_v1() {
+        let routed = RoutedExperts {
+            dtype: "uint8".to_string(),
+            shape: vec![2, 1, 2],
+            data: vec![1, 2, 3, 4],
+        };
+
+        assert_eq!(
+            routed.to_npy_bytes().expect("serialize routed experts"),
+            b"\x93NUMPY\x01\x00\x76\x00{'descr': '|u1', 'fortran_order': False, 'shape': (2, 1, 2), }                                                       \n\x01\x02\x03\x04"
+        );
+    }
+
+    #[test]
+    fn serializes_uint16_as_numpy_v1() {
+        let routed = RoutedExperts {
+            dtype: "uint16".to_string(),
+            shape: vec![2, 1, 2],
+            data: vec![1, 0, 2, 0, 3, 0, 4, 0],
+        };
+
+        assert_eq!(
+            routed.to_npy_bytes().expect("serialize routed experts"),
+            b"\x93NUMPY\x01\x00\x76\x00{'descr': '<u2', 'fortran_order': False, 'shape': (2, 1, 2), }                                                       \n\x01\x00\x02\x00\x03\x00\x04\x00"
+        );
     }
 }
