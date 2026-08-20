@@ -458,7 +458,7 @@ def _detect_developer_role_support(chat_template: str) -> bool:
     return '"developer"' in chat_template or "'developer'" in chat_template
 
 
-def _convert_developer_to_system(
+def convert_developer_to_system(
     conversation: list[ConversationMessage],
     keep_tools: bool = False,
 ) -> list[ConversationMessage]:
@@ -735,7 +735,7 @@ def safe_apply_chat_template(
     if any(
         msg["role"] == "developer" for msg in conversation
     ) and not _detect_developer_role_support(chat_template):
-        conversation = _convert_developer_to_system(conversation)
+        conversation = convert_developer_to_system(conversation)
         conversation = _consolidate_system_messages(conversation)
         logger.info_once(
             "Chat template does not support the 'developer' message role. "
