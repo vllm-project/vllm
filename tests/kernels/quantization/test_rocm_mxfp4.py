@@ -147,31 +147,30 @@ def test_fp4_env_defaults():
     """ROCm FP4 env defaults should stay stable for the AITER gates."""
     import vllm.envs as envs
 
-    assert envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM is False
     assert envs.VLLM_ROCM_USE_AITER_FP4BMM is True
 
 
 @pytest.mark.parametrize(
     (
         "use_aiter",
-        "use_fp4_asm_gemm",
         "use_fp4bmm",
     ),
     [
-        (True, True, True),
-        (True, True, False),
-        (True, False, True),
-        (False, True, True),
+        (True, True),
+        (True, False),
+        (False, True),
     ],
 )
 def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
     use_aiter,
-    use_fp4_asm_gemm,
     use_fp4bmm,
     monkeypatch,
 ):
     """The ROCm FP4 AITER gates should depend only on the env toggles and the
     gfx950 hardware check.
+
+    The asm FP4 GEMM no longer has an env toggle -- it is always on for
+    gfx950 -- so it tracks VLLM_ROCM_USE_AITER and the arch check alone.
 
     Expected values are derived from the *actual* platform rather than a patched
     arch (gfx950 -> MI355, gfx942 -> MI300). A failure in this group therefore
@@ -182,15 +181,11 @@ def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
     _assert_aiter_supported()
 
     on_gfx950_value = on_gfx950()
-    expected_asm_gemm = use_aiter and use_fp4_asm_gemm and on_gfx950_value
+    expected_asm_gemm = use_aiter and on_gfx950_value
     expected_fp4bmm = use_aiter and use_fp4bmm and on_gfx950_value
 
     with monkeypatch.context() as mp:
         mp.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
-        mp.setenv(
-            "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-            "1" if use_fp4_asm_gemm else "0",
-        )
         mp.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "1" if use_fp4bmm else "0")
         _reload_envs()
         rocm_aiter_ops.refresh_env_variables()
