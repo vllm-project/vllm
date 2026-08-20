@@ -44,7 +44,11 @@ from transformers.dynamic_module_utils import (
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import (
+    BaseDummyOptions,
+    ImageDummyOptions,
+    VideoDummyOptions,
+)
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (
@@ -94,6 +98,7 @@ from vllm.transformers_utils.processor import (
 )
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.collection_utils import flatten_2d_lists
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -467,12 +472,12 @@ def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
 def _minicpmv_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     return dict(
         pixel_values=MultiModalFieldConfig.batched("image"),
-        image_sizes=MultiModalFieldConfig.batched("image"),
-        tgt_sizes=MultiModalFieldConfig.batched("image"),
+        image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        tgt_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         image_embeds=MultiModalFieldConfig.batched("image"),
         video_pixel_values=MultiModalFieldConfig.batched("video"),
-        video_image_sizes=MultiModalFieldConfig.batched("video"),
-        video_tgt_sizes=MultiModalFieldConfig.batched("video"),
+        video_image_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+        video_tgt_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         video_embeds=MultiModalFieldConfig.batched("video"),
     )
 
@@ -648,7 +653,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return MiniCPMVMultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_model_version(self):
@@ -811,6 +816,18 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         image_overrides = mm_options.get("image")
         video_overrides = mm_options.get("video")
 
+        # Convert video overrides to image overrides for per-frame image generation,
+        # and apply num_frames override to num_video_frames.
+        video_frame_overrides: ImageDummyOptions | None = None
+        if isinstance(video_overrides, VideoDummyOptions):
+            if video_overrides.num_frames:
+                num_video_frames = min(num_video_frames, video_overrides.num_frames)
+            if video_overrides.width or video_overrides.height:
+                video_frame_overrides = ImageDummyOptions(
+                    width=video_overrides.width,
+                    height=video_overrides.height,
+                )
+
         return {
             "image": self._get_dummy_images(
                 width=image_width,
@@ -823,7 +840,7 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                     width=video_width,
                     height=video_height,
                     num_images=num_video_frames,
-                    overrides=video_overrides,
+                    overrides=video_frame_overrides,
                 )
             ]
             * num_videos,
@@ -1532,7 +1549,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
@@ -1624,7 +1642,9 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        # Needed as a Python int to size the mask below.
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
@@ -1721,7 +1741,8 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
@@ -1823,7 +1844,8 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)

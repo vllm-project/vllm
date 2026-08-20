@@ -2,7 +2,7 @@ group: Distributed
 depends_on: 
   - image-build
 steps:
-- label: Distributed Comm Ops
+- label: ":nvidia: (L4) Distributed Comm Ops"
   key: distributed-comm-ops
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
@@ -17,7 +17,7 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
 
-- label: Distributed DP Tests (2 GPUs)
+- label: ":nvidia: (L4) Distributed DP Basic"
   key: distributed-dp-tests-2-gpus
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
@@ -41,6 +41,7 @@ steps:
   - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
   mirror:
     amd:
+      label: ":amd: (MI300) Distributed DP Basic"
       dind: false
       device: mi300_2
       timeout_in_minutes: 45
@@ -58,7 +59,7 @@ steps:
       - tests/entrypoints/openai/test_multi_api_servers.py
       - vllm/platforms/rocm.py
 
-- label: Distributed Compile + RPC Tests (2 GPUs)
+- label: ":nvidia: (L4) Distributed Compile + RPC"
   key: distributed-compile-rpc-tests-2-gpus
   timeout_in_minutes: 65
   working_dir: "/vllm-workspace/tests"
@@ -80,7 +81,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_wrapper.py
 
-- label: Distributed Torchrun + Shutdown Tests (2 GPUs)
+- label: ":nvidia: (L4) Distributed Torchrun + Shutdown"
   key: distributed-torchrun-shutdown-tests-2-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
@@ -104,7 +105,7 @@ steps:
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
-- label: Distributed Torchrun + Examples (4 GPUs)
+- label: ":nvidia: (L4) Distributed Torchrun + Examples"
   key: distributed-torchrun-examples-4-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace"
@@ -137,7 +138,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
 
-- label: Distributed DP Tests (4 GPUs)
+- label: ":nvidia: (L4) Distributed DP Extended"
   key: distributed-dp-tests-4-gpus
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
@@ -154,12 +155,13 @@ steps:
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_dense_dp_world_size.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
   - pytest -v -s distributed/test_utils.py
 
-- label: Distributed Compile + Comm (4 GPUs)
+- label: ":nvidia: (L4) Distributed Compile + Comm"
   key: distributed-compile-comm-4-gpus
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/tests"
@@ -180,7 +182,7 @@ steps:
   # test multi-node TP with multiproc executor (simulated on single node)
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
 
-- label: Distributed Tests (8xH100)
+- label: ":nvidia: (H100) Distributed DP + EP"
   key: distributed-tests-8xh100
   timeout_in_minutes: 20
   device: h100
@@ -202,7 +204,7 @@ steps:
   # test with torchrun tp=2 and dp=4 with ep
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
-- label: Distributed Tests (4xA100)
+- label: ":nvidia: (A100) Distributed"
   key: distributed-tests-4xa100
   device: a100
   optional: true
@@ -218,7 +220,7 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
-- label: Distributed Tests (2xH100-2xMI300)
+- label: ":nvidia: (H100) Distributed Features"
   key: distributed-tests-2xh100-2xmi300
   timeout_in_minutes: 30
   device: h100
@@ -233,7 +235,7 @@ steps:
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
     - pytest -v -s tests/distributed/test_packed_tensor.py
 
-- label: Distributed Tests (2xB200)
+- label: ":nvidia: (B200) Distributed"
   key: distributed-tests-2xb200
   device: b200-k8s
   optional: true
@@ -242,12 +244,13 @@ steps:
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem.py
+    - pytest -v -s tests/kernels/test_kimi_k3_gemm_rs.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
 
     
 
-- label: 2 Node Test (4 GPUs)
+- label: ":nvidia: (L4) Distributed 2-Node"
   key: 2-node-test-4-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
@@ -266,7 +269,7 @@ steps:
   commands:
     - ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py" "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code"
 
-- label: Pipeline + Context Parallelism (4 GPUs)
+- label: ":nvidia: (L4) Pipeline + Context Parallelism"
   key: pipeline-context-parallelism-4-gpus
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
@@ -282,7 +285,7 @@ steps:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
 
-- label: RayExecutorV2 (4 GPUs)
+- label: ":nvidia: (L4) RayExecutorV2"
   key: rayexecutorv2-4-gpus
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
