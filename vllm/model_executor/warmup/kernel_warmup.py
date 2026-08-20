@@ -95,6 +95,53 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _ll_fp8_block_shapes_from_model(
+    model: torch.nn.Module,
+) -> tuple[tuple[int, int], ...]:
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_fp8_block import (
+        LLFp8BlockScaledMMKernel,
+    )
+
+    shapes: set[tuple[int, int]] = set()
+    for module in model.modules():
+        uses_ll_fp8 = False
+        for holder_name in ("quant_method", "scheme"):
+            holder = getattr(module, holder_name, None)
+            for kernel_name in ("fp8_linear", "w8a8_block_fp8_linear"):
+                if isinstance(
+                    getattr(holder, kernel_name, None), LLFp8BlockScaledMMKernel
+                ):
+                    uses_ll_fp8 = True
+        weight = getattr(module, "weight", None)
+        if uses_ll_fp8 and isinstance(weight, torch.Tensor) and weight.dim() == 2:
+            n, k = weight.shape
+            if k % 128 == 0 and n % 8 == 0:
+                shapes.add((int(k), int(n)))
+    return tuple(sorted(shapes))
+
+
+def _warmup_ll_fp8_block_gemm(model: torch.nn.Module) -> None:
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_fp8_block import (
+        is_available as is_ll_fp8_block_gemm_available,
+    )
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_fp8_block import (
+        ll_fp8_block_gemm_kernel,
+    )
+
+    if not is_ll_fp8_block_gemm_available():
+        return
+
+    shapes = _ll_fp8_block_shapes_from_model(model)
+    if not shapes:
+        logger.debug_once(
+            "Skipping ll_fp8_block_gemm warmup: no selected FP8 linear shapes found."
+        )
+        return
+
+    logger.info_once("Warming up ll_fp8_block_gemm for shapes: %s.", shapes)
+    ll_fp8_block_gemm_kernel.warmup(shapes=shapes)
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -145,6 +192,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
+    if current_platform.is_device_capability_family(100):
+        _warmup_ll_fp8_block_gemm(worker.get_model())
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
