@@ -15,15 +15,14 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp6_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    _ACTIVATION_QUANT_KEY_MAP,
+    _WEIGHT_QUANT_KEY_MAP,
     OCP_MX_BLOCK_SIZE,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kMxfp4Dynamic,
     kMxfp4Static,
-    kMxfp6E2M3Dynamic,
     kMxfp6E2M3Static,
-    kMxfp6E3M2Dynamic,
     kMxfp6E3M2Static,
 )
 from vllm.model_executor.parameter import (
@@ -37,18 +36,6 @@ from vllm.platforms import current_platform
 from .quark_scheme import QuarkScheme
 
 logger = init_logger(__name__)
-
-_WEIGHT_QUANT_KEY_MAP: dict[str, QuantKey] = {
-    "mxfp4": kMxfp4Static,
-    "mxfp6_e3m2": kMxfp6E3M2Static,
-    "mxfp6_e2m3": kMxfp6E2M3Static,
-}
-
-_ACTIVATION_QUANT_KEY_MAP: dict[str, QuantKey] = {
-    "mxfp4": kMxfp4Dynamic,
-    "mxfp6_e3m2": kMxfp6E3M2Dynamic,
-    "mxfp6_e2m3": kMxfp6E2M3Dynamic,
-}
 
 
 class QuarkOCP_MX(QuarkScheme):

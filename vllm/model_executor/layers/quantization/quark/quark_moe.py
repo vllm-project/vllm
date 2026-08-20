@@ -55,11 +55,10 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
-from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import (
-    QuarkOCP_MX,
-)
 from vllm.model_executor.layers.quantization.quark.utils import QuarkQTensorHint
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    _ACTIVATION_QUANT_KEY_MAP,
+    _WEIGHT_QUANT_KEY_MAP,
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
 )
@@ -157,8 +156,8 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         if quant_config._is_w_ocp_mx_a_x(weight_config, input_config):
             assert isinstance(weight_config, dict)
             assert input_config is None or isinstance(input_config, dict)
-            ocp_weight_quant_key, ocp_activation_quant_key = QuarkOCP_MX.get_quant_keys(
-                weight_config, input_config
+            ocp_weight_quant_key, ocp_activation_quant_key = (
+                QuarkOCP_MX_MoEMethod.get_quant_keys(weight_config, input_config)
             )
             return ocp_weight_quant_key, ocp_activation_quant_key, QuarkOCP_MX_MoEMethod
         if quant_config._is_static_tensor_w8a8(
@@ -1167,6 +1166,32 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
 
 
 class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
+    @classmethod
+    def get_quant_keys(
+        cls,
+        weight_config: dict[str, Any] | None,
+        input_config: dict[str, Any] | None,
+    ) -> tuple[QuantKey, QuantKey | None]:
+        if weight_config is None:
+            raise ValueError("OCP MX MoE requires a weight quantization config.")
+
+        weight_dtype = weight_config["dtype"].replace("fp", "mxfp")
+        weight_quant_key = _WEIGHT_QUANT_KEY_MAP[weight_dtype]
+
+        if input_config is None:
+            return weight_quant_key, None
+        if input_config["dtype"] == "fp8_e4m3":
+            activation_quant_key = (
+                kFp8DynamicTensorSym
+                if input_config.get("is_dynamic")
+                else kFp8StaticTensorSym
+            )
+            return weight_quant_key, activation_quant_key
+
+        activation_dtype = input_config["dtype"].replace("fp", "mxfp")
+        activation_quant_key = _ACTIVATION_QUANT_KEY_MAP[activation_dtype]
+        return weight_quant_key, activation_quant_key
+
     def __init__(
         self,
         weight_config: QuarkQTensorHint,

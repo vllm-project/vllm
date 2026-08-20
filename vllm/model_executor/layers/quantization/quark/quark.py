@@ -682,7 +682,7 @@ class QuarkConfig(QuantizationConfig):
         # 2. layer_type_quant_config,
         # 3. global_quant_config.
 
-        layer_type = cast(str, type(module))
+        layer_type = cast(str, module if isinstance(module, type) else type(module))
         layer_type_quant_config = cast(
             dict[str, Any], self.quant_config.get("layer_type_quant_config")
         )
@@ -742,7 +742,8 @@ class QuarkConfig(QuantizationConfig):
                 return weight_key, activation_key, QuarkNVFP4
 
             raise NotImplementedError(
-                "Multi-entry weight or activation quantization configs are only supported for NVFP4."
+                "Multi-entry weight or activation quantization configs are only "
+                "supported for NVFP4."
             )
 
         weight_config = self._unwrap_single_quant_config(weight_config)
