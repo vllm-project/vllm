@@ -77,6 +77,24 @@ export PYTHONFAULTHANDLER
 # depend on their current working directory.
 export PYTHONPATH="${PYTHONPATH:-..}"
 
+hf_test_group_runner=()
+case "${VLLM_CI_HF_HUB_MODE:-}" in
+  "") ;;
+  online)
+    hf_test_group_runner=(python3 -m vllm_test_utils.hf_hub)
+    ;;
+  offline-first)
+    hf_test_group_runner=(python3 -m vllm_test_utils.hf_hub)
+    if [[ "${BUILDKITE_RETRY_COUNT:-0}" == "0" ]]; then
+      hf_test_group_runner+=(--offline)
+    fi
+    ;;
+  *)
+    echo "Invalid VLLM_CI_HF_HUB_MODE: ${VLLM_CI_HF_HUB_MODE}" >&2
+    exit 2
+    ;;
+esac
+
 ###############################################################################
 # Helper Functions
 ###############################################################################
@@ -1353,14 +1371,22 @@ if is_native_runtime; then
     exit 1
   fi
 
-  export PYTHONPATH="${VLLM_CI_WORKSPACE:-/vllm-workspace}"
+  if [[ -n "${VLLM_CI_HF_HUB_MODE:-}" ]]; then
+    export PYTHONPATH="${VLLM_CI_WORKSPACE:-/vllm-workspace}/tests/vllm_test_utils:${VLLM_CI_WORKSPACE:-/vllm-workspace}"
+  else
+    export PYTHONPATH="${VLLM_CI_WORKSPACE:-/vllm-workspace}"
+  fi
 
   echo "Native test commands: $commands"
   run_native_preflight || exit 1
   echo "--- Test log"
   # Keep AMD CI orchestration variables out of vLLM's runtime environment.
   clear_ci_orchestration_env
-  /bin/bash -o pipefail -c "${commands}"
+  if [[ -n "${VLLM_CI_HF_HUB_MODE:-}" ]]; then
+    "${hf_test_group_runner[@]}" --pipefail -- "${commands}"
+  else
+    /bin/bash -o pipefail -c "${commands}"
+  fi
   handle_pytest_exit "$?"
 fi
 
@@ -1491,7 +1517,11 @@ if [[ "$commands" == *python_only_compile.sh* ]]; then
   standalone_merge_base_env=(-e "CI_STANDALONE_MERGE_BASE=${vllm_standalone_merge_base}")
 fi
 
-MYPYTHONPATH="/vllm-workspace"
+if [[ -n "${VLLM_CI_HF_HUB_MODE:-}" ]]; then
+  MYPYTHONPATH="/vllm-workspace/tests/vllm_test_utils:/vllm-workspace"
+else
+  MYPYTHONPATH="/vllm-workspace"
+fi
 
 container_job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-0}}"
 container_job_id="${container_job_id//[^A-Za-z0-9_.-]/_}"
@@ -1589,6 +1619,16 @@ else
     echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
   fi
 
+  if [[ -n "${VLLM_CI_HF_HUB_MODE:-}" ]]; then
+    container_test_group=(
+      "${hf_test_group_runner[@]}" -- "${CONTAINER_PREFLIGHT} && ${commands}"
+    )
+  else
+    container_test_group=(
+      /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
+    )
+  fi
+
   docker run \
     "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
@@ -1625,7 +1665,7 @@ else
     "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
+    "${container_test_group[@]}"
 
   exit_code=$?
   handle_pytest_exit "$exit_code"
