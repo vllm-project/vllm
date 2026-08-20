@@ -30,9 +30,9 @@ The FP8 types typically supported in hardware have two distinct representations,
     `--linear-backend` only affects quantized linear layers; MoE experts
     use the separate `--moe-backend`. An explicit backend that is not
     supported on your hardware raises an error rather than falling back.
-    The full list is documented under `KernelConfig` on the
-    [Engine Arguments](../../../configuration/engine_args.md) page and
-    shown by `vllm serve --help=KernelConfig`.
+    The full list is documented under
+    [`KernelConfig`](../../../cli/serve.md#kernelconfig) in the CLI
+    reference and shown by `vllm serve --help=KernelConfig`.
 
 ## Installation
 
