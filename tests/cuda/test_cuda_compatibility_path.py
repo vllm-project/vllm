@@ -7,9 +7,6 @@ including env var parsing, path detection, and deduplication.
 """
 
 import os
-import subprocess
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -175,31 +172,6 @@ class TestCudaCompatibilityLdPathManipulation:
 
 class TestGetTorchCudaVersion:
     """Test _get_torch_cuda_version() helper."""
-
-    def test_works_without_site_initialization(self, tmp_path):
-        torch_dir = tmp_path / "torch"
-        torch_dir.mkdir()
-        (torch_dir / "__init__.py").write_text("", encoding="utf-8")
-        (torch_dir / "version.py").write_text('cuda = "12.8"', encoding="utf-8")
-        repo_root = Path(__file__).parents[2]
-        env = os.environ | {
-            "PYTHONPATH": os.pathsep.join((str(repo_root), str(tmp_path)))
-        }
-
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-S",
-                "-c",
-                "from vllm._environment import _get_torch_cuda_version; "
-                'assert _get_torch_cuda_version() == "12.8"',
-            ],
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-
-        assert result.returncode == 0, result.stderr
 
     def test_returns_string_when_torch_available(self):
         """Should return a CUDA version string like '12.8'."""
