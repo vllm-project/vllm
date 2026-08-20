@@ -171,18 +171,26 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
 
 @functools.cache
 def _load_gemm_tuned_configs(
-    q_dtype_w: torch.dtype, csv_path: str
-) -> set[tuple[int, int, int]]:
+    csv_path: str,
+    filters: tuple[tuple[str, object], ...],
+    key_cols: tuple[str, ...] = ("N", "K", "M"),
+) -> set[tuple[int, ...]]:
     try:
         df = pd.read_csv(csv_path).drop_duplicates()
-        df = df[df["q_dtype_w"] == str(q_dtype_w)]
-        return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
+        for col, val in filters:
+            if col not in df.columns:
+                continue
+            if isinstance(val, int):
+                df = df[df[col].astype(int) == val]
+            else:
+                df = df[df[col].astype(str) == str(val)]
+        return set(zip(*(df[c].astype(int) for c in key_cols)))
     except Exception:
         return set()
 
 
 def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
-    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
+    configs = _load_gemm_tuned_configs(csv_path, (("q_dtype_w", q_dtype_w),))
     l_m = (
         [1, 2, 4]
         + list(range(8, 513, 8))
@@ -190,21 +198,6 @@ def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -
         + [2**i for i in range(11, 19)]
     )
     return any((N, K, M) in configs for M in l_m)
-
-
-@functools.cache
-def _load_blockscale_bpreshuffle_tuned_shapes(
-    csv_path: str, gfx: str, cu_num: int
-) -> set[tuple[int, int]]:
-    try:
-        df = pd.read_csv(csv_path).drop_duplicates()
-        if "gfx" in df.columns:
-            df = df[df["gfx"] == gfx]
-        if "cu_num" in df.columns:
-            df = df[df["cu_num"].astype(int) == cu_num]
-        return set(zip(df["N"].astype(int), df["K"].astype(int)))
-    except Exception:
-        return set()
 
 
 def if_aiter_supported(func: Callable) -> Callable:
@@ -3023,8 +3016,8 @@ class rocm_aiter_ops:
         csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
         gfx = aiter_gemm_a8w8_ops.get_gfx()
         cu_num = aiter_gemm_a8w8_ops.get_cu_num()
-        return (n, k) in _load_blockscale_bpreshuffle_tuned_shapes(
-            csv_path, gfx, cu_num
+        return (n, k) in _load_gemm_tuned_configs(
+            csv_path, (("gfx", gfx), ("cu_num", cu_num)), key_cols=("N", "K")
         )
 
     @staticmethod
