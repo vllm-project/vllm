@@ -9,7 +9,11 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -35,7 +39,6 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
 )
-from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -43,6 +46,31 @@ from .rocm import DeepseekV32MLAAttention
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
+    @staticmethod
+    def fused_allreduce_rms_norm(
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        norm: RMSNorm,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """One aiter custom-all-reduce kernel, else a separate all-reduce + norm."""
+        if get_tensor_model_parallel_world_size() == 1:
+            return norm(hidden_states, residual)
+
+        if (
+            rocm_aiter_ops.is_fused_ar_rmsnorm_enabled()
+            and rocm_aiter_ops.get_aiter_allreduce() is not None
+        ):
+            out = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(
+                input_=hidden_states,
+                residual=residual,
+                weight=norm.weight.to(hidden_states.dtype),
+                epsilon=norm.variance_epsilon,
+            )
+            return out[0], out[1]
+
+        reduced = tensor_model_parallel_all_reduce(hidden_states)
+        return norm(reduced, residual)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -117,11 +145,11 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = fused_allreduce_rms_norm(
+            hidden_states, residual = self.fused_allreduce_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        hidden_states, residual = fused_allreduce_rms_norm(
+        hidden_states, residual = self.fused_allreduce_rms_norm(
             hidden_states, residual, self.post_attention_layernorm
         )
         hidden_states = self.mlp(hidden_states)
@@ -282,7 +310,9 @@ class DeepseekV32Model(torch.nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = fused_allreduce_rms_norm(hidden_states, residual, self.norm)
+        hidden_states, _ = DeepseekV32DecoderLayer.fused_allreduce_rms_norm(
+            hidden_states, residual, self.norm
+        )
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states

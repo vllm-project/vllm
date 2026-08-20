@@ -1670,6 +1670,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_MLA: Controls MLA (Multi-head Latent Attention) ops.
         VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE: Controls the deepseek_v32 fused QK
             norm + RoPE + KV cache write path (replaces the shared Triton pair).
+        VLLM_ROCM_USE_AITER_FUSED_AR_RMSNORM: Controls fusing the all-reduce
+            with the RMSNorm that follows it (needs the custom all-reduce).
         VLLM_ROCM_USE_AITER_MHA: Controls MHA ops including flash_attn_varlen.
         VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
@@ -1734,6 +1736,7 @@ class rocm_aiter_ops:
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _MLA_QK_NORM_ROPE = envs.VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE
+    _FUSED_AR_RMSNORM = envs.VLLM_ROCM_USE_AITER_FUSED_AR_RMSNORM
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
     _SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
@@ -1768,6 +1771,7 @@ class rocm_aiter_ops:
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
         cls._MLA_QK_NORM_ROPE = envs.VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE
+        cls._FUSED_AR_RMSNORM = envs.VLLM_ROCM_USE_AITER_FUSED_AR_RMSNORM
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
         cls._SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
@@ -1945,6 +1949,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MLA_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_fused_ar_rmsnorm_enabled(cls) -> bool:
+        return cls.is_custom_all_reduce_enabled() and cls._FUSED_AR_RMSNORM
 
     @classmethod
     @if_aiter_supported
