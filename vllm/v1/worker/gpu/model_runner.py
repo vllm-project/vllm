@@ -204,6 +204,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # steps. Must run before any pooled buffer is constructed
         set_default_max_concurrency(vllm_config.max_concurrent_batches)
 
+        # The device reads the pooled host buffers in place and they are
+        # recycled every max_concurrent_batches steps. A sampling step waits on
+        # its output before its own slot comes round again; an encoder-only step
+        # returns a host-built empty output and never waits on the device, so
+        # only it needs an explicit barrier.
+        self.encoder_input_reuse_event: torch.Event | None = None
+        if self.is_encoder_only and vllm_config.max_concurrent_batches > 1:
+            # Blocking (sleep) event: busy-polling the driver lock can make this
+            # rank a straggler under contention.
+            self.encoder_input_reuse_event = torch.Event(blocking=True)
+
         # PP broadcast/recv helper. Runs the collective on a side stream.
         self.pp_handler: PPHandler | None = None
 
@@ -1407,6 +1418,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.ec_connector.no_forward(scheduler_output).ec_connector_output,
         )
 
+    def wait_for_encoder_input_reuse(self) -> None:
+        """Wait for the step still reading the pooled host buffers."""
+        if self.encoder_input_reuse_event is not None:
+            self.encoder_input_reuse_event.synchronize()
+
+    def mark_encoder_input_reuse(self) -> None:
+        """Mark this step's last host write into the pooled buffers."""
+        if self.encoder_input_reuse_event is not None:
+            self.encoder_input_reuse_event.record()
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1417,6 +1438,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         context_len: int = 0,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        self.wait_for_encoder_input_reuse()
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1428,6 +1450,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
+                self.mark_encoder_input_reuse()
                 return self._merge_ec_connector_no_forward(
                     scheduler_output, empty_output
                 )
@@ -1471,6 +1494,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
+            self.mark_encoder_input_reuse()
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
         if not dummy_run:
@@ -1481,6 +1505,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output, batch_req_state, batch_desc
             )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
+            self.mark_encoder_input_reuse()
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
