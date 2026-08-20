@@ -356,6 +356,7 @@ class Sm100GemmRsBF16:
                 cute.nvgpu.CopyUniversalOp(), BFloat16, num_bits_per_copy=128
             )
 
+            # Each thread issues one BF16x8 multimem reduction per vector.
             vec_width = 8
             vec_cols = BN // vec_width
             max_tile_rows = BM // num_ranks
@@ -431,11 +432,13 @@ class Sm100GemmRsBF16:
 
                         if local_row < local_row_end and global_row < M:
                             if cutlass.const_expr(self.all_reduce):
+                                # Broadcast the result to all ranks.
                                 multimem_st_16B(
                                     partial_vecs[None, (global_row, col)],
                                     reduced_vecs[vec_iter],
                                 )
                             else:
+                                # Store the result to local L2.
                                 cute.copy(
                                     st_atom,
                                     reduced_vecs[vec_iter],
@@ -508,6 +511,9 @@ class Sm100GemmRsBF16:
                             num_ranks,
                         )
 
+            # Exit barrier. GPU scope is sufficient for RS because the kernel
+            # writes local global memory and only needs to flush it to local L2.
+            # AR uses system scope to flush the multimem stores to remote L2.
             cute.arch.barrier(barrier_id=BAR_COMM, number_of_threads=128)
             if tid_ == 0:
                 exit_flag = total_tiles + raw_bid
@@ -707,6 +713,8 @@ class GemmRS:
 
         self.partial = symm_mem.empty((max_M, N), dtype=torch.bfloat16, device=device)
         self.partial_handle = symm_mem.rendezvous(self.partial, group)
+        if self.partial_handle.multicast_ptr == 0:
+            raise RuntimeError("GEMM-RS/AR requires NVLink multicast memory")
         self.partial_mc_ptr = make_ptr(
             BFloat16,
             self.partial_handle.multicast_ptr,
@@ -721,6 +729,8 @@ class GemmRS:
         max_flags = grid_m * (N // 128) + self.num_sms
         self.flags = symm_mem.empty(max_flags, dtype=torch.int32, device=device)
         self.flags_handle = symm_mem.rendezvous(self.flags, group)
+        if self.flags_handle.multicast_ptr == 0:
+            raise RuntimeError("GEMM-RS/AR requires NVLink multicast memory")
         self.flags.zero_()
         self.flags_mc_ptr = make_ptr(
             Int32,
@@ -735,8 +745,6 @@ class GemmRS:
             assumed_align=8,
         )
 
-        assert self.partial_handle.multicast_ptr != 0
-        assert self.flags_handle.multicast_ptr != 0
         torch.accelerator.synchronize(device)
         tp_group.barrier()
 
