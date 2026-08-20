@@ -733,8 +733,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
 
         layer.weight_scale = Parameter(scale.contiguous(), requires_grad=False)
 
-        if hasattr(self, "fp8_linear"):
-            self.fp8_linear.process_weights_after_loading(layer)
+        self.w8a8_block_fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -2390,6 +2389,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if quant_algo == "FP8":
                 return ModelOptFp8LinearMethod(self.fp8_config)
+            if quant_algo == "FP8_PB_WO":
+                return ModelOptFp8PbWoLinearMethod(self.fp8_config)
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             if quant_algo == "W4A16_NVFP4":
@@ -2428,3 +2429,15 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         super().apply_vllm_mapper(hf_to_vllm_mapper)
         if self.quantized_layers:
             self.quantized_layers = hf_to_vllm_mapper.apply_dict(self.quantized_layers)
+
+
+def is_modelopt_fp8_pb_wo_layer(
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> bool:
+    """Return whether ``prefix`` uses ModelOpt FP8 block-wise weights."""
+    if isinstance(quant_config, ModelOptFp8Config):
+        return quant_config.quant_method == "FP8_PB_WO"
+    if isinstance(quant_config, ModelOptMixedPrecisionConfig):
+        return quant_config._resolve_quant_algo(prefix) == "FP8_PB_WO"
+    return False

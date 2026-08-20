@@ -70,14 +70,22 @@ class TrtLlmNvFp4ExpertsBase:
         )
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self.is_situ = moe_config.activation == MoEActivation.SITU
 
         assert self.quant_config.g1_alphas is not None
         assert self.quant_config.a2_gscale is not None
         if moe_config.is_act_and_mul:
-            # g1_alpha_s = a13_scale * w13_scale_2
-            # a2_gscale = (1 / a2_scale)
-            # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
-            self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
+            if self.is_situ:
+                # SITU applies its nonlinear activation after g1_alphas, so only
+                # the output quantization factor belongs in g1_scale_c.
+                self.g1_scale_c = self.quant_config.a2_gscale.clone()
+            else:
+                # g1_alphas = a13_scale * w13_scale_2
+                # a2_gscale = 1 / a2_scale
+                # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
+                self.g1_scale_c = (
+                    self.quant_config.g1_alphas * self.quant_config.a2_gscale
+                )
         else:
             self.g1_scale_c = self.quant_config.a2_gscale.clone()
 
@@ -120,7 +128,6 @@ class TrtLlmNvFp4ExpertsBase:
         # (gemm1_alpha) and situ linear_beta -> gatedActBeta (gemm1_beta).
         # These operate on the dequantized gate/up, so they are NOT folded by
         # g1_alphas in process_weights_after_loading.
-        self.is_situ = moe_config.activation == MoEActivation.SITU
         if self.is_situ:
             situ_beta = moe_config.activation_situ_beta
             situ_linear_beta = moe_config.activation_situ_linear_beta
@@ -152,7 +159,10 @@ class TrtLlmNvFp4ExpertsBase:
         assert self.quant_config.g1_alphas is not None
         assert self.quant_config.a2_gscale is not None
         if self.moe_config.is_act_and_mul:
-            g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
+            if self.is_situ:
+                g1_scale_c = self.quant_config.a2_gscale.clone()
+            else:
+                g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
         else:
             g1_scale_c = self.quant_config.a2_gscale.clone()
         layer.register_parameter(

@@ -32,11 +32,14 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
+from vllm.model_executor.layers.quantization.modelopt import (
+    is_modelopt_fp8_pb_wo_layer,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
 )
-from vllm.model_executor.parameter import BasevLLMParameter
+from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
@@ -102,7 +105,11 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
     ) -> None:
         tp_rank = self.tp_rank
         param_tp_rank = getattr(param, "tp_rank", None)
-        if loaded_shard_id == self.replicated_shard_id:
+        replicate_block_scale = (
+            isinstance(param, BlockQuantScaleParameter)
+            and loaded_weight.shape[param.output_dim] < self.tp_size
+        )
+        if loaded_shard_id == self.replicated_shard_id or replicate_block_scale:
             self.tp_rank = 0
             if param_tp_rank is not None:
                 param.tp_rank = 0
@@ -121,7 +128,11 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
     ) -> None:
         tp_rank = self.tp_rank
         param_tp_rank = getattr(param, "tp_rank", None)
-        if loaded_shard_id == self.replicated_shard_id:
+        replicate_block_scale = (
+            isinstance(param, BlockQuantScaleParameter)
+            and loaded_weight.shape[param.output_dim] < self.tp_size
+        )
+        if loaded_shard_id == self.replicated_shard_id or replicate_block_scale:
             self.tp_rank = 0
             if param_tp_rank is not None:
                 param.tp_rank = 0
@@ -352,7 +363,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         local_output_size = (
             4 * self.local_projection_size + self.head_dim + self.local_num_heads
         )
-        self.in_proj_padding = -local_output_size % 16
+        in_proj_prefix = f"{prefix}.in_proj_qkvgfab"
+        alignment = (
+            128
+            if is_modelopt_fp8_pb_wo_layer(self.quant_config, in_proj_prefix)
+            else 16
+        )
+        remainder = local_output_size % alignment
+        self.in_proj_padding = 0 if remainder == 0 else alignment - remainder
         if self.in_proj_padding:
             in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
         self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
@@ -362,7 +380,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             tp_size=self.tp_size,
             bias=False,
             quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_qkvgfab",
+            prefix=in_proj_prefix,
         )
         if self.in_proj_padding:
             self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
