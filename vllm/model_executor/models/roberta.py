@@ -159,7 +159,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
             # `sentence-transformers/stsb-roberta-base-v2`
             mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights_list, mapper=mapper)
 
 
