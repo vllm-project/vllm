@@ -2245,6 +2245,37 @@ def test_explicit_method_selects_deepseek_v4_loader(
         assert block_tokens[0] == 4
 
 
+def test_dspark_reuses_embedded_target_and_defaults_tokens(
+    deepseek_v4_dspark_config,
+):
+    target_model_config = MagicMock(spec=ModelConfig)
+    target_model_config.model = "target/model"
+    target_model_config.quantization = "fp8"
+    target_model_config.hf_overrides = None
+    target_model_config.max_model_len = 4096
+
+    draft_model_config = MagicMock(spec=ModelConfig)
+    draft_model_config.hf_config = SpeculativeConfig.dspark_hf_config_override(
+        deepseek_v4_dspark_config
+    )
+    draft_model_config.architectures = draft_model_config.hf_config.architectures
+    draft_model_config.max_model_len = 4096
+
+    with patch(
+        "vllm.config.speculative.ModelConfig",
+        return_value=draft_model_config,
+    ):
+        speculative_config = SpeculativeConfig(
+            method="dspark",
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+        )
+
+    assert speculative_config.model == "target/model"
+    assert speculative_config.quantization == "fp8"
+    assert speculative_config.num_speculative_tokens == 4
+
+
 @pytest.mark.parametrize(
     ("method", "config_kwargs", "expected"),
     [

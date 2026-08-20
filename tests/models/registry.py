@@ -1722,6 +1722,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DeepseekV32MTPModel": _HfExamplesInfo(
         "nvidia/DeepSeek-V3.2-NVFP4",
         speculative_model="nvidia/DeepSeek-V3.2-NVFP4",
+        speculative_method="mtp",
         is_available_online=False,
     ),
     "DeepSeekV4MTPModel": _HfExamplesInfo(
