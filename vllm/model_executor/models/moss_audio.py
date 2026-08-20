@@ -1450,6 +1450,7 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             "language_model.embed_tokens.": "language_model.model.embed_tokens.",
             "language_model.layers.": "language_model.model.layers.",
             "language_model.norm.": "language_model.model.norm.",
+            "audio_encoder.embed_positions": None,
         },
         orig_to_new_stacked={
             ".gate_proj": (".gate_up_proj", 0),
@@ -1865,8 +1866,5 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["audio_encoder.embed_positions"],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

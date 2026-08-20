@@ -616,17 +616,18 @@ class InternS1ProForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """load weights"""
-        skip_prefixes = ["model.time_series."]
+        orig_to_new_prefix: dict[str, str | None] = {
+            "model.visual.": "visual.",
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+            "model.time_series.": None,
+        }
         if self.visual is None:
-            skip_prefixes.append("visual.")
+            orig_to_new_prefix["visual."] = None
         # FIXME(Isotr0py): See if we can avoid tighing FoPE to PP layers
         weights_mapper = WeightsMapper(
-            orig_to_new_prefix={
-                "model.visual.": "visual.",
-                "lm_head.": "language_model.lm_head.",
-                "model.language_model.": "language_model.model.",
-            },
+            orig_to_new_prefix=orig_to_new_prefix,
             orig_to_new_suffix=self.get_frope_params_map(),
         )
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=weights_mapper)

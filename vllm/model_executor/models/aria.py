@@ -13,18 +13,13 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEFactory,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -42,11 +37,7 @@ from .idefics2_vision_model import (
 )
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    maybe_prefix,
-)
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
 class AriaImagePixelInputs(TensorSchema):
@@ -88,16 +79,17 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
         self.post_layernorm = nn.Identity()
 
     hf_to_vllm_mapper = WeightsMapper(
+        # NOTE: post_layernorm is not used in Aria.
+        orig_to_new_substr={"post_layernorm": None},
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
     )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # NOTE: post_layernorm is not used in Aria.
-        loader = AutoWeightsLoader(self, skip_substrs=["post_layernorm"])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 

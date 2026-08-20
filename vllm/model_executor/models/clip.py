@@ -669,6 +669,9 @@ class CLIPVisionTransformer(nn.Module):
             self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         else:
             self.post_layernorm = None
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix={"post_layernorm.": None}
+            )
 
     @property
     def dtype(self):
@@ -707,10 +710,7 @@ class CLIPVisionTransformer(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes: list[str] = []
-        if self.post_layernorm is None:
-            skip_prefixes.append("post_layernorm.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
 
         # Drop layers beyond num_hidden_layers_override.
         def _filter(ws):
@@ -774,6 +774,8 @@ class CLIPVisionModel(nn.Module):
 )
 class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".position_ids": None})
 
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
@@ -981,8 +983,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            skip_substrs=[".position_ids"],
             ignore_unexpected_prefixes=["logit_scale."],
         )
 
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

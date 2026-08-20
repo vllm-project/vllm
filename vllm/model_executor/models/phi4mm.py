@@ -1016,6 +1016,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             "base_layer.": "",
+            "lora": None,
         },
         orig_to_new_prefix={
             "model.embed_tokens_extend.audio_embed.audio_projection.vision.": "embed_tokens_extend.audio_projection_for_vision.",  # noqa: E501
@@ -1258,7 +1259,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
-        loader = AutoWeightsLoader(self, skip_substrs=["lora"])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

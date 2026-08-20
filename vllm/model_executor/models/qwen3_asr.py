@@ -372,6 +372,8 @@ class Qwen3ASRForConditionalGeneration(
             "model.language_model.": "language_model.model.",
             "model.multi_modal_projector.linear_1.": "audio_tower.proj1.",
             "model.multi_modal_projector.linear_2.": "audio_tower.proj2.",
+            "talker.": None,
+            "code2wav.": None,
         }
     )
 
@@ -545,10 +547,7 @@ class Qwen3ASRForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["talker.", "code2wav."],
-        )
+        loader = AutoWeightsLoader(self)
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
         return loaded_weights

@@ -1189,6 +1189,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             # mapping for original checkpoint
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
+            "audio_tokenizer.": None,
         }
     )
 
@@ -1490,6 +1491,6 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         audio_loaded: set[str] = set()
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_tokenizer."])
+        loader = AutoWeightsLoader(self)
         auto_loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return audio_loaded | auto_loaded

@@ -838,6 +838,7 @@ class WhisperForConditionalGeneration(
             ".encoder_attn.k_proj": (".encoder_attn.kv_proj", 0),
             ".encoder_attn.v_proj": (".encoder_attn.kv_proj", 1),
         },
+        orig_to_new_prefix={"proj_out.": None},
     )
 
     # Whisper only supports audio-conditioned generation.
@@ -1048,7 +1049,7 @@ class WhisperForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
+        loader = AutoWeightsLoader(self)
 
         # add fake zeros bias for k_proj to state_dict
         weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")

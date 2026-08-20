@@ -887,7 +887,16 @@ class SiglipVisionModel(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        # The SigLIP attention pooling head and packing pos embedding are
+        # present in the checkpoint but absent from this vision tower.
+        orig_to_new_substr={
+            "head.attention": None,
+            "head.layernorm": None,
+            "head.mlp": None,
+            "head.probe": None,
+            "packing_position_embedding": None,
+        },
     )
 
     def __init__(
@@ -934,18 +943,7 @@ class SiglipVisionModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Skip the SigLIP attention pooling head and packing pos embedding
-        # present in the checkpoint but absent from this vision tower.
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=[
-                "head.attention",
-                "head.layernorm",
-                "head.mlp",
-                "head.probe",
-                "packing_position_embedding",
-            ],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 

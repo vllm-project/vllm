@@ -760,6 +760,8 @@ class FunAudioChatMultiModalProcessor(
     dummy_inputs=FunAudioChatDummyInputsBuilder,
 )
 class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"audio_invert_tower.": None})
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -969,5 +971,5 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_invert_tower."])
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

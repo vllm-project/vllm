@@ -236,7 +236,8 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
 
             def default_load_weights(weights):
                 loader = AutoWeightsLoader(self)
-                return loader.load_weights(weights)
+                mapper = getattr(self, "hf_to_vllm_mapper", None)
+                return loader.load_weights(weights, mapper=mapper)
 
             load_weights = getattr(super(), "load_weights", default_load_weights)
             return load_weights(mapped_weights)
@@ -584,10 +585,11 @@ def load_weights_using_from_2_way_softmax(
     )
     loaded_weights.add(score_weight_name)
 
-    lm_head_name = "lm_head.weight"
+    lm_head_name: str | None = "lm_head.weight"
     if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
         lm_head_name = hf_to_vllm_mapper._map_name(lm_head_name)
-    loaded_weights.discard(lm_head_name)
+    if lm_head_name is not None:
+        loaded_weights.discard(lm_head_name)
     return loaded_weights
 
 
@@ -649,10 +651,11 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     )
     loaded_weights.add(score_weight_name)
 
-    lm_head_name = "lm_head.weight"
+    lm_head_name: str | None = "lm_head.weight"
     if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
         lm_head_name = hf_to_vllm_mapper._map_name(lm_head_name)
-    loaded_weights.discard(lm_head_name)
+    if lm_head_name is not None:
+        loaded_weights.discard(lm_head_name)
     return loaded_weights
 
 
