@@ -3526,6 +3526,15 @@ class rocm_aiter_ops:
         head_dim: int,
         rotary_dim: int,
         eps: float,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
+        gate_out: torch.Tensor | None = None,
+        query_fp8_out: torch.Tensor | None = None,
+        key_fp8_out: torch.Tensor | None = None,
+        value_fp8_out: torch.Tensor | None = None,
+        query_descale_out: torch.Tensor | None = None,
+        key_descale_out: torch.Tensor | None = None,
+        value_descale_out: torch.Tensor | None = None,
     ):
         from aiter.ops.triton.rope.qwen3_next_fp8_qkv import (
             qwen3_next_fp8_qkv_prep,
@@ -3548,6 +3557,15 @@ class rocm_aiter_ops:
             head_dim=head_dim,
             rotary_dim=rotary_dim,
             eps=eps,
+            query_out=query_out,
+            key_out=key_out,
+            gate_out=gate_out,
+            query_fp8_out=query_fp8_out,
+            key_fp8_out=key_fp8_out,
+            value_fp8_out=value_fp8_out,
+            query_descale_out=query_descale_out,
+            key_descale_out=key_descale_out,
+            value_descale_out=value_descale_out,
         )
 
     @staticmethod
