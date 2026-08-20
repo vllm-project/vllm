@@ -31,6 +31,8 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     block_idx_last_scheduled_token,  # (batch,)
     initial_state_idx,  # (batch,)
     num_computed_tokens,  # (batch,)
+    checkpoint_offsets_ptr,  # (batch,)
+    checkpoint_state_indices_ptr,  # (batch,)
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
     # Matrix dimensions
     dim: tl.constexpr,
@@ -56,6 +58,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     SILU_ACTIVATION: tl.constexpr,
     IS_APC_ENABLED: tl.constexpr,
     HAS_NULL_BLOCK: tl.constexpr,
+    HAS_CHECKPOINT: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -392,6 +395,44 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             tl.debug_barrier()  #  NOTE: use this due to bug in Triton compiler
             tl.store(conv_states_ptrs_target, loaded_x, mask)
 
+    # At a chunk-aligned checkpoint boundary, col0..colN already contain the
+    # exact causal-convolution history immediately before the checkpoint token.
+    # Export it here to avoid reconstructing the state in a separate kernel.
+    if HAS_CHECKPOINT:
+        checkpoint_offset = tl.load(checkpoint_offsets_ptr + idx_seq)
+        checkpoint_state_coord = tl.load(checkpoint_state_indices_ptr + idx_seq).to(
+            tl.int64
+        )
+        store_checkpoint = (checkpoint_state_coord != null_block_id) & (
+            token_offset == checkpoint_offset
+        )
+        checkpoint_state_base = (
+            conv_states_ptr
+            + checkpoint_state_coord * stride_conv_state_seq
+            + idx_feats * stride_conv_state_dim
+        )
+        checkpoint_mask = store_checkpoint & (idx_feats < dim)
+        if KERNEL_WIDTH >= 2:
+            tl.store(checkpoint_state_base, col0, mask=checkpoint_mask)
+        if KERNEL_WIDTH >= 3:
+            tl.store(
+                checkpoint_state_base + stride_conv_state_tok,
+                col1,
+                mask=checkpoint_mask,
+            )
+        if KERNEL_WIDTH >= 4:
+            tl.store(
+                checkpoint_state_base + 2 * stride_conv_state_tok,
+                col2,
+                mask=checkpoint_mask,
+            )
+        if KERNEL_WIDTH >= 5:
+            tl.store(
+                checkpoint_state_base + 3 * stride_conv_state_tok,
+                col3,
+                mask=checkpoint_mask,
+            )
+
     if HAS_BIAS:
         bias = bias_ptr + idx_feats
         mask_bias = idx_feats < dim
@@ -496,6 +537,8 @@ def causal_conv1d_fn(
     block_size_to_align=0,
     metadata=None,
     validate_data=False,
+    checkpoint_offsets: torch.Tensor | None = None,
+    checkpoint_state_indices: torch.Tensor | None = None,
 ):
     """support varlen + continuous batching when x is 2D tensor
 
@@ -546,6 +589,12 @@ def causal_conv1d_fn(
         The number of tokens already completed for each sequence
     block_size_to_align: int
         The block size to align the cached states to
+    checkpoint_offsets: (batch,) int32
+        Optional per-sequence checkpoint offsets. Each valid offset must be
+        aligned to the kernel's BLOCK_M chunk size.
+    checkpoint_state_indices: (batch,) int64
+        Cache line receiving each sequence's checkpoint state. ``null_block_id``
+        disables checkpoint export for that sequence.
     out: same shape as `x`
     """
     if isinstance(activation, bool) and activation:
@@ -580,6 +629,12 @@ def causal_conv1d_fn(
     np2_statelen = triton.next_power_of_2(state_len)
 
     padded_batch = query_start_loc.size(0) - 1
+    has_checkpoint = checkpoint_offsets is not None
+    assert has_checkpoint == (checkpoint_state_indices is not None), (
+        "checkpoint offsets and state indices must be provided together"
+    )
+    if has_checkpoint:
+        assert conv_states is not None
     stride_x_dim = x.stride(0)
     stride_x_token = x.stride(1)
     stride_w_dim = weight.stride(0)
@@ -628,6 +683,15 @@ def causal_conv1d_fn(
             assert conv_states is not None, (
                 "ERROR: `has_initial_state` is used, which needs also `conv_states`"
             )
+        if has_checkpoint:
+            assert checkpoint_offsets is not None
+            assert checkpoint_state_indices is not None
+            assert checkpoint_offsets.size() == (padded_batch,)
+            assert checkpoint_state_indices.size() == (padded_batch,)
+            valid_checkpoint_offsets = checkpoint_offsets[
+                checkpoint_state_indices != null_block_id
+            ]
+            assert torch.all(valid_checkpoint_offsets % BLOCK_M == 0)
         assert weight.stride(1) == 1
         assert (dim, width) == weight.shape
         assert is_channel_last, "Need to run in channel-last layout"
@@ -724,6 +788,8 @@ def causal_conv1d_fn(
         block_idx_last_scheduled_token,
         initial_state_idx,
         num_computed_tokens,
+        checkpoint_offsets,
+        checkpoint_state_indices,
         out,
         # Matrix dimensions
         dim,
@@ -749,6 +815,7 @@ def causal_conv1d_fn(
         SILU_ACTIVATION=activation in ["silu", "swish"],
         IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
         HAS_NULL_BLOCK=null_block_id is not None,
+        HAS_CHECKPOINT=has_checkpoint,
         NP2_STATELEN=np2_statelen,
         # launch_cooperative_grid=True
         BLOCK_M=BLOCK_M,

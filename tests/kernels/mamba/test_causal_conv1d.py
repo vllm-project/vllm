@@ -392,3 +392,70 @@ def test_causal_conv1d_varlen(
     )
     unpadded_out = out[:, : out_ref_tensor.shape[-1]]
     assert torch.allclose(unpadded_out, out_ref_tensor, rtol=rtol, atol=atol)
+
+
+def test_causal_conv1d_exports_checkpoint_state_in_fwd_kernel():
+    device = DEVICE
+    set_random_seed(0)
+
+    dim = 64
+    width = 4
+    seqlens = [24, 24, 32]
+    query_start_loc = torch.tensor(
+        [0, *torch.tensor(seqlens).cumsum(0).tolist()],
+        dtype=torch.int32,
+        device=device,
+    )
+    total_tokens = sum(seqlens)
+    x = torch.randn(total_tokens, dim, device=device).transpose(0, 1)
+    weight = torch.randn(dim, width, device=device)
+    conv_states = torch.randn(8, dim, width - 1, device=device)
+    conv_states_before = conv_states.clone()
+    state_indices = torch.tensor([1, 2, 3], dtype=torch.int32, device=device)
+    has_initial_state = torch.tensor([True, False, True], device=device)
+
+    # Export rows 0 and 2 at chunk boundaries; the null block disables row 1.
+    checkpoint_offsets = torch.tensor([16, 16, 24], dtype=torch.int32, device=device)
+    checkpoint_state_indices = torch.tensor(
+        [5, NULL_BLOCK_ID, 6], dtype=torch.int64, device=device
+    )
+
+    out = causal_conv1d_fn(
+        x,
+        weight,
+        bias=None,
+        conv_states=conv_states,
+        query_start_loc=query_start_loc,
+        cache_indices=state_indices,
+        has_initial_state=has_initial_state,
+        checkpoint_offsets=checkpoint_offsets,
+        checkpoint_state_indices=checkpoint_state_indices,
+        validate_data=True,
+    )
+
+    expected_out = []
+    start = 0
+    for row, seqlen in enumerate(seqlens):
+        x_seq = x[:, start : start + seqlen]
+        initial_state = (
+            conv_states_before[state_indices[row]].unsqueeze(0)
+            if has_initial_state[row]
+            else None
+        )
+        ref_out, _ = causal_conv1d_ref(
+            x_seq.unsqueeze(0),
+            weight,
+            initial_states=initial_state,
+        )
+        expected_out.append(ref_out.squeeze(0))
+        start += seqlen
+    torch.testing.assert_close(out, torch.cat(expected_out, dim=1))
+
+    for row, destination in ((0, 5), (2, 6)):
+        start = int(query_start_loc[row].item())
+        offset = int(checkpoint_offsets[row].item())
+        expected_checkpoint = x[:, start + offset - (width - 1) : start + offset]
+        torch.testing.assert_close(conv_states[destination], expected_checkpoint)
+
+    # A disabled row must not write to any extra checkpoint cache line.
+    torch.testing.assert_close(conv_states[7], conv_states_before[7])

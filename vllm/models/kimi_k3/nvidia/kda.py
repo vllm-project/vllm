@@ -234,29 +234,18 @@ def _flashkda_prefill(
 
 
 @triton.jit
-def _store_cache_checkpoints_kernel(
-    x_ptr,
-    conv_state_ptr,
+def _store_recurrent_cache_checkpoints_kernel(
     recurrent_checkpoint_ptr,
     recurrent_state_ptr,
-    query_start_loc_ptr,
     checkpoint_offsets_ptr,
     checkpoint_state_indices_ptr,
-    x_stride_0: tl.constexpr,
-    x_stride_1: tl.constexpr,
-    state_stride_0: tl.constexpr,
-    state_stride_1: tl.constexpr,
-    state_stride_2: tl.constexpr,
     checkpoint_stride_0: tl.constexpr,
     recurrent_state_stride_0: tl.constexpr,
     checkpoint_offset_stride: tl.constexpr,
-    STATE_LEN: tl.constexpr,
-    WIDTH: tl.constexpr,
     RECURRENT_ROW_SIZE: tl.constexpr,
     NULL_STATE_IDX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    # store checkpoints to cache
     seq_idx = tl.program_id(0)
     cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     state_idx = tl.load(checkpoint_state_indices_ptr + seq_idx)
@@ -264,26 +253,6 @@ def _store_cache_checkpoints_kernel(
         checkpoint_offsets_ptr + seq_idx * checkpoint_offset_stride
     )
     valid_checkpoint = (state_idx != NULL_STATE_IDX) & (checkpoint_offset > 0)
-    valid_conv = (
-        (cols < WIDTH * STATE_LEN) & valid_checkpoint & (checkpoint_offset >= STATE_LEN)
-    )
-    width_idx = cols // STATE_LEN
-    history_idx = cols % STATE_LEN
-    checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
-    token_idx = checkpoint_end - STATE_LEN + history_idx
-    values = tl.load(
-        x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
-        mask=valid_conv,
-    )
-    tl.store(
-        conv_state_ptr
-        + state_idx * state_stride_0
-        + width_idx * state_stride_1
-        + history_idx * state_stride_2,
-        values,
-        mask=valid_conv,
-    )
-
     valid_recurrent = (cols < RECURRENT_ROW_SIZE) & valid_checkpoint
     recurrent = tl.load(
         recurrent_checkpoint_ptr + seq_idx * checkpoint_stride_0 + cols,
@@ -841,6 +810,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         cache_indices=non_spec_state_indices_tensor,
                         query_start_loc=non_spec_query_start_loc,
                         metadata=m,
+                        checkpoint_offsets=(
+                            checkpoint.checkpoint_offsets
+                            if checkpoint is not None
+                            else None
+                        ),
+                        checkpoint_state_indices=(
+                            checkpoint.state_indices
+                            if checkpoint is not None
+                            else None
+                        ),
                     ).transpose(0, 1)
 
                 q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
@@ -895,36 +874,21 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         )
                         core_attn_out_non_spec = flashkda_out
                         last_recurrent_state = final_state
-                        state_len = conv_state.shape[-1]
-                        width = mixed_qkv_ns.shape[-1]
                         recurrent_row_size = checkpoint_state[0].numel()
                         block_size = 256
-                        _store_cache_checkpoints_kernel[
+                        _store_recurrent_cache_checkpoints_kernel[
                             (
                                 checkpoint_offsets.numel(),
-                                triton.cdiv(
-                                    max(width * state_len, recurrent_row_size),
-                                    block_size,
-                                ),
+                                triton.cdiv(recurrent_row_size, block_size),
                             )
                         ](
-                            mixed_qkv_ns,
-                            conv_state,
                             checkpoint_state,
                             recurrent_state,
-                            non_spec_query_start_loc,
                             checkpoint_offsets,
                             checkpoint.state_indices,
-                            mixed_qkv_ns.stride(0),
-                            mixed_qkv_ns.stride(1),
-                            conv_state.stride(0),
-                            conv_state.stride(1),
-                            conv_state.stride(2),
                             checkpoint_state.stride(0),
                             recurrent_state.stride(0),
                             checkpoint_offsets.stride(0),
-                            state_len,
-                            width,
                             recurrent_row_size,
                             NULL_BLOCK_ID,
                             block_size,
