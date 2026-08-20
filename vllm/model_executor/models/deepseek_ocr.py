@@ -320,7 +320,9 @@ class DeepseekOCRMultiModalProcessor(
         patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            images_spatial_crop=MultiModalFieldConfig.batched("image"),
+            images_spatial_crop=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             images_crop=MultiModalFieldConfig.flat_from_sizes(
                 "image", patches_per_image
             ),
