@@ -34,7 +34,7 @@ from .constant import (
 )
 from .manager import PagedShmManager
 from .storage import PagedShmStorage
-from .types import AllocatedShmItem, ShmItem
+from .types import ShmAllocation, ShmWriteRequest
 
 logger = init_logger(__name__)
 
@@ -57,7 +57,7 @@ class PagedShmServer:
         self.block_size = self.storage.block_size
 
         # Priority queue for pending open_write requests.
-        # Elements: (deadline, identity, list_of_ShmItem)
+        # Elements: (deadline, identity, list_of_ShmWriteRequest)
         self.wait_for_open_write: PriorityQueue = PriorityQueue()
 
         # Per-uuid priority queues for pending open_read requests.
@@ -88,7 +88,7 @@ class PagedShmServer:
         items = write_request["items"]
         timeout = float(write_request.get("timeout", 0.0))
 
-        item_objs = [ShmItem(**item) for item in items]
+        item_objs = [ShmWriteRequest(**item) for item in items]
         try:
             allocated = self.manager.open_write(item_objs)
         except MemoryError:
@@ -101,7 +101,7 @@ class PagedShmServer:
 
         result = [
             asdict(
-                AllocatedShmItem(
+                ShmAllocation(
                     uuid=a.uuid, size=a.size, blocks=a.blocks, use_cache=a.use_cache
                 )
             )
@@ -143,7 +143,7 @@ class PagedShmServer:
     def _open_read(self, uuid: str) -> str:
         """Internal helper to open a read reference and build the response."""
         item = self.manager.open_read(uuid)
-        resp = AllocatedShmItem(
+        resp = ShmAllocation(
             uuid=item.uuid, size=item.size, blocks=item.blocks, use_cache=item.use_cache
         )
         return json.dumps({"status": "ok", "data": asdict(resp)})
@@ -183,7 +183,7 @@ class PagedShmServer:
                         "status": "ok",
                         "data": [
                             asdict(
-                                AllocatedShmItem(
+                                ShmAllocation(
                                     uuid=a.uuid,
                                     size=a.size,
                                     blocks=a.blocks,
@@ -416,7 +416,8 @@ class PagedShmServer:
 
                 if len(frames) < 3:
                     logger.warning(
-                        "Received malformed message with %d frames, ignoring", len(frames)
+                        "Received malformed message with %d frames, ignoring",
+                        len(frames),
                     )
                     continue
 
@@ -447,7 +448,9 @@ class PagedShmServer:
                     try:
                         result = self.open_write(payloads[0].decode("utf-8"), identity)
                         if result is not None:
-                            _send_response([identity, EMPTY, OK, result.encode("utf-8")])
+                            _send_response(
+                                [identity, EMPTY, OK, result.encode("utf-8")]
+                            )
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {e}".encode()
                         _send_response([identity, EMPTY, ERROR, error_msg])
@@ -458,7 +461,9 @@ class PagedShmServer:
                     try:
                         result = self.open_read(payloads[0].decode("utf-8"), identity)
                         if result is not None:
-                            _send_response([identity, EMPTY, OK, result.encode("utf-8")])
+                            _send_response(
+                                [identity, EMPTY, OK, result.encode("utf-8")]
+                            )
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {e}".encode()
                         _send_response([identity, EMPTY, ERROR, error_msg])
