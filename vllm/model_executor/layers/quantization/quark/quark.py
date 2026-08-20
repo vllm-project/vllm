@@ -387,12 +387,9 @@ class QuarkConfig(QuantizationConfig):
 
     def _is_fp8_w8a8(
         self,
-        weight_quant: QuarkQTensorHint,
-        input_quant: QuarkQTensorHint,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
     ) -> bool:
-        weight_quant = self._unwrap_single_quant_config(weight_quant)
-        input_quant = self._unwrap_single_quant_config(input_quant)
-
         # Confirm weights and input quantized.
         if not isinstance(weight_quant, dict) or not isinstance(input_quant, dict):
             return False
@@ -440,12 +437,9 @@ class QuarkConfig(QuantizationConfig):
 
     def _is_static_tensor_w8a8(
         self,
-        weight_quant: QuarkQTensorHint,
-        input_quant: QuarkQTensorHint,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
     ) -> bool:
-        weight_quant = self._unwrap_single_quant_config(weight_quant)
-        input_quant = self._unwrap_single_quant_config(input_quant)
-
         # Confirm weights and input quantized.
         if not isinstance(weight_quant, dict) or not isinstance(input_quant, dict):
             return False
@@ -496,13 +490,11 @@ class QuarkConfig(QuantizationConfig):
 
     def _is_dynamic_per_token_w8a8(
         self,
-        weight_quant: QuarkQTensorHint,
-        input_quant: QuarkQTensorHint,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
     ) -> bool:
         """Detect W8A8 INT8 with per-tensor or per-channel
         weights and dynamic per-token input."""
-        weight_quant = self._unwrap_single_quant_config(weight_quant)
-        input_quant = self._unwrap_single_quant_config(input_quant)
         if not isinstance(weight_quant, dict) or not isinstance(input_quant, dict):
             return False
 
@@ -577,8 +569,8 @@ class QuarkConfig(QuantizationConfig):
 
     def _is_w_ocp_mx_a_x(
         self,
-        weight_quant: QuarkQTensorHint,
-        input_quant: QuarkQTensorHint,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
     ) -> bool:
         """
         This check returns True only if it is an OCP-MX weight quantization.
@@ -586,9 +578,6 @@ class QuarkConfig(QuantizationConfig):
         The rationale for checking only the weight type is that
         the model loading concept and process primarily concerns the weights themselves.
         """
-        weight_quant = self._unwrap_single_quant_config(weight_quant)
-        input_quant = self._unwrap_single_quant_config(input_quant)
-
         # Confirm weights quantized.
         if not isinstance(weight_quant, dict):
             logger.debug(
@@ -748,15 +737,12 @@ class QuarkConfig(QuantizationConfig):
             or isinstance(input_config, list)
             and len(input_config) > 1
         ):
-            if (
-                isinstance(input_config, list)
-                and len(input_config) > 1
-                and self._is_nvfp4(weight_config, input_config)
-            ):
+            if self._is_nvfp4(weight_config, input_config):
                 weight_key, activation_key = QuarkNVFP4.get_quant_keys()
                 return weight_key, activation_key, QuarkNVFP4
+
             raise NotImplementedError(
-                "Multi-entry weight quantization configs are only supported for NVFP4."
+                "Multi-entry weight or activation quantization configs are only supported for NVFP4."
             )
 
         weight_config = self._unwrap_single_quant_config(weight_config)
