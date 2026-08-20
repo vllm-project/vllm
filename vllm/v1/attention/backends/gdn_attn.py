@@ -239,6 +239,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 or num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
                 == 0
             ):
+                num_spec_decodes = 0
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
             else:
