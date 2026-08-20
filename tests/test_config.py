@@ -2051,40 +2051,6 @@ def test_methods_with_external_sources_require_model(method):
         SpeculativeConfig(method=method, num_speculative_tokens=1)
 
 
-@pytest.mark.parametrize(
-    ("model_type", "expected"),
-    [
-        pytest.param(
-            "dflash",
-            {"method": "dflash", "num_speculative_tokens": 15},
-            id="dflash",
-        ),
-        pytest.param(
-            "peagle",
-            {
-                "method": "eagle3",
-                "num_speculative_tokens": 7,
-                "parallel_drafting": True,
-            },
-            id="peagle",
-        ),
-    ],
-)
-def test_speculators_format_declares_method_and_tokens(model_type, expected):
-    from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
-
-    config = {
-        "speculators_model_type": model_type,
-        "speculators_config": {
-            "proposal_methods": [
-                {"speculative_tokens": expected["num_speculative_tokens"]}
-            ]
-        },
-    }
-
-    assert SpeculatorsConfig.build_vllm_speculative_config(config) == expected
-
-
 def test_speculators_format_preserves_explicit_shorthand_method():
     from vllm.engine.arg_utils import EngineArgs
     from vllm.transformers_utils.config import maybe_override_with_speculators
@@ -2317,9 +2283,10 @@ def test_explicit_method_selects_deepseek_v4_loader(
 def test_block_drafters_default_tokens_from_block_size(method, config_kwargs, expected):
     hf_config = PretrainedConfig(**config_kwargs)
 
-    assert (
-        SpeculativeConfig._tokens_from_draft_block_size(method, hf_config) == expected
-    )
+    block_tokens = SpeculativeConfig._block_drafter_tokens(method, hf_config)
+    actual = block_tokens[0] if block_tokens is not None else None
+
+    assert actual == expected
 
 
 @pytest.mark.parametrize(

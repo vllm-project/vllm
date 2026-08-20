@@ -718,15 +718,6 @@ class SpeculativeConfig:
         return hf_config
 
     @staticmethod
-    def _tokens_from_draft_block_size(
-        method: SpeculativeMethod,
-        hf_config: PretrainedConfig,
-    ) -> int | None:
-        """Return the checkpoint's default proposal count for block drafters."""
-        block_tokens = SpeculativeConfig._block_drafter_tokens(method, hf_config)
-        return block_tokens[0] if block_tokens is not None else None
-
-    @staticmethod
     def _block_drafter_tokens(
         method: SpeculativeMethod,
         hf_config: PretrainedConfig,
@@ -802,23 +793,11 @@ class SpeculativeConfig:
         target_hf_overrides: HfOverrides | None,
         method: SpeculativeMethod,
     ) -> Callable[[PretrainedConfig], PretrainedConfig]:
-        """Build method-selected ``hf_overrides`` for the draft ``ModelConfig``.
+        """Build method-selected overrides for the draft ``ModelConfig``.
 
-        The explicit method selects any structural loader normalization. A
-        callable target override is then composed after that normalization.
-
-        Callable overrides on the target are config-to-config transforms
-        (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
-        reach the draft config — otherwise a draft belonging to a large
-        target is instantiated at full size even when the target is shrunk.
-        Dict overrides are target-specific key patches and are not applied
-        to the draft.
-
-        The composed override must stay picklable: the draft ``ModelConfig``
-        is sent to spawned engine-core processes, so a local closure would
-        fail with ``Can't get local object`` during pickling. Bind the
-        target via ``functools.partial`` over a module-referenceable static
-        method instead.
+        Callable target transforms run after method normalization; dict
+        overrides remain target-only. Composed callables use
+        ``functools.partial`` so they stay picklable.
         """
         draft_hf_override = {
             "mtp": SpeculativeConfig.hf_config_override,
