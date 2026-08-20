@@ -200,7 +200,17 @@ class QuarkConfig(QuantizationConfig):
         | type[UnquantizedFusedMoEMethod]
         | None,
     ]:
-        """Return the target selected for ``prefix`` and ``layer_type``."""
+        """Return weight key, activation key, and quant method class for
+        the given ``prefix`` and ``layer_type``.
+
+        This is the counterpart of ``get_quant_method`` without quant method
+        instantiation.
+
+        TODO: integrate as part of base QuantizationConfig.get_quant_method_target
+        in the future.
+
+        ``None`` denotes an unquantized/BF16 activation.
+        """
         is_routed_experts = issubclass(layer_type, RoutedExperts)
         if should_ignore_layer(
             prefix,

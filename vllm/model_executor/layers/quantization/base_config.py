@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
@@ -12,12 +11,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
-        UnquantizedFusedMoEMethod,
-    )
-    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization import QuantizationMethods
-    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.model_executor.models.utils import WeightsMapper
 else:
     QuantizationMethods = str
@@ -139,7 +133,7 @@ class QuantizationConfig(ABC):
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: dict[str, Any]) -> QuantizationConfig:
+    def from_config(cls, config: dict[str, Any]) -> "QuantizationConfig":
         """Create a config class from the model's quantization config."""
         raise NotImplementedError
 
@@ -186,8 +180,7 @@ class QuantizationConfig(ABC):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
-        """Get the quantize method to use for the quantized layer, from the
-        pre-quantized checkpoint quant_method.
+        """Get the quantize method to use for the quantized layer.
 
         Args:
             layer: The layer for the quant method.
@@ -198,31 +191,8 @@ class QuantizationConfig(ABC):
         """
         raise NotImplementedError
 
-    def get_quant_method_target(
-        self, prefix: str, layer_type: type[torch.nn.Module]
-    ) -> tuple[
-        QuantKey | None,
-        QuantKey | None,
-        type[QuantizeMethodBase]
-        | type[UnquantizedLinearMethod]
-        | type[UnquantizedFusedMoEMethod]
-        | None,
-    ]:
-        """Return weight key, activation key, and quant method class for
-        the given ``prefix`` and ``layer_type``.
-
-        This is the counterpart of ``get_quant_method`` without quant method
-        instantiation.
-
-        ``None`` denotes an unquantized/BF16 activation.
-        """
-        raise NotImplementedError(
-            f"The quantization config {type(self)} does not yet implement "
-            "get_quant_method_target. Please open an issue."
-        )
-
     @staticmethod
-    def get_cache_scale_mapper() -> WeightsMapper:
+    def get_cache_scale_mapper() -> "WeightsMapper":
         """Mapping from checkpoint KV-cache scale names to vLLM scale names.
 
         Returning a mapper here causes `AutoWeightsLoader` to apply it to the
@@ -257,7 +227,7 @@ class QuantizationConfig(ABC):
         return WeightsMapper(orig_to_new_regex=orig_to_new_regex)
 
     def apply_vllm_mapper(  # noqa: B027
-        self, hf_to_vllm_mapper: WeightsMapper
+        self, hf_to_vllm_mapper: "WeightsMapper"
     ):
         """
         Interface for models to update module names referenced in
