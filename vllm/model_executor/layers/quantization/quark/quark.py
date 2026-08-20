@@ -231,10 +231,11 @@ class QuarkConfig(QuantizationConfig):
         if issubclass(layer_type, Attention):
             return None, None, QuarkKVCacheMethod
         if is_routed_experts:
-            target = QuarkMoEMethod.get_moe_method_target(self, layer_type, prefix)
-            if target[2] is None:
+            weight_quant_key, act_quant_key, quant_method_cls = (
+                QuarkMoEMethod.get_moe_method_target(self, layer_type, prefix)
+            )
+            if quant_method_cls is None:
                 return None, None, None
-            weight_quant_key, act_quant_key, quant_method_cls = target
             return weight_quant_key, act_quant_key, quant_method_cls
         return None, None, None
 

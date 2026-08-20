@@ -60,10 +60,12 @@ class QuarkOCP_MX(QuarkScheme):
         weight_quant_spec: dict[str, Any] | None,
         input_quant_spec: dict[str, Any] | None,
     ) -> tuple[QuantKey, QuantKey | None]:
-        """Return the quantization keys selected by this OCP MX scheme."""
         if weight_quant_spec is None:
             raise ValueError("OCP MX requires a weight quantization config.")
+
         weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
+        weight_quant_key = _WEIGHT_QUANT_KEY_MAP[weight_dtype]
+
         input_dtype = (
             input_quant_spec["dtype"].replace("fp", "mxfp")
             if input_quant_spec is not None
@@ -72,7 +74,7 @@ class QuarkOCP_MX(QuarkScheme):
         activation_key = (
             _ACTIVATION_QUANT_KEY_MAP[input_dtype] if input_dtype is not None else None
         )
-        return _WEIGHT_QUANT_KEY_MAP[weight_dtype], activation_key
+        return weight_quant_key, activation_key
 
     def __init__(
         self,

@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+
 __all__ = ["QuarkScheme"]
 
 
@@ -13,6 +15,13 @@ class QuarkScheme(ABC):
     Abstract class used to describe the weight creation and forward pass
     of different quantization schemes supported by Quark.
     """
+
+    @classmethod
+    @abstractmethod
+    def get_quant_keys(cls, *args, **kwargs) -> tuple[QuantKey, QuantKey | None]:
+        """Get the weight quant key, activation quant key specified by
+        the checkpoint config."""
+        raise NotImplementedError
 
     @classmethod
     @abstractmethod

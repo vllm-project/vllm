@@ -43,7 +43,6 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
 
     @classmethod
     def get_quant_keys(cls) -> tuple[QuantKey, QuantKey]:
-        """Return the W4A8 MXFP4+FP8 quantization keys."""
         return kMxfp4Static, kFp8StaticTensorSym
 
     def __init__(

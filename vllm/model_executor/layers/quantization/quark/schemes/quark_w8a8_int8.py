@@ -32,16 +32,15 @@ class QuarkW8A8Int8(QuarkScheme):
     def get_quant_keys(
         cls, qscheme: str, is_static_input_scheme: bool
     ) -> tuple[QuantKey, QuantKey]:
-        """Return the quantization keys used by the INT8 linear kernel."""
-        weight_key = (
+        weight_quant_key = (
             kInt8StaticChannelSym if qscheme == "per_channel" else kInt8StaticTensorSym
         )
         if is_static_input_scheme:
-            return weight_key, kInt8StaticTensorSym
-        activation_key = (
+            return weight_quant_key, kInt8StaticTensorSym
+        activation_quant_key = (
             kInt8DynamicTokenSym if qscheme == "per_channel" else kInt8DynamicTensorSym
         )
-        return weight_key, activation_key
+        return weight_quant_key, activation_quant_key
 
     def __init__(
         self,

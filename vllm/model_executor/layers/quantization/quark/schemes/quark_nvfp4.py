@@ -43,7 +43,6 @@ class QuarkNVFP4(QuarkScheme):
 
     @classmethod
     def get_quant_keys(cls) -> tuple[QuantKey, QuantKey]:
-        """Return the fixed NVFP4 quantization keys."""
         return kNvfp4Static, kNvfp4Dynamic
 
     def __init__(

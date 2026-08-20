@@ -49,7 +49,6 @@ class QuarkW8A8Fp8(QuarkScheme):
         weight_config: dict[str, Any] | None,
         input_config: dict[str, Any] | None,
     ) -> tuple[QuantKey, QuantKey]:
-        """Return the quantization keys used by the FP8 linear kernel."""
         assert weight_config is not None
 
         weight_qscheme = cast(str, weight_config.get("qscheme"))
@@ -59,17 +58,23 @@ class QuarkW8A8Fp8(QuarkScheme):
         static_input_scales = input_config is not None and not input_config.get(
             "is_dynamic"
         )
-        activation_key = (
-            kFp8DynamicTokenSym
-            if not static_input_scales and input_qscheme == "per_channel"
-            else kFp8StaticTensorSym
+        per_token_activation = (
+            not static_input_scales and input_qscheme == "per_channel"
         )
-        weight_key = (
-            kFp8StaticChannelSym
-            if weight_qscheme == "per_channel"
-            else kFp8StaticTensorSym
+        per_channel_weight = weight_qscheme == "per_channel"
+
+        activation_quant_key = (
+            kFp8DynamicTokenSym if per_token_activation else kFp8StaticTensorSym
         )
-        return weight_key, activation_key
+
+        # A per-output-channel weight scale is one fp32 value per weight row
+        # (length N). Tag it as ``GroupShape.PER_CHANNEL`` to match the
+        # canonical compressed-tensors CHANNEL strategy, so kernel selection
+        # (e.g. AITER's pre-shuffled FP8 GEMM) treats it uniformly.
+        weight_quant_key = (
+            kFp8StaticChannelSym if per_channel_weight else kFp8StaticTensorSym
+        )
+        return weight_quant_key, activation_quant_key
 
     def __init__(
         self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
@@ -233,7 +238,6 @@ class QuarkW8A8Fp8PerBlock(QuarkScheme):
         weight_config: dict[str, Any] | None,
         input_config: dict[str, Any] | None,
     ) -> tuple[QuantKey, QuantKey]:
-        """Return the quantization keys used by the block-FP8 linear kernel."""
         assert weight_config is not None
         assert input_config is not None
         return kFp8Static128BlockSym, kFp8Dynamic128Sym
