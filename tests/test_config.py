@@ -514,6 +514,22 @@ def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slot
     assert speculative_config.max_num_new_slots_for_drafting == expected_slots
 
 
+@pytest.mark.parametrize(("method", "expected_pp"), [("mtp", 1), ("eagle", 2)])
+def test_draft_model_parallel_validation(method, expected_pp):
+    speculative_config = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
+    validated_configs = []
+    speculative_config.method = method
+    speculative_config.draft_model_config = SimpleNamespace(
+        verify_with_parallel_config=validated_configs.append
+    )
+    speculative_config.draft_parallel_config = ParallelConfig(pipeline_parallel_size=2)
+
+    speculative_config._verify_args()
+
+    assert validated_configs[0].pipeline_parallel_size == expected_pp
+    assert speculative_config.draft_parallel_config.pipeline_parallel_size == 2
+
+
 @dataclass
 class _TestConfigFields:
     a: int
