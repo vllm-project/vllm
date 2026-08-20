@@ -66,19 +66,10 @@ else:
 
 logger = init_logger(__name__)
 
-DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
-    {
-        "DeepseekV2ForCausalLM",
-        "DeepseekV32ForCausalLM",
-        "DeepseekV4ForCausalLM",
-        "GlmMoeDsaForCausalLM",
-        "GraniteMoeForCausalLM",
-        "InklingForCausalLM",
-        "InklingForConditionalGeneration",
-        "KimiK3ForConditionalGeneration",
-        "LongcatFlashNgramForCausalLM",
-        "Qwen2MoeForCausalLM",
-    }
+# TODO(rocm): These models are either unsupported by MRV2 or slower with
+# MRV2 on AMD GPUs.
+ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
+    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM"}
 )
 
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
@@ -97,21 +88,6 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
-
-
-@lru_cache
-def default_v2_model_runner_architectures() -> frozenset[str]:
-    """Architectures defaulting to the V2 model runner on this platform."""
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        # TODO(rocm): These models are either unsupported by MRV2 or slower with
-        # MRV2 on AMD GPUs.
-        return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES - {
-            "DeepseekV32ForCausalLM",
-            "DeepseekV4ForCausalLM",
-        }
-    return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
 
 @lru_cache
@@ -651,36 +627,17 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        # PCP runtime support is implemented only by the V2 model runner.
-        if self.parallel_config.prefill_context_parallel_size > 1:
-            return True
+        from vllm.platforms import current_platform
 
-        # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
-        # is not otherwise a default-V2 architecture, so force V2 for it. If V2
-        # is unsupported for the rest of the config, _validate_v2_model_runner
-        # raises rather than silently falling back to V1 (which can't run dspark).
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.method == "dspark"
-        ):
-            return True
-
-        # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only);
-        # force V2 as for dspark, since a hybrid target otherwise defaults to V1.
-        if self._dflash_needs_multi_kv_group():
-            return True
-
-        # The DFlash2 candidate selector exists only in the V2 speculator. On V1
-        # the same checkpoint drafts through DFlashProposer, which never calls
-        # it, so the draft degrades to DFlash1 silently. Force V2 as for dspark.
-        if self._is_dflash2_draft():
-            return True
-
-        if self.model_config is not None and self.model_config.is_diffusion:
-            return True
-
-        if not self._is_default_v2_model_runner_model():
-            return False
+        model_config = self.model_config
+        if model_config is not None and current_platform.is_rocm():
+            architectures = getattr(model_config, "architectures", ())
+            if any(arch in ROCM_DEFAULT_MRV1_ARCHITECTURES for arch in architectures):
+                logger.warning_once(
+                    "Defaulting to V1 model runner on ROCm for model architectures: %s",
+                    architectures,
+                )
+                return False
 
         if not HAS_TRITON:
             logger.warning_once(
@@ -721,26 +678,6 @@ class VllmConfig:
         layer_types = getattr(draft_config.hf_config, "layer_types", None) or []
         num_sliding = sum(lt == "sliding_attention" for lt in layer_types)
         return 0 < num_sliding < len(layer_types)
-
-    def _is_default_v2_model_runner_model(self) -> bool:
-        model_config = self.model_config
-        if model_config is None:
-            return False
-
-        architectures = getattr(model_config, "architectures", [])
-        default_architectures = default_v2_model_runner_architectures()
-        is_default_v2_architecture = any(
-            arch in default_architectures for arch in architectures
-        )
-
-        if getattr(model_config, "is_hybrid", False) and (
-            not is_default_v2_architecture
-        ):
-            return False
-
-        if getattr(model_config, "is_attention_free", False):
-            return False
-        return is_default_v2_architecture or not model_config.is_moe
 
     def _uses_breakable_cudagraph_by_default(self) -> bool:
         model_config = self.model_config
@@ -1669,11 +1606,8 @@ class VllmConfig:
 
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
-        elif self.parallel_config.prefill_context_parallel_size > 1:
-            raise ValueError(
-                "Prefill context parallelism requires Model Runner V2. "
-                "Remove VLLM_USE_V2_MODEL_RUNNER=0."
-            )
+        else:
+            self._validate_v1_model_runner()
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
@@ -2542,6 +2476,32 @@ class VllmConfig:
 
         return unsupported
 
+    def _get_v1_model_runner_unsupported_features(self) -> list[str]:
+        unsupported: list[str] = []
+
+        # PCP runtime support is implemented only by the V2 model runner.
+        if self.parallel_config.prefill_context_parallel_size > 1:
+            unsupported.append("prefill context parallel")
+
+        # DSpark is implemented only by the V2 GPU model runner.
+        if self.speculative_config and self.speculative_config.method == "dspark":
+            unsupported.append("dspark speculative decoding")
+
+        # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
+        if self._dflash_needs_multi_kv_group():
+            unsupported.append("mixed sliding/full dflash drafts")
+
+        # The DFlash2 candidate selector exists only in the V2 speculator. On
+        # V1 the same checkpoint drafts through DFlashProposer, which never
+        # calls it, so the draft would degrade to DFlash1 silently.
+        if self._is_dflash2_draft():
+            unsupported.append("dflash2 drafts")
+
+        if self.model_config is not None and self.model_config.is_diffusion:
+            unsupported.append("diffusion models")
+
+        return unsupported
+
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
         if not HAS_TRITON:
@@ -2551,6 +2511,13 @@ class VllmConfig:
         if unsupported:
             raise ValueError(
                 f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
+            )
+
+    def _validate_v1_model_runner(self) -> None:
+        unsupported = self._get_v1_model_runner_unsupported_features()
+        if unsupported:
+            raise ValueError(
+                f"Model Runner V1 does not support: {', '.join(unsupported)}"
             )
 
     def validate_block_size(self) -> None:
