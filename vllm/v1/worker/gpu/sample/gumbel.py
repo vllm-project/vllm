@@ -91,8 +91,10 @@ def gumbel_block_argmax(
     temp_ptr,
     seeds_ptr,
     pos_ptr,
+    # [max_num_reqs, num_cols, vocab_size]
     logits_cache_ptr,
-    logits_cache_stride,
+    logits_cache_stride_0,
+    logits_cache_stride_1,
     logits_cache_col_ptr,
     vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
@@ -115,8 +117,8 @@ def gumbel_block_argmax(
             col = tl.load(logits_cache_col_ptr)
         tl.store(
             logits_cache_ptr
-            + req_state_idx * logits_cache_stride
-            + col * vocab_size
+            + req_state_idx * logits_cache_stride_0
+            + col * logits_cache_stride_1
             + block,
             logits,
             mask=mask & is_valid_req,
@@ -164,8 +166,10 @@ def _gumbel_sample_kernel(
     local_argmax_stride,
     local_max_ptr,
     local_max_stride,
+    # [max_num_reqs, num_cols, vocab_size]
     logits_cache_ptr,
-    logits_cache_stride,
+    logits_cache_stride_0,
+    logits_cache_stride_1,
     logits_cache_col_ptr,
     logits_ptr,
     logits_stride,
@@ -200,7 +204,8 @@ def _gumbel_sample_kernel(
         seeds_ptr,
         pos_ptr,
         logits_cache_ptr,
-        logits_cache_stride,
+        logits_cache_stride_0,
+        logits_cache_stride_1,
         logits_cache_col_ptr,
         vocab_size,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
@@ -229,6 +234,12 @@ def gumbel_sample(
     if logits_cache_col is not None:
         logits_cache_col = logits_cache_col.contiguous()
     num_tokens, vocab_size = logits.shape
+    if logits_cache is not None:
+        assert logits_cache.size(-1) >= vocab_size, (
+            f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
+            f"than the sampled logits ({vocab_size}). Cached logits would be "
+            "truncated."
+        )
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
@@ -242,6 +253,7 @@ def gumbel_sample(
         local_max.stride(0),
         logits_cache,
         logits_cache.stride(0) if logits_cache is not None else 0,
+        logits_cache.stride(1) if logits_cache is not None else 0,
         logits_cache_col,
         logits,
         logits.stride(0),
