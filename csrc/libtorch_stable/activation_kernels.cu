@@ -549,13 +549,8 @@ __device__ __forceinline__ float warp_reduce_max(float v) {
   return v;
 }
 
-// Non-negative v -> monotone uint bits, so one redux.sync.max (sm_80+).
 __device__ __forceinline__ float warp_reduce_absmax(float v) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(USE_ROCM)
-  return __uint_as_float(__reduce_max_sync(0xffffffffu, __float_as_uint(v)));
-#else
   return warp_reduce_max(v);
-#endif
 }
 
 template <typename scalar_t, typename fp8_type, int THREADS, int NUM_STAGES,
