@@ -14,6 +14,8 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_aiter_indexer_qk_rope_quant_and_cache,
+    rocm_aiter_indexer_qk_rope_quant_and_cache_fake,
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
@@ -1685,6 +1687,7 @@ class rocm_aiter_ops:
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+    _INDEXER_QK_FUSION_ENABLED = envs.VLLM_ROCM_USE_AITER_INDEXER_QK_FUSION
     _SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -1718,6 +1721,7 @@ class rocm_aiter_ops:
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+        cls._INDEXER_QK_FUSION_ENABLED = envs.VLLM_ROCM_USE_AITER_INDEXER_QK_FUSION
         cls._SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
@@ -1831,6 +1835,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_indexer_qk_fusion_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._INDEXER_QK_FUSION_ENABLED
 
     @classmethod
     @if_aiter_supported
@@ -2218,6 +2227,14 @@ class rocm_aiter_ops:
                 op_func=rocm_aiter_sparse_attn_indexer,
                 mutates_args=["topk_indices_buffer"],
                 fake_impl=rocm_aiter_sparse_attn_indexer_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_indexer_qk_rope_quant_and_cache",
+                op_func=rocm_aiter_indexer_qk_rope_quant_and_cache,
+                mutates_args=["kv_cache", "q_fp8_out", "weights_out"],
+                fake_impl=rocm_aiter_indexer_qk_rope_quant_and_cache_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
