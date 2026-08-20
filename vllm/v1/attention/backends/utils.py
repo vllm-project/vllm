@@ -539,8 +539,14 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
     decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
-    decode_max_query_len = int(num_decode_tokens.max().item())
-    total_num_decode_tokens = int(num_decode_tokens.sum().item())
+
+    # `num_decode_tokens` is a histogram over `logits_indices`, so its total is
+    # just how many there were -- already known as a Python int.
+    total_num_decode_tokens = num_logits_indices
+
+    # Largest per-request logits count.
+    decode_max_query_len = common_attn_metadata.max_logits_per_req
+    assert decode_max_query_len is not None
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,

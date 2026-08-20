@@ -24,7 +24,7 @@
 
 ARG CUDA_VERSION=13.0.3
 ARG PYTHON_VERSION=3.12
-ARG UBUNTU_VERSION=22.04
+ARG UBUNTU_VERSION=24.04
 # DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
 # This version is used for CUDA 12+ builds to keep the DeepEP build and
 # runtime NCCL versions compatible.
@@ -279,11 +279,16 @@ ENV CARGO_BUILD_JOBS=4
 # separate local sccache daemon while sharing the same remote cache backend.
 ENV SCCACHE_SERVER_PORT=4227
 
+# Only Rust inputs are present, so suppress the artificial dirty state caused
+# by other tracked files being absent from this build stage.
+ENV SETUPTOOLS_SCM_PRETEND_METADATA={dirty=false}
+
 # Build the release artifacts. Cache cargo registry/git, but not target/,
 # because stale target metadata can outlive source updates across BuildKit
 # cache reuse.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=bind,source=.git,target=.git \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
@@ -568,6 +573,7 @@ RUN dnf install -y numactl-devel \
 ARG PYTORCH_NIGHTLY
 
 # Install development dependencies
+COPY requirements/common.txt requirements/common.txt
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
@@ -593,7 +599,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 #################### DEV IMAGE ####################
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM ${FINAL_BASE_IMAGE} AS vllm-base
+FROM ${FINAL_BASE_IMAGE} AS vllm-runtime-base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
@@ -752,7 +758,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.15.post1
+ARG FLASHINFER_VERSION=0.6.17
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
@@ -765,7 +771,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install gdrcopy (saves ~6s per build)
 # TODO (huydhn): There is no prebuilt gdrcopy package on 12.9 at the moment
 ARG GDRCOPY_CUDA_VERSION=12.8
-ARG GDRCOPY_OS_VERSION=Ubuntu22_04
+ARG GDRCOPY_OS_VERSION=Ubuntu24_04
 ARG TARGETPLATFORM
 COPY tools/install_gdrcopy.sh /tmp/install_gdrcopy.sh
 RUN set -eux; \
@@ -779,24 +785,18 @@ RUN set -eux; \
 
 # Install vllm-openai dependencies (saves ~2.6s per build)
 # These are stable packages that don't depend on vLLM itself
-# From versions.json: .bitsandbytes.x86_64, .bitsandbytes.arm64
 # From versions.json: .openai_server_extras.timm, .openai_server_extras.runai_model_streamer
-ARG BITSANDBYTES_VERSION_X86=0.46.1
-ARG BITSANDBYTES_VERSION_ARM64=0.42.0
 ARG TIMM_VERSION=">=1.0.17"
 ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
 RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_ARM64}"; \
-    else \
-        BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
-    fi; \
     uv pip install --system accelerate 'modelscope<1.38' \
-        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
+        "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
 # ============================================================
+
+FROM vllm-runtime-base AS vllm-base
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -857,11 +857,8 @@ COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
 #################### vLLM installation IMAGE ####################
 #################### TEST IMAGE ####################
-# image to run unit testing suite
-# note that this uses vllm installed by `pip`
-FROM vllm-base AS test
-
-ADD . /vllm-workspace/
+# Stable dependencies for the unit testing image
+FROM vllm-runtime-base AS test-deps
 
 ARG PYTHON_VERSION
 ARG TARGETPLATFORM
@@ -869,6 +866,7 @@ ARG TARGETPLATFORM
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -884,6 +882,7 @@ RUN apt-get update -y \
 ARG PYTORCH_NIGHTLY
 
 # Install development dependencies (for testing)
+COPY requirements/common.txt requirements/common.txt
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
@@ -914,6 +913,53 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi \
     fi
 
+# image to run unit testing suite
+# note that this uses vllm installed by `pip`
+FROM test-deps AS test
+
+ARG PYTHON_VERSION
+
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
+
+# We can specify the standard or nightly build of PyTorch
+ARG PYTORCH_NIGHTLY
+
+# Install vLLM and EP kernel wheels after the stable test dependencies so
+# source-only changes do not invalidate the dependency layers above.
+COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=cache,target=/opt/uv/cache \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        echo "Installing torch nightly..." \
+        && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        && echo "Installing vLLM..." \
+        && uv pip install --system dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    else \
+        echo "Installing vLLM..." \
+        && uv pip install --system dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi
+
+# Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
+RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
+    --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --system ep_kernels/dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# See the matching comment in the vllm-base stage.
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
+
+ADD . /vllm-workspace/
+
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
@@ -923,6 +969,9 @@ ENV HF_XET_HIGH_PERFORMANCE 1
 
 # increase timeout for hf downloads (for testing)
 ENV HF_HUB_DOWNLOAD_TIMEOUT 60
+
+# Catch GPU<->CPU syncs in execute_model/sample_tokens
+ENV VLLM_GPU_SYNC_CHECK=error
 
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
@@ -975,11 +1024,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
-        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is
-        # installed. Chained with && through the mooncake swap below: this RUN has no
-        # `set -e`, so its status is that of the last command, and a trailing no-op
-        # would otherwise mask a failure here.
-        uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR} && \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
         # Mirrors .buildkite/scripts/install-kv-connectors.sh.

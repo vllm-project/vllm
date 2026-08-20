@@ -9,6 +9,7 @@ mod grpc;
 mod listener;
 mod lora;
 mod middleware;
+mod render;
 mod routes;
 mod runtime;
 mod server_info;
@@ -35,6 +36,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
+pub use render::{RenderConfig, serve_render};
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
@@ -214,7 +216,8 @@ where
         health_reporter.set_serving::<grpc::InferenceGrpcService>().await;
         health_reporter.set_serving::<grpc::ControlGrpcService>().await;
         let control_service =
-            grpc::ControlGrpcService::new(grpc::ControlServiceImpl::new(state.clone()));
+            grpc::ControlGrpcService::new(grpc::ControlServiceImpl::new(state.clone()))
+                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
         let inference_service =
             grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
                 .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);

@@ -78,12 +78,14 @@ def _minicpmv4_6_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         tgt_sizes=MultiModalFieldConfig.batched("image"),
         image_embeds=MultiModalFieldConfig.batched("image"),
         video_pixel_values=MultiModalFieldConfig.batched("video"),
-        video_image_sizes=MultiModalFieldConfig.batched("video"),
+        video_image_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         video_tgt_sizes=MultiModalFieldConfig.batched("video"),
         video_embeds=MultiModalFieldConfig.batched("video"),
     )
     if "use_vit_merger" in hf_inputs:
-        fields["use_vit_merger"] = MultiModalFieldConfig.batched("image")
+        fields["use_vit_merger"] = MultiModalFieldConfig.batched(
+            "image", keep_on_cpu=True
+        )
     return fields
 
 
@@ -956,6 +958,7 @@ class MiniCPMV4_6ForConditionalGeneration(
             "model.merger.": "merger.",
             "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
+            "mtp.": None,
         }
     )
 
@@ -1279,7 +1282,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["mtp."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import functools
+import os
 from collections.abc import Callable
 
 import torch
 from torch._ops import OpOverload
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -14,6 +17,8 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
+
+logger = init_logger(__name__)
 
 try:
     import pandas as pd
@@ -47,6 +52,83 @@ def is_aiter_found() -> bool:
 # been checked in forward passes that are torch compiled.
 # we keep this global outside to not cause torch compile breaks.
 IS_AITER_FOUND = is_aiter_found()
+
+
+class _DlInfo(ctypes.Structure):
+    _fields_ = [
+        ("dli_fname", ctypes.c_char_p),
+        ("dli_fbase", ctypes.c_void_p),
+        ("dli_sname", ctypes.c_char_p),
+        ("dli_saddr", ctypes.c_void_p),
+    ]
+
+
+_HIP_RUNTIME_HANDLE: ctypes.CDLL | None = None
+
+
+def _find_torch_hip_runtime_path() -> str | None:
+    """Find the HIP runtime already selected by PyTorch's extension graph."""
+    try:
+        torch_extension = ctypes.CDLL(torch._C.__file__)
+        hip_symbol = torch_extension.hipGetDeviceCount
+        dladdr = ctypes.CDLL(None).dladdr
+        dladdr.argtypes = [ctypes.c_void_p, ctypes.POINTER(_DlInfo)]
+        dladdr.restype = ctypes.c_int
+        info = _DlInfo()
+        if not dladdr(ctypes.cast(hip_symbol, ctypes.c_void_p), ctypes.byref(info)):
+            return None
+    except (AttributeError, OSError, TypeError, ctypes.ArgumentError):
+        return None
+    if info.dli_fname is None:
+        return None
+
+    runtime_path = os.fsdecode(info.dli_fname)
+    if "libamdhip64.so" not in os.path.basename(runtime_path):
+        return None
+    return runtime_path
+
+
+def _promote_torch_hip_runtime() -> None:
+    """Make PyTorch's HIP runtime symbols visible to AITER JIT extensions.
+
+    PyTorch loads its native extension with ``RTLD_LOCAL``. Some AITER JIT
+    extensions rely on HIP registration and launch symbols being available in
+    the process-global lookup scope. Reopening the exact runtime that provides
+    PyTorch's ``hipGetDeviceCount`` symbol promotes the existing DSO instead of
+    selecting or initializing a second HIP runtime.
+    """
+    global _HIP_RUNTIME_HANDLE
+    if _HIP_RUNTIME_HANDLE is not None:
+        return
+
+    runtime_path = _find_torch_hip_runtime_path()
+    if runtime_path is None:
+        logger.warning_once(
+            "Could not locate PyTorch's HIP runtime; AITER JIT extensions may "
+            "fail to resolve HIP symbols."
+        )
+        return
+
+    try:
+        # Retain the handle for the process lifetime. Besides preventing a
+        # future dlclose, this documents that the RTLD_GLOBAL promotion is
+        # intentional and must outlive every lazily imported AITER extension.
+        _HIP_RUNTIME_HANDLE = ctypes.CDLL(runtime_path, mode=ctypes.RTLD_GLOBAL)
+    except OSError as err:
+        logger.warning_once(
+            "Could not promote PyTorch's HIP runtime at %s; AITER JIT "
+            "extensions may fail to resolve HIP symbols: %s",
+            runtime_path,
+            err,
+        )
+
+
+def _maybe_promote_torch_hip_runtime() -> None:
+    if current_platform.is_rocm() and IS_AITER_FOUND:
+        _promote_torch_hip_runtime()
+
+
+_maybe_promote_torch_hip_runtime()
 
 
 def is_aiter_found_and_supported() -> bool:
@@ -1939,12 +2021,27 @@ class rocm_aiter_ops:
 
     @staticmethod
     def register_ops_once() -> None:
+        global _OPS_REGISTERED
+
         if not (
             is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4()
         ):
+            if not current_platform.is_rocm():
+                return
+
+            from vllm.platforms.rocm import on_gfx11
+
+            if on_gfx11() and not _OPS_REGISTERED:
+                direct_register_custom_op(
+                    op_name="rocm_aiter_sparse_attn_indexer",
+                    op_func=rocm_aiter_sparse_attn_indexer,
+                    mutates_args=["topk_indices_buffer"],
+                    fake_impl=rocm_aiter_sparse_attn_indexer_fake,
+                    dispatch_key=current_platform.dispatch_key,
+                )
+                _OPS_REGISTERED = True
             return
 
-        global _OPS_REGISTERED
         if not _OPS_REGISTERED:
             # register all the custom ops here
             direct_register_custom_op(
@@ -2238,6 +2335,35 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_mla_dual_rms_norm_per_token_quant_op() -> OpOverload:
         return torch.ops.vllm.fused_mla_dual_rms_norm_per_token_quant.default
+
+    @staticmethod
+    def rms_norm(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+    ) -> torch.Tensor:
+        """RMSNorm via AITER kernel."""
+        import aiter
+
+        return aiter.rms_norm(x, weight, epsilon)
+
+    @staticmethod
+    def rms_norm2d_with_add(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused residual-add + RMSNorm via AITER kernel.
+
+        Returns (normalized_output, residual_sum).
+        """
+        import aiter
+
+        out = torch.empty_like(x)
+        residual_out = torch.empty_like(x)
+        aiter.rmsnorm2d_fwd_with_add(out, x, residual, residual_out, weight, epsilon, 0)
+        return out, residual_out
 
     @staticmethod
     def w8a8_gemm(
@@ -3169,6 +3295,8 @@ class rocm_aiter_ops:
         hc_sinkhorn_eps: float,
         hc_post_mult_value: float,
         sinkhorn_repeat: int,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass for mHC pre block.
@@ -3183,6 +3311,8 @@ class rocm_aiter_ops:
             hc_sinkhorn_eps: sinkhorn epsilon
             hc_post_mult_value: post-mix multiplier value
             sinkhorn_repeat: number of sinkhorn iterations
+            norm_weight: optional RMSNorm weight fused into the pre kernel
+            norm_eps: epsilon for the fused RMSNorm when norm_weight is set
 
         Returns:
             post_mix: shape (..., hc_mult), dtype torch.float32
@@ -3250,6 +3380,8 @@ class rocm_aiter_ops:
                 hc_sinkhorn_eps,
                 hc_post_mult_value,
                 sinkhorn_repeat,
+                norm_weight,
+                norm_eps,
             )
         return (
             post_mix.view(*outer_shape, hc_mult, 1),
@@ -3334,6 +3466,96 @@ class rocm_aiter_ops:
             comb_res_mix.view(num_tokens, hc_mult, hc_mult),
         )
         return out.view_as(residual)
+
+    @staticmethod
+    def mhc_fused_post_pre(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post_layer_mix: torch.Tensor,
+        comb_res_mix: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused mHC post + next mHC pre via AITER.
+
+        Returns residual_cur, post_mix, comb_mix, layer_input in vLLM order
+        (AITER returns post_mix, comb_mix, layer_input, next_residual).
+        """
+        from aiter.ops.mhc import mhc_fused_post_pre
+
+        assert x.dtype == torch.bfloat16
+        assert residual.dtype == torch.bfloat16
+        assert fn.dtype == torch.float32
+        assert hc_scale.dtype == torch.float32
+        assert hc_base.dtype == torch.float32
+
+        hc_mult = residual.shape[-2]
+        hidden_size = residual.shape[-1]
+        outer_shape = residual.shape[:-2]
+
+        residual_flat = residual.view(-1, hc_mult, hidden_size)
+        num_tokens = residual_flat.shape[0]
+        x_flat = x.view(num_tokens, hidden_size)
+        post_flat = post_layer_mix.view(num_tokens, hc_mult, 1)
+        comb_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
+
+        if num_tokens == 0:
+            return (
+                torch.empty_like(residual_flat).view_as(residual),
+                torch.empty(
+                    *outer_shape,
+                    hc_mult,
+                    1,
+                    dtype=torch.float32,
+                    device=residual.device,
+                ),
+                torch.empty(
+                    *outer_shape,
+                    hc_mult,
+                    hc_mult,
+                    dtype=torch.float32,
+                    device=residual.device,
+                ),
+                torch.empty(
+                    *outer_shape,
+                    hidden_size,
+                    dtype=torch.bfloat16,
+                    device=residual.device,
+                ),
+            )
+
+        with torch.device(residual_flat.device):
+            post_mix, comb_mix, layer_input, next_residual = mhc_fused_post_pre(
+                x_flat,
+                residual_flat,
+                post_flat,
+                comb_flat,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                norm_weight,
+                norm_eps,
+            )
+
+        return (
+            next_residual.view_as(residual),
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, hidden_size),
+        )
 
 
 rocm_aiter_ops.register_ops_once()

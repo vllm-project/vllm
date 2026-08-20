@@ -307,7 +307,9 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
-            iteration_stats = IterationStats() if self.log_stats else None
+            iteration_stats = (
+                IterationStats() if self.log_stats and outputs.outputs else None
+            )
             processed_outputs = self.output_processor.process_outputs(
                 outputs.outputs,
                 engine_core_timestamp=outputs.timestamp,
@@ -321,17 +323,15 @@ class LLMEngine:
 
         # 4) Record stats
         with record_function_or_nullcontext("llm_engine step: record_stats"):
-            if (
-                self.logger_manager is not None
-                and outputs.scheduler_stats is not None
-                and len(outputs.outputs) > 0
-            ):
+            if self.logger_manager is not None and outputs.scheduler_stats is not None:
+                # Record even when this step produced no request outputs.
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
                     mm_cache_stats=self.renderer.stat_mm_cache(),
                 )
-                self.do_log_stats_with_interval()
+                if outputs.outputs:
+                    self.do_log_stats_with_interval()
 
         return processed_outputs.request_outputs
 
