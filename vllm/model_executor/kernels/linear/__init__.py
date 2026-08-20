@@ -1009,13 +1009,14 @@ def _select_nvfp4_a16_kernel(
 ) -> type[NvFp4LinearKernel]:
     """Pick the kernel for weight-only (W4A16) NVFP4 layers.
 
-    Only Marlin and FlashInfer's bf16 x fp4 GEMM apply: the W4A4 kernels
-    quantize activations, and a W4A16 checkpoint has no input scale.
+    Only Marlin, Humming, and FlashInfer's bf16 x fp4 GEMM apply: the W4A4
+    kernels quantize activations, and a W4A16 checkpoint has no input scale.
     FlashInfer is the default on SM121, where it is tuned, and opt-in via
     --linear-backend flashinfer_cutedsl elsewhere.
     """
     fi_kernel = FlashInferW4A16NvFp4LinearKernel
     marlin_kernel = MarlinNvFp4LinearKernel
+    humming_kernel = HummingNvFp4LinearKernel
 
     def usable(kernel: type[NvFp4LinearKernel]) -> tuple[bool, str | None]:
         if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
@@ -1027,7 +1028,7 @@ def _select_nvfp4_a16_kernel(
 
     if linear_backend != "auto":
         requested = _LINEAR_BACKEND_KERNEL_MAP.get(linear_backend, set())
-        for kernel in (fi_kernel, marlin_kernel):
+        for kernel in (fi_kernel, marlin_kernel, humming_kernel):
             if kernel not in requested:
                 continue
             ok, reason = usable(kernel)
@@ -1039,7 +1040,7 @@ def _select_nvfp4_a16_kernel(
             return kernel
         raise ValueError(
             f"--linear-backend={linear_backend} has no kernel for W4A16 "
-            f"NVFP4 layers; use marlin or flashinfer_cutedsl."
+            f"NVFP4 layers; use marlin, humming, or flashinfer_cutedsl."
         )
 
     # Auto selection. VLLM_BATCH_INVARIANT keeps the deterministic Marlin
@@ -1052,9 +1053,10 @@ def _select_nvfp4_a16_kernel(
         return fi_kernel
     if marlin_kernel.__name__ not in envs.VLLM_DISABLED_KERNELS:
         return marlin_kernel
-    ok, reason = usable(fi_kernel)
-    if ok:
-        return fi_kernel
+    for kernel in (fi_kernel, humming_kernel):
+        ok, reason = usable(kernel)
+        if ok:
+            return kernel
     raise ValueError(f"No W4A16 NVFP4 kernel is available: {reason}")
 
 
@@ -1062,7 +1064,11 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
-    a16_kernels = (MarlinNvFp4LinearKernel, HummingNvFp4LinearKernel)
+    a16_kernels = (
+        MarlinNvFp4LinearKernel,
+        HummingNvFp4LinearKernel,
+        FlashInferW4A16NvFp4LinearKernel,
+    )
 
     # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
     # batch-invariant CUTLASS implementation when available, otherwise fall
