@@ -28,7 +28,14 @@ from vllm.utils.flashinfer import (
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
-class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
+class _FlashInferNvFp4LinearKernel(NvFp4LinearKernel):
+    """Base for NVFP4 linear kernels that can route activation quant through
+    FlashInfer (see ``KernelConfig.nvfp4_input_quant_backend``)."""
+
+    uses_flashinfer_input_quant = True
+
+
+class FlashInferCuteDslNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cutedsl backend."""
 
     @classmethod
@@ -70,7 +77,8 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
-            backend="flashinfer-cutedsl",
+            gemm_backend="flashinfer-cutedsl",
+            quant_backend=self.input_quant_backend,
         )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(
@@ -94,12 +102,16 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         return out.view(*output_shape)
 
 
-class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
+class FlashInferCutlassNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's CUTLASS wrapper."""
 
     def input_quant_key(self) -> QuantKey | None:
-        """This kernel supports dynamic quantization of the input. By
-        convention, pre-quantized blockscales must use the swizzled layout."""
+        """Advertise dynamic input pre-quantization (lets producers fuse the
+        activation quant), except under FlashInfer CuTe-DSL: producers quantize
+        with the C++ kernel, so a pre-quantized input would bypass the selected
+        backend. Returning None keeps the quant in apply_weights."""
+        if self.input_quant_backend != "auto":
+            return None
         return kNvfp4Dynamic
 
     @classmethod
@@ -155,8 +167,9 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
                 x,
                 layer.input_global_scale_inv,
                 is_sf_swizzled_layout=True,
-                backend="flashinfer-cutlass",
+                gemm_backend="flashinfer-cutlass",
                 padded_n=x.shape[-1] + weights_padding_bytes * 2,
+                quant_backend=self.input_quant_backend,
             )
 
         out = flashinfer_scaled_fp4_mm(
@@ -176,7 +189,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         return out.view(*output_shape)
 
 
-class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
+class FlashInferTrtllmNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's TensorRT-LLM wrapper."""
 
     @classmethod
@@ -223,7 +236,8 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
-            backend="flashinfer-trtllm",
+            gemm_backend="flashinfer-trtllm",
+            quant_backend=self.input_quant_backend,
         )
 
         out = flashinfer_scaled_fp4_mm(
@@ -243,7 +257,7 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
         return out.view(*output_shape)
 
 
-class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
+class FlashInferCudnnNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cuDNN wrapper."""
 
     @classmethod
@@ -284,8 +298,9 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
-            backend="flashinfer-cudnn",
+            gemm_backend="flashinfer-cudnn",
             padded_n=x.shape[-1] + weights_padding_bytes * 2,
+            quant_backend=self.input_quant_backend,
         )
 
         out = flashinfer_scaled_fp4_mm(
@@ -305,7 +320,7 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
         return out.view(*output_shape)
 
 
-class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
+class FlashInferB12xNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's b12x CuTe DSL warp-level MMA kernel (SM120+)."""
 
     @classmethod
@@ -348,7 +363,8 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
-            backend="b12x",
+            gemm_backend="b12x",
+            quant_backend=self.input_quant_backend,
         )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(

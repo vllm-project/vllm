@@ -15,6 +15,7 @@ from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_cutedsl_nvfp4_quant
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -124,6 +125,26 @@ def test_nvfp4(vllm_runner, model, eager, backend):
         )
 
     with vllm_runner(model, enforce_eager=eager, linear_backend=backend) as llm:
+        output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
+    assert output[0][1] == "1 2 3 4 5 6"
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_cutedsl_nvfp4_quant(),
+    reason="FlashInfer CuTe-DSL NVFP4 activation quant requires SM10x and a "
+    "FlashInfer build with CuTe-DSL",
+)
+@pytest.mark.parametrize("model", ["nvidia/Llama-3.1-8B-Instruct-NVFP4"])
+@pytest.mark.parametrize("eager", EAGER)
+def test_nvfp4_input_quant_backend_cutedsl(vllm_runner, model, eager):
+    """End-to-end check that the FlashInfer CuTe-DSL activation-quant backend
+    (kernel_config.nvfp4_input_quant_backend) drives the NVFP4 linear kernels'
+    apply_weights path correctly, independently of the GEMM backend."""
+    with vllm_runner(
+        model,
+        enforce_eager=eager,
+        kernel_config={"nvfp4_input_quant_backend": "flashinfer_cutedsl"},
+    ) as llm:
         output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
     assert output[0][1] == "1 2 3 4 5 6"
 
