@@ -159,6 +159,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             stop_token_ids: vec![151643],
             eos_token_id: Some(151645),
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
+            routed_experts_prompt_start: 1,
             ..EngineCoreSamplingParams::for_test()
         }),
         arrival_time: 42.5,
@@ -1431,23 +1432,20 @@ async fn is_sleeping_wrapper_sends_typed_request_and_returns_typed_response() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn call_utility_failure_message_surfaces_as_error() {
+async fn call_utility_waits_for_all_engines_before_returning_error() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-utility-fail".to_vec();
-
-    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+    let (failure_sent_tx, failure_sent_rx) = oneshot::channel();
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_id.clone(),
-        |dealer, push| {
+        EngineId::from_engine_index(0).into_frame().to_vec(),
+        move |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
-                assert_eq!(utility[0].as_ref(), &[0x03]);
                 let payload = decode_value(&utility[1]);
                 let call_id =
                     payload.as_array().and_then(|array| array[1].as_u64()).expect("call_id");
-
                 send_outputs(
                     push,
                     UtilityCallOutput {
@@ -1462,35 +1460,134 @@ async fn call_utility_failure_message_surfaces_as_error() {
                     .into(),
                 )
                 .await;
+                let _ = failure_sent_tx.send(());
+            })
+        },
+    );
+    let (second_received_tx, second_received_rx) = oneshot::channel();
+    let (release_second_tx, release_second_rx) = oneshot::channel();
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        EngineId::from_engine_index(1).into_frame().to_vec(),
+        move |dealer, push| {
+            Box::pin(async move {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]);
+                let call_id =
+                    payload.as_array().and_then(|array| array[1].as_u64()).expect("call_id");
+                let _ = second_received_tx.send(());
+                let _ = release_second_rx.await;
+                send_outputs(
+                    push,
+                    UtilityCallOutput {
+                        engine_index: 1,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
+                            call_id: call_id.into(),
+                            failure_message: None,
+                            result: Some(utility_result_value(true)),
+                        },
+                    }
+                    .into(),
+                )
+                .await;
             })
         },
     );
 
-    let client = connect_client_with_ipc(
-        handshake_test_config(
-            handshake_address,
-            1,
-            "test-model",
-            Duration::from_secs(2),
-            0,
-            None,
-        ),
-        &ipc,
-    )
-    .await;
+    let client = std::sync::Arc::new(
+        connect_client_with_ipc(
+            handshake_test_config(
+                handshake_address,
+                2,
+                "test-model",
+                Duration::from_secs(2),
+                0,
+                None,
+            ),
+            &ipc,
+        )
+        .await,
+    );
+    let call_client = client.clone();
+    let call =
+        tokio::spawn(async move { call_client.call_utility::<bool, _>("test_mutation", ()).await });
 
-    let error = client.call_utility::<bool, _>("is_sleeping", ()).await.unwrap_err();
+    failure_sent_rx.await.unwrap();
+    second_received_rx.await.unwrap();
+    timeout(Duration::from_secs(2), async {
+        while client.pending_utility_call_count() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("wait for first engine failure");
+    assert!(!call.is_finished());
+
+    let _ = release_second_tx.send(());
+    let error = call.await.unwrap().unwrap_err();
     assert!(matches!(
         error,
         Error::UtilityCallFailed {
             method,
             message,
             ..
-        } if method == "is_sleeping" && message == "boom"
+        } if method == "test_mutation" && message == "boom"
     ));
 
-    let _ = shutdown_tx.send(());
-    engine_task.await.unwrap();
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    let client = std::sync::Arc::try_unwrap(client)
+        .unwrap_or_else(|_| panic!("utility task retained client after completion"));
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_utility_call_unregisters_waiter() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (received_tx, received_rx) = oneshot::channel();
+    let (_shutdown, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        vec![0x00, 0x00],
+        |dealer, _push| {
+            Box::pin(async move {
+                let _utility = recv_engine_message(dealer).await;
+                let _ = received_tx.send(());
+                std::future::pending::<()>().await;
+            })
+        },
+    );
+    let client = std::sync::Arc::new(
+        connect_client_with_ipc(
+            handshake_test_config(
+                handshake_address,
+                1,
+                "test-model",
+                Duration::from_secs(2),
+                0,
+                None,
+            ),
+            &ipc,
+        )
+        .await,
+    );
+    let call_client = client.clone();
+    let call =
+        tokio::spawn(async move { call_client.call_utility::<bool, _>("add_lora", ()).await });
+
+    received_rx.await.unwrap();
+    assert_eq!(client.pending_utility_call_count(), 1);
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    assert_eq!(client.pending_utility_call_count(), 0);
+
+    engine_task.abort();
+    let client = std::sync::Arc::try_unwrap(client)
+        .unwrap_or_else(|_| panic!("utility task retained client after cancellation"));
     client.shutdown().await.unwrap();
 }
 
@@ -2584,6 +2681,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             logprob_token_ids: None,
             skip_reading_prefix_cache: None,
             extra_args: None,
+            routed_experts_prompt_start: 0,
         },
     );
 
