@@ -844,8 +844,8 @@ def _try_load_fp8_indexer_wk(
     We fuse the WK and weights_proj projections, but in some checkpoints WK is stored
     in FP8 with a separate weight_scale_inv, while weights_proj is stored in BF16.
     Upcasting to BF16 during loading enables the fusion. This function loads the FP8 WK
-    weights and scale, and when both are available, dequantizes to BF16 and stores into
-    the fused wk_weights_proj.weight parameter.
+    weights and scale, and when both are available, dequantizes to BF16 and stores it in
+    the projection containing the indexer WK weight.
     """
     if "indexer.wk." not in name or "wk_weights" in name:
         return False  # Weight is not an isolated WK weight for the indexer, ignore.
@@ -855,7 +855,6 @@ def _try_load_fp8_indexer_wk(
         return False  # WK is not in FP8 format, ignore.
     # Buffer this tensor (weight or scale) until both have arrived.
     layer_prefix = name.rsplit(".wk.", 1)[0]  # e.g. "model.layers.0.self_attn.indexer"
-    fused_name = f"{layer_prefix}.wk_weights_proj.weight"
     if any(
         name.startswith(missing_layer_name)
         for missing_layer_name in pp_missing_layer_names
@@ -882,9 +881,15 @@ def _try_load_fp8_indexer_wk(
         out_dtype=torch.bfloat16,
     )
 
-    # Load the dequantized weight into shard 0 of the fused buffer.
+    fused_name = f"{layer_prefix}.wk_weights_proj.weight"
+    shard_id = 0
+    if fused_name not in params_dict:
+        attention_prefix = layer_prefix.rsplit(".indexer", 1)[0]
+        fused_name = f"{attention_prefix}.fused_qkv_a_proj.weight"
+        shard_id = 2
+
     param = params_dict[fused_name]
-    param.weight_loader(param, weight_bf16, 0)
+    param.weight_loader(param, weight_bf16, shard_id)
     loaded_params.add(fused_name)
     return True
 

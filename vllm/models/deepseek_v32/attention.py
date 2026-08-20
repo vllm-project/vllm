@@ -8,7 +8,10 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
@@ -16,9 +19,11 @@ from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -35,6 +40,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -47,8 +53,113 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 
 
+class DeepseekV32FusedQIndexerProjLinear(MergedColumnParallelLinear):
+    """Fuse TP-sharded MLA Q with replicated indexer Q in one local GEMM."""
+
+    def __init__(
+        self,
+        input_size: int,
+        q_output_size: int,
+        indexer_output_size: int,
+        prefix: str,
+    ) -> None:
+        self.q_tp_rank = get_tensor_model_parallel_rank()
+        self.q_tp_size = get_tensor_model_parallel_world_size()
+        assert q_output_size % self.q_tp_size == 0
+        self.q_output_size = q_output_size
+        self.q_output_size_per_partition = q_output_size // self.q_tp_size
+        super().__init__(
+            input_size,
+            [self.q_output_size_per_partition, indexer_output_size],
+            bias=False,
+            quant_config=None,
+            disable_tp=True,
+            prefix=prefix,
+        )
+
+    def _slice_q_weight(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None,
+    ) -> torch.Tensor:
+        output_dim = getattr(param, "output_dim", None)
+        if loaded_shard_id == 0 and output_dim is not None:
+            loaded_size = loaded_weight.shape[output_dim]
+            if loaded_size == self.q_output_size:
+                loaded_weight = loaded_weight.narrow(
+                    output_dim,
+                    self.q_tp_rank * self.q_output_size_per_partition,
+                    self.q_output_size_per_partition,
+                )
+            else:
+                assert loaded_size == self.q_output_size_per_partition
+        return loaded_weight
+
+    def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        loaded_weight = self._slice_q_weight(param, loaded_weight, loaded_shard_id)
+        super().weight_loader(param, loaded_weight, loaded_shard_id)
+
+    def weight_loader_v2(
+        self,
+        param: BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        loaded_weight = self._slice_q_weight(param, loaded_weight, loaded_shard_id)
+        super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
+
+
+def _uses_unquantized_method(layer: LinearBase) -> bool:
+    return type(layer.quant_method) is UnquantizedLinearMethod
+
+
+def try_load_fused_indexer_projection(
+    name: str,
+    loaded_weight: torch.Tensor,
+    params_dict: dict[str, torch.nn.Parameter],
+) -> str | None:
+    if name.endswith(".q_b_proj.weight"):
+        target_name = name
+        shard_id = 0
+    elif ".indexer.wq_b." in name:
+        target_name = name.replace(".indexer.wq_b.", ".q_b_proj.")
+        shard_id = 1
+    elif ".indexer.wk." in name:
+        target_name = name.replace(".indexer.wk.", ".fused_qkv_a_proj.")
+        shard_id = 2
+    elif ".indexer.weights_proj." in name:
+        target_name = name.replace(".indexer.weights_proj.", ".fused_qkv_a_proj.")
+        shard_id = 3
+    else:
+        return None
+
+    param = params_dict.get(target_name)
+    if param is None:
+        return None
+    layer = getattr(param.weight_loader, "__self__", None)  # type: ignore[attr-defined]
+    if shard_id < 2:
+        if not isinstance(layer, DeepseekV32FusedQIndexerProjLinear):
+            return None
+    elif not (
+        isinstance(layer, DeepSeekV2FusedQkvAProjLinear)
+        and len(layer.output_sizes) == 4
+    ):
+        return None
+
+    param.weight_loader(param, loaded_weight, shard_id)  # type: ignore[attr-defined]
+    return target_name
+
+
 class DeepseekV32Indexer(nn.Module):
     indexer_cache_cls = DeepseekV32IndexerCache
+    wq_b: ReplicatedLinear | None
+    wk_weights_proj: MergedColumnParallelLinear | None
 
     def __init__(
         self,
@@ -124,6 +235,8 @@ class DeepseekV32Indexer(nn.Module):
         positions: torch.Tensor,
         rotary_emb: nn.Module,
     ) -> torch.Tensor:
+        assert self.wq_b is not None
+        assert self.wk_weights_proj is not None
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
@@ -303,6 +416,56 @@ class DeepseekV32Attention(MLAAttention):
             quant_config=quant_config,
             prefix=f"{prefix}.q_b_proj",
         )
+
+        can_fuse_indexer_projections = (
+            indexer is not None
+            and config.model_type == "glm_moe_dsa"
+            and not is_mtp_layer
+            and vllm_config.lora_config is None
+            and current_platform.is_cuda()
+            and not current_platform.is_device_capability((10, 3))
+        )
+        self._fuse_qkv_a_indexer = False
+        self._fuse_q_b_indexer = False
+        if can_fuse_indexer_projections:
+            assert indexer is not None
+            wk_weights_proj = indexer.wk_weights_proj
+            if (
+                wk_weights_proj is not None
+                and _uses_unquantized_method(self.fused_qkv_a_proj)
+                and _uses_unquantized_method(wk_weights_proj)
+                and self.fused_qkv_a_proj.params_dtype == wk_weights_proj.params_dtype
+            ):
+                self._fuse_qkv_a_indexer = True
+                self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
+                    hidden_size,
+                    [
+                        q_lora_rank,
+                        kv_lora_rank + qk_rope_head_dim,
+                        indexer.head_dim,
+                        indexer.n_head,
+                    ],
+                    quant_config=None,
+                    prefix=f"{prefix}.fused_qkv_a_proj",
+                )
+                indexer.wk_weights_proj = None
+
+            wq_b = indexer.wq_b
+            if (
+                wq_b is not None
+                and _uses_unquantized_method(self.q_b_proj)
+                and _uses_unquantized_method(wq_b)
+                and self.q_b_proj.params_dtype == wq_b.params_dtype
+            ):
+                self._fuse_q_b_indexer = True
+                self.q_b_proj = DeepseekV32FusedQIndexerProjLinear(
+                    q_lora_rank,
+                    num_heads * qk_head_dim,
+                    indexer.n_head * indexer.head_dim,
+                    prefix=f"{prefix}.q_b_proj",
+                )
+                indexer.wq_b = None
+
         self.kv_a_layernorm = RMSNorm(kv_lora_rank, eps=config.rms_norm_eps)
 
         self.o_proj = RowParallelLinear(
@@ -335,14 +498,29 @@ class DeepseekV32Attention(MLAAttention):
     ) -> torch.Tensor:
         # Captured: A-projections (+ indexer A-GEMM on indexer layers).
         qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-        q_c, kv_c, k_pe = qkv_lora.split(
-            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-        )
+        if self._fuse_qkv_a_indexer:
+            assert self.indexer is not None
+            q_c, kv_c, k_pe, index_k, index_weights = qkv_lora.split(
+                [
+                    self.q_lora_rank,
+                    self.kv_lora_rank,
+                    self.qk_rope_head_dim,
+                    self.indexer.head_dim,
+                    self.indexer.n_head,
+                ],
+                dim=-1,
+            )
+        else:
+            q_c, kv_c, k_pe = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
 
         if self.indexer is not None and not self.skip_topk:
-            kw = self.indexer.wk_weights_proj(hidden_states)[0]
-            index_k = kw[:, : self.indexer.head_dim]
-            index_weights = kw[:, self.indexer.head_dim :]
+            if not self._fuse_qkv_a_indexer:
+                assert self.indexer.wk_weights_proj is not None
+                kw = self.indexer.wk_weights_proj(hidden_states)[0]
+                index_k = kw[:, : self.indexer.head_dim]
+                index_weights = kw[:, self.indexer.head_dim :]
         else:
             index_k = None
             index_weights = None
@@ -427,15 +605,29 @@ class DeepseekV32Attention(MLAAttention):
             index_k_out=index_k_out,
         )
 
-        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
-
-        if self.indexer is not None and not self.skip_topk:
-            index_q = self.indexer.wq_b(q_c)[0]
+        q_proj = self.q_b_proj(q_c)[0]
+        if self._fuse_q_b_indexer:
+            assert self.indexer is not None
+            q, index_q = q_proj.split(
+                [
+                    self.num_local_heads * self.qk_head_dim,
+                    self.indexer.n_head * self.indexer.head_dim,
+                ],
+                dim=-1,
+            )
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
-            index_q = None
+            q = q_proj
+            if self.indexer is not None and not self.skip_topk:
+                assert self.indexer.wq_b is not None
+                index_q = self.indexer.wq_b(q_c)[0]
+                index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
+            else:
+                index_q = None
+
+        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
 
         index_q_fp8, index_weights_out, mqa_q = fused_q(
             positions,

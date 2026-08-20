@@ -44,7 +44,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.deepseek_v32.attention import DeepseekV32Attention
+from vllm.models.deepseek_v32.attention import (
+    DeepseekV32Attention,
+    try_load_fused_indexer_projection,
+)
 from vllm.sequence import IntermediateTensors
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
@@ -349,6 +352,12 @@ class DeepseekV32Model(torch.nn.Module):
                 loaded_params,
                 pp_missing_layer_names,
             ):
+                continue
+            fused_name = try_load_fused_indexer_projection(
+                name, loaded_weight, params_dict
+            )
+            if fused_name is not None:
+                loaded_params.add(fused_name)
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
