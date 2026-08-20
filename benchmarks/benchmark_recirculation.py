@@ -309,7 +309,7 @@ def run(args: argparse.Namespace, window_data: dict[str, Any]) -> dict[str, Any]
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
         max_num_seqs=1,
-        enforce_eager=True,
+        enforce_eager=args.enforce_eager,
         enable_prefix_caching=False,
         long_prefill_token_threshold=args.long_prefill_token_threshold,
         hf_overrides=hf_overrides,
@@ -356,6 +356,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable torch.compile and CUDA graphs for debugging.",
+    )
     parser.add_argument("--decode-tokens", type=int, default=64)
     parser.add_argument("--source-layer", type=int, default=11)
     parser.add_argument("--destination-layer", type=int, default=4)
@@ -387,7 +392,7 @@ def main() -> None:
             "seed": args.seed,
             "max_model_len": args.max_model_len,
             "max_num_seqs": 1,
-            "enforce_eager": True,
+            "enforce_eager": args.enforce_eager,
             "speculative_decoding": False,
             "prefix_caching": False,
             "long_prefill_token_threshold": args.long_prefill_token_threshold,

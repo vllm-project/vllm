@@ -83,8 +83,28 @@ uv pip install 'datasets>=3.3.0,<=3.6.0'
 
 Use `--num-windows 50` for a larger sample. For a normal-scheduler baseline
 performance measurement, add `--long-prefill-token-threshold 0
---performance-only`. The exact runs default to one sequence, eager BF16,
-`max_model_len=1024`, no prefix caching, and no speculative decoding.
+--performance-only`. The exact runs default to one sequence, compiled BF16,
+`max_model_len=1024`, no prefix caching, and no speculative decoding. Add
+`--enforce-eager` only when debugging; it disables torch.compile and CUDA graphs
+and can be substantially slower.
+
+For faster approximate prefill, increase `--long-prefill-token-threshold` to
+the desired Recirculation block size. For example:
+
+```bash
+.venv/bin/python benchmarks/benchmark_recirculation.py \
+  --mode recirculation \
+  --long-prefill-token-threshold 16 \
+  --windows-file results/recirculation-windows.json \
+  --output results/recirculation-block16.json
+```
+
+A threshold of `1` is exact tokenwise Recirculation. Values greater than `1`
+process that many prefill tokens together: the first-pass logits within each
+block do not depend on that block's recirculated cache, so this is an explicit
+quality-throughput tradeoff rather than an exact optimization. Autoregressive
+decode remains tokenwise. Sweep block sizes on the target workload instead of
+assuming one value is universally optimal.
 
 ## Current restrictions
 
