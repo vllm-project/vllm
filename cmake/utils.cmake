@@ -659,3 +659,17 @@ function (define_extension_target MOD_NAME)
 
   install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${MOD_NAME})
 endfunction()
+
+# Disable the CUDA 12.8+ static global template stub for heavily templated
+# kernel sources that don't need it.
+#
+# Usage:
+#   disable_static_global_template_stub(SRCS ${MY_KERNEL_SOURCES})
+#
+function(disable_static_global_template_stub)
+  cmake_parse_arguments(PARSE_ARGV 0 ARG "" "" "SRCS")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+    set_source_files_properties(${ARG_SRCS}
+      PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+  endif()
+endfunction()
