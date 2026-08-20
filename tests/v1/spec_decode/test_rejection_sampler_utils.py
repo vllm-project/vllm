@@ -139,17 +139,22 @@ def _assert_distribution_match(
 
 
 @pytest.mark.parametrize(
-    "num_speculative_steps,temperature",
+    "num_speculative_steps,temperature,apply_target_temperature",
     [
-        (1, 0.6),
-        (3, 0.6),
-        (1, 1.0),
-        (3, 1.0),
+        (1, 0.6, False),
+        (3, 0.6, False),
+        (1, 1.0, False),
+        (3, 1.0, False),
+        (1, 0.6, True),
+        (3, 0.6, True),
     ],
 )
 @pytest.mark.parametrize("draft_logits_dtype", [torch.float32, torch.bfloat16])
 def test_stochastic_rejection_sample(
-    num_speculative_steps: int, temperature: float, draft_logits_dtype: torch.dtype
+    num_speculative_steps: int,
+    temperature: float,
+    apply_target_temperature: bool,
+    draft_logits_dtype: torch.dtype,
 ):
     """
     Verify that rejection sampling produces the target distribution.
@@ -167,13 +172,14 @@ def test_stochastic_rejection_sample(
     device = "cuda"
     num_trials = 10 * VOCAB_SIZE
 
-    target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    raw_target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    target_logits_1d = raw_target_logits_1d
     draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32).to(
         draft_logits_dtype
     )
 
-    if temperature > 0:
-        target_logits_1d /= temperature
+    if temperature > 0 and not apply_target_temperature:
+        target_logits_1d = target_logits_1d / temperature
 
     inputs = _build_rejection_sample_inputs(
         target_logits_1d,
@@ -184,15 +190,184 @@ def test_stochastic_rejection_sample(
     )
 
     sampled, num_sampled = rejection_sample(
-        **inputs, num_speculative_steps=num_speculative_steps
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        apply_target_temperature=apply_target_temperature,
     )
 
-    target_probs = torch.softmax(target_logits_1d, dim=0)
+    processed_target_logits_1d = raw_target_logits_1d
+    if temperature > 0:
+        processed_target_logits_1d = processed_target_logits_1d / temperature
+    target_probs = torch.softmax(processed_target_logits_1d, dim=0)
     for pos in range(num_speculative_steps + 1):
         accepted_mask = num_sampled >= pos + 1
         _assert_distribution_match(
             sampled[accepted_mask, pos], target_probs, device, label=f"position {pos}"
         )
+
+
+@pytest.mark.parametrize("target_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("has_draft_logits", [True, False])
+@pytest.mark.parametrize("use_block_verification", [True, False])
+def test_in_kernel_target_temperature_matches_preprocessing(
+    target_dtype: torch.dtype,
+    has_draft_logits: bool,
+    use_block_verification: bool,
+):
+    torch.manual_seed(42)
+    device = "cuda"
+    num_trials = 64
+    num_speculative_steps = 3
+    temperature = 0.6
+
+    raw_target_logits_1d = torch.randn(
+        VOCAB_SIZE, device=device, dtype=torch.float32
+    ).to(target_dtype)
+    processed_target_logits_1d = raw_target_logits_1d.float() / temperature
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.bfloat16)
+    processed_inputs = _build_rejection_sample_inputs(
+        processed_target_logits_1d,
+        draft_logits_1d,
+        num_speculative_steps,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    raw_inputs = dict(processed_inputs)
+    raw_inputs["target_logits"] = (
+        raw_target_logits_1d.unsqueeze(0)
+        .expand(num_trials * (num_speculative_steps + 1), -1)
+        .contiguous()
+    )
+    if not has_draft_logits:
+        processed_inputs["draft_logits"] = None
+        raw_inputs["draft_logits"] = None
+
+    expected = rejection_sample(
+        **processed_inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+    )
+    actual = rejection_sample(
+        **raw_inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+        apply_target_temperature=True,
+    )
+
+    assert torch.equal(actual[1], expected[1])
+    steps = torch.arange(num_speculative_steps + 1, device=device).unsqueeze(0)
+    valid = steps < expected[1].unsqueeze(1)
+    assert torch.equal(actual[0][valid], expected[0][valid])
+
+
+def test_in_kernel_target_temperature_supports_mixed_requests():
+    torch.manual_seed(42)
+    device = "cuda"
+    num_trials = 6
+    num_speculative_steps = 2
+    num_logits = num_trials * (num_speculative_steps + 1)
+    temperatures = torch.tensor(
+        [0.0, 0.6, 1.0, 0.8, 0.0, 1.0], dtype=torch.float32, device=device
+    )
+    idx_mapping = torch.arange(num_trials, dtype=torch.int32, device=device)
+    expanded_idx_mapping = idx_mapping.repeat_interleave(num_speculative_steps + 1)
+    expanded_local_pos = torch.arange(
+        num_speculative_steps + 1, dtype=torch.int32, device=device
+    ).repeat(num_trials)
+    row_temperatures = temperatures[expanded_idx_mapping.long()]
+
+    raw_target_logits = torch.randn(
+        num_logits, VOCAB_SIZE, dtype=torch.bfloat16, device=device
+    )
+    processed_target_logits = raw_target_logits.float()
+    scaled_rows = (row_temperatures != 0.0) & (row_temperatures != 1.0)
+    processed_target_logits[scaled_rows] /= row_temperatures[scaled_rows, None]
+    draft_sampled = torch.randint(
+        VOCAB_SIZE, (num_logits,), dtype=torch.int64, device=device
+    )
+    cu_num_logits = torch.arange(num_trials + 1, dtype=torch.int32, device=device) * (
+        num_speculative_steps + 1
+    )
+    pos = torch.arange(num_logits, dtype=torch.int32, device=device)
+    seed = torch.arange(num_trials, dtype=torch.int64, device=device)
+    common_inputs = dict(
+        draft_logits=None,
+        draft_sampled=draft_sampled,
+        cu_num_logits=cu_num_logits,
+        pos=pos,
+        idx_mapping=idx_mapping,
+        expanded_idx_mapping=expanded_idx_mapping,
+        expanded_local_pos=expanded_local_pos,
+        temperature=temperatures,
+        seed=seed,
+        num_speculative_steps=num_speculative_steps,
+    )
+
+    expected = rejection_sample(target_logits=processed_target_logits, **common_inputs)
+    actual = rejection_sample(
+        target_logits=raw_target_logits,
+        apply_target_temperature=True,
+        **common_inputs,
+    )
+
+    assert torch.equal(actual[1], expected[1])
+    steps = torch.arange(num_speculative_steps + 1, device=device).unsqueeze(0)
+    valid = steps < expected[1].unsqueeze(1)
+    assert torch.equal(actual[0][valid], expected[0][valid])
+
+
+def test_in_kernel_target_temperature_stress_matches_preprocessing():
+    torch.manual_seed(42)
+    device = "cuda"
+    num_trials = 8192
+    num_speculative_steps = 1
+    temperature = 0.6
+
+    num_logits = num_trials * (num_speculative_steps + 1)
+    raw_target_logits = torch.randn(
+        num_logits, VOCAB_SIZE, device=device, dtype=torch.bfloat16
+    )
+    draft_sampled = torch.randint(
+        VOCAB_SIZE,
+        (num_trials, num_speculative_steps + 1),
+        dtype=torch.int64,
+        device=device,
+    )
+    draft_sampled[:, 0] = 0
+    idx_mapping = torch.arange(num_trials, dtype=torch.int32, device=device)
+    common_inputs = dict(
+        draft_logits=None,
+        draft_sampled=draft_sampled.flatten(),
+        cu_num_logits=torch.arange(num_trials + 1, dtype=torch.int32, device=device)
+        * (num_speculative_steps + 1),
+        pos=torch.arange(num_logits, dtype=torch.int32, device=device),
+        idx_mapping=idx_mapping,
+        expanded_idx_mapping=idx_mapping.repeat_interleave(num_speculative_steps + 1),
+        expanded_local_pos=torch.arange(
+            num_speculative_steps + 1, dtype=torch.int32, device=device
+        ).repeat(num_trials),
+        temperature=torch.full(
+            (num_trials,), temperature, dtype=torch.float32, device=device
+        ),
+        seed=torch.arange(num_trials, dtype=torch.int64, device=device),
+    )
+
+    expected = rejection_sample(
+        target_logits=raw_target_logits.float() / temperature,
+        **common_inputs,
+        num_speculative_steps=num_speculative_steps,
+    )
+    actual = rejection_sample(
+        target_logits=raw_target_logits,
+        **common_inputs,
+        num_speculative_steps=num_speculative_steps,
+        apply_target_temperature=True,
+    )
+
+    assert torch.equal(actual[1], expected[1])
+    steps = torch.arange(num_speculative_steps + 1, device=device).unsqueeze(0)
+    valid = steps < expected[1].unsqueeze(1)
+    assert torch.equal(actual[0][valid], expected[0][valid])
 
 
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])

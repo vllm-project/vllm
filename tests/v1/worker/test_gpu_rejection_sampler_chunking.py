@@ -10,10 +10,54 @@ import torch
 
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
 )
+
+
+@pytest.mark.parametrize(
+    (
+        "logprobs_mode",
+        "max_num_logprobs",
+        "active_flags",
+        "temperatures",
+        "expected",
+    ),
+    [
+        ("raw_logprobs", NO_LOGPROBS, [False, False], [0.6, 0.6], True),
+        ("raw_logprobs", 2, [False, False], [0.6, 0.6], True),
+        ("processed_logprobs", NO_LOGPROBS, [False, False], [0.6, 0.6], True),
+        ("processed_logprobs", 2, [False, False], [0.6, 0.6], False),
+        ("raw_logprobs", NO_LOGPROBS, [False, True], [0.6, 0.6], False),
+        ("raw_logprobs", NO_LOGPROBS, [False, False], [0.0, 1.0], False),
+        ("raw_logprobs", NO_LOGPROBS, [False, False], [0.0, 0.6], True),
+    ],
+)
+def test_target_temperature_fusion_eligibility(
+    logprobs_mode: str,
+    max_num_logprobs: int,
+    active_flags: list[bool],
+    temperatures: list[float],
+    expected: bool,
+):
+    rejection_sampler = object.__new__(RejectionSampler)
+    all_flags = np.array([True, *active_flags, True], dtype=bool)
+    rejection_sampler.sampler = SimpleNamespace(
+        logprobs_mode=logprobs_mode,
+        needs_non_temperature_logits_processing=all_flags,
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(np=np.array([1.0, *temperatures, 1.0]))
+        ),
+    )
+
+    assert (
+        rejection_sampler._should_apply_target_temperature(
+            np.array([1, 2], dtype=np.int32), max_num_logprobs
+        )
+        is expected
+    )
 
 
 def test_iter_request_chunks_preserves_request_boundaries():

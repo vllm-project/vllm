@@ -18,6 +18,17 @@ def _compute_max_and_sumexp(logits):
 
 
 @triton.jit
+def _maybe_apply_target_temperature(
+    logits,
+    temperature,
+    APPLY_TARGET_TEMPERATURE: tl.constexpr,
+):
+    if APPLY_TARGET_TEMPERATURE and temperature != 0.0 and temperature != 1.0:
+        logits = logits / temperature
+    return logits
+
+
+@triton.jit
 def _compute_global_logsumexp(
     local_max_ptr,
     local_max_stride,
@@ -57,8 +68,10 @@ def _compute_global_residual_mass(
     target_local_sumexp_stride,
     draft_token,
     logit_idx,
+    temp,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    APPLY_TARGET_TEMPERATURE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     if HAS_DRAFT_LOGITS:
@@ -86,6 +99,9 @@ def _compute_global_residual_mass(
         target_logit = tl.load(
             target_logits_ptr + logit_idx * target_logits_stride + draft_token,
         ).to(tl.float32)
+        target_logit = _maybe_apply_target_temperature(
+            target_logit, temp, APPLY_TARGET_TEMPERATURE
+        )
         m_b = tl.exp(target_logit - target_lse)
         return prefix_joint_ratio * (1.0 - m_b)
 
@@ -142,6 +158,7 @@ def _compute_global_logprobs_and_logsumexp(
     draft_local_sumexp_stride,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    APPLY_TARGET_TEMPERATURE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     target_logit = tl.load(
@@ -149,6 +166,9 @@ def _compute_global_logprobs_and_logsumexp(
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
+    target_logit = _maybe_apply_target_temperature(
+        target_logit, temp, APPLY_TARGET_TEMPERATURE
+    )
     target_lse = _compute_global_logsumexp(
         target_local_max_ptr,
         target_local_max_stride,
@@ -222,6 +242,7 @@ def _compute_local_logits_stats_kernel(
     vocab_size,
     num_speculative_steps,
     BLOCK_SIZE: tl.constexpr,
+    APPLY_TARGET_TEMPERATURE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
@@ -245,6 +266,9 @@ def _compute_local_logits_stats_kernel(
             mask=mask,
             other=float("-inf"),
         ).to(tl.float32)
+        target_logits = _maybe_apply_target_temperature(
+            target_logits, temp, APPLY_TARGET_TEMPERATURE
+        )
         value, idx = tl.max(target_logits, axis=0, return_indices=True)
         token_id = block_idx * BLOCK_SIZE + idx
         tl.store(
@@ -264,6 +288,9 @@ def _compute_local_logits_stats_kernel(
             mask=mask,
             other=float("-inf"),
         ).to(tl.float32)
+        target_logits = _maybe_apply_target_temperature(
+            target_logits, temp, APPLY_TARGET_TEMPERATURE
+        )
         target_max, target_sumexp = _compute_max_and_sumexp(target_logits)
         tl.store(
             target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
@@ -335,6 +362,7 @@ def _compute_cumulative_log_p_kernel(
     temp_ptr,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    APPLY_TARGET_TEMPERATURE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -376,6 +404,7 @@ def _compute_cumulative_log_p_kernel(
                     draft_local_sumexp_stride,
                     vocab_num_blocks,
                     PADDED_VOCAB_NUM_BLOCKS,
+                    APPLY_TARGET_TEMPERATURE,
                     HAS_DRAFT_LOGITS,
                 )
             )
@@ -422,6 +451,7 @@ def _compute_local_residual_mass_kernel(
     vocab_num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    APPLY_TARGET_TEMPERATURE: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
@@ -466,6 +496,7 @@ def _compute_local_residual_mass_kernel(
         draft_local_sumexp_stride,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
+        APPLY_TARGET_TEMPERATURE,
         True,  # HAS_DRAFT_LOGITS
     )
 
@@ -534,6 +565,7 @@ def _rejection_kernel(
     local_residual_mass_stride,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    APPLY_TARGET_TEMPERATURE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
@@ -615,8 +647,10 @@ def _rejection_kernel(
                         target_local_sumexp_stride,
                         next_draft_token,
                         logit_idx + 1,
+                        temp,
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
+                        APPLY_TARGET_TEMPERATURE,
                         HAS_DRAFT_LOGITS,
                     )
                     denom = residual_mass + 1.0 - prefix_joint_ratio
@@ -650,6 +684,7 @@ def _rejection_kernel(
                         draft_local_sumexp_stride,
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
+                        APPLY_TARGET_TEMPERATURE,
                         HAS_DRAFT_LOGITS,
                     )
                 )
@@ -729,6 +764,7 @@ def _resample_kernel(
     cumulative_log_p_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
+    APPLY_TARGET_TEMPERATURE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
@@ -762,6 +798,9 @@ def _resample_kernel(
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
+    target_logits = _maybe_apply_target_temperature(
+        target_logits, temp, APPLY_TARGET_TEMPERATURE
+    )
 
     # Compute the residual logits to resample the rejected token from.
     if is_bonus or not is_valid_rejected_draft:
@@ -946,6 +985,7 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
     use_block_verification: bool = False,
+    apply_target_temperature: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -1005,6 +1045,7 @@ def rejection_sample(
         vocab_size,
         num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+        APPLY_TARGET_TEMPERATURE=apply_target_temperature,
         HAS_DRAFT_LOGITS=has_draft_logits,
     )
 
@@ -1040,6 +1081,7 @@ def rejection_sample(
             temperature,
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+            APPLY_TARGET_TEMPERATURE=apply_target_temperature,
             HAS_DRAFT_LOGITS=has_draft_logits,
             num_warps=1,
         )
@@ -1078,6 +1120,7 @@ def rejection_sample(
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                APPLY_TARGET_TEMPERATURE=apply_target_temperature,
             )
         else:
             local_residual_mass = None
@@ -1126,6 +1169,7 @@ def rejection_sample(
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+        APPLY_TARGET_TEMPERATURE=apply_target_temperature,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
@@ -1166,6 +1210,7 @@ def rejection_sample(
         cumulative_log_p,
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
+        APPLY_TARGET_TEMPERATURE=apply_target_temperature,
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_FP64=use_fp64,
         USE_BLOCK_VERIFICATION=use_block_verification,
