@@ -94,8 +94,8 @@ def _vllm_silu_mul_quant(
     swiglu_limit: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        ds4_silu_mul_quant_fp8,
-        is_ds4_alignment_quant_enabled,
+        fused_silu_mul_per_token_group_quant_fp8,
+        is_batch_invariant_quant_kernel_enabled,
         per_token_group_quant_fp8_packed_for_deepgemm,
         silu_mul_per_token_group_quant_fp8_colmajor,
         silu_mul_quant_fp8_packed_triton,
@@ -103,14 +103,14 @@ def _vllm_silu_mul_quant(
     from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
 
     scale_format = DeepGemmQuantScaleFMT.from_oracle()
-    if is_ds4_alignment_quant_enabled():
+    if is_batch_invariant_quant_kernel_enabled():
         if swiglu_limit > 0:
             # BatchedDeepGemmExperts, which is the rollout reference for this
             # DS4 path, exposes plain SiLU*up at this fused quant boundary.
             # Keep the argument for the BF16 fallback/VJP contract, but do not
             # introduce a training-only clamp into the visible forward.
             pass
-        return ds4_silu_mul_quant_fp8(
+        return fused_silu_mul_per_token_group_quant_fp8(
             gate_up,
             output_q=output,
             use_ue8m0=(scale_format == DeepGemmQuantScaleFMT.UE8M0),
