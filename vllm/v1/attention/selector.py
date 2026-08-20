@@ -116,7 +116,7 @@ def get_attn_backend(
     """Selects which attention backend to use and lazily imports it."""
 
     if kv_cache_dtype is not None:
-        from vllm.config.kv_cache_dtype import (
+        from vllm.config.cache import (
             KV_CACHE_DTYPES,
             is_known_kv_cache_dtype,
         )

@@ -96,7 +96,7 @@ class KVQuantMode(IntEnum):
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
-    from vllm.config.kv_cache_dtype import get_kv_cache_dtype_handler
+    from vllm.config.cache import get_kv_cache_dtype_handler
 
     handler = get_kv_cache_dtype_handler(kv_cache_dtype)
     if handler is not None:
