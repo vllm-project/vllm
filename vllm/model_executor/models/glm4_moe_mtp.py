@@ -31,7 +31,6 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
