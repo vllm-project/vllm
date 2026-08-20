@@ -548,6 +548,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
+    "Spark3ForCausalLM": _HfExamplesInfo(
+        "XHToken/Spark3-1.7B",
+    ),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),
