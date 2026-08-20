@@ -1,9 +1,9 @@
 # Recirculation
 
 !!! warning
-    Recirculation support is experimental. The serial implementation supports
-    text-only Gemma 3 models; the optimized wavefront path has the additional
-    restrictions listed below.
+    Recirculation support is experimental. Compatible model implementations
+    must opt in to the engine capability; the optimized wavefront path has the
+    additional restrictions listed below.
 
 [Recirculation](https://arxiv.org/abs/2608.17981) feeds a norm-matched deep
 residual-stream activation back into a shallower layer. vLLM returns the logits
@@ -35,6 +35,19 @@ accordingly.
 An identity configuration with `alpha = 0` and `beta` omitted or set to `1`
 disables Recirculation. It therefore agrees exactly with the baseline and does
 not incur a redundant upper-layer pass.
+
+## Model capability
+
+The scheduler, recurrent-state buffers, KV-slot remapping, and CUDA-graph
+specialization are engine-level features. Model implementations opt in through
+the `SupportsRecirculation` interface and use a shared residual-decoder
+execution mixin. This keeps scheduling behavior common while allowing a model
+family to override its layer execution with a specialized implementation.
+
+The reviewed adapters currently cover text-only Gemma 3, the native Llama
+implementation and its direct architecture aliases, and Mistral. An
+unreviewed subclass does not inherit support automatically and fails during
+model loading when Recirculation is requested.
 
 ## Wavefront execution
 
@@ -139,7 +152,8 @@ assuming one value is universally optimal.
 
 ## Current restrictions
 
-- Only `Gemma3ForCausalLM` is supported. Multimodal Gemma 3 models are not.
+- Reviewed adapters currently cover text-only Gemma 3, Llama, and Mistral
+  implementations. Multimodal wrappers are not yet supported.
 - Pipeline parallelism is not supported.
 - Only fixed scalar coefficients and source norm matching are implemented.
 - Wavefront execution currently requires one sequence, one scheduled token per

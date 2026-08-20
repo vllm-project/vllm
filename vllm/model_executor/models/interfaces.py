@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import MoERunner
     from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
     from vllm.model_executor.models.interfaces_base import VllmModel
+    from vllm.model_executor.models.recirculation import RecirculationCapabilities
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
@@ -813,6 +814,66 @@ def supports_pp(
                 )
 
     return supports_attributes and supports_inspect
+
+
+@runtime_checkable
+class SupportsRecirculation(Protocol):
+    """Interface for causal models with Recirculation-aware forwards."""
+
+    supports_recirculation: bool
+
+    def get_recirculation_capabilities(
+        self,
+    ) -> "RecirculationCapabilities | None": ...
+
+    def forward(
+        self,
+        input_ids: Tensor | None,
+        positions: Tensor,
+        *,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: Tensor | None = None,
+        recirculation_wavefront_pending: Tensor | None = None,
+    ) -> "Tensor | IntermediateTensors": ...
+
+
+def supports_recirculation(model: object) -> TypeIs[SupportsRecirculation]:
+    return get_recirculation_capabilities(model) is not None
+
+
+def get_recirculation_capabilities(
+    model: object,
+) -> "RecirculationCapabilities | None":
+    if not getattr(model, "supports_recirculation", False):
+        return None
+
+    get_capabilities = getattr(model, "get_recirculation_capabilities", None)
+    if not callable(get_capabilities):
+        return None
+    capabilities = get_capabilities()
+    if capabilities is None:
+        return None
+
+    model_forward = getattr(model, "forward", None)
+    if not callable(model_forward):
+        return None
+    required_kwargs = (
+        "recirculation_wavefront_warmup",
+        "recirculation_wavefront_positions",
+        "recirculation_wavefront_pending",
+    )
+    missing_kwargs = tuple(
+        kwarg for kwarg in required_kwargs if not supports_kw(model_forward, kwarg)
+    )
+    if missing_kwargs:
+        logger.warning(
+            "The model (%s) advertises Recirculation support but its forward "
+            "method is missing arguments: %s",
+            model,
+            missing_kwargs,
+        )
+        return None
+    return capabilities
 
 
 def _supports_pp_attributes(model: type[object] | object) -> bool:

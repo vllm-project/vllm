@@ -23,6 +23,7 @@ from vllm.model_executor.models.llama import (
     LlamaForCausalLM,
     LlamaModel,
 )
+from vllm.model_executor.models.recirculation import RecirculationCapabilities
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
@@ -203,8 +204,18 @@ class MistralDecoderLayer(LlamaDecoderLayer):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+        "t_cond": 0,
+    }
+)
 class MistralModel(LlamaModel):
+    recirculation_capabilities = RecirculationCapabilities(adapter="mistral")
+
     def __init__(
         self,
         *,
@@ -221,9 +232,19 @@ class MistralModel(LlamaModel):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         t_cond: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         return super().forward(
-            input_ids, positions, intermediate_tensors, inputs_embeds, t_cond=t_cond
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            t_cond=t_cond,
+            recirculation_wavefront_warmup=recirculation_wavefront_warmup,
+            recirculation_wavefront_positions=recirculation_wavefront_positions,
+            recirculation_wavefront_pending=recirculation_wavefront_pending,
         )
 
 

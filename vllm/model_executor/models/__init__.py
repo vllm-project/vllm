@@ -8,13 +8,16 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsMultiModalEmbeddings,
     SupportsPP,
+    SupportsRecirculation,
     SupportsTranscription,
+    get_recirculation_capabilities,
     has_inner_state,
     supports_lora,
     supports_mrope,
     supports_multimodal,
     supports_multimodal_embeddings,
     supports_pp,
+    supports_recirculation,
     supports_transcription,
 )
 from .interfaces_base import (
@@ -43,6 +46,9 @@ __all__ = [
     "supports_mrope",
     "SupportsPP",
     "supports_pp",
+    "SupportsRecirculation",
+    "supports_recirculation",
+    "get_recirculation_capabilities",
     "SupportsTranscription",
     "supports_transcription",
 ]

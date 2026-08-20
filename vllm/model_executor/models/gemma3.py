@@ -46,8 +46,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsLoRA, SupportsPP
-from .recirculation import RecirculationConfig
+from .interfaces import SupportsLoRA, SupportsPP, SupportsRecirculation
+from .recirculation import RecirculationCapabilities, RecirculationDecoderMixin
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -297,7 +297,8 @@ class Gemma3DecoderLayer(nn.Module):
         "inputs_embeds": 0,
     }
 )
-class Gemma3Model(nn.Module):
+class Gemma3Model(RecirculationDecoderMixin, nn.Module):
+    recirculation_capabilities = RecirculationCapabilities(adapter="gemma3")
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
@@ -316,12 +317,6 @@ class Gemma3Model(nn.Module):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.recirculation_config = RecirculationConfig.from_hf_config(config)
-        if self.recirculation_config is not None and not getattr(
-            config, "is_causal", True
-        ):
-            raise ValueError("Recirculation requires causal attention")
-
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -335,10 +330,7 @@ class Gemma3Model(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
-        if self.recirculation_config is not None and (
-            self.start_layer != 0 or self.end_layer != config.num_hidden_layers
-        ):
-            raise ValueError("Recirculation does not support pipeline parallelism")
+        self._init_recirculation(config, self.start_layer, self.end_layer)
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # Normalize the embedding by sqrt(hidden_size)
@@ -378,23 +370,17 @@ class Gemma3Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        if (
-            self.recirculation_config is not None
-            and self.recirculation_config.wavefront
-            and recirculation_wavefront_warmup is not None
-        ):
-            return self._forward_recirculation_wavefront(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-                warmup=recirculation_wavefront_warmup,
-                wavefront_positions=recirculation_wavefront_positions,
-                wavefront_pending=recirculation_wavefront_pending,
+        if self.recirculation_config is not None:
+            return self._forward_recirculation(
+                positions,
+                hidden_states,
+                residual,
+                recirculation_wavefront_warmup,
+                recirculation_wavefront_positions,
+                recirculation_wavefront_pending,
                 **kwargs,
             )
 
-        destination_states = None
-        source_states = None
         for layer_idx in range(self.start_layer, self.end_layer):
             layer = self.layers[layer_idx]
             hidden_states, residual = layer(
@@ -403,102 +389,19 @@ class Gemma3Model(nn.Module):
                 residual,
                 **kwargs,
             )
-            if self.recirculation_config is not None:
-                if layer_idx == self.recirculation_config.destination_layer:
-                    destination_states = hidden_states + residual
-                if layer_idx == self.recirculation_config.source_layer:
-                    source_states = hidden_states + residual
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
-
-        if self.recirculation_config is not None:
-            assert destination_states is not None and source_states is not None
-            recirculated_states = self.recirculation_config.mix(
-                source_states, destination_states, positions
-            )
-            recirculated_residual = None
-            for layer_idx in range(
-                self.recirculation_config.destination_layer + 1, self.end_layer
-            ):
-                recirculated_states, recirculated_residual = self.layers[layer_idx](
-                    positions,
-                    recirculated_states,
-                    recirculated_residual,
-                    **kwargs,
-                )
         return hidden_states
-
-    def _forward_recirculation_wavefront(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        warmup: bool,
-        wavefront_positions: torch.Tensor | None,
-        wavefront_pending: torch.Tensor | None,
-        **kwargs,
-    ) -> torch.Tensor:
-        """Run the normal and previous-token recurrent upper stacks together."""
-        config = self.recirculation_config
-        assert config is not None and config.wavefront
-        assert positions.shape[0] == 1
-
-        destination_states = None
-        source_states = None
-        if warmup:
-            for layer_idx in range(self.start_layer, self.end_layer):
-                hidden_states, residual = self.layers[layer_idx](
-                    positions,
-                    hidden_states,
-                    residual,
-                    **kwargs,
-                )
-                if layer_idx == config.destination_layer:
-                    destination_states = hidden_states + residual
-                if layer_idx == config.source_layer:
-                    source_states = hidden_states + residual
-            hidden_states, _ = self.norm(hidden_states, residual)
-        else:
-            assert wavefront_positions is not None
-            assert wavefront_positions.shape[0] == 2
-            assert wavefront_pending is not None
-            assert wavefront_pending.shape == hidden_states.shape
-            for layer_idx in range(self.start_layer, config.destination_layer + 1):
-                hidden_states, residual = self.layers[layer_idx](
-                    positions,
-                    hidden_states,
-                    residual,
-                    **kwargs,
-                )
-
-            destination_states = hidden_states + residual
-            hidden_states = torch.cat((wavefront_pending, destination_states), dim=0)
-            residual = None
-            for layer_idx in range(config.destination_layer + 1, self.end_layer):
-                hidden_states, residual = self.layers[layer_idx](
-                    wavefront_positions,
-                    hidden_states,
-                    residual,
-                    **kwargs,
-                )
-                if layer_idx == config.source_layer:
-                    source_states = (hidden_states + residual)[1:]
-            hidden_states, _ = self.norm(hidden_states, residual)
-            hidden_states = hidden_states[1:]
-
-        assert destination_states is not None and source_states is not None
-        next_pending = config.mix(source_states, destination_states, positions)
-        return torch.cat((hidden_states, next_pending), dim=0)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsRecirculation):
     hf_to_vllm_mapper = Gemma3Model.hf_to_vllm_mapper
     packed_modules_mapping = {
         "qkv_proj": [
@@ -541,6 +444,13 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    @property
+    def supports_recirculation(self) -> bool:
+        return self.model.has_recirculation_adapter()
+
+    def get_recirculation_capabilities(self) -> RecirculationCapabilities | None:
+        return self.model.get_recirculation_capabilities()
 
     def forward(
         self,

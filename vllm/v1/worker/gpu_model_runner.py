@@ -83,6 +83,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsXDRoPE,
     get_mixture_of_experts_model,
+    get_recirculation_capabilities,
     supports_eagle3,
     supports_mrope,
     supports_multimodal_pruning,
@@ -95,6 +96,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
+from vllm.model_executor.models.recirculation import RecirculationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -519,24 +521,21 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
-        raw_recirculation_config = getattr(
-            self.model_config.hf_config, "recirculation_config", None
+        self.recirculation_config = RecirculationConfig.from_hf_config(
+            self.model_config.hf_config
         )
+        self.recirculation_enabled = self.recirculation_config is not None
         self.recirculation_wavefront_enabled = bool(
-            isinstance(raw_recirculation_config, dict)
-            and raw_recirculation_config.get("wavefront") is True
-            and not (
-                raw_recirculation_config.get("alpha", 0.15) == 0.0
-                and raw_recirculation_config.get("beta") in (None, 1.0)
-            )
+            self.recirculation_config is not None
+            and self.recirculation_config.wavefront
         )
         self.recirculation_wavefront_destination_layer: int | None = None
         if self.recirculation_wavefront_enabled:
-            assert isinstance(raw_recirculation_config, dict)
-            self._validate_recirculation_wavefront_config(raw_recirculation_config)
-            self.recirculation_wavefront_destination_layer = raw_recirculation_config[
-                "destination_layer"
-            ]
+            assert self.recirculation_config is not None
+            self._validate_recirculation_wavefront_config()
+            self.recirculation_wavefront_destination_layer = (
+                self.recirculation_config.destination_layer
+            )
             # The external graph batch contains one token; the upper stack's
             # second row is created inside the model. Preserve explicit eager
             # execution, but specialize any enabled graph configuration for
@@ -4321,13 +4320,10 @@ class GPUModelRunner(
 
         return slot_mappings_by_gid, slot_mappings_by_layer
 
-    def _validate_recirculation_wavefront_config(
-        self, raw_config: dict[str, Any]
-    ) -> None:
-        architectures = getattr(self.model_config.hf_config, "architectures", None)
-        if architectures != ["Gemma3ForCausalLM"]:
+    def _validate_recirculation_wavefront_config(self) -> None:
+        if self.model_config.runner_type != "generate":
             raise ValueError(
-                "Recirculation wavefront execution only supports Gemma3ForCausalLM"
+                "Recirculation wavefront execution requires a generation model"
             )
         if self.scheduler_config.max_num_seqs != 1:
             raise ValueError(
@@ -4366,8 +4362,6 @@ class GPUModelRunner(
                 "Recirculation wavefront execution does not support sequence "
                 "parallelism"
             )
-        if type(raw_config.get("destination_layer")) is not int:
-            raise ValueError("destination_layer must be an integer")
 
     def _apply_recirculation_wavefront_attention_metadata(
         self,
@@ -5662,6 +5656,29 @@ class GPUModelRunner(
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config, model_config=self.model_config
                 )
+                if self.recirculation_enabled:
+                    capabilities = get_recirculation_capabilities(self.model)
+                    if capabilities is None:
+                        raise ValueError(
+                            f"{self.model.__class__.__name__} does not implement "
+                            "the Recirculation model interface"
+                        )
+                    if (
+                        self.recirculation_wavefront_enabled
+                        and not capabilities.wavefront
+                    ):
+                        raise ValueError(
+                            f"The {capabilities.adapter} Recirculation adapter "
+                            "does not support wavefront execution"
+                        )
+                    if (
+                        not self.recirculation_wavefront_enabled
+                        and not capabilities.serial
+                    ):
+                        raise ValueError(
+                            f"The {capabilities.adapter} Recirculation adapter "
+                            "does not support serial execution"
+                        )
                 if self.lora_config:
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
