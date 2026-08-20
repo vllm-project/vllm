@@ -936,6 +936,16 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param = getattr(self, name, self)
             if param is None and name == "bias":
                 continue
+
+            if not isinstance(param, torch.nn.Parameter):
+                raise ValueError(
+                    f"{self.prefix}: cannot load {name!r} — no such "
+                    f"parameter, got {type(param).__name__} instead. "
+                    f"This usually means the checkpoint carries a "
+                    f"tensor the layer does not declare, e.g. a "
+                    f"quantization scale on an unquantized layer."
+                )
+
             param.weight_loader(param, loaded_weight, shard_id)
             logger.debug(
                 "Loaded shard %s with shape %s into %s.%s",
@@ -1342,6 +1352,16 @@ class QKVParallelLinear(ColumnParallelLinear):
                 param = getattr(self, name, self)
             if param is None and name == "bias":
                 continue
+
+            if not isinstance(param, Parameter):
+                raise ValueError(
+                    f"{self.prefix}: cannot load {name!r} — no such "
+                    f"parameter, got {type(param).__name__} instead. "
+                    f"This usually means the checkpoint carries a "
+                    f"tensor the layer does not declare, e.g. a "
+                    f"quantization scale on an unquantized layer."
+                )
+
             param.weight_loader(param, loaded_weight, shard_id)
             logger.debug(
                 "Loaded shard %s with shape %s into %s.%s",
