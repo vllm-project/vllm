@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import sys
+from types import ModuleType
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 
@@ -11,6 +15,7 @@ from vllm.utils.torch_utils import set_random_seed
 try:
     from vllm.vllm_flash_attn import (
         fa_version_unsupported_reason,
+        flash_attn_interface,
         flash_attn_varlen_func,
         is_fa_version_supported,
     )
@@ -32,6 +37,58 @@ QDTYPES = [None, torch.float8_e4m3fn]
 NUM_BLOCKS = [32768, 2048]
 SOFT_CAPS = [None]
 SLIDING_WINDOWS = [None, 256]
+
+
+def test_fa4_dcp_forwards_native_cp_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda _device: (9, 0)
+    )
+
+    forwarded_kwargs = {}
+
+    def fake_flash_attn_fwd(*args, **kwargs):
+        forwarded_kwargs.update(kwargs)
+        return args[0], None, None, None
+
+    fake_interface = ModuleType("vllm.vllm_flash_attn.cute.interface")
+    fake_interface._flash_attn_fwd = fake_flash_attn_fwd  # type: ignore[attr-defined]
+    monkeypatch.setitem(
+        sys.modules, "vllm.vllm_flash_attn.cute.interface", fake_interface
+    )
+
+    q = torch.empty((1, 1, 64))
+    cp_tot_seqused_k = torch.tensor([2], dtype=torch.int32)
+    result = flash_attn_varlen_func(
+        q=q,
+        k=torch.empty_like(q),
+        v=torch.empty_like(q),
+        cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+        seqused_k=torch.tensor([1], dtype=torch.int32),
+        max_seqlen_q=1,
+        max_seqlen_k=1,
+        fa_version=4,
+        cp_world_size=2,
+        cp_rank=1,
+        cp_tot_seqused_k=cp_tot_seqused_k,
+    )
+
+    assert result is q
+    assert forwarded_kwargs["cp_world_size"] == 2
+    assert forwarded_kwargs["cp_rank"] == 1
+    assert forwarded_kwargs["cp_tot_seqused_k"] is cp_tot_seqused_k
+
+
+def test_fa4_cutedsl_probe_imports_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import_module = MagicMock(side_effect=ModuleNotFoundError("no cutlass"))
+    monkeypatch.setattr(flash_attn_interface, "import_module", import_module)
+
+    assert (
+        flash_attn_interface.fa4_cutedsl_import_error()
+        == "ModuleNotFoundError: no cutlass"
+    )
+    import_module.assert_called_once_with("vllm.vllm_flash_attn.cute.interface")
 
 
 def ref_paged_attn(
