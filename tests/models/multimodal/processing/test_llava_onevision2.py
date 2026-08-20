@@ -24,6 +24,7 @@ import pytest
 from vllm.model_executor.models.llava_onevision2 import (
     _CODEC_VIDEO_MARKER,
     LlavaOnevision2VideoBackend,
+    _codec_module_name,
     _extract_codec_video_paths,
     _frame_video_to_pil_and_timestamps,
     _validate_video_source,
@@ -300,3 +301,34 @@ def test_backend_target_fps_controls_sampling_when_below_cap():
     # fps-derived nframes (2) is below the 128 cap, so fps wins.
     assert len(idx) <= 8
     assert len(idx) % 2 == 0
+
+
+# ---------------------------------------------------------------------------
+# Remote-code module naming. Every checkpoint on this architecture ships the
+# same three trust_remote_code modules under its own suffix (OV2:
+# ``*_llava_onevision2``; Mage-VL: ``*_mage_vl``), so the codec module is
+# derived from the loaded processor's module name rather than hardcoded.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "processor_module,expected",
+    [
+        ("processing_llava_onevision2", "codec_video_processing_llava_onevision2"),
+        ("processing_mage_vl", "codec_video_processing_mage_vl"),
+    ],
+)
+def test_codec_module_name(processor_module, expected):
+    assert _codec_module_name(processor_module) == expected
+
+
+def test_video_backend_registered_for_both_checkpoints():
+    # The frame backend is selected by ``video_processor_type``; both OV2 and
+    # Mage-VL checkpoints must resolve to this backend.
+    from vllm.multimodal.video import VIDEO_LOADER_REGISTRY
+
+    for name in ("LlavaOnevision2VideoProcessor", "MageVLVideoProcessor"):
+        assert (
+            VIDEO_LOADER_REGISTRY.get_backend_for_video_processor(name)
+            == "llava_onevision2"
+        )
