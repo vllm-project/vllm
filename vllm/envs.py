@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_BATCH_INVARIANT_KERNEL_LIB: str | None = None
     VLLM_DS4_DECODE_KERNEL: Literal["paged", "sparse"] = "paged"
     VLLM_TRITON_USE_TD: bool | None = None
     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
@@ -617,6 +618,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Standalone fused SiLU+A2-quant kernel required by batch-invariant
+    # DeepGEMM experts. Expert initialization fails closed when BI is enabled
+    # and this path is absent or ABI-incompatible.
+    "VLLM_BATCH_INVARIANT_KERNEL_LIB": lambda: os.getenv(
+        "VLLM_BATCH_INVARIANT_KERNEL_LIB"
+    ),
     # DeepSeek-V4 decode attention kernel. ``paged`` is the production default;
     # ``sparse`` keeps decode request semantics but reuses the prefill FlashMLA
     # kernel for train/rollout alignment.

@@ -64,6 +64,17 @@ def is_batch_invariant_quant_kernel_enabled() -> bool:
     return True
 
 
+def require_batch_invariant_quant_kernel() -> None:
+    """Load the BI activation kernel or fail before expert execution."""
+    path = os.environ.get("VLLM_BATCH_INVARIANT_KERNEL_LIB")
+    if not path:
+        raise RuntimeError(
+            "VLLM_BATCH_INVARIANT=1 requires "
+            "VLLM_BATCH_INVARIANT_KERNEL_LIB; refusing a non-BI MoE fallback"
+        )
+    _load_batch_invariant_kernel_library(path)
+
+
 def fused_silu_mul_per_token_group_quant_fp8(
     input: torch.Tensor,
     *,

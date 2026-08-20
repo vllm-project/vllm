@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -25,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     is_batch_invariant_quant_kernel_enabled,
     per_token_group_quant_fp8,
     per_token_group_quant_fp8_packed_for_deepgemm,
+    require_batch_invariant_quant_kernel,
     silu_mul_per_token_group_quant_fp8_colmajor,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -130,6 +132,8 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
+        if envs.VLLM_BATCH_INVARIANT:
+            require_batch_invariant_quant_kernel()
         # MXFP8: FP8 e4m3 values + UE8M0 1x32 block scales (Blackwell). Reuses
         # the same grouped GEMM (aliased to fp8_fp4) with recipe (1, 32).
         self.mxfp8 = quant_config.block_shape == [1, 32]

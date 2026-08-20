@@ -6,6 +6,7 @@ import os
 
 import torch
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -23,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     fused_silu_mul_per_token_group_quant_fp8,
     is_batch_invariant_quant_kernel_enabled,
+    require_batch_invariant_quant_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -354,6 +356,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
+        if envs.VLLM_BATCH_INVARIANT:
+            require_batch_invariant_quant_kernel()
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
         assert self.quant_config.use_fp8_w8a8
 
