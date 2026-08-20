@@ -477,6 +477,27 @@ def test_batched_mm_swapped_grid(num_experts, max_tokens_per_expert, K, N):
     torch.testing.assert_close(out, ref, atol=6e-2, rtol=6e-2)
 
 
+def test_swapped_kernel_matches_original_source():
+    """The two kernels must stay in sync apart from their program_id axes."""
+    import inspect
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        batched_triton_kernel,
+        batched_triton_kernel_swapped,
+    )
+
+    def body(kernel):
+        return [
+            line
+            for line in inspect.getsource(kernel.fn).splitlines()
+            if not line.startswith("def ")
+            and "tl.program_id(" not in line
+            and not line.strip().startswith("# axis ")
+        ]
+
+    assert body(batched_triton_kernel_swapped) == body(batched_triton_kernel)
+
+
 @pytest.mark.parametrize("num_experts,max_tokens_per_expert,K,N", _TD_SHAPES)
 def test_batched_mm_td_matches_plain(num_experts, max_tokens_per_expert, K, N):
     if not _td_supported():
