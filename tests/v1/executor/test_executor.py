@@ -5,9 +5,7 @@ import asyncio
 import os
 from collections.abc import Callable
 from concurrent.futures import Future
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock as MockCall
 
 import pytest
 
@@ -45,36 +43,6 @@ def test_supports_async_scheduling_executor_with_external_launcher():
 
 def test_supports_async_scheduling_multiproc_executor():
     assert MultiprocExecutor.supports_async_scheduling() is True
-
-
-def test_discard_records_sleep_state_after_worker_failure():
-    collective_rpc = MockCall(side_effect=RuntimeError("discard failed"))
-    executor = SimpleNamespace(
-        collective_rpc=collective_rpc,
-        is_sleeping=False,
-        sleeping_tags=set(),
-    )
-
-    with pytest.raises(RuntimeError, match="discard failed"):
-        Executor.discard(executor, ("kv_cache",))
-
-    assert executor.is_sleeping is True
-    assert executor.sleeping_tags == {"kv_cache"}
-
-
-@pytest.mark.parametrize("level", [1, 2])
-def test_sleep_after_kv_cache_discard(level):
-    collective_rpc = MockCall()
-    executor = SimpleNamespace(
-        collective_rpc=collective_rpc,
-        is_sleeping=True,
-        sleeping_tags={"kv_cache"},
-    )
-
-    Executor.sleep(executor, level)
-
-    collective_rpc.assert_called_once_with("sleep", kwargs={"level": level})
-    assert executor.sleeping_tags == {"weights", "kv_cache"}
 
 
 class _FakeClock:

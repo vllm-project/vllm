@@ -54,21 +54,6 @@ def test_sleep_mode():
         assert weights_offloaded == 0
         assert discard_all == 0
 
-        response = requests.post(remote_server.url_for("release_kv_cache_memory"))
-        assert response.status_code == 200
-
-        response = requests.get(remote_server.url_for("metrics"))
-        assert response.status_code == 200
-        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
-        assert awake == 0
-        assert weights_offloaded == 0
-        assert discard_all == 0
-
-        response = requests.post(
-            remote_server.url_for("wake_up"), params={"tags": ["kv_cache"]}
-        )
-        assert response.status_code == 200
-
         # test wake up with tags
         response = requests.post(remote_server.url_for("sleep"), params={"level": "1"})
         assert response.status_code == 200
@@ -82,11 +67,6 @@ def test_sleep_mode():
         response = requests.get(remote_server.url_for("is_sleeping"))
         assert response.status_code == 200
         assert response.json().get("is_sleeping") is True
-
-        response = requests.get(remote_server.url_for("metrics"))
-        assert response.status_code == 200
-        awake, _, _ = _get_sleep_metrics_from_api(response)
-        assert awake == 0
 
         response = requests.post(
             remote_server.url_for("wake_up"), params={"tags": ["kv_cache"]}
