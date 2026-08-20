@@ -115,6 +115,7 @@ class _WriteContext:
         open_read: bool = False,
         blocks: list[int] | None = None,
         timeout: float = 0.0,
+        generate_read_token: bool = False,
     ):
         self._client = client
         self._uuid = uuid
@@ -122,20 +123,26 @@ class _WriteContext:
         self._use_cache = use_cache
         self.open_read = open_read
         self._timeout = timeout
+        self._generate_read_token = generate_read_token
         if blocks is None:
             self.blocks: list[int] = []
         else:
             self.blocks = blocks
+        self.read_token: str | None = None
 
     def __enter__(self) -> "_WriteContext":
         if len(self.blocks) > 0:
             return self
 
         item_spec = ShmWriteRequest(
-            uuid=self._uuid, size=self._size, use_cache=self._use_cache
+            uuid=self._uuid,
+            size=self._size,
+            use_cache=self._use_cache,
+            generate_read_token=self._generate_read_token,
         )
         alloc = self._client.open_write([item_spec], timeout=self._timeout)
         self.blocks = alloc[0].blocks
+        self.read_token = alloc[0].read_token
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -291,6 +298,7 @@ class PagedShmClient(_BaseClient):
         blocks: list[int] | None = None,
         open_read: bool = False,
         timeout: float = 0.0,
+        generate_read_token: bool = False,
     ) -> _WriteContext:
         """
         Create a context manager for a synchronous write operation.
@@ -302,7 +310,11 @@ class PagedShmClient(_BaseClient):
         If `blocks` are provided, the context manager assumes the blocks
         have already been allocated and will not call `open_write`; it will
         still commit or rollback as appropriate. In this case `use_cache`
-        is ignored.
+        and `generate_read_token` are ignored.
+
+        Even if `open_read` is True, `generate_read_token` can be True to
+        obtain a single‑use token for future reads (independent of the
+        read lock held by `open_read`).
         """
         return _WriteContext(
             self,
@@ -312,6 +324,7 @@ class PagedShmClient(_BaseClient):
             open_read=open_read,
             blocks=blocks,
             timeout=timeout,
+            generate_read_token=generate_read_token,
         )
 
     def read_context(
@@ -346,6 +359,8 @@ class PagedShmClient(_BaseClient):
         open_read: bool = False,
         async_write: bool = False,
         timeout: float = 0.0,
+        generate_read_token: bool = False,
+        return_read_token: bool = False,
     ):
         """
         Write an item to the shared memory store.
@@ -353,13 +368,13 @@ class PagedShmClient(_BaseClient):
         For synchronous writes (``async_write=False``), uses a write context
         manager to ensure blocks are allocated, data is transferred directly
         into shared memory, and the write is finalised or rolled back atomically.
+        If `return_read_token` is True, returns a tuple ``(size, read_token)``,
+        otherwise only ``size`` is returned.
 
         For asynchronous writes (``async_write=True``), the data copy and
         finalisation (``close_write``) are submitted to a background thread
-        pool.  This method returns immediately with a tuple of (size, future).
-        The future completes once the data is safely stored and the item is
-        readable (or deleted on error).  The caller can wait on the future
-        or handle exceptions via its result.
+        pool.  This method returns immediately with a tuple of
+        ``(size, future, read_token)``.
 
         Args:
             uuid: Unique identifier for the item.
@@ -376,10 +391,18 @@ class PagedShmClient(_BaseClient):
             timeout: Timeout in seconds for block allocation (synchronous
                      path only; for async_write, the allocation is done
                      synchronously before submission).
+            generate_read_token: If True, request a single-use read token
+                                 to be returned in the allocation. This is
+                                 independent of `open_read`.
+            return_read_token: If True and `async_write` is False, return
+                               a tuple ``(size, read_token)`` instead of
+                               just ``size``.
 
         Returns:
-            For sync writes: the size of written data.
-            For async writes: (size, future) where future can be awaited.
+            For sync writes with return_read_token=False: the size of written data.
+            For sync writes with return_read_token=True: (size, read_token_or_None).
+            For async writes: (size, future, read_token_or_None) where
+                              future can be awaited.
         """
 
         # Determine size in bytes
@@ -394,22 +417,37 @@ class PagedShmClient(_BaseClient):
 
         if async_write:
             # Allocate blocks synchronously (or use provided ones)
+            read_token = None
             if blocks is None:
-                item_spec = ShmWriteRequest(uuid=uuid, size=size, use_cache=use_cache)
+                item_spec = ShmWriteRequest(
+                    uuid=uuid,
+                    size=size,
+                    use_cache=use_cache,
+                    generate_read_token=generate_read_token,
+                )
                 alloc = self.open_write([item_spec], timeout=timeout)
                 blocks = alloc[0].blocks
+                read_token = alloc[0].read_token
 
             # Submit background task: write data + close_write (or rollback on error)
             future = self._executor.submit(
                 self._async_write_task, uuid, data, blocks, open_read
             )
-            return size, future
+            return size, future, read_token
 
         # Synchronous path: use context manager
         with self.write_context(
-            uuid, size, use_cache, blocks, open_read, timeout=timeout
+            uuid,
+            size,
+            use_cache,
+            blocks,
+            open_read,
+            timeout=timeout,
+            generate_read_token=generate_read_token,
         ) as ctx:
             self._storage.write(data, ctx.blocks)
+            if return_read_token:
+                return size, ctx.read_token
             return size
 
     def _async_write_task(self, uuid: str, data, blocks: list[int], open_read: bool):
@@ -435,7 +473,7 @@ class PagedShmClient(_BaseClient):
 
     def read(
         self,
-        uuid: str,
+        uuid_or_token: str,
         size: int | None = None,
         blocks: list[int] | None = None,
         device: DeviceLikeType = "cpu",
@@ -444,22 +482,23 @@ class PagedShmClient(_BaseClient):
         """
         Read an item from the shared memory store.
 
-        Returns a numpy array if ``device="cpu"``, or a torch tensor
-        if a GPU device is specified.  The read lock is held for the
-        duration of the data copy.
+        Can accept either a real UUID or a read token. When a token is used,
+        it is consumed (single-use). The read lock is held for the duration
+        of the data copy.
 
-        If the stored data size is 0, an empty array/tensor is returned.
+        Returns a numpy array if ``device="cpu"``, or a torch tensor
+        if a GPU device is specified.  If the stored data size is 0,
+        an empty array/tensor is returned.
         """
-        with self.read_context(uuid, size, blocks, timeout=timeout) as ctx:
+        with self.read_context(uuid_or_token, size, blocks, timeout=timeout) as ctx:
             if ctx.size == 0:
-                # Return an empty array/tensor of appropriate type
                 if device == "cpu":
                     return np.array([])
                 else:
                     return torch.tensor([], device=device)
 
             if not ctx.blocks:
-                raise ValueError(f"Server returned empty block list for uuid '{uuid}'")
+                raise ValueError(f"Server returned empty block list for uuid '{uuid_or_token}'")
 
             if device == "cpu":
                 result = self._storage.read_to_numpy(ctx.size, ctx.blocks)
@@ -517,9 +556,13 @@ class PagedShmClient(_BaseClient):
         payload = json.dumps({"uuid": uuid, "open_read": open_read})
         self._request(CLOSE_WRITE, payload)
 
-    def open_read(self, uuid: str, timeout: float = 0.0) -> ShmAllocation:
-        """Acquire a read reference to an item and return its block list."""
-        payload = json.dumps({"uuid": uuid, "timeout": timeout})
+    def open_read(self, uuid_or_token: str, timeout: float = 0.0) -> ShmAllocation:
+        """
+        Acquire a read reference to an item and return its block list.
+
+        Accepts either a real UUID or a read token. Tokens are single-use.
+        """
+        payload = json.dumps({"uuid": uuid_or_token, "timeout": timeout})
         resp = self._request(OPEN_READ, payload)
         resp_dict = json.loads(resp)
         status = resp_dict.pop("status", "error")
@@ -527,16 +570,25 @@ class PagedShmClient(_BaseClient):
             raise RuntimeError("Server returned non-ok status")
         return ShmAllocation(**resp_dict["data"])
 
-    def close_read(self, uuid: str) -> None:
-        """Release a read reference for the given UUID."""
-        self._request(CLOSE_READ, uuid)
-
-    def wait_write(self, uuid: str, timeout: float = 0.0) -> None:
-        """Wait for the item with the given UUID to become readable.
-        Does NOT acquire a read lock. Returns when the item is ready,
-        or raises TimeoutError if timeout expires.
+    def close_read(self, uuid_or_token: str) -> None:
         """
-        payload = json.dumps({"uuid": uuid, "timeout": timeout})
+        Release a read reference.
+
+        Accepts either a real UUID or a read token. If a token is used,
+        it is automatically consumed.
+        """
+        self._request(CLOSE_READ, uuid_or_token)
+
+    def wait_write(self, uuid_or_token: str, timeout: float = 0.0) -> None:
+        """
+        Wait for the item to become readable. Does NOT acquire a read lock.
+
+        Accepts either a real UUID or a read token. If a token is provided,
+        the wait applies to the underlying item; the token itself is not
+        consumed by this call. After the wait completes, the caller may
+        use the token to perform a single read.
+        """
+        payload = json.dumps({"uuid": uuid_or_token, "timeout": timeout})
         self._request(WAIT_WRITE, payload)
 
     def pin(self, uuid: str) -> None:
@@ -569,7 +621,7 @@ class PagedShmClient(_BaseClient):
         return self.get_storage_info()["name"]
 
     def get_info(self, uuid: str) -> dict[str, Any]:
-        """Return object info for the given UUID."""
+        """Return object info for the given UUID (real UUID only)."""
         resp = self._request(GET_INFO, uuid)
         return json.loads(resp)
 
@@ -584,8 +636,8 @@ class PagedShmClient(_BaseClient):
         """Create and connect a new REQ socket to the server."""
         sock = self._ctx.socket(zmq.REQ)
         # Set timeouts to avoid indefinite blocking
-        sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5 seconds receive timeout
-        sock.setsockopt(zmq.SNDTIMEO, 5000)  # 5 seconds send timeout
+        sock.setsockopt(zmq.RCVTIMEO, 5000)   # 5 seconds receive timeout
+        sock.setsockopt(zmq.SNDTIMEO, 5000)   # 5 seconds send timeout
         sock.connect(self._address)
         return sock
 

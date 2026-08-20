@@ -15,6 +15,7 @@ import zmq
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path
+from vllm.utils import random_uuid
 
 from .constant import (
     CLOSE_READ,
@@ -69,31 +70,38 @@ class PagedShmServer:
         self.wait_for_open_read: dict[str, PriorityQueue] = {}
 
         # Per-uuid priority queues for pending WAIT_WRITE requests.
-        # These clients wait until the item becomes readable (ref_count >= 0)
-        # but do NOT acquire a read lock.
         self.wait_for_write_completion: dict[str, PriorityQueue] = {}
+
+        # Read token storage: token -> real_uuid
+        self._read_tokens: dict[str, str] = {}
+        # Reverse mapping: real_uuid -> set of tokens
+        self._item_to_read_tokens: dict[str, set[str]] = {}
 
     # ------------------------------------------------------------------
     # Helper for constructing write responses
     # ------------------------------------------------------------------
-    def _build_write_response(self, allocated: list) -> str:
-        """Convert a list of allocated ShmSlot to a JSON response."""
-        return json.dumps(
-            {
-                "status": "ok",
-                "data": [
-                    asdict(
-                        ShmAllocation(
-                            uuid=a.uuid,
-                            size=a.size,
-                            blocks=a.blocks,
-                            use_cache=a.use_cache,
-                        )
+    def _build_write_response(self, allocated: list, requests: list[ShmWriteRequest]) -> str:
+        """Build JSON response for open_write, including read tokens if requested."""
+        data = []
+        for a, req in zip(allocated, requests):
+            token = None
+            if req.generate_read_token:
+                token = random_uuid()
+                # Store token -> item_uuid
+                self._read_tokens[token] = a.uuid
+                self._item_to_read_tokens.setdefault(a.uuid, set()).add(token)
+            data.append(
+                asdict(
+                    ShmAllocation(
+                        uuid=a.uuid,
+                        size=a.size,
+                        blocks=a.blocks,
+                        use_cache=a.use_cache,
+                        read_token=token,
                     )
-                    for a in allocated
-                ],
-            }
-        )
+                )
+            )
+        return json.dumps({"status": "ok", "data": data})
 
     # ------------------------------------------------------------------
     # Request handlers
@@ -128,7 +136,7 @@ class PagedShmServer:
             self.wait_for_open_write.put((deadline, identity, item_objs))
             return None
 
-        return self._build_write_response(allocated)
+        return self._build_write_response(allocated, item_objs)
 
     def open_read(self, data: bytes, identity: bytes) -> str | None:
         """Acquire a read reference to an item, returning its block list and size.
@@ -148,21 +156,56 @@ class PagedShmServer:
         uuid = read_request["uuid"]
         timeout = float(read_request.get("timeout", 0.0))
 
-        info = self.manager.get_info(uuid)  # raises ValueError if uuid unknown
-        if info["ref_count"] < 0:  # item is being written
+        # Resolve read token to real UUID
+        real_uuid, is_token = self._resolve_read_token(uuid)
+
+        # Get item info
+        try:
+            info = self.manager.get_info(real_uuid)
+        except ValueError:
+            # If token points to a deleted item, invalidate token and re-raise
+            if is_token:
+                self._invalidate_token(uuid)
+            raise
+
+        if info["ref_count"] < 0:  # being written
             if timeout == 0.0:
-                # Simulate the same error as an immediate open_read
-                return self._open_read(uuid)  # will raise ValueError
-            deadline = float("inf") if timeout < 0 else time.monotonic() + timeout
-            # Get or create the per-uuid wait queue
-            q = self.wait_for_open_read.setdefault(uuid, PriorityQueue())
-            q.put((deadline, identity))
-            return None
-        else:
-            return self._open_read(uuid)
+                # Fail immediately
+                raise RuntimeError(f"Item {uuid} is still being written")
+            else:
+                # Queue the request (store token if present)
+                deadline = float("inf") if timeout < 0 else time.monotonic() + timeout
+                q = self.wait_for_open_read.setdefault(real_uuid, PriorityQueue())
+                # Store the original identifier (token or uuid) to be used when waking
+                q.put((deadline, identity, uuid if is_token else None))
+                return None
+
+        # Item is readable: consume token if present, then open read
+        if is_token:
+            self._consume_token(uuid)  # token consumed now
+
+        return self._open_read(real_uuid)
+
+    def _resolve_read_token(self, uuid: str) -> tuple[str, bool]:
+        """Return (real_uuid, is_token) after validating the token."""
+        if uuid in self._read_tokens:
+            return self._read_tokens[uuid], True
+        return uuid, False
+
+    def _consume_token(self, token: str) -> None:
+        """Consume a read token (remove it)."""
+        real_uuid = self._read_tokens.pop(token, None)
+        if real_uuid is not None:
+            self._item_to_read_tokens.get(real_uuid, set()).discard(token)
+
+    def _invalidate_token(self, token: str) -> None:
+        """Force-invalidate a token (e.g., on item deletion)."""
+        real_uuid = self._read_tokens.pop(token, None)
+        if real_uuid is not None:
+            self._item_to_read_tokens.get(real_uuid, set()).discard(token)
 
     def _open_read(self, uuid: str) -> str:
-        """Internal helper to open a read reference and build the response."""
+        """Internal helper to open a read reference and build response."""
         item = self.manager.open_read(uuid)
         resp = ShmAllocation(
             uuid=item.uuid, size=item.size, blocks=item.blocks, use_cache=item.use_cache
@@ -170,45 +213,33 @@ class PagedShmServer:
         return json.dumps({"status": "ok", "data": asdict(resp)})
 
     def wait_write(self, data: bytes, identity: bytes) -> str | None:
-        """
-        Wait for the item with the given UUID to become readable (i.e., the
-        write operation has been closed). Unlike open_read, this does NOT
-        acquire a read lock; it only signals that the item is available.
-        If the item is already readable, returns immediately with a success
-        status. Otherwise, the request is queued and the client will be
-        notified when close_write is called for this UUID.
-
-        Args:
-            data: JSON payload containing 'uuid' and optional 'timeout'.
-            identity: ZMQ identity of the requesting client.
-
-        Returns:
-            JSON response string if the item is already readable,
-            None if the request was queued (item is being written).
-
-        Raises:
-            ValueError: if uuid does not exist or timeout=0 and item is being written.
-        """
+        """Wait for an item to become readable. Supports read tokens."""
         req = json.loads(data)
-        uuid = req["uuid"]
+        uuid_or_token = req["uuid"]
         timeout = float(req.get("timeout", 0.0))
 
-        # Check if the item exists and is not being written.
+        # Resolve token to real UUID
         try:
-            info = self.manager.get_info(uuid)
+            real_uuid, is_token = self._resolve_read_token(uuid_or_token)
         except ValueError:
-            # Re-raise with a clear message; the server will catch and send ERROR.
-            raise ValueError(f"UUID {uuid} not found") from None
+            # Token is invalid or not found; re-raise with clear error
+            raise ValueError(f"Invalid read token or UUID: {uuid_or_token}")
+
+        # Wait only supports real UUID (token resolution succeeded)
+        try:
+            info = self.manager.get_info(real_uuid)
+        except ValueError:
+            raise ValueError(f"UUID {uuid_or_token} not found")
 
         if info["ref_count"] >= 0:
-            # Already readable: respond immediately with success.
+            # Already readable: respond immediately (token is untouched)
             return json.dumps({"status": "ok"})
-        else:  # ref_count == REF_WRITING
+        else:
+            # Still being written: queue the request
             if timeout == 0.0:
-                # Immediate failure: item is still being written.
-                raise RuntimeError(f"UUID {uuid} is still being written")
+                raise RuntimeError(f"Item {uuid_or_token} is still being written")
             deadline = float("inf") if timeout < 0 else time.monotonic() + timeout
-            q = self.wait_for_write_completion.setdefault(uuid, PriorityQueue())
+            q = self.wait_for_write_completion.setdefault(real_uuid, PriorityQueue())
             q.put((deadline, identity))
             return None
 
@@ -225,7 +256,7 @@ class PagedShmServer:
         """
         now = time.monotonic()
 
-        # Discard all requests whose deadline has passed
+        # Discard expired requests
         while not self.wait_for_open_write.empty():
             deadline, identity, _ = self.wait_for_open_write.queue[0]
             if deadline <= now:
@@ -236,7 +267,7 @@ class PagedShmServer:
                 continue
             break  # queue is sorted by deadline; no more expired entries
 
-        # Try to satisfy up to max_attempts non‑expired requests
+        # Try to satisfy up to max_attempts requests
         attempts = 0
         while not self.wait_for_open_write.empty() and attempts < max_attempts:
             deadline, identity, item_objs = self.wait_for_open_write.queue[0]
@@ -249,8 +280,8 @@ class PagedShmServer:
                 continue
             try:
                 allocated = self.manager.open_write(item_objs)
-                self.wait_for_open_write.get()  # success, remove from queue
-                response = self._build_write_response(allocated)
+                self.wait_for_open_write.get()
+                response = self._build_write_response(allocated, item_objs)
                 self._send_response(socket, identity, OK, response.encode("utf-8"))
                 attempts += 1
             except MemoryError:
@@ -280,29 +311,31 @@ class PagedShmServer:
         now = time.monotonic()
 
         if uuid is not None:
-            # Process a specific uuid queue
             q = self.wait_for_open_read.get(uuid)
             if q is None:
                 return
 
-            # Discard expired requests
+            # Discard expired
             while not q.empty():
-                deadline, identity = q.queue[0]
+                deadline, identity, token = q.queue[0]
                 if deadline <= now:
-                    _, ident = q.get()
+                    _, ident, _ = q.get()
                     self._send_response(
                         socket, ident, ERROR, b"TimeoutError: open_read timed out"
                     )
                     continue
                 break
 
-            # Satisfy as many requests as possible (the item is now readable)
+            # Satisfy waiters if item is readable
             if not q.empty():
                 info = self.manager.get_info(uuid)
                 if info["ref_count"] >= 0:
                     while not q.empty():
-                        deadline, identity = q.get()
+                        deadline, identity, token_or_none = q.get()
                         try:
+                            # If this was a token, consume it now
+                            if token_or_none is not None:
+                                self._consume_token(token_or_none)
                             result = self._open_read(uuid)
                             self._send_response(
                                 socket, identity, OK, result.encode("utf-8")
@@ -326,9 +359,9 @@ class PagedShmServer:
             for u, q in self.wait_for_open_read.items():
                 # Remove expired requests from this queue
                 while not q.empty():
-                    deadline, identity = q.queue[0]
+                    deadline, identity, token = q.queue[0]
                     if deadline <= now:
-                        _, ident = q.get()
+                        _, ident, _ = q.get()
                         self._send_response(
                             socket, ident, ERROR, b"TimeoutError: open_read timed out"
                         )
@@ -382,16 +415,13 @@ class PagedShmServer:
                             self._send_response(
                                 socket, identity, OK, b'{"status":"ok"}'
                             )
-                    else:
-                        # Still being written? This should not happen if we are
-                        # called after close_write; but if it does, leave queue
-                        # for later processing.
-                        pass
                 except ValueError:
                     # Item disappeared; send error to all waiters
                     while not q.empty():
                         _, ident = q.get()
-                        self._send_response(socket, ident, ERROR, b"UUID not found")
+                        self._send_response(
+                            socket, ident, ERROR, b"UUID not found"
+                        )
 
             if q.empty():
                 self.wait_for_write_completion.pop(uuid, None)
@@ -439,7 +469,8 @@ class PagedShmServer:
 
     def close_read(self, uuid: str) -> str:
         """Release a read reference."""
-        self.manager.close_read(uuid)
+        real_uuid, _ = self._resolve_read_token(uuid)
+        self.manager.close_read(real_uuid)
         return json.dumps({"status": "ok"})
 
     def pin(self, uuid: str) -> str:
@@ -454,6 +485,10 @@ class PagedShmServer:
 
     def delete(self, uuid: str) -> str:
         """Delete an item and free its blocks."""
+        # Invalidate all read tokens associated with this item
+        if uuid in self._item_to_read_tokens:
+            for token in self._item_to_read_tokens.pop(uuid):
+                self._read_tokens.pop(token, None)
         self.manager.delete(uuid)
         return json.dumps({"status": "ok"})
 
@@ -473,7 +508,9 @@ class PagedShmServer:
 
     def get_info(self, uuid: str) -> str:
         """Return object info as a JSON string."""
-        info = self.manager.get_info(uuid)
+        # Resolve token if needed, but get_info returns info for the real item
+        real_uuid, _ = self._resolve_read_token(uuid)
+        info = self.manager.get_info(real_uuid)
         return json.dumps(info)
 
     def close(self):
@@ -610,14 +647,16 @@ def _zmq_server(size: int, block_size: int, conn):
                 try:
                     # First, attempt to delete; if it fails, raise an error
                     server.delete(uuid)
-                    # Deletion succeeded; now clear all waiters for this uuid
-                    # (open_read waiters)
+                    # Clear waiters for both open_read and wait_write
                     q = server.wait_for_open_read.pop(uuid, None)
                     if q is not None:
                         while not q.empty():
-                            _, ident = q.get()
+                            _, ident, _ = q.get()
                             server._send_response(
-                                socket, ident, ERROR, b"Item deleted while waiting"
+                                socket,
+                                ident,
+                                ERROR,
+                                b"Item deleted while waiting"
                             )
                     # (wait_write waiters)
                     q = server.wait_for_write_completion.pop(uuid, None)
@@ -625,10 +664,14 @@ def _zmq_server(size: int, block_size: int, conn):
                         while not q.empty():
                             _, ident = q.get()
                             server._send_response(
-                                socket, ident, ERROR, b"Item deleted while waiting"
+                                socket,
+                                ident,
+                                ERROR,
+                                b"Item deleted while waiting"
                             )
-                    server._send_response(socket, identity, OK, b'{"status":"ok"}')
-                    # Space may have been freed, try open_write waiters
+                    server._send_response(
+                        socket, identity, OK, b'{"status":"ok"}'
+                    )
                     server.defer_open_write(socket)
                 except Exception as e:
                     error_msg = f"{type(e).__name__}: {e}".encode()
@@ -658,7 +701,9 @@ def _zmq_server(size: int, block_size: int, conn):
                     result = handler()
 
                 if result is not None:
-                    server._send_response(socket, identity, OK, result.encode("utf-8"))
+                    server._send_response(
+                        socket, identity, OK, result.encode("utf-8")
+                    )
                 success = True
             except Exception as e:
                 error_msg = f"{type(e).__name__}: {e}".encode()
