@@ -96,11 +96,11 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
-def _warmup_kimi_k3_gemm_rs() -> None:
-    module = sys.modules.get("vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs")
+def _warmup_kimi_k3_gemm_rs_ar() -> None:
+    module = sys.modules.get("vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar")
     if module is None:
         return
-    compiled = module.warmup_gemm_rs()
+    compiled = module.warmup_gemm_rs_ar()
     if compiled:
         logger.info_once("Warmed up %d Kimi-K3 GEMM-RS/AR variants.", compiled)
 
@@ -156,7 +156,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
 
-    _warmup_kimi_k3_gemm_rs()
+    _warmup_kimi_k3_gemm_rs_ar()
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated

@@ -319,7 +319,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
-        run_gemm_rs: bool = False,
+        run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
         self.use_recoverssm = self.cache_config.use_kda_recoverssm
@@ -491,12 +491,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        self.run_gemm_rs = run_gemm_rs
-        if self.run_gemm_rs:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+        self.run_gemm_rs_ar = run_gemm_rs_ar
+        if self.run_gemm_rs_ar:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+                get_gemm_rs_ar,
+            )
 
-            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj)
-            if not self.run_gemm_rs:
+            self.run_gemm_rs_ar = get_gemm_rs_ar().can_run(self.o_proj)
+            if not self.run_gemm_rs_ar:
                 logger.warning_once(
                     "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
                     prefix,
@@ -541,12 +543,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        if self.run_gemm_rs:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+        if self.run_gemm_rs_ar:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+                get_gemm_rs_ar,
+            )
 
-            gemm_rs = get_gemm_rs()
-            if gemm_rs.should_run(core_attn_out):
-                return gemm_rs(core_attn_out, self.o_proj.weight)
+            gemm_rs_ar = get_gemm_rs_ar()
+            if gemm_rs_ar.should_run(core_attn_out):
+                return gemm_rs_ar(core_attn_out, self.o_proj.weight)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture

@@ -83,7 +83,7 @@ def multimem_st_16B(dst: cute.Tensor, value: cute.Tensor, *, loc=None, ip=None) 
     )
 
 
-class Sm100GemmRsBF16:
+class Sm100GemmRsArBF16:
     def __init__(
         self,
         rank: int,
@@ -669,7 +669,9 @@ class Sm100GemmRsBF16:
         peer_flag_ptr = nullptr(Int64, cute.AddressSpace.gmem, assumed_align=8)
 
         stream = make_fake_stream(use_tvm_ffi_env_stream=True)
-        kernel = Sm100GemmRsBF16(rank, num_ranks, BN, cta_group, all_reduce=all_reduce)
+        kernel = Sm100GemmRsArBF16(
+            rank, num_ranks, BN, cta_group, all_reduce=all_reduce
+        )
         return cute.compile(
             kernel,
             A,
@@ -686,7 +688,7 @@ class Sm100GemmRsBF16:
         )
 
 
-class GemmRS:
+class GemmRsAr:
     """Own the symmetric workspace for Kimi-K3 GEMM-RS/AR launches.
 
     All TP ranks must belong to one NVLink domain for multimem instructions.
@@ -800,7 +802,7 @@ class GemmRS:
         output = None
         if not self.all_reduce:
             output = torch.empty((local_M, N), dtype=torch.bfloat16, device=self.device)
-        compiled = Sm100GemmRsBF16.compile(
+        compiled = Sm100GemmRsArBF16.compile(
             self.rank,
             self.world_size,
             BN,
@@ -824,37 +826,37 @@ class GemmRS:
         return output
 
 
-_gemm_rs: GemmRS | None = None
+_gemm_rs_ar: GemmRsAr | None = None
 
 
-def init_gemm_rs(max_M: int, N: int, *, all_reduce: bool = False) -> None:
+def init_gemm_rs_ar(max_M: int, N: int, *, all_reduce: bool = False) -> None:
     """Collectively initialize the process-wide GEMM-RS/AR state."""
-    global _gemm_rs
-    if _gemm_rs is not None:
+    global _gemm_rs_ar
+    if _gemm_rs_ar is not None:
         assert (
-            _gemm_rs.max_M >= max_M
-            and _gemm_rs.N == N
-            and _gemm_rs.all_reduce == all_reduce
+            _gemm_rs_ar.max_M >= max_M
+            and _gemm_rs_ar.N == N
+            and _gemm_rs_ar.all_reduce == all_reduce
         )
         return
-    _gemm_rs = GemmRS(max_M=max_M, N=N, all_reduce=all_reduce)
+    _gemm_rs_ar = GemmRsAr(max_M=max_M, N=N, all_reduce=all_reduce)
 
 
-def warmup_gemm_rs() -> int:
+def warmup_gemm_rs_ar() -> int:
     """Compile every reachable dispatch for the initialized GEMM-RS/AR mode."""
-    if _gemm_rs is None:
+    if _gemm_rs_ar is None:
         return 0
     for BN, cta_group in ((128, 1), (128, 2), (256, 2)):
-        Sm100GemmRsBF16.compile(
-            _gemm_rs.rank,
-            _gemm_rs.world_size,
+        Sm100GemmRsArBF16.compile(
+            _gemm_rs_ar.rank,
+            _gemm_rs_ar.world_size,
             BN,
             cta_group,
-            _gemm_rs.all_reduce,
+            _gemm_rs_ar.all_reduce,
         )
     return 3
 
 
-def get_gemm_rs() -> GemmRS:
-    assert _gemm_rs is not None, "GEMM-RS is not initialized"
-    return _gemm_rs
+def get_gemm_rs_ar() -> GemmRsAr:
+    assert _gemm_rs_ar is not None, "GEMM-RS is not initialized"
+    return _gemm_rs_ar

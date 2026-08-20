@@ -154,7 +154,7 @@ def shard_sequence_parallel_mlp(
     )
 
 
-def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
+def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
     all_reduce = not use_sequence_parallel
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
     enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_KIMI_K3_GEMM_RS
@@ -175,8 +175,6 @@ def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> 
         reason = "TP size is not in the supported range 2-16"
     elif 128 % tp_size != 0:
         reason = "TP size does not divide 128"
-    elif torch.distributed.get_world_size() != tp_size:
-        reason = "the distributed world size does not equal the TP size"
     else:
         reason = None
 
@@ -184,14 +182,18 @@ def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> 
         logger.warning_once("%s is disabled because %s.", mode, reason)
         return False
 
-    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import init_gemm_rs
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import init_gemm_rs_ar
 
     config = vllm_config.model_config.hf_text_config
-    init_gemm_rs(
-        max_M=vllm_config.scheduler_config.max_num_batched_tokens,
-        N=config.hidden_size,
-        all_reduce=all_reduce,
-    )
+    try:
+        init_gemm_rs_ar(
+            max_M=vllm_config.scheduler_config.max_num_batched_tokens,
+            N=config.hidden_size,
+            all_reduce=all_reduce,
+        )
+    except RuntimeError as e:
+        logger.warning_once("%s is disabled because initialization failed: %s", mode, e)
+        return False
     if all_reduce:
         logger.info_once(
             "GEMM-AR is enabled. To disable it, set VLLM_KIMI_K3_GEMM_AR=0."
@@ -226,7 +228,7 @@ class KimiMLP(nn.Module):
         reduce_results: bool = True,
         use_sequence_parallel: bool = False,
         can_shard_sequence_parallel: bool = False,
-        run_gemm_rs: bool = False,
+        run_gemm_rs_ar: bool = False,
         prefix: str = "",
         activation_situ_beta: float | None = None,
         activation_situ_linear_beta: float | None = None,
@@ -239,7 +241,7 @@ class KimiMLP(nn.Module):
             use_sequence_parallel,
             can_shard_sequence_parallel,
         )
-        self.run_gemm_rs = self.shard_sequence_parallel and run_gemm_rs
+        self.run_gemm_rs_ar = self.shard_sequence_parallel and run_gemm_rs_ar
         replicate = use_sequence_parallel and not self.shard_sequence_parallel
 
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -261,11 +263,13 @@ class KimiMLP(nn.Module):
             disable_tp=replicate,
             prefix=f"{prefix}.down_proj",
         )
-        if self.run_gemm_rs:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+        if self.run_gemm_rs_ar:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+                get_gemm_rs_ar,
+            )
 
-            self.run_gemm_rs = get_gemm_rs().can_run(self.down_proj)
-            if not self.run_gemm_rs:
+            self.run_gemm_rs_ar = get_gemm_rs_ar().can_run(self.down_proj)
+            if not self.run_gemm_rs_ar:
                 logger.warning_once(
                     "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
                     prefix,
@@ -293,12 +297,14 @@ class KimiMLP(nn.Module):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
 
-        if self.run_gemm_rs:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+        if self.run_gemm_rs_ar:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+                get_gemm_rs_ar,
+            )
 
-            gemm_rs = get_gemm_rs()
-            if gemm_rs.should_run(x):
-                return gemm_rs(x, self.down_proj.weight)
+            gemm_rs_ar = get_gemm_rs_ar()
+            if gemm_rs_ar.should_run(x):
+                return gemm_rs_ar(x, self.down_proj.weight)
 
         x, _ = self.down_proj(x)
         if self.shard_sequence_parallel:
@@ -536,7 +542,7 @@ class KimiMoE(nn.Module):
         prefix: str = "",
         layer_idx: int = 0,
         use_sequence_parallel: bool = False,
-        run_gemm_rs: bool = False,
+        run_gemm_rs_ar: bool = False,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -625,7 +631,7 @@ class KimiMoE(nn.Module):
                 # FusedMoE path below hands them to the runner, which fuses
                 # their reduction and assumes the replicated layout.
                 can_shard_sequence_parallel=self.use_mega_moe,
-                run_gemm_rs=run_gemm_rs,
+                run_gemm_rs_ar=run_gemm_rs_ar,
                 prefix=f"{prefix}.shared_experts",
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
@@ -847,7 +853,7 @@ class KimiDecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         aux_stream: torch.cuda.Stream | None = None,
-        run_gemm_rs: bool = False,
+        run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -882,7 +888,7 @@ class KimiDecoderLayer(nn.Module):
                     config,
                     vllm_config,
                     prefix=f"{prefix}.self_attn",
-                    run_gemm_rs=run_gemm_rs,
+                    run_gemm_rs_ar=run_gemm_rs_ar,
                 )
                 self._self_attn_writes_output = False
             else:
@@ -919,7 +925,7 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
                 aux_stream=aux_stream,
-                run_gemm_rs=run_gemm_rs,
+                run_gemm_rs_ar=run_gemm_rs_ar,
             )
             self._self_attn_writes_output = False
 
@@ -934,7 +940,7 @@ class KimiDecoderLayer(nn.Module):
                 prefix=f"{prefix}.block_sparse_moe",
                 layer_idx=layer_idx,
                 use_sequence_parallel=self.use_sequence_parallel,
-                run_gemm_rs=run_gemm_rs,
+                run_gemm_rs_ar=run_gemm_rs_ar,
             )
             self.mlp = self.block_sparse_moe
         else:
@@ -946,7 +952,7 @@ class KimiDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
                 use_sequence_parallel=self.use_sequence_parallel,
                 can_shard_sequence_parallel=True,
-                run_gemm_rs=run_gemm_rs,
+                run_gemm_rs_ar=run_gemm_rs_ar,
                 activation_situ_beta=config.activation_situ_beta,
                 activation_situ_linear_beta=config.activation_situ_linear_beta,
             )
@@ -1129,7 +1135,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # GEMM-RS/AR uses NCCL symmetric-memory multicast, which requires all
         # TP ranks to belong to one NVLink domain.
-        self.run_gemm_rs = maybe_init_gemm_rs(vllm_config, self.use_sequence_parallel)
+        self.run_gemm_rs_ar = maybe_init_gemm_rs_ar(
+            vllm_config, self.use_sequence_parallel
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1151,7 +1159,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 vllm_config,
                 prefix,
                 aux_stream=aux_stream,
-                run_gemm_rs=self.run_gemm_rs,
+                run_gemm_rs_ar=self.run_gemm_rs_ar,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(

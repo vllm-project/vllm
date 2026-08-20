@@ -86,7 +86,10 @@ def _run_mode(
     world_size: int,
     weights: dict[int, torch.Tensor],
 ) -> None:
-    gemm_rs = GemmRS(
+    # cute_dsl is unavailable off CUDA, so import it only inside the GPU worker.
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import GemmRsAr
+
+    gemm_rs_ar = GemmRsAr(
         max_M=max(M for M, _ in _SHAPES),
         N=_N,
         all_reduce=all_reduce,
@@ -105,7 +108,7 @@ def _run_mode(
             generator=input_generator,
         )
         expected = _reference(x, weights[K], world_size, group, all_reduce)
-        actual = gemm_rs(x, weights[K])
+        actual = gemm_rs_ar(x, weights[K])
         torch.accelerator.synchronize(device)
         _assert_valid_rows_close(actual, expected, M, rank, all_reduce)
 
@@ -119,9 +122,9 @@ def _run_mode(
             device=device,
             generator=input_generator,
         )
-        first_output = gemm_rs(lifetime_x, weights[lifetime_K])
+        first_output = gemm_rs_ar(lifetime_x, weights[lifetime_K])
         first_snapshot = first_output.clone()
-        second_output = gemm_rs(-lifetime_x, weights[lifetime_K])
+        second_output = gemm_rs_ar(-lifetime_x, weights[lifetime_K])
         torch.accelerator.synchronize(device)
         assert first_output.data_ptr() != second_output.data_ptr()
         torch.testing.assert_close(first_output, first_snapshot, rtol=0, atol=0)
@@ -148,13 +151,13 @@ def _run_mode(
     capture_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(capture_stream):
         for _ in range(3):
-            graph_output.copy_(gemm_rs(graph_x, weights[graph_K]))
+            graph_output.copy_(gemm_rs_ar(graph_x, weights[graph_K]))
     capture_stream.synchronize()
     dist.barrier(group=group)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=capture_stream):
-        graph_output.copy_(gemm_rs(graph_x, weights[graph_K]))
+        graph_output.copy_(gemm_rs_ar(graph_x, weights[graph_K]))
     torch.cuda.current_stream().wait_stream(capture_stream)
     dist.barrier(group=group)
 
@@ -170,7 +173,7 @@ def _run_mode(
         )
 
     dist.barrier(group=group)
-    del gemm_rs, capture_stream, graph, graph_output
+    del gemm_rs_ar, capture_stream, graph, graph_output
 
 
 def _worker(local_rank: int, world_size: int, master_port: int) -> None:
