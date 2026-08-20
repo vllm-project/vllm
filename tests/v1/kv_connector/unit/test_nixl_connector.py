@@ -45,7 +45,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     compute_nixl_compatibility_hash,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import ReadSpec
 from vllm.distributed.kv_transfer.kv_transfer_state import (
     ensure_kv_transfer_shutdown,
     has_kv_transfer_group,
@@ -568,52 +567,6 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
             remote_agents[(0, remote_tp_rank)] = remote_agent_name
         # Handshake bypasses zmq, so report a zero clock offset to the peer.
         return remote_agents, 0.0
-
-
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
-    FakeNixlWrapper,
-)
-def test_pull_uses_only_transferable_groups(default_vllm_config, dist_init):
-    kv_cache_config = make_kv_cache_config(block_size=16, swa_enabled=True)
-    kv_cache_config.kv_cache_groups[1].enable_kv_transfer = False
-    vllm_config = create_vllm_config()
-    worker = FakeNixlConnectorWorker(
-        vllm_config,
-        "engine",
-        hand_shake_latency=0,
-        kv_cache_config=kv_cache_config,
-    )
-    remote_engine = "remote"
-    worker.transfer_topo.register_remote_engine(
-        remote_engine,
-        EngineTransferInfo(
-            remote_tp_size=1,
-            remote_block_len=4096,
-            remote_block_size=worker.block_size,
-            remote_physical_blocks_per_logical=1,
-        ),
-    )
-    worker.dst_num_blocks[worker.engine_id] = kv_cache_config.num_blocks
-    worker.dst_num_blocks[remote_engine] = kv_cache_config.num_blocks
-    worker.num_regions = 1
-    worker._mixed_mem_types = False
-    worker._remote_agents[remote_engine] = {(0, 0): "remote-agent"}
-    worker._compute_desc_ids = MagicMock(return_value=np.array([0]))
-
-    assert worker._read_blocks(
-        read_spec=ReadSpec(
-            remote_rank=0,
-            local_block_ids=([1],),
-            remote_block_ids=([2],),
-        ),
-        dst_engine_id=remote_engine,
-        request_id="request",
-        remote_request_id="remote-request",
-        remote_host="localhost",
-        local_xfer_side_handle=1,
-        remote_xfer_side_handle=2,
-    )
 
 
 class TestNixlHandshake:

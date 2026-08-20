@@ -69,6 +69,7 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
 
 
 def test_hisparse_worker_includes_indexer_sources_in_host_cow_copies():
+    """Host copy-on-write must read indexer pages from the source cache."""
     worker = object.__new__(HiSparseWorker)
     hot = torch.empty((2, 4, 2))
     host = torch.empty_like(hot)
@@ -90,6 +91,7 @@ def test_hisparse_worker_includes_indexer_sources_in_host_cow_copies():
 
 
 def test_hisparse_spill_batches_wait_for_reused_staging(monkeypatch):
+    """A spill batch must not overwrite staging still used by its predecessor."""
     worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 2
     worker.spill_row_capacity = 2

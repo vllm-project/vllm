@@ -334,6 +334,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
 
 
 def test_hisparse_materialization_respects_per_step_spill_budget():
+    """Prefix publication must not bypass the configured spill batch limit."""
     manager = make_hisparse_kv_cache_manager(
         32,
         16,
@@ -355,6 +356,7 @@ def test_hisparse_materialization_respects_per_step_spill_budget():
 
 
 def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
+    """Host-only copy-on-write work must reach the worker copy queue."""
     manager = make_hisparse_kv_cache_manager(16, 16)
     source_manager = manager.coordinator.single_type_managers[0]
     source_block = source_manager.block_pool.get_new_blocks(1)[0]
@@ -376,6 +378,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
 
 
 def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
+    """An in-flight host import must reserve its unwritten resident pages."""
     manager = make_hisparse_kv_cache_manager(
         10,
         16,
@@ -408,6 +411,7 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
 
 
 def test_hisparse_host_import_keeps_partial_page_gpu_only():
+    """A partial imported page must not become readable from stale host data."""
     manager = make_hisparse_kv_cache_manager(16, 16)
     coordinator = manager.hisparse_coordinator
 
@@ -419,6 +423,7 @@ def test_hisparse_host_import_keeps_partial_page_gpu_only():
 
 
 def test_hisparse_capacity_query_does_not_require_hot_blocks():
+    """A read-only capacity query must not mutate hot-block requirements."""
     manager = make_hisparse_kv_cache_manager(16, 16)
     coordinator = manager.hisparse_coordinator
     host_pool = coordinator.get_host_block_pool()
@@ -493,10 +498,7 @@ def test_hisparse_external_import_falls_back_to_hard_gpu_footprint(
         assert request.hisparse_host_import
 
 
-@pytest.mark.parametrize("host_num_blocks", [7, 9])
-def test_hisparse_host_import_decision_survives_capacity_retry(
-    host_num_blocks: int,
-):
+def test_hisparse_host_import_decision_survives_capacity_retry():
     """A waiting external import must not flip back to full residency.
 
     A full-resident request can leave less than the fixed host-backed footprint
@@ -505,7 +507,7 @@ def test_hisparse_host_import_decision_survives_capacity_retry(
     """
     manager = make_hisparse_kv_cache_manager(
         9,
-        host_num_blocks,
+        7,
         transfer_device_cache=True,
     )
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))

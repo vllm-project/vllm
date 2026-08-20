@@ -50,6 +50,7 @@ def test_hisparse_connector_composes_without_replacing_existing_connector():
 
 
 def test_no_forward_enqueues_deferred_hisparse_transfers():
+    """A zero-token step must still enqueue deferred post-forward transfers."""
     connector = object.__new__(ActiveKVConnector)
     connector._disabled = False
     connector.pre_forward = MagicMock()

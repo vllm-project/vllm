@@ -741,6 +741,7 @@ def _make_mock_worker_for_desc_ids(
 
 @pytest.mark.cpu_test
 def test_shared_nixl_region_broadcasts_every_group_block_table():
+    """A shared region must receive every group's block table exactly once."""
     worker = _make_mock_worker_for_desc_ids(
         num_regions=3,
         has_mamba=False,
@@ -762,6 +763,7 @@ def test_shared_nixl_region_broadcasts_every_group_block_table():
 
 @pytest.mark.cpu_test
 def test_nixl_region_sort_preserves_pipeline_layer_order():
+    """Numeric layer order prevents PP peers from pairing different regions."""
     names = [
         "model.layers.10.self_attn",
         "model.layers.2.self_attn",
@@ -1786,6 +1788,7 @@ def test_hisparse_host_import_metadata_keeps_source_blocks_separate():
 
 @pytest.mark.cpu_test
 def test_hisparse_full_local_hit_does_not_index_empty_import_blocks():
+    """A full local hit must not index an empty external-import block tuple."""
     source_spec = make_kv_cache_config(block_size=16).kv_cache_groups[0].kv_cache_spec
     sched = make_nixl_scheduler(heartbeat=True)
     sched._is_hma_required = False

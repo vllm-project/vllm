@@ -1434,6 +1434,7 @@ def test_hisparse_uses_graph_stable_request_state_mapping():
     assert (runtime.index_group.device_global_indices[1] == 0).any()
 
 
+@requires_hisparse_ops
 def test_hisparse_resident_rows_bypass_hot_lru():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 64, 8
@@ -1756,6 +1757,7 @@ def test_hisparse_copy_prefix_blocks_into_packed_hma(dtype, row_width):
 
 @requires_hisparse_ops
 def test_hisparse_copy_blocks_rejects_unpinned_host_memory():
+    """Reject pageable sources before an asynchronous copy can access them."""
     device = torch.device(DEVICE_TYPE)
     source = torch.empty((1, 64, 16), dtype=torch.uint8)
     destination = torch.empty_like(source, device=device)
@@ -2000,6 +2002,7 @@ def test_hisparse_gather_zeroes_unaligned_destination():
 
 @requires_hisparse_ops
 def test_hisparse_gather_rejects_short_attention_block_stride():
+    """Reject a stride that would let the gather kernel cross block bounds."""
     device = torch.device(DEVICE_TYPE)
     host_cache = torch.ones(1, 16, dtype=torch.uint8).pin_memory()
     hot_cache = torch.empty((1, 2, 16), dtype=torch.uint8, device=device)
@@ -2465,6 +2468,7 @@ def test_hisparse_fp8_decode_resolves_each_speculative_step():
 
 
 def test_hisparse_shared_sparse_builder_routes_multi_token_chunks_to_prefill():
+    """Default sparse backends must route multi-token chunks to prefill."""
     builder = object.__new__(FlashInferMLASparseMetadataBuilder)
     builder.vllm_config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=object()),
