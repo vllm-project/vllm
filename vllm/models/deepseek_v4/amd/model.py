@@ -545,12 +545,20 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # DeepseekV4Attention._run_parallel_input_projections
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm because of hang issues.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        # aux_streams[0] overlaps the main compressor (c4a/c128a) with
+        # Q/KV projections on ROCm. Slots [1],[2] (indexer streams) are
+        # left None since the ROCm indexer path doesn't use them yet.
+        #
+        # NOTE(regression): Measured on MI355X with ISL=8k/OSL=1k, this
+        # overlap caused a 2–4% throughput regression across conc=1..64.
+        # HIP inter-stream event synchronization overhead exceeds the
+        # compression/projection overlap benefit at these batch sizes.
+        # Keeping the code path enabled for investigation; revert to
+        # None if the regression persists on other workloads.
+        if current_platform.is_rocm():
+            aux_stream_list = [torch.cuda.Stream(), None, None]
+        else:
+            aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
