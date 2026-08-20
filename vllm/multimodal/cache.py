@@ -290,19 +290,17 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         Returns:
             `True` if the item was cached, otherwise `False`.
         """
-        item_size = cache.getsizeof(value)
-        if item_size > cache.maxsize:
-            logger.warning_once(
-                "Skipping multi-modal processor cache insert for an item of "
-                "%s GiB because it exceeds --mm-processor-cache-gb=%s. "
-                "The item will be processed uncached; increase "
-                "--mm-processor-cache-gb to cache items of this size.",
-                format_gib(int(item_size)),
-                format_gib(int(cache.maxsize)),
-            )
-            return False
-        cache[key] = value
-        return True
+        if cache.put_if_fits(key, value):
+            return True
+        logger.warning_once(
+            "Skipping multi-modal processor cache insert for an item of "
+            "%s GiB because it exceeds --mm-processor-cache-gb=%s. "
+            "The item will be processed uncached; increase "
+            "--mm-processor-cache-gb to cache items of this size.",
+            format_gib(int(cache.getsizeof(value))),
+            format_gib(int(cache.maxsize)),
+        )
+        return False
 
     @abstractmethod
     def clear_cache(self) -> None:
