@@ -1145,7 +1145,7 @@ class SpeculativeConfig:
                     logger.warning(
                         "Enabling num_speculative_tokens > 1 will run "
                         "multiple times of forward on same MTP layer"
-                        ",which may result in lower acceptance rate"
+                        ", which may result in lower acceptance rate"
                     )
 
                 if self.dspark_draft_topk is not None and self.method != "dspark":
