@@ -86,6 +86,7 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
+from vllm.v1.notifications import EngineNotification
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
@@ -239,6 +240,10 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+
+        # In-process frontend only; EngineCoreProc broadcasts instead.
+        self._pending_notifications: list[EngineNotification] = []
+        self._last_notification_gather = 0.0
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -609,10 +614,12 @@ class EngineCore:
             scheduler_output, model_output
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
+        self._flush_notifications(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
+        self._maybe_gather_worker_notifications()
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
@@ -711,6 +718,7 @@ class EngineCore:
             scheduler_output, model_output
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
+        self._flush_notifications(engine_core_outputs)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -736,6 +744,40 @@ class EngineCore:
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
 
         return engine_core_outputs, model_executed
+
+    def _publish_notifications(self, notifications: list[EngineNotification]) -> None:
+        """Queue notifications for the frontend."""
+        self._pending_notifications.extend(notifications)
+
+    def _flush_notifications(
+        self, engine_core_outputs: dict[int, EngineCoreOutputs]
+    ) -> None:
+        """Attach pending notifications to the in-process frontend's outputs."""
+        if not self._pending_notifications:
+            return
+        if (eco := next(iter(engine_core_outputs.values()), None)) is None:
+            engine_core_outputs[0] = eco = EngineCoreOutputs()
+        eco.engine_notifications = self._pending_notifications
+        self._pending_notifications = []
+
+    def gather_worker_notifications(self) -> None:
+        """Collect and publish every rank's notifications; an rpc round trip,
+        so callers own the cadence."""
+        per_rank = self.model_executor.collective_rpc("take_notifications")
+        if notifications := [n for rank in per_rank for n in rank]:
+            self._publish_notifications(notifications)
+
+    def _maybe_gather_worker_notifications(self) -> None:
+        """Poll workers on an interval, between steps so the rpc cannot
+        stall a rank mid-forward."""
+        interval = envs.VLLM_WORKER_NOTIFICATION_POLL_INTERVAL
+        if not interval:
+            return
+        now = time.monotonic()
+        if now - self._last_notification_gather < interval:
+            return
+        self._last_notification_gather = now
+        self.gather_worker_notifications()
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
@@ -1390,6 +1432,8 @@ class EngineCoreProc(EngineCore):
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
+        # Load-time producers have already run; nothing else will gather them.
+        self.gather_worker_notifications()
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
@@ -1430,9 +1474,13 @@ class EngineCoreProc(EngineCore):
                     waited = True
             block = self.process_input_queue_block
             try:
-                req = self.input_queue.get(block=block)
+                poll_interval = envs.VLLM_WORKER_NOTIFICATION_POLL_INTERVAL
+                req = self.input_queue.get(block=block, timeout=poll_interval or None)
                 self._handle_client_request(*req)
             except queue.Empty:
+                if block:
+                    self._maybe_gather_worker_notifications()
+                    continue
                 break
             if not block:
                 break
@@ -1894,6 +1942,14 @@ class EngineCoreProc(EngineCore):
             socket.send_multipart(buffers[1:], copy=False)
         return tracker
 
+    def _publish_notifications(self, notifications: list[EngineNotification]) -> None:
+        """Broadcast to every frontend; attaching to one client's step
+        outputs would leave the others stale."""
+        for client_index in range(len(self.addresses.outputs)):
+            self.output_queue.put_nowait(
+                (client_index, EngineCoreOutputs(engine_notifications=notifications))
+            )
+
     def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
         """Log and return a request-scoped error response for exceptions raised
         from the add request preprocessing in the input socket processing thread.
@@ -2169,7 +2225,8 @@ class DPEngineCoreProc(EngineCoreProc):
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
-
+        # Load-time producers have already run; nothing else will gather them.
+        self.gather_worker_notifications()
         # Loop until process is sent a SIGINT or SIGTERM
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
