@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the `vllm launch` CLI subcommand."""
+"""Unit tests for CLI launch and runtime dispatch."""
 
 import argparse
 import subprocess
@@ -111,6 +111,202 @@ def test_launch_registered_in_main():
     assert hasattr(launch_module, "cmd_init")
     subcmds = launch_module.cmd_init()
     assert any(s.name == "launch" for s in subcmds)
+
+
+def test_top_level_help_does_not_import_runtime_modules():
+    script = """
+import sys
+
+sys.argv = ["vllm", "--help"]
+from vllm.entrypoints.cli.main import main
+
+exit_code = None
+try:
+    main()
+except SystemExit as exc:
+    exit_code = exc.code
+
+assert exit_code == 0
+blocked_prefixes = (
+    "torch",
+    "uvloop",
+    "vllm.env_override",
+    "vllm.entrypoints.openai.api_server",
+    "vllm.v1.executor",
+    "vllm.v1.metrics",
+)
+loaded = sorted(
+    prefix
+    for prefix in blocked_prefixes
+    if any(
+        name == prefix or name.startswith(f"{prefix}.") for name in sys.modules
+    )
+)
+assert not loaded, loaded
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_serve_help_is_compact_and_import_light():
+    script = """
+import os
+import sys
+
+os.environ.pop("VLLM_WORKER_MULTIPROC_METHOD", None)
+sys.argv = ["vllm", "serve", "--help"]
+from vllm.entrypoints.cli.main import main
+
+exit_code = None
+try:
+    main()
+except SystemExit as exc:
+    exit_code = exc.code
+
+assert exit_code == 0
+assert "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ
+blocked_prefixes = (
+    "torch",
+    "uvloop",
+    "vllm.env_override",
+    "vllm.entrypoints.cli.serve",
+    "vllm.entrypoints.launchers.api_server",
+    "vllm.entrypoints.openai.api_server",
+    "vllm.entrypoints.openai.cli_args",
+    "vllm.entrypoints.serve.utils.api_utils",
+    "vllm.v1.executor",
+    "vllm.v1.metrics",
+)
+loaded = sorted(
+    prefix
+    for prefix in blocked_prefixes
+    if any(
+        name == prefix or name.startswith(f"{prefix}.") for name in sys.modules
+    )
+)
+assert not loaded, loaded
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for argument in (
+        "model_tag",
+        "--headless",
+        "--api-server-count",
+        "-asc",
+        "--config",
+        "--grpc",
+    ):
+        assert argument in result.stdout
+    for non_core_argument in ("--host", "--port", "--max-model-len"):
+        assert non_core_argument not in result.stdout
+    assert "Config Groups:" not in result.stdout
+    assert "vllm serve --help=all" in result.stdout
+
+
+def test_serve_help_all_uses_canonical_parser():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.cli.main",
+            "serve",
+            "--help=all",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for argument in ("model_tag", "--grpc", "--host", "--max-model-len"):
+        assert argument in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("argv", "module_name"),
+    [
+        pytest.param(
+            ["serve", "--help=all"],
+            "vllm.entrypoints.cli.serve",
+            id="serve",
+        ),
+        pytest.param(
+            ["bench", "--help"],
+            "vllm.entrypoints.cli.benchmark.main",
+            id="bench",
+        ),
+    ],
+)
+def test_runtime_cli_sets_environment_before_loading_selected_command(
+    argv, module_name
+):
+    script = f"""
+import importlib.abc
+import os
+import sys
+
+os.environ.pop("VLLM_WORKER_MULTIPROC_METHOD", None)
+
+class RuntimeImportOrderGuard(importlib.abc.MetaPathFinder):
+    torch_seen = False
+    selected_seen = False
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "torch":
+            self.torch_seen = True
+            assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn"
+        if fullname == {module_name!r}:
+            self.selected_seen = True
+            assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn"
+            assert self.torch_seen
+            assert "vllm.env_override" in sys.modules
+            assert "vllm.entrypoints.serve.utils.api_utils" not in sys.modules
+        return None
+
+guard = RuntimeImportOrderGuard()
+sys.meta_path.insert(0, guard)
+sys.argv = ["vllm", *{argv!r}]
+
+from vllm.entrypoints.cli.main import main
+
+try:
+    main()
+except SystemExit as exc:
+    assert exc.code == 0
+
+assert guard.torch_seen
+assert guard.selected_seen
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_serve_parser_uses_explicit_args_not_host_sys_argv():
+    from vllm.entrypoints.cli.serve import ServeSubcommand
+
+    with patch.object(sys, "argv", ["foreign-host", "serve", "--help"]):
+        parser = FlexibleArgumentParser()
+        subparsers = parser.add_subparsers(dest="subparser", required=True)
+        selected_command = ServeSubcommand()
+        selected_command.subparser_init(subparsers)
+        args = parser.parse_args(["serve", "--host", "127.0.0.1"])
+
+    assert selected_command.name == "serve"
+    assert args.host == "127.0.0.1"
 
 
 def test_public_lazy_exports_apply_runtime_environment_once():

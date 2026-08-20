@@ -2,41 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import signal
-import time
+import typing
 
-import uvloop
-
-import vllm
-import vllm.envs as envs
-from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.dp_supervisor import run_dp_supervisor
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.logger import init_logger
-from vllm.usage.usage_lib import UsageContext
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.network_utils import get_tcp_uri
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
-from vllm.v1.executor import Executor
-from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-from vllm.v1.utils import (
-    APIServerProcessManager,
-    RustFrontendProcessManager,
-    wait_for_completion_or_failure,
+from vllm.entrypoints.cli._utils import (
+    SERVE_DESCRIPTION,
+    VLLM_SUBCMD_PARSER_EPILOG,
 )
+from vllm.entrypoints.cli.types import CLISubcommand
+from vllm.logger import init_logger
+
+if typing.TYPE_CHECKING:
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 logger = init_logger(__name__)
-
-DESCRIPTION = """Launch a local OpenAI-compatible API server to serve LLM
-completions via HTTP. Defaults to Qwen/Qwen3-0.6B if no model is specified.
-
-Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
---help=ModelConfig, --help=Frontend)
-  Use `--help=all` to show all available flags at once.
-"""
 
 
 class ServeSubcommand(CLISubcommand):
@@ -46,11 +26,15 @@ class ServeSubcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
+        import vllm.envs as envs
+
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
         if getattr(args, "grpc", False):
+            import uvloop
+
             from vllm.entrypoints.grpc_server import serve_grpc
 
             uvloop.run(serve_grpc(args))
@@ -139,17 +123,25 @@ class ServeSubcommand(CLISubcommand):
             args.api_server_count = 1
 
         if is_multi_port:
+            from vllm.entrypoints.openai.dp_supervisor import run_dp_supervisor
+
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
             run_headless(args)
         elif args.api_server_count > 1 or rust_frontend_path:
             run_multi_api_server(args)
         else:
+            import uvloop
+
+            from vllm.entrypoints.launchers.api_server.entry import run_server
+
             # Single API server (this process).
             args.api_server_count = None
             uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
+        from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+
         validate_parsed_serve_args(args)
 
     def subparser_init(
@@ -159,9 +151,10 @@ class ServeSubcommand(CLISubcommand):
             self.name,
             help="Launch a local OpenAI-compatible API server to serve LLM "
             "completions via HTTP.",
-            description=DESCRIPTION,
+            description=SERVE_DESCRIPTION,
             usage="vllm serve [model_tag] [options]",
         )
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
 
         serve_parser = make_arg_parser(serve_parser)
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
@@ -173,6 +166,14 @@ def cmd_init() -> list[CLISubcommand]:
 
 
 def run_headless(args: argparse.Namespace):
+    import signal
+
+    import vllm
+    from vllm.usage.usage_lib import UsageContext
+    from vllm.utils.network_utils import get_tcp_uri
+    from vllm.v1.engine.utils import CoreEngineProcManager
+    from vllm.v1.executor import Executor
+
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
 
@@ -206,6 +207,7 @@ def run_headless(args: argparse.Namespace):
     signal.signal(signal.SIGINT, signal_handler)
 
     if parallel_config.node_rank_within_dp > 0:
+        from vllm.v1.executor.multiproc_executor import MultiprocExecutor
         from vllm.version import __version__ as VLLM_VERSION
 
         # Run headless workers (for multi-node PP/TP).
@@ -257,6 +259,21 @@ def run_headless(args: argparse.Namespace):
 
 
 def run_multi_api_server(args: argparse.Namespace):
+    import signal
+    import time
+
+    import vllm
+    import vllm.envs as envs
+    from vllm.entrypoints.launchers.api_server.entry import setup_server
+    from vllm.usage.usage_lib import UsageContext
+    from vllm.v1.engine.utils import launch_core_engines
+    from vllm.v1.executor import Executor
+    from vllm.v1.utils import (
+        APIServerProcessManager,
+        RustFrontendProcessManager,
+        wait_for_completion_or_failure,
+    )
+
     assert not args.headless
     rust_frontend_path = (
         envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
@@ -270,6 +287,8 @@ def run_multi_api_server(args: argparse.Namespace):
         )
 
     if num_api_servers > 1:
+        from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
+
         setup_multiprocess_prometheus()
 
     shutdown_requested = False

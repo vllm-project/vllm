@@ -20,6 +20,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
+from vllm.entrypoints.cli._utils import add_serve_core_args
 from vllm.entrypoints.launchers.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
@@ -370,40 +371,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     register all arguments instead of manually enumerating them here. This
     avoids code duplication and keeps the argument definitions in one place.
     """
-    parser.add_argument(
-        "model_tag",
-        type=str,
-        nargs="?",
-        help="The model tag to serve (optional if specified in config)",
-    )
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        default=False,
-        help="Run in headless mode. See multi-node data parallel "
-        "documentation for more details.",
-    )
-    parser.add_argument(
-        "--api-server-count",
-        "-asc",
-        type=int,
-        default=None,
-        help="How many API server processes to run. "
-        "Defaults to data_parallel_size if not specified.",
-    )
-    parser.add_argument(
-        "--config",
-        help="Read CLI options from a config file. "
-        "Must be a YAML with the following options: "
-        "https://docs.vllm.ai/en/latest/configuration/serve_args.html",
-    )
-    parser.add_argument(
-        "--grpc",
-        action="store_true",
-        default=False,
-        help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
-        "server. Requires: pip install vllm[grpc].",
-    )
+    parser = add_serve_core_args(parser)
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
