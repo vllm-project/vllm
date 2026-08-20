@@ -618,6 +618,15 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
       indices, logits, rowStart, rowEnd, outIndices, outLogits, stride1, topK);
 }
 
+// Measured native-kernel policy for gfx950, FP32, and k=1024. This
+// active-column split crossover is independent of the Python AITER/native
+// backend crossover; the two policies can be retuned separately. At exactly
+// 64K, an eager call may select AITER while a captured native replay uses two
+// splits.
+constexpr int kGfx950C4AShortRowNumBlocks = 3;
+constexpr int kGfx950C4ALongRowNumBlocks = 2;
+constexpr int kGfx950C4ATwoSplitMinRowLength = 64 * 1024;
+
 template <int kNumThreadsPerBlock, bool mergeBlocks = false>
 static __global__
 __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecodeDeviceLengthAware(
@@ -625,18 +634,15 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecodeDeviceLengthAware(
     int stride1, const int topK, int next_n, int seqLensIs2D = 0,
     float* outLogits = nullptr, const int* indices = nullptr) {
   static constexpr int kNumBins = 2048;
-  static constexpr int kShortRowNumBlocks = 3;
-  static constexpr int kLongRowNumBlocks = 2;
-  static constexpr int kLongRowThreshold = 64 * 1024;
-
   int rowIdx = blockIdx.x;
   int batch_idx = rowIdx / next_n;
   int next_n_idx = rowIdx % next_n;
   int seq_len = seqLensIs2D ? seqLens[rowIdx] : seqLens[batch_idx];
   int rowEnd =
       seqLensIs2D ? max(0, seq_len) : max(0, seq_len - next_n + next_n_idx + 1);
-  const int activeBlocks =
-      rowEnd >= kLongRowThreshold ? kLongRowNumBlocks : kShortRowNumBlocks;
+  const int activeBlocks = rowEnd >= kGfx950C4ATwoSplitMinRowLength
+                               ? kGfx950C4ALongRowNumBlocks
+                               : kGfx950C4AShortRowNumBlocks;
   int rowStart = 0;
 
   if constexpr (!mergeBlocks) {
@@ -644,13 +650,16 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecodeDeviceLengthAware(
     const auto blockSize = rowEnd / activeBlocks;
     rowStart = blockSize * blockIdx.y;
     rowEnd = activeBlocks == blockIdx.y + 1 ? rowEnd : rowStart + blockSize;
-    outIndices += static_cast<int64_t>(rowIdx) * kShortRowNumBlocks * topK +
-                  blockIdx.y * topK;
-    outLogits += static_cast<int64_t>(rowIdx) * kShortRowNumBlocks * topK +
-                 blockIdx.y * topK;
+    outIndices +=
+        static_cast<int64_t>(rowIdx) * kGfx950C4AShortRowNumBlocks * topK +
+        blockIdx.y * topK;
+    outLogits +=
+        static_cast<int64_t>(rowIdx) * kGfx950C4AShortRowNumBlocks * topK +
+        blockIdx.y * topK;
   } else {
     rowEnd = activeBlocks * topK;
-    indices += static_cast<int64_t>(rowIdx) * kShortRowNumBlocks * topK;
+    indices +=
+        static_cast<int64_t>(rowIdx) * kGfx950C4AShortRowNumBlocks * topK;
     outIndices += static_cast<int64_t>(rowIdx) * topK;
   }
   logits += static_cast<int64_t>(rowIdx) * stride0;
@@ -748,7 +757,8 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
       // Keep three blocks for short FULL-graph replays, but let each row use
       // two blocks once its live device length reaches the long-context
       // crossover. The grid and workspace shapes remain capture-stable.
-      constexpr int multipleBlocksPerRowConfig = 3;
+      constexpr int multipleBlocksPerRowConfig =
+          vllm::kGfx950C4AShortRowNumBlocks;
       const auto outIndicesAux = torch::stable::empty(
           {numRows, multipleBlocksPerRowConfig, topK},
           torch::headeronly::ScalarType::Int, std::nullopt, logits.device());

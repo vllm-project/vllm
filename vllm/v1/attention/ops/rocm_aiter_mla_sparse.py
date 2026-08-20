@@ -39,6 +39,38 @@ def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | N
     return top_k_per_row_prefill, top_k_per_row_decode
 
 
+_GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
+_GFX950_C4A_NATIVE_MAX_ROWS = 256
+
+
+def _get_aiter_top_k_kernel(
+    *,
+    is_prefill: bool,
+    compress_ratio: int,
+    num_rows: int,
+    max_valid_seq_len: int | None = None,
+    on_gfx950: bool = _ON_GFX950,
+) -> Callable[..., None] | None:
+    if compress_ratio <= 1 or not on_gfx950:
+        return None
+
+    if not is_prefill:
+        assert max_valid_seq_len is not None
+        # AITER v0.1.19 decode is one-block only. This measured gfx950
+        # FP32/k=1024 compressed-row boundary is independent of the native
+        # split-count boundary in sampler.cu.
+        if (
+            num_rows <= _GFX950_C4A_NATIVE_MAX_ROWS
+            and max_valid_seq_len > _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN
+        ):
+            return None
+
+    topk_ops = _get_aiter_topk_ops()
+    if topk_ops is None:
+        return None
+    return topk_ops[0] if is_prefill else topk_ops[1]
+
+
 @triton.jit
 def _localize_aiter_prefill_topk_kernel(
     indices_ptr,
@@ -75,17 +107,14 @@ def _localize_aiter_prefill_topk(
     )
 
 
-def _aiter_top_k_per_row_prefill(
+def _launch_aiter_top_k_per_row_prefill(
+    top_k_per_row_prefill: Callable[..., None],
     logits: torch.Tensor,
     row_starts: torch.Tensor,
     row_ends: torch.Tensor,
     indices: torch.Tensor,
     topk_tokens: int,
-) -> bool:
-    topk_ops = _get_aiter_topk_ops()
-    if topk_ops is None:
-        return False
-    top_k_per_row_prefill, _ = topk_ops
+) -> None:
     top_k_per_row_prefill(
         logits,
         row_starts,
@@ -98,19 +127,15 @@ def _aiter_top_k_per_row_prefill(
         k=topk_tokens,
     )
     _localize_aiter_prefill_topk(indices, row_starts)
-    return True
 
 
-def _aiter_top_k_per_row_decode(
+def _launch_aiter_top_k_per_row_decode(
+    top_k_per_row_decode: Callable[..., None],
     logits: torch.Tensor,
     seq_lens: torch.Tensor,
     indices: torch.Tensor,
     topk_tokens: int,
-) -> bool:
-    topk_ops = _get_aiter_topk_ops()
-    if topk_ops is None:
-        return False
-    _, top_k_per_row_decode = topk_ops
+) -> None:
     top_k_per_row_decode(
         logits,
         1,
@@ -121,19 +146,6 @@ def _aiter_top_k_per_row_decode(
         logits.stride(1),
         k=topk_tokens,
     )
-    return True
-
-
-def _use_aiter_c4a_decode_topk_auto(
-    num_rows: int,
-    max_valid_seq_len: int,
-    on_gfx950: bool = _ON_GFX950,
-) -> bool:
-    # AITER v0.1.19 decode is one-block only. The native split kernel remains
-    # faster for long rows while its gfx950 specialization applies.
-    if not on_gfx950:
-        return False
-    return num_rows > 256 or max_valid_seq_len <= 65_536
 
 
 @triton.jit
@@ -948,18 +960,21 @@ def rocm_aiter_sparse_attn_indexer(
 
             num_rows = logits.shape[0]
 
-            used_aiter_topk = (
-                compress_ratio > 1
-                and _ON_GFX950
-                and _aiter_top_k_per_row_prefill(
+            aiter_topk_kernel = _get_aiter_top_k_kernel(
+                is_prefill=True,
+                compress_ratio=compress_ratio,
+                num_rows=num_rows,
+            )
+            if aiter_topk_kernel is not None:
+                _launch_aiter_top_k_per_row_prefill(
+                    aiter_topk_kernel,
                     logits,
                     chunk.cu_seqlen_ks,
                     chunk.cu_seqlen_ke,
                     topk_indices,
                     topk_tokens,
                 )
-            )
-            if not used_aiter_topk:
+            else:
                 torch.ops._C.top_k_per_row_prefill(
                     logits,
                     chunk.cu_seqlen_ks,
@@ -1015,15 +1030,21 @@ def rocm_aiter_sparse_attn_indexer(
             max_compressed_seq_len = max_model_len
         else:
             max_compressed_seq_len = layer_attn_metadata.max_seq_len // compress_ratio
-        use_aiter_topk = compress_ratio > 1 and _use_aiter_c4a_decode_topk_auto(
-            num_rows, max_compressed_seq_len
+        aiter_topk_kernel = _get_aiter_top_k_kernel(
+            is_prefill=False,
+            compress_ratio=compress_ratio,
+            num_rows=num_rows,
+            max_valid_seq_len=max_compressed_seq_len,
         )
-        if not use_aiter_topk or not _aiter_top_k_per_row_decode(
-            logits,
-            decode_metadata.seq_lens,
-            topk_indices,
-            topk_tokens,
-        ):
+        if aiter_topk_kernel is not None:
+            _launch_aiter_top_k_per_row_decode(
+                aiter_topk_kernel,
+                logits,
+                decode_metadata.seq_lens,
+                topk_indices,
+                topk_tokens,
+            )
+        else:
             torch.ops._C.top_k_per_row_decode(
                 logits,
                 next_n,
