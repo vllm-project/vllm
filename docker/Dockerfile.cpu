@@ -30,6 +30,13 @@
 # builder. sccache's cache lives in S3 instead, so it does.
 FROM ubuntu:22.04 AS base
 
+# RELEASE-ONLY (torch 2.14.0): the RC is republished to the PyTorch test channel
+# under an unchanging version string and filename, so uv's persistent cache mount
+# at /root/.cache/uv will happily serve a stale wheel even when the layer is
+# rebuilt with --no-cache. Disable the uv cache so every build re-downloads torch
+# and triton. Remove once 2.14.0 is final and published to PyPI.
+ENV UV_NO_CACHE=1
+
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
