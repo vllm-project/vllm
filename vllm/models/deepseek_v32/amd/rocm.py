@@ -418,6 +418,11 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
                     active_indexer.k_cache.uses_shuffled_layout,
                     self.indexer_rope_emb.is_neox_style,
                 )
+            else:
+                # Profiling run: the op early-returns on slot < 0, so seed what
+                # _run_indexer reads rather than leave the previous layer's rows.
+                q_index_fp8.zero_()
+                index_weights_out.zero_()
 
         mqa_q = self._mqa_q_buffer[: ql_nope.shape[0]]
         if has_caches:
