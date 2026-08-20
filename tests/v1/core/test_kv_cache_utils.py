@@ -21,13 +21,14 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils.hashing import sha256, sha256_cbor
+from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    check_enough_kv_cache_memory,
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
@@ -201,14 +202,20 @@ def new_mamba_spec(
 def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils
 
-    # case 1: PYTHONHASHSEED is not set, use random
+    # case 1: PYTHONHASHSEED is not set -> deterministic default seed so that
+    # independent processes compute identical block hashes for identical
+    # content (e.g. for KV cache reuse across nodes).
     with monkeypatch.context() as m:
         m.delenv("PYTHONHASHSEED", raising=False)
         reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
         reloaded_kv_cache_utils.init_none_hash(hash_fn)
-        assert reloaded_kv_cache_utils.NONE_HASH is not None
-        assert isinstance(reloaded_kv_cache_utils.NONE_HASH, bytes)
-        assert reloaded_kv_cache_utils.NONE_HASH != b""
+        none_hash = reloaded_kv_cache_utils.NONE_HASH
+        assert isinstance(none_hash, bytes)
+        assert none_hash != b""
+        assert none_hash == hash_fn(reloaded_kv_cache_utils.DEFAULT_NONE_HASH_SEED)
+        # deterministic across re-initialization within the same environment
+        reloaded_kv_cache_utils.init_none_hash(hash_fn)
+        assert none_hash == reloaded_kv_cache_utils.NONE_HASH
 
     # case 2: PYTHONHASHSEED is set, use the seed and hash_fn
     with monkeypatch.context() as m:
@@ -218,6 +225,58 @@ def test_none_hash(monkeypatch, hash_fn):
         assert reloaded_kv_cache_utils.NONE_HASH is not None
         assert isinstance(reloaded_kv_cache_utils.NONE_HASH, bytes)
         assert hash_fn("python hash seed") == reloaded_kv_cache_utils.NONE_HASH
+
+
+@pytest.mark.parametrize("non_crypto_fn", [xxhash, xxhash_cbor])
+def test_none_hash_seed_random_for_non_crypto(monkeypatch, non_crypto_fn):
+    """Non-cryptographic algorithms keep the per-process random seed.
+
+    A deterministic seed is safe for SHA-256, whose collision resistance does
+    not depend on a secret, but xxHash is not collision resistant: a known seed
+    would let an attacker precompute colliding blocks offline. Keep the
+    unpredictable seed there unless the operator opts into a shared one.
+    """
+    # PYTHONHASHSEED unset -> unpredictable, differs per resolution.
+    with monkeypatch.context() as m:
+        m.delenv("PYTHONHASHSEED", raising=False)
+        seeds = {kv_cache_utils.resolve_none_hash_seed(non_crypto_fn) for _ in range(5)}
+        assert len(seeds) == 5
+        assert kv_cache_utils.DEFAULT_NONE_HASH_SEED not in seeds
+
+    # PYTHONHASHSEED set -> operator opt-in wins, so peers can share a cache.
+    with monkeypatch.context() as m:
+        m.setenv("PYTHONHASHSEED", "12345")
+        assert kv_cache_utils.resolve_none_hash_seed(non_crypto_fn) == "12345"
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_none_hash_seed_deterministic_for_crypto(monkeypatch, hash_fn):
+    with monkeypatch.context() as m:
+        m.delenv("PYTHONHASHSEED", raising=False)
+        seed = kv_cache_utils.resolve_none_hash_seed(hash_fn)
+        assert seed == kv_cache_utils.DEFAULT_NONE_HASH_SEED
+        assert seed == kv_cache_utils.resolve_none_hash_seed(hash_fn)
+
+
+def test_get_none_hash_seed_reports_effective_seed(monkeypatch):
+    """P2P advertises the seed NONE_HASH was actually derived from.
+
+    The P2P tier is constructed before init_none_hash runs, so it must read the
+    resolved seed lazily rather than re-deriving it.
+    """
+    import vllm.v1.core.kv_cache_utils
+
+    with monkeypatch.context() as m:
+        m.delenv("PYTHONHASHSEED", raising=False)
+        reloaded = importlib.reload(vllm.v1.core.kv_cache_utils)
+        reloaded.init_none_hash(sha256)
+        assert reloaded.get_none_hash_seed() == reloaded.DEFAULT_NONE_HASH_SEED
+
+    with monkeypatch.context() as m:
+        m.setenv("PYTHONHASHSEED", "12345")
+        reloaded = importlib.reload(vllm.v1.core.kv_cache_utils)
+        reloaded.init_none_hash(sha256)
+        assert reloaded.get_none_hash_seed() == "12345"
 
 
 def test_kv_cache_block():
@@ -818,6 +877,7 @@ def test_metrics_empty_stats():
 def test_get_kv_cache_configs_multiple_workers():
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.prefix_cache_retention_interval = None
 
     ref_kv_cache_spec = new_kv_cache_spec()
     same_kv_cache_specs = [
@@ -1175,6 +1235,7 @@ def test_get_kv_cache_configs_multiple_workers():
 def test_get_kv_cache_configs_pp_sharding(asymmetric_memory):
     model_config = ModelConfig(max_model_len=512)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.prefix_cache_retention_interval = None
 
     ref_kv_cache_spec = new_kv_cache_spec()
     pp_kv_cache_specs = [
@@ -1700,6 +1761,7 @@ def test_get_kv_cache_config_one_worker():
     # pass max_model_len to pass check_enough_kv_cache_memory
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.prefix_cache_retention_interval = None
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
     # all layers are full attention -> single group
@@ -2013,6 +2075,7 @@ def test_get_kv_cache_config_one_worker():
 def test_get_kv_cache_configs_attention_free():
     kv_cache_specs: dict[str, KVCacheSpec] = {}
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config.cache_config.prefix_cache_retention_interval = None
     kv_cache_configs = get_kv_cache_configs(vllm_config, [kv_cache_specs], [0])
     assert kv_cache_configs == [
         KVCacheConfig(
@@ -2832,6 +2895,9 @@ def test_auto_fit_max_model_len_with_hybrid():
         "layer_2": new_kv_cache_spec(),
     }
 
+    # The mamba pool is request-constant, so it needs blocks_per_request for
+    # every concurrent sequence. One extra block on top of that: the pool
+    # reserves one block as the null block.
     mamba_request_blocks = scheduler_config.max_num_seqs * (1 + gamma) + 1
     available_memory = mem_per_block_per_layer * (1024 // 16 + mamba_request_blocks)
     kv_cache_configs = get_kv_cache_configs(
@@ -3003,21 +3069,20 @@ def test_unify_kv_cache_page_size_padding_requires_backend_support():
         kv_cache_utils.unify_kv_cache_spec_page_size(specs)
 
 
-def test_unpadded_page_size_without_quant_matches_real_page():
-    # Without quantization the offload transfer width is just the raw page.
-    spec = new_kv_cache_spec()
-    assert spec.unpadded_page_size_bytes == spec.real_page_size_bytes
-    assert spec.page_size_bytes == spec.unpadded_page_size_bytes
-
-
 def test_unpadded_page_size_includes_per_token_head_scales():
     # Per-token-head quant carries inline fp32 scales that are carved from the
-    # raw KV allocation, so they must be budgeted into the offload width.
-    spec = new_kv_cache_spec(
-        dtype=torch.uint8, kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD
+    # raw KV allocation, so they must be budgeted into the offload width. The
+    # packing is published by the owning backend's customize_spec hook.
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+
+    dense = new_kv_cache_spec(dtype=torch.uint8)
+    spec = TritonAttentionBackend.customize_spec(
+        new_kv_cache_spec(
+            dtype=torch.uint8, kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD
+        )
     )
     scales = 2 * spec.block_size * spec.num_kv_heads * 4
-    assert spec.unpadded_page_size_bytes == spec.real_page_size_bytes + scales
+    assert spec.unpadded_page_size_bytes == dense.unpadded_page_size_bytes + scales
     assert spec.page_size_bytes == spec.unpadded_page_size_bytes
 
 
@@ -3271,3 +3336,72 @@ def test_resolve_block_hashes_rejects_mismatched_view():
     mismatched = BlockHashListWithBlockSize(raw, 2, 8)
     with pytest.raises(AssertionError):
         resolve_block_hashes(mismatched, 2, 4)
+
+
+@pytest.mark.parametrize("use_override", [True, False])
+def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
+    """A KV cache sized to exactly the blocks a max_model_len request needs must
+    be rejected. BlockPool keeps one block as the null block, so only
+    num_blocks - 1 are usable; accepting num_blocks == needed would leave the
+    request unschedulable and hang the engine. Covers both the
+    num_gpu_blocks_override path and the memory-derived block count.
+    """
+    block_size = 16
+    max_model_len = 512  # needs 512 / 16 = 32 blocks
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    spec = new_kv_cache_spec(block_size=block_size)
+
+    # 32 blocks -> only 31 usable after the null block: one short -> reject.
+    if use_override:
+        # Ample raw memory; the override alone constrains the block count.
+        vllm_config.cache_config.num_gpu_blocks_override = 32
+        available_memory = [spec.page_size_bytes * 1024]
+    else:
+        available_memory = [spec.page_size_bytes * 32]
+
+    with pytest.raises(ValueError, match="max seq len"):
+        get_kv_cache_configs(vllm_config, [{"layer1": spec}], available_memory)
+
+
+def test_auto_fit_max_model_len_reserves_null_block():
+    """Auto-fit (max_model_len=-1) must size max_model_len against usable
+    blocks, not the total pool. With memory for exactly 64 blocks, one is the
+    null block, so auto-fit must settle on 63 * block_size; picking the full
+    pool would leave a max-length request unschedulable and hang the engine.
+    """
+    block_size = 16
+    model_config = ModelConfig(max_model_len=1024)
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+    spec = new_kv_cache_spec(block_size=block_size)
+
+    # Exactly the 1024 / 16 = 64 blocks a full-length request would need.
+    available_memory = [spec.page_size_bytes * 64]
+
+    get_kv_cache_configs(vllm_config, [{"layer1": spec}], available_memory)
+
+    assert vllm_config.model_config.max_model_len == 63 * block_size
+
+
+def test_check_enough_kv_cache_memory_reserves_null_block():
+    """The public admission check must reject a KV cache sized to exactly the
+    blocks a max_model_len request needs. BlockPool keeps one block as the
+    null block, so only num_blocks - 1 are usable; accepting
+    num_blocks == needed would leave the request unschedulable and hang the
+    engine.
+    """
+    block_size = 16
+    max_model_len = 512  # needs 512 / 16 = 32 blocks
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    spec = new_kv_cache_spec(block_size=block_size)
+
+    # 32 blocks -> only 31 usable after the null block: one short -> reject.
+    with pytest.raises(ValueError, match="max seq len"):
+        check_enough_kv_cache_memory(
+            vllm_config, {"layer1": spec}, spec.page_size_bytes * 32
+        )
+
+    # 33 blocks -> 32 usable after the null block -> accept.
+    check_enough_kv_cache_memory(
+        vllm_config, {"layer1": spec}, spec.page_size_bytes * 33
+    )

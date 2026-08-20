@@ -34,8 +34,10 @@ from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
     get_dcp_local_seq_lens,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp import (
+    cp_lse_ag_out_rs,
+    dcp_a2a_lse_reduce,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -286,8 +288,6 @@ class FlashAttentionMetadata:
     max_num_splits: int = 0
 
     causal: bool | torch.Tensor = True
-
-    sliding_window: tuple[int, int] | None = None
 
     # PrefixLM bidirectional range containing each scheduled query token.
     # Shape: (num_actual_tokens, 2) int32, absolute [start, end] bounds;
@@ -713,13 +713,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
             causal = causal.to(torch.int32)
 
-        # Symmetrize the spec's sliding_window for non-causal attention
-        group_sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
-        base_window = (
-            (-1, -1) if group_sliding_window is None else (group_sliding_window - 1, 0)
-        )
-        effective_sliding_window = _maybe_symmetrize_window(base_window, causal)
-
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -743,7 +736,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
-            sliding_window=effective_sliding_window,
         )
 
         # Compute mm_prefix range tensor if the batch contains
@@ -870,7 +862,6 @@ class FlashAttentionImpl(AttentionImpl):
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=alibi_slopes is not None,
-            requires_local_attention=sliding_window is not None,
             head_size=head_size,
             has_sinks=sinks is not None,
         )
@@ -1047,17 +1038,17 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
-                window = (
-                    attn_metadata.sliding_window
-                    if attn_metadata.sliding_window is not None
-                    else self.sliding_window
-                )
+                causal = attn_metadata.causal
+                is_dynamic_causal = isinstance(causal, torch.Tensor)
+
+                # The layer's own window wins over the group's: one KV cache
+                # group can hold both windowed and global layers (e.g. Gemma-3
+                # with the hybrid KV cache manager disabled), and the group spec
+                # cannot describe both.
+                window = _maybe_symmetrize_window(self.sliding_window, causal)
                 sliding_window_size: list[int] | None = (
                     list(window) if window is not None else None
                 )
-
-                causal = attn_metadata.causal
-                is_dynamic_causal = isinstance(causal, torch.Tensor)
 
                 mm_prefix_query_ranges = attn_metadata.mm_prefix_query_range_tensor
                 mm_mask_mod = None
@@ -1068,10 +1059,6 @@ class FlashAttentionImpl(AttentionImpl):
                     and causal is True
                     and self.vllm_flash_attn_version == 4
                 ):
-                    # Use the layer impl's window, not attn_metadata's. The
-                    # metadata field comes from kv_cache_spec (model-wide, e.g.
-                    # Gemma4's 512), while the impl holds the per-layer window
-                    # the mask_mod must encode (e.g. a test override).
                     # Triton convention: 1 + window_size[0]. Global layers store
                     # (-1, -1) → sw stays None.
                     layer_window = self.sliding_window

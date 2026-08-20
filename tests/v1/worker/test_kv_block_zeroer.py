@@ -1,10 +1,73 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+from types import SimpleNamespace
+
 import pytest
 import torch
 
-from vllm.v1.worker.utils import KVBlockZeroer, _zero_kv_blocks_kernel
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    SlidingWindowSpec,
+)
+from vllm.v1.worker import utils as worker_utils
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    KVBlockZeroer,
+    _zero_kv_blocks_kernel,
+)
+
+
+class _BlockFirstBackend:
+    @staticmethod
+    def get_kv_cache_block_dim(*args, **kwargs):
+        return 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "spec",
+    [
+        SlidingWindowSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.uint8,
+            sliding_window=4,
+        ),
+        ChunkedLocalAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.uint8,
+            attention_chunk_size=4,
+        ),
+    ],
+    ids=["sliding-window", "chunked-local"],
+)
+def test_attention_blocks_are_zeroed(spec):
+    device = torch.device("cuda")
+    storage = torch.ones((4, 1, 2, 2), dtype=torch.uint8, device=device)
+    layer_name = "draft.self_attn"
+    zeroer = KVBlockZeroer(
+        device,
+        attn_groups_iter=[
+            AttentionGroup(_BlockFirstBackend, [layer_name], spec, 0)  # type: ignore[arg-type]
+        ],
+        kernel_block_sizes=[2],
+        cache_dtype="fp8",
+        static_forward_context={
+            layer_name: SimpleNamespace(kv_cache=storage),
+        },
+    )
+
+    zeroer.zero_block_ids([1])
+    torch.accelerator.synchronize()
+
+    expected = torch.ones_like(storage)
+    expected[1] = 0
+    assert torch.equal(storage, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -60,10 +123,7 @@ def test_non_uniform_page_sizes():
     seg_page_sizes = [page_size_a, page_size_b]
     max_ps = max(seg_page_sizes)
 
-    def largest_power_of_2_divisor(n):
-        return n & -n
-
-    blk_size = min(min(largest_power_of_2_divisor(ps) for ps in seg_page_sizes), 1024)
+    blk_size = min(1 << (max_ps - 1).bit_length(), 1024)
 
     zeroer._meta = (
         torch.tensor(
@@ -73,7 +133,7 @@ def test_non_uniform_page_sizes():
         ),
         torch.tensor(seg_page_sizes, dtype=torch.int64, device=device),
         torch.tensor(seg_page_sizes, dtype=torch.int64, device=device),
-        max_ps // blk_size,
+        (max_ps + blk_size - 1) // blk_size,
         blk_size,
         2,
     )
@@ -125,12 +185,74 @@ def test_packed_segment_zeros_only_its_last_block_page():
     assert torch.equal(backing, expected)
 
 
+def test_large_dsv4_launch_geometry(monkeypatch):
+    """Keep the failing DSV4 shape efficient and within launch limits."""
+    device = torch.device("cpu")
+    n_blocks, n_segs = 6870, 181
+    layer_names = [f"layer.{i}" for i in range(n_segs)]
+    page_sizes = [9344 if i % 2 == 0 else 292 for i in range(n_segs)]
+    spec = SlidingWindowSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.int32,
+        sliding_window=1,
+    )
+    storages = {
+        name: torch.ones((1, page_size), dtype=torch.int32)
+        for name, page_size in zip(layer_names, page_sizes)
+    }
+    zeroer = KVBlockZeroer(
+        device,
+        attn_groups_iter=[
+            AttentionGroup(
+                _BlockFirstBackend,  # type: ignore[arg-type]
+                [name],
+                spec,
+                group_id,
+            )
+            for group_id, name in enumerate(layer_names)
+        ],
+        kernel_block_sizes=[1] * n_segs,
+        cache_dtype="auto",
+        static_forward_context={
+            name: SimpleNamespace(kv_cache=storage)
+            for name, storage in storages.items()
+        },
+    )
+
+    assert zeroer._meta is not None
+    _, _, seg_page_sizes, max_chunks, blk_size, n_segs = zeroer._meta
+    assert seg_page_sizes.tolist() == page_sizes
+    assert (max_chunks, blk_size, n_segs) == (10, 1024, 181)
+
+    captured_grids = []
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            captured_grids.append(grid)
+            return lambda *args, **kwargs: None
+
+    monkeypatch.setattr(worker_utils, "_zero_kv_blocks_kernel", FakeKernel())
+    monkeypatch.setattr(
+        worker_utils,
+        "async_tensor_h2d",
+        lambda values, **kwargs: torch.tensor(values, dtype=torch.int64),
+    )
+
+    zeroer.zero_block_ids(list(range(n_blocks)))
+
+    old_max_chunks = max(page_sizes) // 4
+    assert math.prod((n_blocks, n_segs, old_max_chunks)) > 2**31 - 1
+    assert captured_grids == [(n_blocks, n_segs, max_chunks)]
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_warmup_compiles_every_n_blocks_specialization():
+def test_warmup_compiles_for_all_block_counts():
     """After warmup, no launch should trigger a first-request JIT compile.
 
-    ``n_blocks`` is ``do_not_specialize``, so a single warmup launch must
-    cover every block count.
+    The block count is carried by the launch grid, so changing it must reuse
+    the warmup's compiled kernel.
     """
     device = torch.device("cuda")
     num_blocks = 64

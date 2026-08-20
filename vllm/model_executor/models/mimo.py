@@ -101,15 +101,14 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -120,10 +119,8 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
         # MTP layers are loaded by the draft model, not the main model.
-        skip_prefixes.append("model.mtp_layers.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self, skip_prefixes=["model.mtp_layers."])
         return loader.load_weights(weights)
 
     def compute_logits(

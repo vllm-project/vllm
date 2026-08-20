@@ -15,7 +15,7 @@ from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.hashing import sha256_cbor, xxhash_cbor
+from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    replace_as,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
@@ -86,32 +87,73 @@ logger = init_logger(__name__)
 
 # The hash seed for the first block of any prefix block sequence.
 #
-# We use a random value to avoid hash collisions or PYTHONHASHSEED environment
-# variable if set such that processes can share the seed if needed. This aligns
-# with the behavior of Python's hash() function, which also uses a random seed
-# if PYTHONHASHSEED is not set.
+# For cryptographic hash algorithms it is derived deterministically from a fixed
+# default seed, so independent vLLM processes compute identical block hashes for
+# identical content and can share a prefix cache (e.g. KV cache reuse across
+# nodes) without extra configuration. This does not weaken collision resistance,
+# which for SHA-256 does not depend on keeping the seed secret; ``cache_salt``
+# remains the mechanism for intentional cache isolation.
+#
+# Non-cryptographic algorithms keep a per-process random seed, because a
+# predictable seed would let an attacker precompute colliding blocks offline
+# (see #12621). Setting PYTHONHASHSEED overrides the seed in both cases.
 #
 # The function `init_none_hash` initializes this variable globally.
 NONE_HASH: BlockHash
-_CBOR_HASH_FUNCTIONS = frozenset({sha256_cbor, xxhash_cbor})
+
+# Fixed seed used when the PYTHONHASHSEED environment variable is not set and
+# the hash algorithm is cryptographic.
+DEFAULT_NONE_HASH_SEED = "vllm-none-hash"
+
+# Algorithms that are not collision resistant, so the seed must stay secret.
+_NON_CRYPTO_HASH_FUNCTIONS = frozenset({xxhash, xxhash_cbor})
+
+# The seed NONE_HASH was derived from, set by init_none_hash.
+_NONE_HASH_SEED: str | None = None
+
+
+def resolve_none_hash_seed(hash_fn: Callable[[Any], bytes]) -> str:
+    """Resolve the seed to derive NONE_HASH from.
+
+    PYTHONHASHSEED wins if set. Otherwise cryptographic algorithms get the
+    fixed default (shareable across processes) and non-cryptographic ones get
+    fresh random bytes, keeping the seed unpredictable where collision
+    resistance depends on it.
+    """
+    hash_seed = os.getenv("PYTHONHASHSEED")
+    if hash_seed is not None:
+        return hash_seed
+    if hash_fn in _NON_CRYPTO_HASH_FUNCTIONS:
+        return os.urandom(32).hex()
+    return DEFAULT_NONE_HASH_SEED
+
+
+def get_none_hash_seed() -> str:
+    """Return the seed NONE_HASH was derived from.
+
+    Components that must agree on NONE_HASH across processes (the P2P tier
+    advertises this during its connect handshake) read the resolved seed here
+    instead of re-deriving it, so they observe the random seed too. Falls back
+    to the deterministic seed before ``init_none_hash`` has run.
+    """
+    if _NONE_HASH_SEED is None:
+        return DEFAULT_NONE_HASH_SEED
+    return _NONE_HASH_SEED
 
 
 def init_none_hash(hash_fn: Callable[[Any], bytes]):
-    global NONE_HASH
+    global NONE_HASH, _NONE_HASH_SEED
 
-    hash_seed = os.getenv("PYTHONHASHSEED")
-    if hash_seed is None and hash_fn in _CBOR_HASH_FUNCTIONS:
+    _NONE_HASH_SEED = resolve_none_hash_seed(hash_fn)
+    if hash_fn in _NON_CRYPTO_HASH_FUNCTIONS and os.getenv("PYTHONHASHSEED") is None:
         logger.warning(
-            "PYTHONHASHSEED is not set. This will lead to non-reproducible "
-            "block-hashes when using CBOR-based hash functions such as "
-            "sha256_cbor or xxhash_cbor. Consider setting PYTHONHASHSEED to a "
-            "fixed value for reproducibility."
+            "Using a random per-process NONE_HASH seed because %s is not "
+            "collision resistant. Block hashes are therefore not reproducible "
+            "across processes; set PYTHONHASHSEED to a shared value to reuse "
+            "the prefix cache across instances, or use sha256.",
+            hash_fn.__name__,
         )
-
-    if hash_seed is None:
-        NONE_HASH = BlockHash(os.urandom(32))
-    else:
-        NONE_HASH = BlockHash(hash_fn(hash_seed))
+    NONE_HASH = BlockHash(hash_fn(_NONE_HASH_SEED))
 
 
 @dataclass(slots=True)
@@ -619,8 +661,7 @@ def resolve_kv_cache_block_sizes(
       ``cache_config.prefix_match_unit`` override if set, else the GCD of
       group block sizes; every group's block size must be divisible by it.
       Returns the scheduler block size (i.e. disables finer hashing) if block
-      hashing is inactive or a mamba group's block size diverges from the
-      cache block size (mamba_cache_mode != "align").
+      hashing is inactive or a mamba group is not using cache mode "align".
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
@@ -851,8 +892,13 @@ def check_enough_kv_cache_memory(
 
     # No need to check for available memory if the kv_cache_spec is empty
     if kv_cache_spec:
+        # Reserve the null block BlockPool permanently holds back, so the check
+        # plans against usable blocks, as in get_kv_cache_configs. Group a copy
+        # of the specs since grouping may unify them in-place.
+        groups = get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
+        check_memory = _get_fit_available_memory(vllm_config, groups, available_memory)
         _check_enough_kv_cache_memory(
-            available_memory,
+            check_memory,
             lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
             vllm_config.model_config.max_model_len,
             lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
@@ -1380,6 +1426,9 @@ def _get_token_proportional_kv_cache_config_from_groups(
             num_blocks=1,
             kv_cache_tensors=[],
             kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=(
+                vllm_config.cache_config.prefix_cache_retention_interval
+            ),
         )
 
     # Determine how model runners should initialize the KV cache tensors.
@@ -1439,6 +1488,9 @@ def _get_token_proportional_kv_cache_config_from_groups(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
+        prefix_cache_retention_interval=(
+            vllm_config.cache_config.prefix_cache_retention_interval
+        ),
     )
 
 
@@ -1498,43 +1550,30 @@ def _promote_local_kv_cache_specs(
         )
         return max(spec.page_size_padded, unpadded_page_size)
 
+    promotions: dict[type[AttentionSpec], type[AttentionSpec]] = {
+        SlidingWindowMLASpec: MLAAttentionSpec,
+        SlidingWindowSpec: FullAttentionSpec,
+        ChunkedLocalAttentionSpec: FullAttentionSpec,
+    }
+
     if has_full_attention and (has_sliding_window or has_chunked_local_attention):
         for layer_name, spec in kv_cache_spec.items():
-            if isinstance(spec, SlidingWindowMLASpec):
-                block_size = full_attention_block_size or spec.block_size
-                promoted_specs[layer_name] = MLAAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=spec.num_kv_heads,
-                    head_size=spec.head_size,
-                    dtype=spec.dtype,
-                    page_size_padded=promoted_page_size_padded(spec, block_size),
-                    cache_dtype_str=spec.cache_dtype_str,
-                    alignment=spec.alignment,
-                    compress_ratio=spec.compress_ratio,
-                    model_version=spec.model_version,
-                )
-            elif isinstance(spec, SlidingWindowSpec):
-                block_size = full_attention_block_size or spec.block_size
-                promoted_specs[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=spec.num_kv_heads,
-                    head_size=spec.head_size,
-                    head_size_v=spec.head_size_v,
-                    dtype=spec.dtype,
-                    kv_quant_mode=spec.kv_quant_mode,
-                    sliding_window=spec.sliding_window,
-                    page_size_padded=promoted_page_size_padded(spec, block_size),
-                )
-            elif isinstance(spec, ChunkedLocalAttentionSpec):
-                block_size = full_attention_block_size or spec.block_size
-                promoted_specs[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=spec.num_kv_heads,
-                    head_size=spec.head_size,
-                    dtype=spec.dtype,
-                    attention_chunk_size=spec.attention_chunk_size,
-                    page_size_padded=promoted_page_size_padded(spec, block_size),
-                )
+            target_cls = next(
+                (promotions[c] for c in type(spec).__mro__ if c in promotions), None
+            )
+            if target_cls is None:
+                continue
+            assert isinstance(spec, AttentionSpec)
+            block_size = full_attention_block_size or spec.block_size
+            promoted_specs[layer_name] = replace_as(
+                spec,
+                target_cls,
+                # Promoted specs allocate blocks for all tokens and never free
+                # below the window, so the trailing-edge extension is moot.
+                drop=("extra_retained_tokens",),
+                block_size=block_size,
+                page_size_padded=promoted_page_size_padded(spec, block_size),
+            )
 
     if not (
         is_kv_cache_spec_uniform(promoted_specs)
@@ -2248,6 +2287,21 @@ def get_kv_cache_configs(
     # Check if the KV cache specs are registered correctly.
     # This is to prevent that some layers are initialized with unregistered specs.
     KVCacheSpecRegistry.check_kv_cache_spec_registry(merged_kv_cache_specs)
+
+    # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
+    # tag every SlidingWindowSpec with how many extra tokens to retain in the window.
+    extra_retained_tokens = (
+        vllm_config.speculative_config.num_speculative_tokens - 1
+        if vllm_config.speculative_config is not None
+        and vllm_config.speculative_config.use_multi_module_mtp()
+        else 0
+    )
+    for layer_name, layer_spec in merged_kv_cache_specs.items():
+        if isinstance(layer_spec, SlidingWindowSpec):
+            merged_kv_cache_specs[layer_name] = replace(
+                layer_spec, extra_retained_tokens=extra_retained_tokens
+            )
+
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_kv_cache_specs may be modified in-place.
@@ -2283,6 +2337,9 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
+    # Reserve the null block BlockPool permanently holds back, so auto-fit and
+    # the capacity check both plan against usable blocks. Allocation below
+    # still uses the full memory.
     fit_available_memory = [
         _get_fit_available_memory(vllm_config, groups, avail_mem)
         for groups, avail_mem in zip(
