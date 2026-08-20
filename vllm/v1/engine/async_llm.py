@@ -334,6 +334,7 @@ class AsyncLLM(EngineClient):
                 priority,
                 data_parallel_rank,
                 session_id,
+                operation_name=operation_name,
             )
 
         # Convert Input --> Request.
@@ -455,6 +456,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         session_id: str | None = None,
+        operation_name: str | None = None,
     ) -> RequestOutputCollector:
         self._validate_streaming_input_sampling_params(sampling_params)
 
@@ -467,6 +469,7 @@ class AsyncLLM(EngineClient):
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             session_id=session_id,
+            operation_name=operation_name,
         )
 
         if not sampling_params.skip_clone:

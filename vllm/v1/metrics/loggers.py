@@ -46,7 +46,6 @@ LATENCY_OPERATION_LABELS = (
     "chat",
     "text_completion",
     "embeddings",
-    "responses",
     UNKNOWN_OPERATION_NAME,
 )
 
