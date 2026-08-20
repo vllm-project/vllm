@@ -42,6 +42,27 @@ class MMEncoderModelRunner(GPUModelRunner):
             "An encoder-only instance must serve a multi-modal model."
         )
 
+        # The device reads the pooled host input buffers in place, and they are
+        # recycled every max_concurrent_batches steps. A sampling step waits on
+        # its output copy before its own slot comes round again; this runner
+        # returns a host-built output and never waits on the device (see
+        # `execute_model`), so it is the one that needs an explicit barrier.
+        self._input_reuse_event: torch.Event | None = None
+        if vllm_config.max_concurrent_batches > 1:
+            # Blocking (sleep) event: busy-polling the driver lock can make this
+            # rank a straggler under contention.
+            self._input_reuse_event = torch.Event(blocking=True)
+
+    def _wait_for_input_reuse(self) -> None:
+        """Wait for the step still reading the pooled input buffers."""
+        if self._input_reuse_event is not None:
+            self._input_reuse_event.synchronize()
+
+    def _mark_input_reuse(self) -> None:
+        """Mark this step's last host write into the pooled input buffers."""
+        if self._input_reuse_event is not None:
+            self._input_reuse_event.record()
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return {}
 
@@ -77,6 +98,7 @@ class MMEncoderModelRunner(GPUModelRunner):
     ) -> ModelRunnerOutput:
         assert not dummy_run, "An encoder-only instance runs no dummy batch."
 
+        self._wait_for_input_reuse()
         self.update_pp_decode_requests()
         self.finish_requests(scheduler_output)
         self.free_states(scheduler_output)
@@ -84,6 +106,7 @@ class MMEncoderModelRunner(GPUModelRunner):
         self.update_requests(scheduler_output)
         self.block_tables.apply_staged_writes()
         if scheduler_output.total_num_scheduled_tokens == 0:
+            self._mark_input_reuse()
             return self._no_forward(scheduler_output)
 
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
@@ -111,9 +134,15 @@ class MMEncoderModelRunner(GPUModelRunner):
             num_active_loras=num_active_loras,
         )
         if batch_desc.num_tokens == 0:
+            self._mark_input_reuse()
             return self._no_forward(scheduler_output)
 
         self.prepare_inputs(scheduler_output, batch_req_state, batch_desc)
+        # Last host write into the pooled buffers. Recorded here rather than at
+        # function exit: after `execute_mm_encoder` the next step's wait would
+        # also have to wait for this step's ViT, which costs ~22% throughput
+        # and protects nothing -- the encoder reads no pooled metadata.
+        self._mark_input_reuse()
 
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if self.lora_config is not None:
