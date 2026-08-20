@@ -9,7 +9,7 @@ import shutil
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from pickle import PickleBuffer
@@ -528,6 +528,7 @@ class ShmTensorArena:
         self._fallbacks = 0
         self._pin_attempted = False
         self._pinned = False
+        self._pinned_ptr = 0
         # slots whose tensors were handed out by THIS reader and not yet
         # released (flushed at the next dequeue).
         self._pending_release: list[int] = []
@@ -634,6 +635,8 @@ class ShmTensorArena:
             ptr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
             ret = current_platform.cudart().cudaHostRegister(ptr, self.total_bytes, 0)
             self._pinned = int(ret) == 0
+            if self._pinned:
+                self._pinned_ptr = ptr
             logger.info(
                 "ShmTensorArena: cudaHostRegister(%d MB) -> %s",
                 self.total_bytes >> 20,
@@ -641,6 +644,17 @@ class ShmTensorArena:
             )
         except Exception as e:
             logger.info("ShmTensorArena: host-register skipped: %s", e)
+
+    def _unpin(self):
+        """cudaHostUnregister the mapping pinned by _ensure_pinned; must run
+        before the mapping is closed. Failures are ignored — at interpreter
+        shutdown the CUDA context may already be gone, and the registration
+        dies with the process anyway."""
+        if not self._pinned:
+            return
+        self._pinned = False
+        with suppress(Exception):
+            current_platform.cudart().cudaHostUnregister(self._pinned_ptr)
 
     def get_tensor(
         self, idx: int, nbytes: int, dtype: torch.dtype, shape: tuple[int, ...]
@@ -713,6 +727,7 @@ class ShmTensorArena:
 
     def __del__(self):
         if hasattr(self, "shared_memory"):
+            self._unpin()
             try:
                 self.shared_memory.close()
                 if self.is_creator:

@@ -934,6 +934,28 @@ def test_arena_pickler_noncontig_falls_through(monkeypatch):
     del out
 
 
+def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
+    """A reader that cudaHostRegister-ed its mapping must cudaHostUnregister
+    the same pointer before the mapping is closed; an unpinned arena must not
+    unregister memory it never registered."""
+    writer, (reader,) = _make_arena(n_reader=1)
+    cudart = mock.MagicMock()
+    cudart.cudaHostRegister.return_value = 0
+    cudart.cudaHostUnregister.return_value = 0
+    monkeypatch.setattr(
+        shm_broadcast,
+        "current_platform",
+        SimpleNamespace(is_cuda_alike=lambda: True, cudart=lambda: cudart),
+    )
+    reader._ensure_pinned()
+    assert reader._pinned
+    ptr = cudart.cudaHostRegister.call_args.args[0]
+    del reader
+    cudart.cudaHostUnregister.assert_called_once_with(ptr)
+    del writer  # never pinned -> no unregister
+    cudart.cudaHostUnregister.assert_called_once()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_arena_event_gated_release():
     """On the pinned path a slot release is gated on an H2D-completion CUDA
