@@ -161,11 +161,41 @@ class PCPManager:
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "MRV2 PCP does not support speculative decoding yet."
-            )
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            if speculative_config.method != "mtp":
+                raise NotImplementedError(
+                    "MRV2 PCP speculative decoding currently supports MTP only."
+                )
+            if is_sparse_mla:
+                raise NotImplementedError(
+                    "MRV2 PCP speculative decoding currently supports dense MLA only."
+                )
+            if parallel_config.decode_context_parallel_size != 1:
+                raise NotImplementedError(
+                    "MRV2 PCP speculative decoding does not support DCP yet."
+                )
+            if speculative_config.draft_sample_method != "greedy":
+                raise NotImplementedError(
+                    "MRV2 PCP speculative decoding currently requires greedy "
+                    "draft sampling."
+                )
+            if speculative_config.enable_adaptive_verification:
+                raise NotImplementedError(
+                    "MRV2 PCP speculative decoding does not support adaptive "
+                    "verification yet."
+                )
+            if speculative_config.num_speculative_tokens_per_batch_size:
+                raise NotImplementedError(
+                    "MRV2 PCP speculative decoding does not support dynamic "
+                    "draft lengths yet."
+                )
+            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                raise NotImplementedError(
+                    "MRV2 PCP speculative decoding currently requires "
+                    "cudagraph_mode=NONE."
+                )
         if (
             is_sparse_mla
             and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -383,9 +413,6 @@ class PCPManager:
         assert self._input_buffers is not None
         req_states = self._req_states
         input_buffers = self._input_buffers
-        if input_batch.num_draft_tokens > 0:
-            raise NotImplementedError("MRV2 PCP does not support spec decode yet.")
-
         global_batch = input_batch
         self._global_batch = global_batch
 
@@ -685,6 +712,13 @@ class PCPManager:
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
 
+    def restore_hidden_state_buffer(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self._padded_gather_idx is not None
+        local_num_tokens_padded = (
+            self._padded_gather_idx.shape[0] // self.pcp_world_size
+        )
+        return self.restore_hidden_states(hidden_states[:local_num_tokens_padded])
+
     def restore_for_sampling(
         self,
         hidden_states: torch.Tensor,
@@ -814,6 +848,27 @@ def _validate_pcp_direct_kv_config(vllm_config: VllmConfig) -> None:
     if getattr(model_config, "enable_sleep_mode", False):
         raise NotImplementedError("Direct PCP KV does not support sleep mode.")
 
+
+def maybe_restore_pcp_hidden_state_buffer(
+    manager: PCPManager | None,
+    hidden_states: torch.Tensor | None,
+) -> torch.Tensor:
+    assert hidden_states is not None
+    if manager is None:
+        return hidden_states
+    return manager.restore_hidden_state_buffer(hidden_states)
+
+
+def maybe_restore_pcp_for_speculator(
+    manager: PCPManager | None,
+    aux_hidden_states: list[torch.Tensor] | None,
+) -> list[torch.Tensor] | None:
+    if manager is None or aux_hidden_states is None:
+        return aux_hidden_states
+    return [
+        manager.restore_hidden_states(aux_hidden_state)
+        for aux_hidden_state in aux_hidden_states
+    ]
 
 def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
