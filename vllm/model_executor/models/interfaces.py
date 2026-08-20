@@ -820,7 +820,8 @@ def supports_pp(
 class SupportsRecirculation(Protocol):
     """Interface for causal models with Recirculation-aware forwards."""
 
-    supports_recirculation: bool
+    @property
+    def supports_recirculation(self) -> bool: ...
 
     def get_recirculation_capabilities(
         self,

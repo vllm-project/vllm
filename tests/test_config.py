@@ -128,6 +128,27 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def test_recirculation_forces_v1_model_runner(monkeypatch):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(recirculation_config={"source_layer": 2})
+        )
+    )
+    config._recirculation_requested = lambda: VllmConfig._recirculation_requested(
+        config
+    )
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+
+    assert not VllmConfig.use_v2_model_runner.fget(config)
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
+        VllmConfig.use_v2_model_runner.fget(config)
+
+    config.model_config.hf_config.recirculation_config.update(alpha=0.0)
+    assert VllmConfig.use_v2_model_runner.fget(config)
+
+
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps DeepSeek V3.2 and V4 on their compiled MRV1 paths."""
     from vllm.config.vllm import (

@@ -75,6 +75,11 @@ from vllm.model_executor.models.interfaces import (
     SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
+    SupportsRecirculation,
+)
+from vllm.model_executor.models.recirculation import (
+    RecirculationCapabilities,
+    RecirculationDecoderMixin,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -1082,7 +1087,11 @@ class MiniMaxM3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class MiniMaxM3Model(nn.Module, EagleModelMixin):
+class MiniMaxM3Model(RecirculationDecoderMixin, nn.Module, EagleModelMixin):
+    recirculation_capabilities = RecirculationCapabilities(
+        adapter="minimax_m3_sparse_moe",
+        wavefront=False,
+    )
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1109,7 +1118,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # layers (mirrors DeepseekV4); the indexer writes its per-head decode/
         # prefill block selection into it, the attend reads it back.
         sparse_cfg = getattr(config, "sparse_attention_config", None)
-        if sparse_cfg is not None:
+        if sparse_cfg:
             tp_size = get_tensor_model_parallel_world_size()
             num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
             self.topk_indices_buffer = torch.empty(
@@ -1132,6 +1141,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        self._init_recirculation(config, self.start_layer, self.end_layer)
+        if (
+            self.recirculation_config is not None
+            and vllm_config.parallel_config.tensor_parallel_size != 1
+        ):
+            raise ValueError(
+                "Recirculation currently requires tensor-parallel size 1 for MiniMax M3"
+            )
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             MiniMaxM3MoE,
@@ -1155,6 +1172,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -1166,6 +1186,16 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        if self.recirculation_config is not None:
+            return self._forward_recirculation(
+                positions,
+                hidden_states,
+                residual,
+                recirculation_wavefront_warmup,
+                recirculation_wavefront_positions,
+                recirculation_wavefront_pending,
+            )
 
         # EAGLE3 is not yet compatible with pipeline parallel
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
@@ -1310,7 +1340,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         return loaded_params
 
 
-class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
+class MiniMaxM3SparseForCausalLM(
+    nn.Module, SupportsPP, SupportsEagle3, SupportsRecirculation
+):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
 
     packed_modules_mapping = {
@@ -1344,15 +1376,33 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    @property
+    def supports_recirculation(self) -> bool:
+        return self.model.has_recirculation_adapter()
+
+    def get_recirculation_capabilities(self) -> RecirculationCapabilities | None:
+        return self.model.get_recirculation_capabilities()
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
-        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+        return self.model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            recirculation_wavefront_warmup=recirculation_wavefront_warmup,
+            recirculation_wavefront_positions=recirculation_wavefront_positions,
+            recirculation_wavefront_pending=recirculation_wavefront_pending,
+        )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)

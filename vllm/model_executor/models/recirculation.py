@@ -20,9 +20,19 @@ class RecirculationConfig:
     ramp_tokens: int = 0
     wavefront: bool = False
 
+    @staticmethod
+    def _get_text_config(hf_config: object) -> object:
+        get_text_config = getattr(hf_config, "get_text_config", None)
+        if callable(get_text_config):
+            return get_text_config()
+        return hf_config
+
     @classmethod
     def from_hf_config(cls, hf_config: object) -> "RecirculationConfig | None":
+        text_config = cls._get_text_config(hf_config)
         raw_config = getattr(hf_config, "recirculation_config", None)
+        if raw_config is None and text_config is not hf_config:
+            raw_config = getattr(text_config, "recirculation_config", None)
         if raw_config is None:
             return None
         if not isinstance(raw_config, dict):
@@ -54,7 +64,7 @@ class RecirculationConfig:
             ramp_tokens=raw_config.get("ramp_tokens", 0),
             wavefront=raw_config.get("wavefront", False),
         )
-        config.validate(hf_config.num_hidden_layers)
+        config.validate(text_config.num_hidden_layers)
         if config.alpha == 0.0 and config.beta in (None, 1.0):
             return None
         return config
@@ -149,10 +159,21 @@ class RecirculationDecoderMixin:
         if config is not None and not getattr(hf_config, "is_causal", True):
             raise ValueError("Recirculation requires causal attention")
         if config is not None and (
-            start_layer != 0 or end_layer != hf_config.num_hidden_layers
+            start_layer != 0
+            or end_layer
+            != RecirculationConfig._get_text_config(hf_config).num_hidden_layers
         ):
             raise ValueError("Recirculation does not support pipeline parallelism")
+        if config is not None:
+            self._validate_recirculation_model_config(hf_config, config)
         self.recirculation_config = config
+
+    def _validate_recirculation_model_config(
+        self,
+        hf_config: object,
+        config: RecirculationConfig,
+    ) -> None:
+        """Validate family-specific constraints before model execution."""
 
     def has_recirculation_adapter(self) -> bool:
         return self.get_recirculation_capabilities() is not None
@@ -201,7 +222,7 @@ class RecirculationDecoderMixin:
         config: RecirculationConfig,
         **layer_kwargs: Any,
     ) -> torch.Tensor:
-        hidden_states, residual, destination_states, source_states = (
+        hidden_states, residual, destination_states, source_states, layer_states = (
             self._forward_recirculation_normal_stack(
                 positions,
                 hidden_states,
@@ -210,15 +231,21 @@ class RecirculationDecoderMixin:
                 **layer_kwargs,
             )
         )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = self._finalize_recirculation(hidden_states, residual)
         recirculated_states = config.mix(source_states, destination_states, positions)
         recirculated_residual = None
         for layer_idx in range(config.destination_layer + 1, self.end_layer):
-            recirculated_states, recirculated_residual = self.layers[layer_idx](
-                positions,
-                recirculated_states,
-                recirculated_residual,
-                **layer_kwargs,
+            self._restore_recirculation_layer_state(
+                layer_idx, layer_states.get(layer_idx)
+            )
+            recirculated_states, recirculated_residual = (
+                self._forward_recirculation_layer(
+                    layer_idx,
+                    positions,
+                    recirculated_states,
+                    recirculated_residual,
+                    **layer_kwargs,
+                )
             )
         return hidden_states
 
@@ -229,11 +256,23 @@ class RecirculationDecoderMixin:
         residual: torch.Tensor | None,
         config: RecirculationConfig,
         **layer_kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor,
+        torch.Tensor,
+        dict[int, Any],
+    ]:
         destination_states = None
         source_states = None
+        layer_states: dict[int, Any] = {}
         for layer_idx in range(self.start_layer, self.end_layer):
-            hidden_states, residual = self.layers[layer_idx](
+            if layer_idx > config.destination_layer:
+                layer_states[layer_idx] = self._capture_recirculation_layer_state(
+                    layer_idx
+                )
+            hidden_states, residual = self._forward_recirculation_layer(
+                layer_idx,
                 positions,
                 hidden_states,
                 residual,
@@ -244,7 +283,7 @@ class RecirculationDecoderMixin:
             if layer_idx == config.source_layer:
                 source_states = self._materialize_residual(hidden_states, residual)
         assert destination_states is not None and source_states is not None
-        return hidden_states, residual, destination_states, source_states
+        return hidden_states, residual, destination_states, source_states, layer_states
 
     def _forward_recirculation_wavefront(
         self,
@@ -261,7 +300,7 @@ class RecirculationDecoderMixin:
         destination_states = None
         source_states = None
         if warmup:
-            hidden_states, residual, destination_states, source_states = (
+            hidden_states, residual, destination_states, source_states, _ = (
                 self._forward_recirculation_normal_stack(
                     positions,
                     hidden_states,
@@ -270,14 +309,15 @@ class RecirculationDecoderMixin:
                     **layer_kwargs,
                 )
             )
-            hidden_states, _ = self.norm(hidden_states, residual)
+            hidden_states = self._finalize_recirculation(hidden_states, residual)
         else:
             assert wavefront_positions is not None
             assert wavefront_positions.shape[0] == 2
             assert wavefront_pending is not None
             assert wavefront_pending.shape == hidden_states.shape
             for layer_idx in range(self.start_layer, config.destination_layer + 1):
-                hidden_states, residual = self.layers[layer_idx](
+                hidden_states, residual = self._forward_recirculation_layer(
+                    layer_idx,
                     positions,
                     hidden_states,
                     residual,
@@ -288,7 +328,8 @@ class RecirculationDecoderMixin:
             hidden_states = torch.cat((wavefront_pending, destination_states), dim=0)
             residual = None
             for layer_idx in range(config.destination_layer + 1, self.end_layer):
-                hidden_states, residual = self.layers[layer_idx](
+                hidden_states, residual = self._forward_recirculation_layer(
+                    layer_idx,
                     wavefront_positions,
                     hidden_states,
                     residual,
@@ -298,12 +339,52 @@ class RecirculationDecoderMixin:
                     source_states = self._materialize_residual(hidden_states, residual)[
                         1:
                     ]
-            hidden_states, _ = self.norm(hidden_states, residual)
+            hidden_states = self._finalize_recirculation(hidden_states, residual)
             hidden_states = hidden_states[1:]
 
         assert destination_states is not None and source_states is not None
         next_pending = config.mix(source_states, destination_states, positions)
         return torch.cat((hidden_states, next_pending), dim=0)
+
+    def _forward_recirculation_layer(
+        self,
+        layer_idx: int,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        **layer_kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.layers[layer_idx](
+            positions,
+            hidden_states,
+            residual,
+            **layer_kwargs,
+        )
+
+    def _capture_recirculation_layer_state(self, layer_idx: int) -> Any:
+        """Capture non-overwritable state before an upper-layer first pass.
+
+        Attention KV entries are naturally overwritten by the rerun. Recurrent
+        families override this hook to retain the pre-block state that their
+        in-place update kernels would otherwise consume twice.
+        """
+
+    def _restore_recirculation_layer_state(self, layer_idx: int, state: Any) -> None:
+        """Restore family state captured by `_capture_recirculation_layer_state`."""
+
+    def _finalize_recirculation(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> torch.Tensor:
+        normalized = (
+            self.norm(hidden_states, residual)
+            if residual is not None
+            else self.norm(hidden_states)
+        )
+        if isinstance(normalized, tuple):
+            return normalized[0]
+        return normalized
 
     @staticmethod
     def _materialize_residual(

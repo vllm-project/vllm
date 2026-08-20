@@ -68,7 +68,8 @@ from vllm.model_executor.models.glm4_moe import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsRecirculation
+from .recirculation import RecirculationCapabilities, RecirculationDecoderMixin
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -213,7 +214,12 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         "inputs_embeds": 0,
     }
 )
-class Glm4MoeLiteModel(nn.Module):
+class Glm4MoeLiteModel(RecirculationDecoderMixin, nn.Module):
+    recirculation_capabilities = RecirculationCapabilities(
+        adapter="glm4_moe_lite",
+        wavefront=False,
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -255,6 +261,7 @@ class Glm4MoeLiteModel(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
+        self._init_recirculation(config, self.start_layer, self.end_layer)
 
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
@@ -279,6 +286,9 @@ class Glm4MoeLiteModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -290,6 +300,16 @@ class Glm4MoeLiteModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        if self.recirculation_config is not None:
+            return self._forward_recirculation(
+                positions,
+                hidden_states,
+                residual,
+                recirculation_wavefront_warmup,
+                recirculation_wavefront_positions,
+                recirculation_wavefront_pending,
+            )
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
@@ -521,7 +541,11 @@ class Glm4MoeLiteModel(nn.Module):
 
 
 class Glm4MoeLiteForCausalLM(
-    nn.Module, SupportsPP, SupportsLoRA, Glm4LiteMixtureOfExperts
+    nn.Module,
+    SupportsPP,
+    SupportsLoRA,
+    Glm4LiteMixtureOfExperts,
+    SupportsRecirculation,
 ):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -600,15 +624,31 @@ class Glm4MoeLiteForCausalLM(
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    @property
+    def supports_recirculation(self) -> bool:
+        return self.model.has_recirculation_adapter()
+
+    def get_recirculation_capabilities(self) -> RecirculationCapabilities | None:
+        return self.model.get_recirculation_capabilities()
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            recirculation_wavefront_warmup=recirculation_wavefront_warmup,
+            recirculation_wavefront_positions=recirculation_wavefront_positions,
+            recirculation_wavefront_pending=recirculation_wavefront_pending,
         )
         return hidden_states
 

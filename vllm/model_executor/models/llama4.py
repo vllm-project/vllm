@@ -59,6 +59,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
+from .recirculation import RecirculationCapabilities
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -384,6 +385,8 @@ class Llama4DecoderLayer(nn.Module):
 
 @support_torch_compile
 class Llama4Model(LlamaModel):
+    recirculation_capabilities = RecirculationCapabilities(adapter="llama4_moe")
+
     def __init__(
         self,
         *,

@@ -57,7 +57,9 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsRecirculation,
 )
+from .recirculation import RecirculationCapabilities, RecirculationDecoderMixin
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -292,7 +294,11 @@ class TransformerBlock(torch.nn.Module):
 
 
 @support_torch_compile
-class GptOssModel(nn.Module, EagleModelMixin):
+class GptOssModel(RecirculationDecoderMixin, nn.Module, EagleModelMixin):
+    recirculation_capabilities = RecirculationCapabilities(
+        adapter="gpt_oss_moe",
+        wavefront=False,
+    )
     # Override to swap in an alternative TransformerBlock subclass.
     block_cls: type[nn.Module] = TransformerBlock
 
@@ -319,6 +325,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        self._init_recirculation(self.config, self.start_layer, self.end_layer)
         self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
@@ -327,12 +334,30 @@ class GptOssModel(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding(input_ids)
 
+    def _forward_recirculation_layer(
+        self,
+        layer_idx: int,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        **layer_kwargs: object,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.layers[layer_idx](
+            hidden_states,
+            positions,
+            residual,
+            **layer_kwargs,
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -345,6 +370,16 @@ class GptOssModel(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             x = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        if self.recirculation_config is not None:
+            return self._forward_recirculation(
+                positions,
+                x,
+                residual,
+                recirculation_wavefront_warmup,
+                recirculation_wavefront_positions,
+                recirculation_wavefront_pending,
+            )
 
         aux_hidden_states = self._maybe_add_hidden_state(
             [], self.start_layer, x, residual
@@ -1168,7 +1203,12 @@ class GptOssModel(nn.Module, EagleModelMixin):
 
 
 class GptOssForCausalLM(
-    nn.Module, SupportsPP, SupportsEagle, SupportsEagle3, SupportsLoRA
+    nn.Module,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsRecirculation,
 ):
     is_3d_moe_weight: bool = True
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
@@ -1228,14 +1268,32 @@ class GptOssForCausalLM(
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    @property
+    def supports_recirculation(self) -> bool:
+        return self.model.has_recirculation_adapter()
+
+    def get_recirculation_capabilities(self) -> RecirculationCapabilities | None:
+        return self.model.get_recirculation_capabilities()
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+        return self.model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            recirculation_wavefront_warmup=recirculation_wavefront_warmup,
+            recirculation_wavefront_positions=recirculation_wavefront_positions,
+            recirculation_wavefront_pending=recirculation_wavefront_pending,
+        )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states)

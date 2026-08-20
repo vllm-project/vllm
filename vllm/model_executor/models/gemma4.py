@@ -73,6 +73,12 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsRecirculation,
+)
+from .recirculation import (
+    RecirculationCapabilities,
+    RecirculationConfig,
+    RecirculationDecoderMixin,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -946,7 +952,9 @@ class Gemma4CrossDecoderLayers(nn.Module):
 @support_torch_compile(
     enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
 )
-class Gemma4Model(nn.Module, EagleModelMixin):
+class Gemma4Model(RecirculationDecoderMixin, nn.Module, EagleModelMixin):
+    recirculation_capabilities = RecirculationCapabilities(adapter="gemma4")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = _get_text_config(vllm_config.model_config.hf_config)
@@ -1092,6 +1100,11 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             )
 
         self.fast_prefill_enabled = cache_config.kv_sharing_fast_prefill
+        self._init_recirculation(
+            vllm_config.model_config.hf_config,
+            self.start_layer,
+            self.end_layer,
+        )
 
         if self.fast_prefill_enabled:
             # Allocate static buffers for CUDAGraph
@@ -1153,6 +1166,46 @@ class Gemma4Model(nn.Module, EagleModelMixin):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.self_decoder.embed_input_ids(input_ids)
+
+    def get_recirculation_capabilities(self) -> RecirculationCapabilities | None:
+        capabilities = super().get_recirculation_capabilities()
+        if capabilities is not None and self.hidden_size_per_layer_input:
+            return replace(capabilities, wavefront=False)
+        return capabilities
+
+    def _validate_recirculation_model_config(
+        self,
+        hf_config: object,
+        config: RecirculationConfig,
+    ) -> None:
+        if self.fast_prefill_enabled:
+            raise ValueError("Recirculation does not support Gemma 4 YOCO fast prefill")
+        if self.hidden_size_per_layer_input and config.wavefront:
+            raise ValueError(
+                "Gemma 4 per-layer embeddings only support serial Recirculation"
+            )
+
+    def _forward_recirculation_layer(
+        self,
+        layer_idx: int,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        **layer_kwargs: object,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        per_layer_inputs = layer_kwargs.pop("per_layer_inputs", None)
+        layer_per_input = (
+            per_layer_inputs[:, layer_idx, :]
+            if isinstance(per_layer_inputs, torch.Tensor)
+            else None
+        )
+        return self.layers[layer_idx](
+            positions,
+            hidden_states,
+            residual,
+            per_layer_input=layer_per_input,
+            **layer_kwargs,
+        )
 
     def get_per_layer_inputs(self, input_ids: torch.Tensor) -> torch.Tensor | None:
         """Get per-layer embeddings from embed_tokens_per_layer.
@@ -1273,6 +1326,9 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         per_layer_inputs: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if self.fast_prefill_enabled:
@@ -1309,6 +1365,17 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             if per_layer_inputs is not None:
                 per_layer_inputs = intermediate_tensors["per_layer_inputs"]
         residual = None
+        if self.recirculation_config is not None:
+            return self._forward_recirculation(
+                positions,
+                hidden_states,
+                residual,
+                recirculation_wavefront_warmup,
+                recirculation_wavefront_positions,
+                recirculation_wavefront_pending,
+                per_layer_inputs=per_layer_inputs,
+                **kwargs,
+            )
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
@@ -1492,7 +1559,12 @@ class Gemma4Model(nn.Module, EagleModelMixin):
 
 
 class Gemma4ForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
+    nn.Module,
+    SupportsLoRA,
+    SupportsPP,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsRecirculation,
 ):
     hf_to_vllm_mapper = _GEMMA4_EXPERT_PARENT_MAPPER | WeightsMapper(
         orig_to_new_prefix={
@@ -1583,16 +1655,33 @@ class Gemma4ForCausalLM(
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    @property
+    def supports_recirculation(self) -> bool:
+        return self.model.has_recirculation_adapter()
+
+    def get_recirculation_capabilities(self) -> RecirculationCapabilities | None:
+        return self.model.get_recirculation_capabilities()
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            recirculation_wavefront_warmup=recirculation_wavefront_warmup,
+            recirculation_wavefront_positions=recirculation_wavefront_positions,
+            recirculation_wavefront_pending=recirculation_wavefront_pending,
+            **kwargs,
         )
         return hidden_states
 

@@ -44,10 +44,26 @@ the `SupportsRecirculation` interface and use a shared residual-decoder
 execution mixin. This keeps scheduling behavior common while allowing a model
 family to override its layer execution with a specialized implementation.
 
-The reviewed adapters currently cover text-only Gemma 3, the native Llama
-implementation and its direct architecture aliases, and Mistral. An
-unreviewed subclass does not inherit support automatically and fails during
-model loading when Recirculation is requested.
+The reviewed text adapters cover the following residual-decoder families:
+
+| Execution | Families |
+| --- | --- |
+| Serial and wavefront | Gemma 3, Gemma 4, Llama and direct aliases, Llama 4, Mistral, Mixtral, Qwen 2, Qwen 3, Qwen 3 MoE, GLM-4 MoE, MiniMax-M2, MiMo-V2, Step-3.5 |
+| Serial only | DeepSeek V2/V3/V3.2, GLM-4.7-Flash, GPT-OSS, MiniMax-M3, Qwen3-Next, Qwen 3.5 dense and MoE |
+
+Serial-only status is deliberate when the architecture uses an attention
+backend that cannot consume the engine's two-token FlashAttention wavefront,
+or a recurrent state that needs a pre-block snapshot. Qwen3-Next and Qwen 3.5
+snapshot the active convolution and GDN state slots before the normal upper
+stack, then restore those slots before the recirculated rerun. This prevents a
+second in-place recurrent update from incorrectly consuming the current
+token's already-updated state.
+
+An unreviewed subclass does not inherit support automatically and fails during
+model loading when Recirculation is requested. DeepSeek-V4 is intentionally
+not opted in: its multi-stream hyperconnection state does not expose the
+standard residual boundary assumed by this algorithm. Diffusion and other
+non-causal models are also rejected.
 
 ## Wavefront execution
 
@@ -99,6 +115,32 @@ from the normal pass, and the recirculated cache affects later blocks.
 For exact tokenwise evaluation, set `--long-prefill-token-threshold 1` and do
 not enable speculative decoding. For throughput experiments, increase the
 threshold to sweep the block size and measure the quality-throughput tradeoff.
+
+## No-download adapter validation
+
+`benchmarks/validate_recirculation_adapters.py` creates a four-layer local
+configuration, initializes dummy weights, skips tokenizer initialization, and
+runs token-ID generation through the real GPU engine. It does not download
+model weights or tokenizers. Run each family in a fresh process, for example:
+
+```bash
+.venv/bin/python benchmarks/validate_recirculation_adapters.py \
+  --family qwen3.5-moe --mode serial \
+  --output results/qwen3.5-moe-recirculation.json
+
+.venv/bin/python benchmarks/validate_recirculation_adapters.py \
+  --family gemma4 --mode wavefront \
+  --output results/gemma4-recirculation.json
+
+.venv/bin/python benchmarks/validate_recirculation_adapters.py \
+  --family qwen3 --mode wavefront --compile \
+  --output results/qwen3-compiled-recirculation.json
+```
+
+This is an integration smoke for adapter signatures, attention/MoE kernels,
+cache allocation, recurrent-state handling, and generation. Random dummy
+weights cannot establish model quality; use the perplexity harness with real
+weights when storage and hardware permit.
 
 ## Reproducible evaluation
 
@@ -152,10 +194,20 @@ assuming one value is universally optimal.
 
 ## Current restrictions
 
-- Reviewed adapters currently cover text-only Gemma 3, Llama, and Mistral
-  implementations. Multimodal wrappers are not yet supported.
+- Multimodal wrappers, DeepSeek-V4 hyperconnections, and non-causal diffusion
+  backbones are not supported.
 - Pipeline parallelism is not supported.
+- Model Runner V2 does not yet implement Recirculation. Recirculation selects
+  Model Runner V1 automatically; explicitly setting
+  `VLLM_USE_V2_MODEL_RUNNER=1` is rejected.
 - Only fixed scalar coefficients and source norm matching are implemented.
+- Qwen3-Next and Qwen 3.5 reject speculative decoding and sequence-parallel
+  MoE execution. Their recurrent-state adapter is serial only.
+- MiniMax-M3 currently requires tensor-parallel size 1. Its sparse-attention
+  backend is serial only.
+- Gemma 4 YOCO fast prefill is unsupported. Gemma 4 per-layer embeddings are
+  serial only because the engine does not retain the previous token's
+  per-layer input stack for a wavefront.
 - Wavefront execution currently requires one sequence, one scheduled token per
   step, FlashAttention, no prefix caching or speculative decoding, and no data,
   decode-context, sequence, or pipeline parallelism.

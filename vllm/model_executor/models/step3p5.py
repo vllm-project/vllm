@@ -47,7 +47,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import MixtureOfExperts, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsPP, SupportsRecirculation
+from .recirculation import RecirculationCapabilities, RecirculationDecoderMixin
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -533,7 +534,9 @@ class Step3p5DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Step3p5Model(nn.Module):
+class Step3p5Model(RecirculationDecoderMixin, nn.Module):
+    recirculation_capabilities = RecirculationCapabilities(adapter="step3p5_moe")
+
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
@@ -562,6 +565,7 @@ class Step3p5Model(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
+        self._init_recirculation(config, self.start_layer, self.end_layer)
         if get_pp_group().is_last_rank:
             self.norm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         else:
@@ -574,12 +578,35 @@ class Step3p5Model(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _forward_recirculation_layer(
+        self,
+        layer_idx: int,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        **layer_kwargs: object,
+    ) -> tuple[torch.Tensor, None]:
+        assert residual is None
+        return self.layers[layer_idx](positions, hidden_states), None
+
+    def _finalize_recirculation(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert residual is None
+        # Step 3.5 applies the final norm in compute_logits, not model.forward.
+        return hidden_states
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -589,6 +616,15 @@ class Step3p5Model(nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
+        if self.recirculation_config is not None:
+            return self._forward_recirculation(
+                positions,
+                hidden_states,
+                None,
+                recirculation_wavefront_warmup,
+                recirculation_wavefront_positions,
+                recirculation_wavefront_pending,
+            )
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states = layer(positions, hidden_states)
@@ -869,7 +905,9 @@ class Step3p5Model(nn.Module):
         return loaded_params
 
 
-class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+class Step3p5ForCausalLM(
+    nn.Module, SupportsPP, MixtureOfExperts, SupportsRecirculation
+):
     # Required so quantization exclude lists match fused module prefixes.
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -933,11 +971,27 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
     ):
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            recirculation_wavefront_warmup=recirculation_wavefront_warmup,
+            recirculation_wavefront_positions=recirculation_wavefront_positions,
+            recirculation_wavefront_pending=recirculation_wavefront_pending,
         )
         return hidden_states
+
+    @property
+    def supports_recirculation(self) -> bool:
+        return self.model.has_recirculation_adapter()
+
+    def get_recirculation_capabilities(self) -> RecirculationCapabilities | None:
+        return self.model.get_recirculation_capabilities()
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.model.norm(hidden_states)

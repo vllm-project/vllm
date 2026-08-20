@@ -71,6 +71,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsRecirculation,
     _require_is_multimodal,
 )
 from .qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
@@ -88,6 +89,7 @@ from .qwen3_vl import (
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
 )
+from .recirculation import RecirculationCapabilities
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -215,6 +217,11 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
     }
 )
 class Qwen3_5Model(Qwen3NextModel):
+    recirculation_capabilities = RecirculationCapabilities(
+        adapter="qwen3_5_hybrid",
+        wavefront=False,
+    )
+
     # Qwen3.5 ships the GDN in_proj checkpoints separately (qwen3-next
     # pre-fuses them); fuse them on top of the qwen3-next QKV/gate_up mapping.
     hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper | WeightsMapper(
@@ -257,6 +264,20 @@ class Qwen3_5Model(Qwen3NextModel):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        self._init_recirculation(
+            vllm_config.model_config.hf_config,
+            self.start_layer,
+            self.end_layer,
+        )
+        if self.recirculation_config is not None and self.use_sequence_parallel:
+            raise ValueError("Recirculation does not support sequence-parallel Qwen3.5")
+        if (
+            self.recirculation_config is not None
+            and vllm_config.speculative_config is not None
+        ):
+            raise ValueError(
+                "Recirculation does not support speculative Qwen3.5 decoding"
+            )
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             Qwen3NextSparseMoeBlock,
@@ -297,6 +318,7 @@ class Qwen3_5ForCausalLMBase(
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsRecirculation,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -363,6 +385,13 @@ class Qwen3_5ForCausalLMBase(
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    @property
+    def supports_recirculation(self) -> bool:
+        return self.model.has_recirculation_adapter()
+
+    def get_recirculation_capabilities(self) -> RecirculationCapabilities | None:
+        return self.model.get_recirculation_capabilities()
+
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
 
@@ -376,10 +405,18 @@ class Qwen3_5ForCausalLMBase(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **kwargs: object,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
     ):
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            recirculation_wavefront_warmup=recirculation_wavefront_warmup,
+            recirculation_wavefront_positions=recirculation_wavefront_positions,
+            recirculation_wavefront_pending=recirculation_wavefront_pending,
         )
 
         return hidden_states

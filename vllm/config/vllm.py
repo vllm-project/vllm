@@ -648,8 +648,17 @@ class VllmConfig:
     @property
     def use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        recirculation_requested = self._recirculation_requested()
         if use_v2_model_runner is not None:
+            if use_v2_model_runner and recirculation_requested:
+                raise ValueError(
+                    "Recirculation is not implemented by Model Runner V2; "
+                    "set VLLM_USE_V2_MODEL_RUNNER=0"
+                )
             return use_v2_model_runner
+
+        if recirculation_requested:
+            return False
 
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:
@@ -692,6 +701,24 @@ class VllmConfig:
             return False
 
         return True
+
+    def _recirculation_requested(self) -> bool:
+        if self.model_config is None:
+            return False
+        hf_config = self.model_config.hf_config
+        raw_config = getattr(hf_config, "recirculation_config", None)
+        get_text_config = getattr(hf_config, "get_text_config", None)
+        if raw_config is None and callable(get_text_config):
+            text_config = get_text_config()
+            raw_config = getattr(text_config, "recirculation_config", None)
+        if raw_config is None:
+            return False
+        if not isinstance(raw_config, dict):
+            return True
+        return not (
+            raw_config.get("alpha", 0.15) == 0.0
+            and raw_config.get("beta") in (None, 1.0)
+        )
 
     def _dflash_needs_multi_kv_group(self) -> bool:
         """Whether a DFlash draft mixes sliding-window and full attention."""
