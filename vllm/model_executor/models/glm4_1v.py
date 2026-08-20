@@ -1759,6 +1759,7 @@ class Glm4vForConditionalGeneration(
     )
 
     supports_encoder_tp_data = True
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

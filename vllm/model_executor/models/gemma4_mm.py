@@ -1000,6 +1000,7 @@ class Gemma4ForConditionalGeneration(
     # window instead of dropping them (which would make image attention
     # causal-only for images larger than the sliding window).
     mm_prefix_clamp_sliding_window: bool = True
+    supports_tower_connector_lora = True
 
     packed_modules_mapping = {
         "qkv_proj": [

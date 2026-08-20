@@ -492,6 +492,8 @@ class Gemma3ForConditionalGeneration(
         }
     )
 
+    supports_tower_connector_lora = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
