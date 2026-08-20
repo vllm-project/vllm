@@ -56,12 +56,14 @@ struct GmemTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
         BQ_smem_base_addr(BQ_smem_addr),
         A_smem_stage_stride(A_stage_stride),
         BQ_smem_stage_stride(BQ_stage_stride) {
-    this_block_A_base_ptr = params.A_ptr + blockIdx.x * Mtile * params.K +
-                            blockIdx.z * params.SplitK;
+    this_block_A_base_ptr =
+        params.A_ptr + static_cast<int64_t>(blockIdx.x) * Mtile * params.K +
+        static_cast<int64_t>(blockIdx.z) * params.SplitK;
     // here B is rearranged as N32K16 order, i.e. 4 continuous N-direction
     // 8(N)x16(K) size data blocks are packed together
-    this_block_B_base_ptr = params.B_ptr + blockIdx.y * Ntile * params.K +
-                            blockIdx.z * params.SplitK * 4;
+    this_block_B_base_ptr =
+        params.B_ptr + static_cast<int64_t>(blockIdx.y) * Ntile * params.K +
+        static_cast<int64_t>(blockIdx.z) * params.SplitK * 4;
 
     const auto lane_id = threadIdx.x % WARP_SIZE;
 
@@ -252,11 +254,14 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
 
     if (EnableFuse) {
       this_block_C_base_ptr =
-          params.C_ptr + blockIdx.x * Mtile * params.N + blockIdx.y * Ntile;
+          params.C_ptr + static_cast<int64_t>(blockIdx.x) * Mtile * params.N +
+          blockIdx.y * Ntile;
     } else {
       this_block_C_base_ptr =
-          params.C_split_ptr + blockIdx.z * params.M * params.N +
-          blockIdx.x * Mtile * params.N + blockIdx.y * Ntile;
+          params.C_split_ptr +
+          static_cast<int64_t>(blockIdx.z) * params.M * params.N +
+          static_cast<int64_t>(blockIdx.x) * Mtile * params.N +
+          blockIdx.y * Ntile;
     }
     int store_thds_in_row = WARP_NTILE / 8;
     store_c_row_base_idx = lane_id / store_thds_in_row;
