@@ -147,6 +147,24 @@ class TestReadLifecycle:
         with pytest.raises(ValueError, match="not being read"):
             manager.close_read("small")
 
+    def test_non_cacheable_read(self, manager, item_nocache):
+        """Reading a non-cacheable item should not affect LRU."""
+        manager.open_write([item_nocache])
+        manager.close_write("nocache")
+        # Item is not cached; total_available_blocks should be 3 (not 4)
+        assert manager._total_available_blocks == 3
+        item = manager.open_read("nocache")
+        assert item.ref_count == 1
+        # Reading does not remove from cache (it was never there)
+        assert "nocache" not in manager._lru_cache
+        # total_available_blocks remains 3
+        assert manager._total_available_blocks == 3
+        manager.close_read("nocache")
+        assert item.ref_count == 0
+        # After close, still not cached (use_cache=False)
+        assert "nocache" not in manager._lru_cache
+        assert manager._total_available_blocks == 3
+
 
 # ---------------------------------------------------------------------------
 # Pin / unpin
@@ -246,6 +264,23 @@ class TestPinUnpin:
         assert "small" in manager._lru_cache
         assert manager._total_available_blocks == 4
 
+    def test_pin_unpin_idempotence(self, manager, item_small):
+        """Repeated pin/unpin should be safe and not change state."""
+        manager.open_write([item_small])
+        manager.close_write("small")
+        # Pin twice
+        manager.pin("small")
+        manager.pin("small")   # should be no-op
+        assert "small" in manager._pinned_items
+        assert "small" not in manager._lru_cache
+        assert manager._total_available_blocks == 3
+        # Unpin twice
+        manager.unpin("small")
+        manager.unpin("small")   # should be no-op
+        assert "small" not in manager._pinned_items
+        assert "small" in manager._lru_cache
+        assert manager._total_available_blocks == 4
+
 
 # ---------------------------------------------------------------------------
 # Delete
@@ -299,6 +334,12 @@ class TestDelete:
         with pytest.raises(ValueError, match="busy now"):
             manager.delete("small")
 
+    def test_delete_while_writing(self, manager, item_small):
+        """Deleting an item that is still being written should raise."""
+        manager.open_write([item_small])
+        with pytest.raises(ValueError, match="busy now"):
+            manager.delete("small")
+
 
 # ---------------------------------------------------------------------------
 # Batch allocation & memory pressure
@@ -338,6 +379,13 @@ class TestBatchAllocation:
             manager.open_write([ShmItem(uuid="z", size=0, use_cache=True)])
         with pytest.raises(ValueError, match="must be greater than zero"):
             manager.open_write([ShmItem(uuid="z", size=-1, use_cache=True)])
+
+    def test_open_write_empty_list(self, manager):
+        """Calling open_write with an empty list should be a no-op."""
+        allocs = manager.open_write([])
+        assert allocs == []
+        assert manager._total_available_blocks == manager.n_block
+        assert len(manager._free_blocks) == manager.n_block
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +455,48 @@ class TestLRUEviction:
         # one block remains free.
         assert len(manager._free_blocks) == 1
 
+    def test_evict_multiple_items(self, manager):
+        """Eviction should pop only the minimum number of cache entries needed."""
+        # Fill pool with three 1-block items (total 3 blocks)
+        items = [
+            ShmItem(uuid="a", size=100, use_cache=True),
+            ShmItem(uuid="b", size=100, use_cache=True),
+            ShmItem(uuid="c", size=100, use_cache=True),
+        ]
+        manager.open_write(items)
+        manager.close_write("a")
+        manager.close_write("b")
+        manager.close_write("c")
+        # All in cache; free_blocks = 1 (because 4 blocks total, 3 used)
+        assert len(manager._free_blocks) == 1
+        # Request 2 blocks -> need to evict at least one 1-block item
+        [new] = manager.open_write([ShmItem(uuid="new", size=300, use_cache=True)])
+        # new needs 2 blocks (300/256 = 2)
+        # Eviction order: a (oldest) -> freed 1 block, plus existing 1 = 2 free
+        # allocate 2 -> leaves 0 free blocks
+        assert len(manager._free_blocks) == 0
+        assert "a" not in manager._all_items  # evicted
+        assert "b" in manager._all_items      # not evicted
+        assert "c" in manager._all_items      # not evicted
+        assert "new" in manager._all_items
+
+    def test_evict_no_eviction_when_free_blocks_sufficient(self, manager):
+        """If free_blocks already >= needed, _evict should do nothing."""
+        # Allocate one 2-block item and close it -> goes to cache
+        item = ShmItem(uuid="big", size=400, use_cache=True)
+        manager.open_write([item])
+        manager.close_write("big")
+        # free_blocks = 2, cached blocks = 2
+        # Request 1 block, no eviction needed
+        [new] = manager.open_write([ShmItem(uuid="small", size=100, use_cache=True)])
+        # "big" should still be in cache and all items exist
+        assert "big" in manager._all_items
+        assert "small" in manager._all_items
+        # free_blocks should be 1 (2 initial -1 allocated)
+        assert len(manager._free_blocks) == 1
+        # total_available_blocks = free(1) + cached(2) = 3
+        assert manager._total_available_blocks == 3
+
 
 # ---------------------------------------------------------------------------
 # Info and state reporting
@@ -443,7 +533,8 @@ class TestInfoAndState:
         manager.close_write("small")
         state = manager.get_manager_state()
         assert state["free_blocks_count"] == 1  # 4 - (1+2) = 1
-        assert state["total_available_blocks"] == 3  # item_large not cached yet
+        # total_available_blocks = free_blocks(1) + cached_blocks(1) = 2
+        assert state["total_available_blocks"] == 2
         assert state["cached_items_count"] == 1  # small
         assert state["cached_blocks_count"] == 1  # small's block
         assert state["total_items_count"] == 2

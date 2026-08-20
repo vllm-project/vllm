@@ -7,7 +7,7 @@ import random
 import sys
 import threading
 from collections.abc import Callable, Collection
-from typing import TYPE_CHECKING, Any, TypeVar, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 import numpy as np
 import numpy.typing as npt
