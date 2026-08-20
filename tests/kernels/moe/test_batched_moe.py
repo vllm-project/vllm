@@ -380,7 +380,7 @@ def _td_supported() -> bool:
     )
 
 
-def _run_td(A, B, num_expert_tokens, use_td: bool):
+def _run_td(A, B, num_expert_tokens, use_td: bool, swap: bool | None = None):
     out = torch.zeros(
         A.shape[0],
         A.shape[1],
@@ -392,6 +392,7 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
 
     from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
         batched_triton_kernel,
+        batched_triton_kernel_swapped,
     )
 
     if use_td:
@@ -404,8 +405,12 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
     K = A.shape[2]
     N = B.shape[1]
     BM = BN = BK = 64
-    grid = (triton.cdiv(max_tokens, BM) * triton.cdiv(N, BN), E)
-    batched_triton_kernel[grid](
+    if swap is None:
+        swap = current_platform.is_xpu()
+    num_tiles = triton.cdiv(max_tokens, BM) * triton.cdiv(N, BN)
+    grid = (num_tiles, E) if swap else (E, num_tiles)
+    kernel = batched_triton_kernel_swapped if swap else batched_triton_kernel
+    kernel[grid](
         A,
         B,
         out,
@@ -446,28 +451,25 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
 
 
 @pytest.mark.parametrize("num_experts,max_tokens_per_expert,K,N", _TD_SHAPES)
-def test_batched_mm_tile_mapping(num_experts, max_tokens_per_expert, K, N):
-    """Check every program's tile lands on the right expert, m and n."""
-    if not (current_platform.is_xpu() or current_platform.is_cuda_alike()):
-        pytest.skip("No GPU device available")
+def test_batched_mm_swapped_grid(num_experts, max_tokens_per_expert, K, N):
+    """The swapped kernel maps every program's tile to the right expert, m and n."""
     set_random_seed(42)
-    device = current_platform.device_type
     A = (
         torch.randn(
-            num_experts, max_tokens_per_expert, K, device=device, dtype=torch.bfloat16
+            num_experts, max_tokens_per_expert, K, device=DEVICE, dtype=torch.bfloat16
         )
         / 10
     )
-    B = torch.randn(num_experts, N, K, device=device, dtype=torch.bfloat16)
+    B = torch.randn(num_experts, N, K, device=DEVICE, dtype=torch.bfloat16)
     num_expert_tokens = torch.randint(
         low=0,
         high=max_tokens_per_expert,
         size=(num_experts,),
-        device=device,
+        device=DEVICE,
         dtype=torch.int32,
     )
 
-    out = _run_td(A, B, num_expert_tokens, False)
+    out = _run_td(A, B, num_expert_tokens, False, swap=True)
     ref = native_batched_masked_quant_matmul(
         A, B, torch.zeros_like(out), num_expert_tokens
     )
