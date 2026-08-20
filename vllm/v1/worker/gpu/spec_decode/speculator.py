@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
@@ -71,6 +71,16 @@ class BaseSpeculator(ABC):
 
 class DraftModelSpeculator(BaseSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        target_parallel_config = vllm_config.parallel_config
+        self.replicated_pcp = target_parallel_config.prefill_context_parallel_size > 1
+        if self.replicated_pcp:
+            vllm_config = replace(
+                vllm_config,
+                parallel_config=replace(
+                    target_parallel_config,
+                    prefill_context_parallel_size=1,
+                ),
+            )
         self.vllm_config = vllm_config
         self.device = device
 

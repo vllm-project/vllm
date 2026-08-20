@@ -68,6 +68,36 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     def on_multi_step_decode_end(self, num_reqs: int) -> None: ...
 
+    def _prepare_replicated_pcp_attn(
+        self,
+        input_batch: InputBatch,
+        batch_desc: BatchExecutionDescriptor,
+    ) -> tuple[dict[str, Any] | None, dict[str, torch.Tensor]]:
+        num_reqs = input_batch.num_reqs
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        self.block_tables.gather_block_tables(
+            input_batch.idx_mapping,
+            num_reqs_padded=num_reqs_padded,
+        )
+        slot_mappings_tensor = self.block_tables.compute_slot_mappings(
+            input_batch.idx_mapping,
+            self.input_buffers.query_start_loc,
+            self.input_buffers.positions,
+            num_tokens_padded=batch_desc.num_tokens,
+        )
+        slot_mappings = build_slot_mappings_by_layer(
+            slot_mappings_tensor, self.kv_cache_config
+        )
+        attn_metadata = self._build_draft_attn_metadata(
+            num_reqs=num_reqs,
+            num_reqs_padded=num_reqs_padded,
+            num_tokens_padded=batch_desc.num_tokens,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            step=0,
+            query_start_loc_np=input_batch.query_start_loc_np,
+        )
+        return attn_metadata, slot_mappings
+
     @property
     def advance_draft_positions(self) -> bool:
         """
@@ -288,6 +318,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
         )
+
+        if self.replicated_pcp and not (dummy_run and skip_attn_for_dummy_run):
+            attn_metadata, slot_mappings = self._prepare_replicated_pcp_attn(
+                input_batch, prefill_batch_desc
+            )
 
         self._prepare_eplb_forward(num_tokens)
 

@@ -284,6 +284,63 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
     assert actual_feedback_hidden is hidden
 
 
+def test_replicated_pcp_rebuilds_global_draft_attention(monkeypatch):
+    speculator = object.__new__(_TestSpeculator)
+    speculator.block_tables = Mock()
+    speculator.block_tables.input_block_tables = [torch.empty(0)]
+    speculator.kv_cache_config = object()
+    speculator.input_buffers = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 2, 5], dtype=torch.int32),
+        positions=torch.arange(5),
+    )
+    rebuilt_metadata = object()
+    speculator._build_draft_attn_metadata = Mock(return_value=rebuilt_metadata)
+    slot_mappings_tensor = torch.arange(5).reshape(1, 5)
+    speculator.block_tables.compute_slot_mappings.return_value = slot_mappings_tensor
+    monkeypatch.setattr(
+        spec_module,
+        "build_slot_mappings_by_layer",
+        lambda slot_mappings, kv_cache_config: {"attention_layer": slot_mappings},
+    )
+
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        idx_mapping=torch.tensor([3, 7], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([9, 11], dtype=torch.int32),
+        query_start_loc_np=torch.tensor([0, 2, 5], dtype=torch.int32).numpy(),
+    )
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.NONE,
+        num_tokens=5,
+        num_reqs=2,
+    )
+
+    metadata, slot_mappings = speculator._prepare_replicated_pcp_attn(
+        input_batch, batch_desc
+    )
+
+    assert metadata is rebuilt_metadata
+    speculator.block_tables.gather_block_tables.assert_called_once_with(
+        input_batch.idx_mapping,
+        num_reqs_padded=2,
+    )
+    speculator.block_tables.compute_slot_mappings.assert_called_once_with(
+        input_batch.idx_mapping,
+        speculator.input_buffers.query_start_loc,
+        speculator.input_buffers.positions,
+        num_tokens_padded=5,
+    )
+    speculator._build_draft_attn_metadata.assert_called_once_with(
+        num_reqs=2,
+        num_reqs_padded=2,
+        num_tokens_padded=5,
+        seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+        step=0,
+        query_start_loc_np=input_batch.query_start_loc_np,
+    )
+    assert set(slot_mappings) == {"attention_layer"}
+
+
 @pytest.mark.parametrize(
     (
         "method_name",
