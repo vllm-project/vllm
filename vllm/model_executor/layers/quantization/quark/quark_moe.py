@@ -122,6 +122,12 @@ class QuarkMoEMethod(FusedMoEMethodBase):
     ]:
         """Return the quantization target for a routed-experts layer."""
         layer_quant_config = quant_config._find_matched_config(layer_name, layer_type)
+        if layer_quant_config.get("output_tensors") or layer_quant_config.get("bias"):
+            raise NotImplementedError(
+                "Currently, Quark models with "
+                "output_tensors and bias "
+                "quantized are not supported"
+            )
         weight_config: QuarkQTensorHint = layer_quant_config.get("weight")
         input_config: QuarkQTensorHint = layer_quant_config.get("input_tensors")
 
@@ -186,8 +192,8 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 "quantized are not supported"
             )
 
-        weight_config = layer_quant_config.get("weight")
-        input_config = layer_quant_config.get("input_tensors")
+        weight_config: QuarkQTensorHint = layer_quant_config.get("weight")
+        input_config: QuarkQTensorHint = layer_quant_config.get("input_tensors")
 
         _, _, method_cls = QuarkMoEMethod.get_moe_method_target(
             quant_config, type(module), layer_name

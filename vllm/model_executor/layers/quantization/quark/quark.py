@@ -41,7 +41,9 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare,
     should_ignore_layer,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
@@ -222,7 +224,10 @@ class QuarkConfig(QuantizationConfig):
                 return None, None, UnquantizedFusedMoEMethod
             if issubclass(layer_type, LinearBase):
                 if "self_attn" in prefix and self.dynamic_mxfp4_quant:
-                    return None, None, QuarkLinearMethod
+                    weight_key, activation_key, _ = self.get_scheme_cls(
+                        layer_type, prefix
+                    )
+                    return weight_key, activation_key, QuarkLinearMethod
                 return None, None, UnquantizedLinearMethod
             return None, None, None
         if issubclass(layer_type, LinearBase):
@@ -799,7 +804,6 @@ class QuarkConfig(QuantizationConfig):
         self,
         scheme_cls: type["QuarkScheme"],
         config: dict[str, Any],
-        *,
         dynamic_mxfp4_quant: bool = False,
     ) -> "QuarkScheme":
         """Construct a Quark scheme selected by get_scheme_cls."""
