@@ -320,7 +320,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration, chunk_start_offsets
+        return engine_inputs, duration, chunk_start_offsets, chunks
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -501,6 +501,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             engine_inputs,
             duration_s,
             chunk_start_offsets,
+            chunks,
         ) = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
@@ -642,6 +643,50 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     chunk_text_parts[idx].append(
                         self.model_cls.post_process_output(raw_text)
                     )
+            # After initial pass, resubmit abandoned tails in verbose_json mode.
+            # Resubmit once per chunk when the decoder finished early inside the chunk.
+            if request.response_format == "verbose_json":
+                sr = self.asr_config.sample_rate
+                for ridx in range(len(chunks)):
+                    start_time_r = chunk_start_offsets[ridx]
+                    chunk_audio = chunks[ridx]
+                    chunk_end = start_time_r + chunk_audio.shape[-1] / sr
+                    segs = chunk_segment_parts[ridx]
+                    last_end = segs[-1].end if segs else start_time_r
+                    # allow small tolerance
+                    if chunk_end - last_end > 0.5:
+                        start_sample = max(0, int((last_end - start_time_r) * sr))
+                        sliced = chunk_audio[start_sample:]
+                        if sliced.size == 0:
+                            continue
+                        stt_params = request.build_stt_params(
+                            audio=sliced,
+                            stt_config=self.asr_config,
+                            model_config=self.model_config,
+                            task_type=self.task_type,
+                        )
+                        prompt = self.model_cls.get_generation_prompt(stt_params)
+                        parsed_prompt: DictPrompt
+                        parsed_prompt = parse_enc_dec_prompt(prompt)
+                        parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
+                        new_engine_inputs = await self.renderer.render_cmpl_async([parsed_prompt])
+                        new_engine_input = new_engine_inputs[0]
+                        res_request_id = f"{request_id}-{ridx}-resubmit"
+                        gen = self.engine_client.generate(
+                            new_engine_input, sampling_params, res_request_id
+                        )
+                        async for op2 in gen:
+                            assert op2.outputs[0].logprobs
+                            segments2 = self._get_verbose_segments(
+                                tokens=tuple(op2.outputs[0].token_ids),
+                                segment_class=segment_class,
+                                request=request,
+                                start_time=last_end,
+                                log_probs=op2.outputs[0].logprobs,
+                            )
+                            chunk_segment_parts[ridx].extend(segments2)
+                            chunk_text_parts[ridx].extend([seg.text for seg in segments2])
+                            break
             total_segments = [
                 segment
                 for segment_parts in chunk_segment_parts
