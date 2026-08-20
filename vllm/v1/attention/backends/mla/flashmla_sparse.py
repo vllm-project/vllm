@@ -682,9 +682,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             "FP8 sparse MLA expects either the decode subset or the full batch"
         )
 
-        fp8_metadata = attn_metadata.fp8_extra_metadata
-        assert isinstance(fp8_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode)
-
         def _fp8_decode(
             q: torch.Tensor,
             topk_indices: torch.Tensor,

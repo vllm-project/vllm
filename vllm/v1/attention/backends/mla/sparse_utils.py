@@ -239,7 +239,8 @@ def triton_convert_req_index_to_global_index(
             assert valid_counts_out.dtype == torch.int32
             assert valid_counts_out.device == token_indices.device
             valid_counts = valid_counts_out
-            valid_counts.zero_()
+            if not single_tile:
+                valid_counts.zero_()
     else:
         assert valid_counts_out is None
 
