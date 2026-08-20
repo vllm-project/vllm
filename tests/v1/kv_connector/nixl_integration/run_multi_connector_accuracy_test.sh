@@ -178,7 +178,7 @@ cleanup_instances() {
   wait_for_gpu_memory_release
 }
 
-trap cleanup_instances EXIT
+trap 'rc=$?; cleanup_instances || true; exit $rc' EXIT
 trap 'exit 130' SIGINT SIGTERM
 
 get_num_gpus() {
