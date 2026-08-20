@@ -46,9 +46,20 @@ jobs:
 
   pre-commit:
     needs: pre-run-check
-    if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
+    if: always()
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
+    # pre-run-check gates untrusted PR code (this job's own .pre-commit-config.yaml)
+    # from running on self-hosted runners. Fail outright instead of skipping when
+    # it doesn't pass: a skipped conclusion reads as "passing" to both the
+    # branch-protection required check and ci-infra's pre-commit poller, so a
+    # skip here previously let unlinted PRs merge silently.
+    # Remaining steps use the default `if: success()` and are skipped automatically.
+    - name: Fail if pre-run-check did not pass
+      if: needs.pre-run-check.result == 'failure'
+      run: |
+        echo "::error::pre-commit did not run because pre-run-check failed. Ask a maintainer to add the 'ready' label, or see the pre-run-check job above for details."
+        exit 1
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
