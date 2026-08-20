@@ -24,7 +24,7 @@ MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 # Reduce NUM_BLOCKS when it happens.
 NUM_BLOCKS = 4321  # Arbitrary values for testing
 PARTITION_SIZE_ROCM = 256
-DTYPES = [torch.bfloat16]
+DTYPES = [torch.bfloat16, torch.float16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(32, 8), (40, 40), (64, 8)]  # Arbitrary values for testing
@@ -345,4 +345,76 @@ def test_num_heads_not_divisible_by_num_kv_heads(attention_cls: type) -> None:
             head_size=head_size,
             scale=scale,
             num_kv_heads=num_kv_heads,
+        )
+
+
+UNSUPPORTED_HEAD_SIZES = [32, 80, 96, 160, 192, 224, 256]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-only paged attention kernel"
+)
+@pytest.mark.parametrize("head_size", UNSUPPORTED_HEAD_SIZES)
+def test_paged_attention_unsupported_head_sizes(head_size: int) -> None:
+    """Verify ROCm paged attention rejects unsupported head sizes."""
+    set_random_seed(0)
+    torch.set_default_device("cuda")
+
+    dtype = torch.bfloat16
+    num_seqs = 4
+    num_query_heads = 16
+    num_kv_heads = 16
+    block_size = 16
+    scale = float(1.0 / (head_size**0.5))
+
+    seq_lens = [64, 128, 192, 256]
+    max_seq_len = max(seq_lens)
+
+    query = torch.empty(num_seqs, num_query_heads, head_size, dtype=dtype)
+    query.uniform_(-scale, scale)
+
+    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
+    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int32)
+
+    # Create KV caches with the unsupported head size.
+    x = 16 // torch.tensor([], dtype=dtype).element_size()
+    key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x, block_size, x)
+    key_cache = torch.empty(size=key_cache_shape, dtype=dtype)
+    value_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size, block_size)
+    value_cache = torch.empty(size=value_cache_shape, dtype=dtype)
+
+    output = torch.empty(num_seqs, num_query_heads, head_size, dtype=dtype)
+    num_partitions = (max_seq_len + PARTITION_SIZE_ROCM - 1) // PARTITION_SIZE_ROCM
+    tmp_output = torch.empty(
+        num_seqs, num_query_heads, num_partitions, head_size, dtype=torch.float32
+    )
+    exp_sums = torch.empty(
+        num_seqs, num_query_heads, num_partitions, dtype=torch.float32
+    )
+    max_logits = torch.empty_like(exp_sums)
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+
+    with pytest.raises(RuntimeError, match="Unsupported head size"):
+        ops.paged_attention_rocm(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            scale,
+            block_tables,
+            seq_lens_tensor,
+            None,
+            block_size,
+            max_seq_len,
+            None,
+            "auto",
+            k_scale,
+            v_scale,
         )
