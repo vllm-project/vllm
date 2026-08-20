@@ -16,6 +16,11 @@ from vllm.utils.torch_utils import set_random_seed
 NUM_TOKENS = [1, 17, 256]
 TOP_KS = [2, 8]
 HIDDEN_SIZE = 512
+# One BLOCK_K tile, a partial trailing tile, and Kimi-K3's real dims
+# (moe_intermediate_size 3072, hidden_size 7168) -- exercises the per-tile loop
+# and its tail mask (BLOCK_K caps at 512 for <=2-byte dtypes).
+HIDDEN_SIZES = [512, 1000, 3072, 7168]
+DTYPES = [torch.bfloat16, torch.float32]
 NUM_EXPERTS = 16
 
 
@@ -223,3 +228,62 @@ def test_nonlocal_and_padding_adjacent():
     written = out[~padding].float()
     assert not written.isnan().any(), "non-local row leaked NaN into the output"
     torch.testing.assert_close(written, torch.zeros_like(written))
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("top_k", TOP_KS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_weighted_sum_matches_reference(
+    num_tokens: int, top_k: int, hidden_size: int, dtype: torch.dtype
+):
+    """Weighted sum over live slots matches the reference across hidden tiles.
+
+    Covers the deployed humming path (globalized ids, expert_map=None): a random
+    -1 mix with NaN-poisoned dead slots, over hidden sizes that span a single
+    tile, a partial trailing tile, and many tiles, in both bf16 and fp32.
+    """
+    set_random_seed(0)
+    device = "cuda"
+
+    inputs = torch.randn(num_tokens, top_k, hidden_size, dtype=dtype, device=device)
+    topk_weights = torch.rand(num_tokens, top_k, dtype=dtype, device=device)
+    topk_ids = torch.randint(
+        0, NUM_EXPERTS, (num_tokens, top_k), dtype=torch.int32, device=device
+    )
+    invalid = torch.rand(num_tokens, top_k, device=device) < 0.5
+    topk_ids[invalid] = -1
+    inputs[invalid] = float("nan")
+
+    # All-padding rows early-return untouched, so pre-zero to match the reference.
+    outputs = torch.zeros(num_tokens, hidden_size, dtype=dtype, device=device)
+    out = moe_fused_mul_sum(
+        inputs=inputs,
+        topk_weights=topk_weights,
+        outputs=outputs,
+        topk_ids=topk_ids,
+        expert_map=None,
+    )
+
+    assert not out.isnan().any(), "invalid slots leaked into the reduction"
+    ref = _reference(inputs.nan_to_num(), topk_weights, topk_ids, expert_map=None)
+    atol, rtol = (1e-2, 1e-2) if dtype == torch.bfloat16 else (1e-4, 1e-4)
+    torch.testing.assert_close(out.float(), ref, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_no_topk_ids_sums_all_slots(dtype: torch.dtype):
+    """With topk_ids=None every slot is live: plain weighted sum over top_k."""
+    set_random_seed(0)
+    device = "cuda"
+    num_tokens, top_k, hidden_size = 17, 8, 1000
+
+    inputs = torch.randn(num_tokens, top_k, hidden_size, dtype=dtype, device=device)
+    topk_weights = torch.rand(num_tokens, top_k, dtype=dtype, device=device)
+    out = moe_fused_mul_sum(inputs=inputs, topk_weights=topk_weights)
+
+    ref = (inputs.float() * topk_weights.float().unsqueeze(-1)).sum(dim=1)
+    atol, rtol = (1e-2, 1e-2) if dtype == torch.bfloat16 else (1e-4, 1e-4)
+    torch.testing.assert_close(out.float(), ref, atol=atol, rtol=rtol)
