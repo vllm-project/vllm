@@ -172,6 +172,22 @@ class TestInitHashSeed:
         )
         assert mgr._get_hash_seed() == "random-seed-abc"
 
+    def test_unbound_store_timeout_configurable(self, monkeypatch):
+        """Constructor honors `unbound_store_timeout_s` tier config."""
+        monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
+        monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
+        monkeypatch.setattr(
+            manager_module.FileMapper,
+            "from_offloading_spec",
+            lambda **k: SimpleNamespace(get_run_config=lambda: {}),
+        )
+        mgr = P2PSecondaryTierManager(
+            offloading_spec=_init_offloading_spec(),
+            primary_kv_view=memoryview(bytearray(16)),
+            unbound_store_timeout_s=5,
+        )
+        assert mgr._unbound_store_timeout_s == 5.0
+
 
 # ---------------------------------------------------------------------------
 # Tests for _peer_id_from_params
