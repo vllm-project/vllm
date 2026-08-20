@@ -80,107 +80,13 @@ def _allocate_prequantized_outputs(
     )
 
 
-def _qwen3_next_fp8_qkv_prep_impl(
+def _allocate_outputs(
     q_gate: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    query_norm_weight: torch.Tensor,
-    key_norm_weight: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    positions: torch.Tensor,
-    layer_name: LayerNameType,
-    eps: float,
     num_query_heads: int,
     num_kv_heads: int,
     head_dim: int,
-    rotary_dim: int,
-) -> Qwen3NextFp8PrepOutputs:
-    from vllm.model_executor.layers.attention.attention import (
-        get_attention_context,
-    )
-
-    resolved_name = _resolve_layer_name(layer_name)
-    attn_metadata, _, _, _ = get_attention_context(resolved_name)
-    total_tokens = q_gate.shape[0]
-    if attn_metadata is None:
-        num_actual_tokens = total_tokens
-        cu_seqlens = torch.tensor(
-            [0, total_tokens],
-            dtype=torch.int32,
-            device=q_gate.device,
-        )
-        quant_token_start = 0
-        quant_sequence_start = 0
-    else:
-        num_actual_tokens = int(attn_metadata.num_actual_tokens)
-        cu_seqlens = attn_metadata.query_start_loc
-        num_decodes = int(getattr(attn_metadata, "num_decodes", 0))
-        quant_token_start = int(getattr(attn_metadata, "num_decode_tokens", 0))
-        quant_sequence_start = num_decodes
-
-    if quant_token_start == num_actual_tokens:
-        query, output_key, gate = fused_qk_rmsnorm_rope_gate(
-            q_gate,
-            key,
-            query_norm_weight.float() + 1.0,
-            key_norm_weight.float() + 1.0,
-            cos_sin_cache,
-            positions,
-            eps,
-            num_query_heads,
-            num_kv_heads,
-            head_dim,
-            rotary_dim,
-        )
-        return (
-            query,
-            output_key,
-            gate,
-            *_allocate_prequantized_outputs(
-                q_gate,
-                key,
-                value,
-                num_query_heads,
-                num_kv_heads,
-                head_dim,
-            ),
-        )
-
-    output = rocm_aiter_ops.qwen3_next_fp8_qkv_prep(
-        q_gate,
-        key,
-        value,
-        query_norm_weight,
-        key_norm_weight,
-        cos_sin_cache,
-        positions,
-        cu_seqlens,
-        num_actual_tokens=num_actual_tokens,
-        quant_token_start=quant_token_start,
-        quant_sequence_start=quant_sequence_start,
-        num_query_heads=num_query_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
-        rotary_dim=rotary_dim,
-        eps=eps,
-    )
-    return tuple(output)
-
-
-def _qwen3_next_fp8_qkv_prep_fake(
-    q_gate: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    query_norm_weight: torch.Tensor,
-    key_norm_weight: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    positions: torch.Tensor,
-    layer_name: LayerNameType,
-    eps: float,
-    num_query_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    rotary_dim: int,
 ) -> Qwen3NextFp8PrepOutputs:
     total_tokens = q_gate.shape[0]
     query = torch.empty(
@@ -209,11 +115,150 @@ def _qwen3_next_fp8_qkv_prep_fake(
     )
 
 
+def _qwen3_next_fp8_qkv_prep_impl(
+    q_gate: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    query_norm_weight: torch.Tensor,
+    key_norm_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    layer_name: LayerNameType,
+    eps: float,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rotary_dim: int,
+    query_out: torch.Tensor,
+    key_out: torch.Tensor,
+    gate_out: torch.Tensor,
+    query_fp8_out: torch.Tensor,
+    key_fp8_out: torch.Tensor,
+    value_fp8_out: torch.Tensor,
+    query_descale_out: torch.Tensor,
+    key_descale_out: torch.Tensor,
+    value_descale_out: torch.Tensor,
+) -> None:
+    from vllm.model_executor.layers.attention.attention import (
+        get_attention_context,
+    )
+
+    resolved_name = _resolve_layer_name(layer_name)
+    attn_metadata, _, _, _ = get_attention_context(resolved_name)
+    total_tokens = q_gate.shape[0]
+    if attn_metadata is None:
+        num_actual_tokens = total_tokens
+        cu_seqlens = (
+            torch.arange(
+                2,
+                dtype=torch.int32,
+                device=q_gate.device,
+            )
+            * total_tokens
+        )
+        quant_token_start = 0
+        quant_sequence_start = 0
+    else:
+        num_actual_tokens = int(attn_metadata.num_actual_tokens)
+        cu_seqlens = attn_metadata.query_start_loc
+        num_decodes = int(getattr(attn_metadata, "num_decodes", 0))
+        quant_token_start = int(getattr(attn_metadata, "num_decode_tokens", 0))
+        quant_sequence_start = num_decodes
+
+    if quant_token_start == num_actual_tokens:
+        fused_qk_rmsnorm_rope_gate(
+            q_gate,
+            key,
+            query_norm_weight.float() + 1.0,
+            key_norm_weight.float() + 1.0,
+            cos_sin_cache,
+            positions,
+            eps,
+            num_query_heads,
+            num_kv_heads,
+            head_dim,
+            rotary_dim,
+            query_out=query_out,
+            key_out=key_out,
+            gate_out=gate_out,
+        )
+        return
+
+    rocm_aiter_ops.qwen3_next_fp8_qkv_prep(
+        q_gate,
+        key,
+        value,
+        query_norm_weight,
+        key_norm_weight,
+        cos_sin_cache,
+        positions,
+        cu_seqlens,
+        num_actual_tokens=num_actual_tokens,
+        quant_token_start=quant_token_start,
+        quant_sequence_start=quant_sequence_start,
+        num_query_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        rotary_dim=rotary_dim,
+        eps=eps,
+        query_out=query_out,
+        key_out=key_out,
+        gate_out=gate_out,
+        query_fp8_out=query_fp8_out,
+        key_fp8_out=key_fp8_out,
+        value_fp8_out=value_fp8_out,
+        query_descale_out=query_descale_out,
+        key_descale_out=key_descale_out,
+        value_descale_out=value_descale_out,
+    )
+
+
+def _qwen3_next_fp8_qkv_prep_fake(
+    q_gate: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    query_norm_weight: torch.Tensor,
+    key_norm_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    layer_name: LayerNameType,
+    eps: float,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rotary_dim: int,
+    query_out: torch.Tensor,
+    key_out: torch.Tensor,
+    gate_out: torch.Tensor,
+    query_fp8_out: torch.Tensor,
+    key_fp8_out: torch.Tensor,
+    value_fp8_out: torch.Tensor,
+    query_descale_out: torch.Tensor,
+    key_descale_out: torch.Tensor,
+    value_descale_out: torch.Tensor,
+) -> None:
+    return
+
+
+# The implementation reads per-step attention metadata from forward context.
+# Keep it outside piecewise CUDA graphs so capture-time decode/prefill offsets
+# are not replayed against a different runtime batch.
 direct_register_custom_op(
     op_name="qwen3_next_fp8_qkv_prep",
     op_func=_qwen3_next_fp8_qkv_prep_impl,
     fake_impl=_qwen3_next_fp8_qkv_prep_fake,
-    mutates_args=[],
+    mutates_args=[
+        "query_out",
+        "key_out",
+        "gate_out",
+        "query_fp8_out",
+        "key_fp8_out",
+        "value_fp8_out",
+        "query_descale_out",
+        "key_descale_out",
+        "value_descale_out",
+    ],
+    tags=(torch.Tag.cudagraph_unsafe,),
 )
 
 
@@ -232,7 +277,15 @@ def qwen3_next_fp8_qkv_prep(
     head_dim: int,
     rotary_dim: int,
 ) -> Qwen3NextFp8PrepOutputs:
-    return torch.ops.vllm.qwen3_next_fp8_qkv_prep(
+    outputs = _allocate_outputs(
+        q_gate,
+        key,
+        value,
+        num_query_heads,
+        num_kv_heads,
+        head_dim,
+    )
+    torch.ops.vllm.qwen3_next_fp8_qkv_prep(
         q_gate,
         key,
         value,
@@ -246,4 +299,6 @@ def qwen3_next_fp8_qkv_prep(
         num_kv_heads,
         head_dim,
         rotary_dim,
+        *outputs,
     )
+    return outputs
