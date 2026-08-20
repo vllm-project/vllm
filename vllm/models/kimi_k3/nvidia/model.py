@@ -155,14 +155,15 @@ def shard_sequence_parallel_mlp(
 
 
 def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
-    if not envs.VLLM_KIMI_K3_GEMM_RS:
+    all_reduce = not use_sequence_parallel
+    mode = "GEMM-AR" if all_reduce else "GEMM-RS"
+    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_KIMI_K3_GEMM_RS
+    if not enabled:
         return False
 
     parallel_config = vllm_config.parallel_config
     tp_size = parallel_config.tensor_parallel_size
-    if not use_sequence_parallel:
-        reason = "sequence parallelism is disabled"
-    elif parallel_config.use_ubatching:
+    if parallel_config.use_ubatching:
         reason = "ubatching is enabled"
     elif vllm_config.model_config.dtype != torch.bfloat16:
         reason = "the model dtype is not BF16"
@@ -174,11 +175,13 @@ def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> 
         reason = "TP size is not in the supported range 2-16"
     elif 128 % tp_size != 0:
         reason = "TP size does not divide 128"
+    elif torch.distributed.get_world_size() != tp_size:
+        reason = "the distributed world size does not equal the TP size"
     else:
         reason = None
 
     if reason is not None:
-        logger.warning_once("GEMM-RS was requested but is disabled because %s.", reason)
+        logger.warning_once("%s is disabled because %s.", mode, reason)
         return False
 
     from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import init_gemm_rs
@@ -187,8 +190,14 @@ def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> 
     init_gemm_rs(
         max_M=vllm_config.scheduler_config.max_num_batched_tokens,
         N=config.hidden_size,
+        all_reduce=all_reduce,
     )
-    logger.info_once("GEMM-RS is enabled.")
+    if all_reduce:
+        logger.info_once(
+            "GEMM-AR is enabled. To disable it, set VLLM_KIMI_K3_GEMM_AR=0."
+        )
+    else:
+        logger.info_once("GEMM-RS is enabled.")
     return True
 
 
@@ -258,7 +267,7 @@ class KimiMLP(nn.Module):
             self.run_gemm_rs = get_gemm_rs().can_run(self.down_proj)
             if not self.run_gemm_rs:
                 logger.warning_once(
-                    "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
                     prefix,
                 )
         if hidden_act == "silu":
@@ -1118,8 +1127,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         self.vocab_size = config.vocab_size
 
-        # GEMM-RS uses NCCL symmetric-memory multicast, which requires all TP
-        # ranks to belong to one NVLink domain.
+        # GEMM-RS/AR uses NCCL symmetric-memory multicast, which requires all
+        # TP ranks to belong to one NVLink domain.
         self.run_gemm_rs = maybe_init_gemm_rs(vllm_config, self.use_sequence_parallel)
 
         if get_pp_group().is_first_rank:

@@ -278,7 +278,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj)
             if not self.run_gemm_rs:
                 logger.warning_once(
-                    "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
                     prefix,
                 )
 

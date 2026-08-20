@@ -811,7 +811,7 @@ class GemmRS:
             num_ctas,
         )
         if self.all_reduce:
-            return self.partial[:M]
+            return self.partial[:M].clone()
         assert output is not None
         return output
 
@@ -819,13 +819,32 @@ class GemmRS:
 _gemm_rs: GemmRS | None = None
 
 
-def init_gemm_rs(max_M: int, N: int) -> None:
-    """Collectively initialize the process-wide GEMM-RS state."""
+def init_gemm_rs(max_M: int, N: int, *, all_reduce: bool = False) -> None:
+    """Collectively initialize the process-wide GEMM-RS/AR state."""
     global _gemm_rs
     if _gemm_rs is not None:
-        assert _gemm_rs.max_M >= max_M and _gemm_rs.N == N
+        assert (
+            _gemm_rs.max_M >= max_M
+            and _gemm_rs.N == N
+            and _gemm_rs.all_reduce == all_reduce
+        )
         return
-    _gemm_rs = GemmRS(max_M=max_M, N=N)
+    _gemm_rs = GemmRS(max_M=max_M, N=N, all_reduce=all_reduce)
+
+
+def warmup_gemm_rs() -> int:
+    """Compile every reachable dispatch for the initialized GEMM-RS/AR mode."""
+    if _gemm_rs is None:
+        return 0
+    for BN, cta_group in ((128, 1), (128, 2), (256, 2)):
+        Sm100GemmRsBF16.compile(
+            _gemm_rs.rank,
+            _gemm_rs.world_size,
+            BN,
+            cta_group,
+            _gemm_rs.all_reduce,
+        )
+    return 3
 
 
 def get_gemm_rs() -> GemmRS:
