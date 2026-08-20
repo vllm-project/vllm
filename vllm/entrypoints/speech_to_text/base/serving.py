@@ -80,6 +80,100 @@ ResponseType: TypeAlias = (
 logger = init_logger(__name__)
 
 
+# --- Recovering speech the decoder abandoned inside a chunk -------------------
+#
+# Whisper emits timestamp tokens, and the last one before EOT is the model's own
+# statement of how far it got. When that falls short of the chunk it was given,
+# the rest of that audio is transcribed by nobody: the chunk was decoded once and
+# the cursor moves on. Measured on whisper-large-v3-turbo: a 29.42 s recording
+# (ONE chunk — no splitting involved) came back with text ending at 21.56 s, i.e.
+# 7.9 s of speech silently absent, with HTTP 200 and a complete-looking `duration`.
+#
+# The repair re-submits the abandoned region as its own request. It is bounded on
+# every side, because the failure it must never introduce is worse than the one it
+# fixes: a region the decoder refused to read is usually SILENCE, and Whisper does
+# not stay quiet over silence — it invents. Hence SPARSE_* below.
+
+UNDECODED_MIN_GAP_S: Final[float] = 2.0
+"""Shortest abandoned stretch worth re-asking for. Below this the gap is more
+likely a breath between segments than lost speech, and a round trip costs more
+than the words it could return."""
+
+UNDECODED_PREROLL_S: Final[float] = 0.5
+"""How far BEFORE the gap the re-submitted slice starts. Whisper's timestamps are
+quantised and routinely land mid-word, so a cut exactly at the last timestamp
+begins on half a syllable and the model guesses the rest. The words this
+necessarily repeats are removed by `strip_seam_overlap`."""
+
+UNDECODED_MAX_PASSES: Final[int] = 8
+"""Ceiling on recovery requests per transcription. A transcript is worth several
+extra passes, never an unbounded number."""
+
+SPARSE_MIN_DURATION_S: Final[float] = 4.0
+"""A recovered region shorter than this is not judged by speech density — a
+two-second gap holding one real word is ordinary."""
+
+SPARSE_MIN_WORDS_PER_S: Final[float] = 0.5
+"""Words per second below which a RECOVERED region is not speech at all.
+
+Measured, and the separation is not subtle: real speech runs at ~2.3 words/s,
+while a phantom over 13.8 s of near-silence came back as " Let's go." — 3 words,
+0.22 words/s, avg_logprob -0.46, i.e. "confident". A blocklist of known phantom
+phrases cannot be the defence here: that sentence is ordinary English and no list
+would carry it. Applied ONLY to recovered regions, where the fallback is "no
+text" — exactly what the transcript had before the repair existed — so a false
+positive costs nothing that was not already lost, while a false negative writes a
+sentence the speaker never said into the middle of their transcript."""
+
+SEAM_MAX_OVERLAP_WORDS: Final[int] = 3
+"""Longest repetition the seam de-duplicator removes. Tied to UNDECODED_PREROLL_S:
+half a second of speech is one or two words, three at a gallop. A wider window
+would delete repetitions the speaker made on purpose — and a gap IS a pause,
+which is exactly where people repeat themselves."""
+
+
+def last_decoded_timestamp(tokens: tuple, init_token: int) -> float | None:
+    """Seconds into the chunk where the decoder stopped, per its own timestamps.
+
+    Reads only token ids, so it works for every response format — `verbose_json`
+    is the only one that carries logprobs, and this must not depend on them.
+    """
+    last: int | None = None
+    for token in tokens:
+        if token >= init_token:
+            last = token
+    if last is None:
+        return None
+    return (last - init_token) * 0.02
+
+
+def is_sparse_recovery(text: str, duration_s: float) -> bool:
+    """True when a recovered region came back too thin to be speech."""
+    if duration_s < SPARSE_MIN_DURATION_S:
+        return False
+    words = len([word for word in text.strip().split() if word])
+    return words / duration_s < SPARSE_MIN_WORDS_PER_S
+
+
+def _seam_key(word: str) -> str:
+    return "".join(char for char in word.lower() if char.isalnum())
+
+
+def strip_seam_overlap(previous: str, following: str) -> str:
+    """Drops the leading words of `following` that merely repeat the tail of
+    `previous` — the price of UNDECODED_PREROLL_S."""
+    prev_words = [word for word in previous.strip().split() if word]
+    next_words = [word for word in following.strip().split() if word]
+    if not prev_words or not next_words:
+        return following.strip()
+    limit = min(SEAM_MAX_OVERLAP_WORDS, len(prev_words), len(next_words))
+    for size in range(limit, 1, -1):
+        tail = [_seam_key(word) for word in prev_words[-size:]]
+        head = [_seam_key(word) for word in next_words[:size]]
+        if all(word and word == head[i] for i, word in enumerate(tail)):
+            return " ".join(next_words[size:])
+    return following.strip()
+
 def asr_inter_chunk_separator(
     language: str | None, no_space_languages: Set[str]
 ) -> str:
@@ -265,7 +359,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[EngineInput], float, list[float]]:
+    ) -> tuple[list[EngineInput], float, list[float], list[np.ndarray]]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
         request.to_language = (
@@ -299,28 +393,35 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 chunks[0], f"{request_id}-lang_detect"
             )
 
-        parsed_prompts: list[DictPrompt] = []
-        for chunk in chunks:
-            stt_params = request.build_stt_params(
-                audio=chunk,
-                stt_config=self.asr_config,
-                model_config=self.model_config,
-                task_type=self.task_type,
-            )
-            prompt = self.model_cls.get_generation_prompt(stt_params)
-
-            parsed_prompt: DictPrompt
-            if request.response_format == "verbose_json":
-                parsed_prompt = parse_enc_dec_prompt(prompt)
-                parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
-            else:
-                parsed_prompt = parse_model_prompt(self.model_config, prompt)
-
-            parsed_prompts.append(parsed_prompt)
+        parsed_prompts: list[DictPrompt] = [
+            self._parse_stt_prompt(request, chunk) for chunk in chunks
+        ]
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration, chunk_start_offsets
+        return engine_inputs, duration, chunk_start_offsets, chunks
+
+    def _parse_stt_prompt(
+        self, request: SpeechToTextRequest, audio: np.ndarray
+    ) -> DictPrompt:
+        """One audio array to the prompt shape the engine takes.
+
+        Factored out so the recovery pass below goes through the SAME path as the
+        first pass: a second, hand-rolled copy of this would drift from it, and
+        the drift would show up as a subtly different prompt on exactly the audio
+        the first pass already failed to read.
+        """
+        stt_params = request.build_stt_params(
+            audio=audio,
+            stt_config=self.asr_config,
+            model_config=self.model_config,
+            task_type=self.task_type,
+        )
+        prompt = self.model_cls.get_generation_prompt(stt_params)
+
+        if request.response_format == "verbose_json":
+            return self._preprocess_verbose_prompt(parse_enc_dec_prompt(prompt))
+        return parse_model_prompt(self.model_config, prompt)
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -427,6 +528,151 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 avg_logprob += log_probs[idx - 1][token].logprob
         return segments
 
+
+    async def _recover_abandoned_speech(
+        self,
+        *,
+        request: SpeechToTextRequest,
+        request_id: str,
+        sampling_params: SamplingParams | BeamSearchParams,
+        lora_request,
+        raw_request: Request | None,
+        audio_chunks: list[np.ndarray],
+        chunk_start_offsets: list[float],
+        chunk_decoded_until: list[float | None],
+        chunk_segment_parts: list[list[SpeechToTextSegment]],
+        chunk_text_parts: list[list[str]],
+        segment_class: type[SpeechToTextSegment],
+    ) -> None:
+        """Re-asks for the audio each chunk's decoder walked away from.
+
+        A chunk is decoded once. If the model emits end-of-transcript before the
+        chunk is exhausted, everything after its last timestamp is transcribed by
+        nobody and nothing in the response says so. This walks the chunks, finds
+        those stretches, and submits each as its own request.
+
+        Recovered text is appended to the chunk it came from, so ordering needs no
+        sorting: the abandoned stretch belongs at the END of its own chunk and
+        before the next one, which is exactly where appending puts it.
+        """
+        if isinstance(sampling_params, BeamSearchParams):
+            # Beam search takes a different generation path; recovery stays out of
+            # it rather than half-supporting it.
+            return
+
+        sample_rate = self.asr_config.sample_rate
+        passes = 0
+        abandoned = 0
+        recovered = 0
+
+        for idx, chunk in enumerate(audio_chunks):
+            decoded_until = chunk_decoded_until[idx]
+            if decoded_until is None:
+                continue
+            chunk_duration = chunk.shape[-1] / sample_rate
+            if chunk_duration - decoded_until < UNDECODED_MIN_GAP_S:
+                continue
+
+            abandoned += 1
+            if passes >= UNDECODED_MAX_PASSES:
+                continue
+            passes += 1
+
+            # Start slightly EARLY: the last timestamp usually lands mid-word.
+            slice_start = max(0.0, decoded_until - UNDECODED_PREROLL_S)
+            audio = chunk[..., int(slice_start * sample_rate) :]
+            if audio.shape[-1] < int(UNDECODED_MIN_GAP_S * sample_rate):
+                continue
+
+            try:
+                engine_input = (
+                    await self.renderer.render_cmpl_async(
+                        [self._parse_stt_prompt(request, audio)]
+                    )
+                )[0]
+                trace_headers = (
+                    None
+                    if raw_request is None
+                    else await self._get_trace_headers(raw_request.headers)
+                )
+                final_output: RequestOutput | None = None
+                async for output in self.engine_client.generate(
+                    engine_input,
+                    sampling_params,
+                    f"{request_id}-recover-{idx}",
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                ):
+                    final_output = output
+            except Exception:
+                # A failure HERE must not cost the transcript already in hand.
+                logger.exception(
+                    "Recovery request for chunk %d of %s failed; "
+                    "that stretch stays untranscribed.",
+                    idx,
+                    request_id,
+                )
+                continue
+
+            if final_output is None or not final_output.outputs:
+                continue
+
+            slice_duration = chunk_duration - slice_start
+            segments: list[SpeechToTextSegment] = []
+            if request.response_format == "verbose_json" and final_output.outputs[0].logprobs:
+                segments = self._get_verbose_segments(
+                    tokens=tuple(final_output.outputs[0].token_ids),
+                    segment_class=segment_class,
+                    request=request,
+                    start_time=chunk_start_offsets[idx] + slice_start,
+                    log_probs=final_output.outputs[0].logprobs,
+                )
+                text = "".join(segment.text for segment in segments)
+            else:
+                text = self.model_cls.post_process_output(final_output.outputs[0].text)
+
+            if not text.strip():
+                continue
+
+            # 🔴 The blocklist-free phantom test. An abandoned stretch is usually
+            # silence, and Whisper does not stay quiet over silence.
+            if is_sparse_recovery(text, slice_duration):
+                logger.info(
+                    "Recovered region %.2f-%.2fs of %s is not speech "
+                    "(%d words over %.1fs); dropping it.",
+                    chunk_start_offsets[idx] + slice_start,
+                    chunk_start_offsets[idx] + chunk_duration,
+                    request_id,
+                    len(text.split()),
+                    slice_duration,
+                )
+                continue
+
+            trimmed = strip_seam_overlap("".join(chunk_text_parts[idx]), text)
+            if not trimmed:
+                continue
+
+            # The segments keep their own (untrimmed) text: the seam repetition is
+            # a word or two, and rewriting a segment's text would desynchronise it
+            # from the tokens and logprobs it was built from. The flat transcript
+            # gets the trimmed form.
+            chunk_segment_parts[idx].extend(segments)
+            chunk_text_parts[idx].append(trimmed)
+            recovered += 1
+
+        if abandoned:
+            # Never stop quietly: everything below leaves the transcript
+            # incomplete, which is the failure this code exists to end.
+            logger.info(
+                "Transcript repair for %s: %d abandoned stretch(es), "
+                "%d recovered, %d left (pass ceiling %d).",
+                request_id,
+                abandoned,
+                recovered,
+                abandoned - recovered,
+                UNDECODED_MAX_PASSES,
+            )
+
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
@@ -501,6 +747,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             engine_inputs,
             duration_s,
             chunk_start_offsets,
+            audio_chunks,
         ) = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
@@ -622,9 +869,20 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
             assert len(chunk_start_offsets) == len(list_result_generator)
+            # How far each chunk's decoder actually got, by its own timestamps —
+            # the only signal that a stretch of audio was abandoned.
+            init_timestamp_token = self.tokenizer.encode(
+                "<|0.00|>", add_special_tokens=False
+            )[0]
+            chunk_decoded_until: list[float | None] = [
+                None for _ in list_result_generator
+            ]
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
                 start_time = chunk_start_offsets[idx]
+                chunk_decoded_until[idx] = last_decoded_timestamp(
+                    tuple(op.outputs[0].token_ids), init_timestamp_token
+                )
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
@@ -642,6 +900,20 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     chunk_text_parts[idx].append(
                         self.model_cls.post_process_output(raw_text)
                     )
+            await self._recover_abandoned_speech(
+                request=request,
+                request_id=request_id,
+                sampling_params=sampling_params,
+                lora_request=lora_request,
+                raw_request=raw_request,
+                audio_chunks=audio_chunks,
+                chunk_start_offsets=chunk_start_offsets,
+                chunk_decoded_until=chunk_decoded_until,
+                chunk_segment_parts=chunk_segment_parts,
+                chunk_text_parts=chunk_text_parts,
+                segment_class=segment_class,
+            )
+
             total_segments = [
                 segment
                 for segment_parts in chunk_segment_parts
