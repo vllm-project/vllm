@@ -462,11 +462,14 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
             mm_data = {**mm_data, "return_mm_token_type_ids": True}
 
         # The prompt is decoded from tokens that already contain special
-        # tokens, so don't let the tokenizer add them again.
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, add_special_tokens=False),
+        # tokens, so don't let the tokenizer add them again. `super()` still
+        # applies the ValueError fallback and unpadding; `add_special_tokens`
+        # is a text-kwarg, so it is filtered out of the processor constructor
+        # and only reaches the `__call__`.
+        return super()._call_hf_processor(
+            prompt,
+            mm_data,
+            dict(mm_kwargs, add_special_tokens=False),
         )
 
     def _get_mm_token_ids(self, modality: str) -> list[int]:
