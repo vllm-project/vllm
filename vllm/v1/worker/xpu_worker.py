@@ -56,9 +56,34 @@ class XPUWorker(Worker):
                 parallel_config.pipeline_parallel_size
                 * parallel_config.tensor_parallel_size
             )
+            visible_device_count = torch.accelerator.device_count()
+
+            if parallel_config.data_parallel_external_lb:
+                # External LB runs one engine per process and pins
+                # data_parallel_rank_local to 0, so it cannot tell co-located
+                # ranks apart. Narrowing ZE_AFFINITY_MASK per process is not an
+                # option on XPU because oneCCL then sees a single device and
+                # builds a degenerate topology, so fall back to the global DP
+                # rank whenever every device is still visible.
+                global_offset = parallel_config.data_parallel_index * tp_pp_world_size
+                if self.local_rank + global_offset < visible_device_count:
+                    dp_local_rank = parallel_config.data_parallel_index
+                else:
+                    logger.warning(
+                        "XPU external LB: cannot apply global DP device offset "
+                        "(dp_index=%d, local_rank=%d, tp_pp=%d, visible=%d). "
+                        "External LB on XPU requires every process to see all devices "
+                        "(device masking is not viable because oneCCL would build a "
+                        "degenerate topology). Falling back to local device numbering; "
+                        "co-located DP ranks will collide on the same device.",
+                        parallel_config.data_parallel_index,
+                        self.local_rank,
+                        tp_pp_world_size,
+                        visible_device_count,
+                    )
+
             self.local_rank += dp_local_rank * tp_pp_world_size
 
-            visible_device_count = torch.accelerator.device_count()
             assert self.local_rank < visible_device_count, (
                 f"DP adjusted local rank {self.local_rank} is out of bounds. "
             )
