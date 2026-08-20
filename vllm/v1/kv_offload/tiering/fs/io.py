@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import ctypes
 import logging
 import mmap
 import os
@@ -87,12 +88,34 @@ def _validate_offsets(view: memoryview, offsets: list[int], block_size: int) -> 
             )
 
 
+def _can_use_o_direct(
+    view: memoryview,
+    block_size: int,
+    direct_io_alignment: int,
+    use_o_direct: bool,
+) -> bool:
+    """Return whether this buffer and transfer satisfy O_DIRECT alignment."""
+    if (
+        not use_o_direct
+        or not O_DIRECT
+        or direct_io_alignment <= 0
+        or block_size % direct_io_alignment != 0
+    ):
+        return False
+    try:
+        address = ctypes.addressof(ctypes.c_char.from_buffer(view))
+    except (TypeError, BufferError):
+        return False
+    return address % direct_io_alignment == 0
+
+
 def _store_block(
     dest_path: str,
     buffer: memoryview,
     offset: int,
     block_size: int,
     use_o_direct: bool = True,
+    direct_io_alignment: int = 1,
 ) -> None:
     """
     Store callback: Writes to a temp file then atomically replaces the destination.
@@ -108,7 +131,11 @@ def _store_block(
     # Write block atomically. Cast to a flat byte view so the slice uses byte
     # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
     view_slice = buffer.cast("B")[offset : offset + block_size]
-    o_direct = O_DIRECT if use_o_direct else 0
+    o_direct = (
+        O_DIRECT
+        if _can_use_o_direct(view_slice, block_size, direct_io_alignment, use_o_direct)
+        else 0
+    )
     try:
         fd = os.open(
             tmp_path,
@@ -138,13 +165,17 @@ def _load_block(
     offset: int,
     block_size: int,
     use_o_direct: bool = True,
+    direct_io_alignment: int = 1,
 ) -> None:
     """Read one KV block from disk; remove the file only on a provable short
     read (a too-short file is genuine corruption) and leave it untouched on any
     other error."""
     fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
-    o_direct = O_DIRECT if use_o_direct else 0
+    use_direct_io = _can_use_o_direct(
+        view_slice, block_size, direct_io_alignment, use_o_direct
+    )
+    o_direct = O_DIRECT if use_direct_io else 0
 
     try:
         fd = os.open(source_path, os.O_RDONLY | o_direct)
@@ -171,6 +202,7 @@ def batch_store_block(
     offsets: list[int],
     block_size: int,
     use_o_direct: bool = True,
+    direct_io_alignment: int = 1,
 ) -> None:
     """
     Store a batch of KV blocks from a shared buffer to disk in one call.
@@ -184,10 +216,23 @@ def batch_store_block(
         view_B = view.cast("B")
         view_slices = [view_B[x : x + block_size] for x in offsets]
         tmp_paths = [p + _get_tmp_suffix() for p in paths]
-        return batch_store_block_C(tmp_paths, paths, view_slices, use_o_direct)
+        return batch_store_block_C(
+            tmp_paths,
+            paths,
+            view_slices,
+            use_o_direct,
+            direct_io_alignment,
+        )
     else:
         for path, offset in zip(paths, offsets):
-            _store_block(path, view, offset, block_size, use_o_direct)
+            _store_block(
+                path,
+                view,
+                offset,
+                block_size,
+                use_o_direct,
+                direct_io_alignment,
+            )
 
 
 def batch_load_block(
@@ -196,6 +241,7 @@ def batch_load_block(
     offsets: list[int],
     block_size: int,
     use_o_direct: bool = True,
+    direct_io_alignment: int = 1,
 ) -> None:
     """
     Load a batch of KV blocks from disk into a shared buffer in one call.
@@ -210,11 +256,23 @@ def batch_load_block(
     if _HAS_FSIO_C:
         view_B = view.cast("B")
         view_slices = [view_B[x : x + block_size] for x in offsets]
-        return batch_load_block_C(paths, view_slices, use_o_direct)
+        return batch_load_block_C(
+            paths,
+            view_slices,
+            use_o_direct,
+            direct_io_alignment,
+        )
     else:
         for i, (path, offset) in enumerate(zip(paths, offsets)):
             try:
-                _load_block(path, view, offset, block_size, use_o_direct)
+                _load_block(
+                    path,
+                    view,
+                    offset,
+                    block_size,
+                    use_o_direct,
+                    direct_io_alignment,
+                )
             except OSError as exc:
                 # Blocks 0..i-1 loaded fine; record the count for partial keep.
                 # The C path sets the same attribute via PyObject_SetAttrString.

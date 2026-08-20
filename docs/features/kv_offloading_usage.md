@@ -153,6 +153,14 @@ single request containing many blocks to use multiple storage paths. Changing
 the number or order of roots changes the mapping and makes blocks under the old
 mapping unavailable until they are stored again.
 
+The FS tier probes O_DIRECT support independently for each root with a
+page-sized transfer from a page-aligned buffer. Each read or write uses direct
+I/O only when that root passes the probe and the transfer size and host buffer
+address meet that validated alignment. An unaligned operation falls back to
+buffered I/O without changing other roots or operations. The `statvfs` block
+size is recorded for diagnostics but is not treated as a strict direct-I/O
+alignment because NFS can report its preferred transfer size there.
+
 #### On-Disk Layout
 
 Under each `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.
