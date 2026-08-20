@@ -175,7 +175,7 @@ class MLAPrefillBackend(ABC):
     @abstractmethod
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,

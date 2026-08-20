@@ -22,6 +22,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
@@ -51,6 +52,7 @@ class DSparkMarkovHead(nn.Module):
         draft_vocab_size: int,
         markov_rank: int,
         prefix: str,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.markov_w1 = nn.Embedding(vocab_size, markov_rank)
@@ -58,6 +60,7 @@ class DSparkMarkovHead(nn.Module):
             draft_vocab_size,
             markov_rank,
             bias=False,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "markov_w2"),
             disable_tp=True,
         )
@@ -73,6 +76,30 @@ class DSparkMarkovHead(nn.Module):
     ) -> torch.Tensor:
         """Vocab-size transition bias from a Markov embedding ([B, r] -> [B, V])."""
         return logits_processor(self.markov_w2, markov_embed)
+
+    def apply_bias_gathered(
+        self,
+        markov_embed: torch.Tensor,
+        logits: torch.Tensor,
+        values: torch.Tensor,
+        index: torch.Tensor,
+        scale: float = 1.0,
+    ) -> torch.Tensor:
+        """Apply the Markov bias only to selected rows of ``logits``.
+
+        The caller initializes ``logits`` to ``-inf`` once for all draft
+        positions. This method scatters the corrected candidate values into
+        that dense buffer so the normal sampler sees the truncated proposal.
+        """
+        weight = self.markov_w2.weight[index]
+        corrected = values.unsqueeze(-1)
+        corrected.baddbmm_(
+            weight,
+            markov_embed.unsqueeze(-1),
+            beta=1.0,
+            alpha=scale,
+        )
+        return logits.scatter_(1, index, corrected.squeeze(-1))
 
 
 class Qwen3DSparkModel(DFlashQwen3Model):
@@ -97,6 +124,7 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             draft_vocab_size,
             config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
+            quant_config=self.quant_config,
         )
 
 
@@ -153,6 +181,21 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
 
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
+
+    def apply_markov_bias_gathered(
+        self,
+        markov_embed: torch.Tensor,
+        logits: torch.Tensor,
+        values: torch.Tensor,
+        index: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.model.markov_head.apply_bias_gathered(
+            markov_embed,
+            logits,
+            values,
+            index,
+            self.logits_processor.scale,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}

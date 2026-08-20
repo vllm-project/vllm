@@ -54,10 +54,15 @@ class JobMetadata:
 
 @dataclass
 class JobResult:
-    """Result of an async transfer job (successful or failed)."""
+    """Result of an async transfer job."""
 
     job_id: JobId
+    # True if all keys succeeded; False if all or some failed.
     success: bool
+    # Only applicable to promotion jobs. On partial failure, identifies the
+    # keys that were successfully loaded. None means all keys share the fate
+    # indicated by `success`. Must be a subset of the job's original keys.
+    successful_keys: Collection[OffloadKey] | None = None
 
 
 class ParentManager(ABC):

@@ -83,8 +83,8 @@ completion = client.chat.completions.create(
 
 ## Extra HTTP Headers
 
-Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
-with `--enable-request-id-headers`.
+The `X-Request-Id` HTTP request header can be enabled with
+`--enable-request-id-headers`.
 
 ??? code
 
@@ -109,6 +109,19 @@ with `--enable-request-id-headers`.
     )
     print(completion._request_id)
     ```
+
+The Completions, Chat Completions, and Responses APIs also support the
+`X-Vllm-Priority` request header. Its value must be an integer and overrides
+the `priority` value in the JSON request body. Non-zero priorities require the
+server to use priority scheduling.
+
+```python
+completion = client.chat.completions.create(
+    model="NousResearch/Meta-Llama-3-8B-Instruct",
+    messages=[{"role": "user", "content": "Hello!"}],
+    extra_headers={"X-Vllm-Priority": "-10"},
+)
+```
 
 ## API Reference
 

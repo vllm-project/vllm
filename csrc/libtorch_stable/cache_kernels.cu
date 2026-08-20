@@ -186,57 +186,6 @@ void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
 
 namespace vllm {
 
-// Grid: (num_layers, num_pairs)
-template <typename scalar_t>
-__global__ void copy_blocks_kernel(int64_t* key_cache_ptrs,
-                                   int64_t* value_cache_ptrs,
-                                   const int64_t* __restrict__ block_mapping,
-                                   const int numel_per_block) {
-  const int layer_idx = blockIdx.x;
-  const int pair_idx = blockIdx.y;
-
-  scalar_t* key_cache = reinterpret_cast<scalar_t*>(key_cache_ptrs[layer_idx]);
-  scalar_t* value_cache =
-      reinterpret_cast<scalar_t*>(value_cache_ptrs[layer_idx]);
-  int64_t src_block_number = block_mapping[2 * pair_idx];
-  int64_t dst_block_number = block_mapping[2 * pair_idx + 1];
-
-  const int64_t src_block_offset = src_block_number * numel_per_block;
-  const int64_t dst_block_offset = dst_block_number * numel_per_block;
-  for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
-    int64_t src_offset = src_block_offset + i;
-    int64_t dst_offset = dst_block_offset + i;
-    key_cache[dst_offset] = key_cache[src_offset];
-  }
-  for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
-    int64_t src_offset = src_block_offset + i;
-    int64_t dst_offset = dst_block_offset + i;
-    value_cache[dst_offset] = value_cache[src_offset];
-  }
-}
-
-// Kernel for MLA, which works on a single joint kv_cache
-// Grid: (num_layers, num_pairs)
-template <typename scalar_t>
-__global__ void copy_blocks_mla_kernel(
-    int64_t* cache_ptrs, const int64_t* __restrict__ block_mapping,
-    const int mem_footprint_per_block) {
-  const int layer_idx = blockIdx.x;
-  const int pair_idx = blockIdx.y;
-  scalar_t* cache = reinterpret_cast<scalar_t*>(cache_ptrs[layer_idx]);
-  int64_t src_block = block_mapping[2 * pair_idx];
-  int64_t dst_block = block_mapping[2 * pair_idx + 1];
-  int64_t src_offset = src_block * mem_footprint_per_block;
-  int64_t dst_offset = dst_block * mem_footprint_per_block;
-  for (int i = threadIdx.x; i < mem_footprint_per_block; i += blockDim.x) {
-    cache[dst_offset + i] = cache[src_offset + i];
-  }
-}
-
-}  // namespace vllm
-
-namespace vllm {
-
 // Used to copy/convert one element
 template <typename OutT, typename InT, Fp8KVCacheDataType kv_dt>
 struct CopyWithScaleOp {
@@ -821,16 +770,17 @@ void reshape_and_cache_flash(
       key.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
-  if (kv_cache_dtype == "nvfp4") {
+  if (kv_cache_dtype == "nvfp4" || kv_cache_dtype == "nvfp4_4over6") {
 #if defined(ENABLE_NVFP4_SM100) || defined(ENABLE_NVFP4_SM120)
     // NVFP4 dispatch is compiled separately for SM100+.
     extern void reshape_and_cache_nvfp4_dispatch(
         torch::stable::Tensor & key, torch::stable::Tensor & value,
         torch::stable::Tensor & key_cache, torch::stable::Tensor & value_cache,
         torch::stable::Tensor & slot_mapping, torch::stable::Tensor & k_scale,
-        torch::stable::Tensor & v_scale);
+        torch::stable::Tensor & v_scale, const std::string& kv_cache_dtype);
     reshape_and_cache_nvfp4_dispatch(key, value, key_cache, value_cache,
-                                     slot_mapping, k_scale, v_scale);
+                                     slot_mapping, k_scale, v_scale,
+                                     kv_cache_dtype);
     return;
 #else
     STD_TORCH_CHECK(

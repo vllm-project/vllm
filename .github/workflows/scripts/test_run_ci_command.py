@@ -12,7 +12,10 @@ from run_ci_command import (
     CI_AUTHORIZED_COMMENT_MARKER,
     COMMAND_RETRY_FAILED,
     COMMAND_RUN_CI,
+    COMMAND_RUN_CI_ALL,
+    COMMAND_RUN_CI_NIGHTLY,
     RETRY_STATES,
+    ApiError,
     BuildkiteClient,
     HttpTransport,
     authorize,
@@ -23,6 +26,7 @@ from run_ci_command import (
     notify_authorized,
     parse_command,
     parse_trusted_users,
+    resolve_workflow_run_pr,
     run,
     select_latest_build,
 )
@@ -70,6 +74,8 @@ class FakeGitHub:
         review_decision: str = "REVIEW_REQUIRED",
         reviews: list[dict[str, Any]] | None = None,
         comments: list[str] | None = None,
+        pulls_for_commit: list[dict[str, Any]] | None = None,
+        prs: dict[int, dict[str, Any]] | None = None,
     ) -> None:
         self.comments = comments or []
         self.permission = permission
@@ -78,12 +84,20 @@ class FakeGitHub:
         self.reactions: list[str] = []
         self.review_decision = review_decision
         self.reviews = reviews or []
+        self.pulls_for_commit = pulls_for_commit or []
+        self.prs = prs or {self.pr["number"]: self.pr}
 
     def get_pr(self, number: int) -> dict[str, Any]:
-        return self.pr
+        try:
+            return self.prs[number]
+        except KeyError as error:
+            raise ApiError(404, "Not found") from error
 
     def get_permission(self, actor: str) -> str:
         return self.permissions.get(actor, self.permission)
+
+    def list_pulls_for_commit(self, commit: str) -> list[dict[str, Any]]:
+        return self.pulls_for_commit
 
     def get_review_decision(self, number: int) -> str:
         return self.review_decision
@@ -269,11 +283,17 @@ class RunCiCommandTest(unittest.TestCase):
 
     def test_only_exact_ci_commands_are_accepted(self) -> None:
         self.assertEqual(parse_command(COMMAND_RUN_CI), COMMAND_RUN_CI)
+        self.assertEqual(parse_command(COMMAND_RUN_CI_ALL), COMMAND_RUN_CI_ALL)
+        self.assertEqual(
+            parse_command(COMMAND_RUN_CI_NIGHTLY),
+            COMMAND_RUN_CI_NIGHTLY,
+        )
         self.assertEqual(
             parse_command(COMMAND_RETRY_FAILED),
             COMMAND_RETRY_FAILED,
         )
         self.assertIsNone(parse_command("/ci run please"))
+        self.assertIsNone(parse_command("/ci run all please"))
         self.assertIsNone(parse_command(" /ci run"))
 
     def test_write_access_authorizes_reviewers_and_authors(self) -> None:
@@ -435,6 +455,28 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(github.comments[0].startswith("✅ "))
         self.assertIn("Buildkite CI #123", github.comments[0])
 
+    def test_run_all_sets_buildkite_environment(self) -> None:
+        github = FakeGitHub()
+        buildkite = FakeBuildkite([[], []])
+
+        run(make_event(COMMAND_RUN_CI_ALL), github, buildkite)
+
+        payload = buildkite.created_builds[0]
+        self.assertEqual(payload["message"], "PR #42 /ci run all by @reviewer")
+        self.assertEqual(payload["env"]["RUN_ALL"], "1")
+        self.assertNotIn("NIGHTLY", payload["env"])
+
+    def test_run_nightly_sets_buildkite_environment(self) -> None:
+        github = FakeGitHub()
+        buildkite = FakeBuildkite([[], []])
+
+        run(make_event(COMMAND_RUN_CI_NIGHTLY), github, buildkite)
+
+        payload = buildkite.created_builds[0]
+        self.assertEqual(payload["message"], "PR #42 /ci run nightly by @reviewer")
+        self.assertEqual(payload["env"]["RUN_ALL"], "1")
+        self.assertEqual(payload["env"]["NIGHTLY"], "1")
+
     def test_unapproved_authors_are_denied_without_buildkite(self) -> None:
         github = FakeGitHub(
             permission="read",
@@ -485,12 +527,17 @@ class RunCiCommandTest(unittest.TestCase):
         notify_authorized(event, github)
 
         self.assertEqual(len(github.comments), 1)
-        self.assertTrue(github.comments[0].startswith("✅ @author"))
-        self.assertIn("`/ci run`", github.comments[0])
-        self.assertIn("`/ci retry`", github.comments[0])
-        self.assertIn(CI_AUTHORIZED_COMMENT_MARKER, github.comments[0])
+        comment = github.comments[0]
+        self.assertTrue(comment.startswith("✅ @author"))
+        self.assertIn("`/ci run` starts a CI build", comment)
+        self.assertIn("`/ci retry` retries failed jobs", comment)
+        self.assertIn("CI build for the current PR head", comment)
+        self.assertIn("only jobs that failed in the latest earlier CI build", comment)
+        self.assertNotIn(COMMAND_RUN_CI_ALL, comment)
+        self.assertNotIn(COMMAND_RUN_CI_NIGHTLY, comment)
+        self.assertIn(CI_AUTHORIZED_COMMENT_MARKER, comment)
 
-    def test_ready_label_does_not_notify_after_trusted_approval(self) -> None:
+    def test_ready_label_notifies_after_missed_approval_notification(self) -> None:
         pr = make_pr(labels=[{"name": "ready"}])
         event = {
             "action": "labeled",
@@ -512,7 +559,8 @@ class RunCiCommandTest(unittest.TestCase):
 
         notify_authorized(event, github)
 
-        self.assertEqual(github.comments, [])
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn("@author", github.comments[0])
 
     def test_trusted_approval_notifies_author_once(self) -> None:
         event = {
@@ -537,6 +585,37 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(len(github.comments), 1)
         self.assertIn("@author", github.comments[0])
+
+    def test_workflow_run_resolves_pr_from_head_commit(self) -> None:
+        pr = make_pr()
+        github = FakeGitHub(
+            pr=pr,
+            pulls_for_commit=[{"number": pr["number"]}],
+        )
+
+        resolved = resolve_workflow_run_pr(
+            {"head_sha": pr["head"]["sha"], "pull_requests": []},
+            github,
+        )
+
+        self.assertEqual(resolved, pr)
+
+    def test_workflow_run_ignores_unrelated_pr_association(self) -> None:
+        pr = make_pr()
+        github = FakeGitHub(
+            pr=pr,
+            pulls_for_commit=[{"number": pr["number"]}],
+        )
+
+        resolved = resolve_workflow_run_pr(
+            {
+                "head_sha": pr["head"]["sha"],
+                "pull_requests": [{"number": 1}],
+            },
+            github,
+        )
+
+        self.assertEqual(resolved, pr)
 
     def test_approval_does_not_notify_when_ready_label_exists(self) -> None:
         pr = make_pr(labels=[{"name": "ready"}])

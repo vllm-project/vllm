@@ -21,6 +21,7 @@ steps:
   - vllm/config/model.py
   - vllm/model_executor
   - tests/model_executor
+  # Remove VLLM_DISABLE_COMPILE_CACHE=1 once intel/intel-xpu-backend-for-triton#7682 is fixed
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -30,4 +31,4 @@ steps:
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       export PYTHONFAULTHANDLER=1 &&
       cd tests &&
-      pytest -v -s model_executor -m "not slow_test" --ignore="model_executor/layers/test_rocm_unquantized_gemm.py" --deselect="tests/model_executor/model_loader/test_reload.py::test_kv_scale_reload"'
+      VLLM_DISABLE_COMPILE_CACHE=1 pytest -v -s model_executor -m "not slow_test" --ignore="model_executor/layers/test_rocm_unquantized_gemm.py" --deselect="tests/model_executor/model_loader/test_reload.py::test_kv_scale_reload"'

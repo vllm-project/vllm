@@ -445,23 +445,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         Args:
             vllm_config: vLLM Config
         """
-        cache_config = vllm_config.cache_config
-
-        # Disable calculate_kv_scales for hybrid models: uninitialized
-        # recurrent state corrupts scales during the calibration pass.
-        # See issue: https://github.com/vllm-project/vllm/issues/37554
-
-        if cache_config.calculate_kv_scales:
-            logger.warning(
-                "Disabling calculate_kv_scales for hybrid model '%s'. "
-                "Hybrid models with recurrent layers (GDN, Mamba, SSM) "
-                "produce unreliable KV cache scales during the "
-                "calibration pass because recurrent state is "
-                "uninitialized. Using default scale of 1.0 instead.",
-                vllm_config.model_config.model,
-            )
-            cache_config.calculate_kv_scales = False
-
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
@@ -612,10 +595,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = (
-                    "all" if model_config.supports_mamba_prefix_caching else "align"
-                )
-                logger.warning(
+                cache_config.mamba_cache_mode = "align"
+                logger.info(
                     "Mamba cache mode is set to '%s' for %s by default "
                     "when prefix caching is enabled",
                     cache_config.mamba_cache_mode,
@@ -635,13 +616,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
                 )
-            logger.info(
-                "Warning: Prefix caching in Mamba cache '%s' "
-                "mode is currently enabled. "
-                "Its support for Mamba layers is experimental. "
-                "Please report any issues you may observe.",
-                cache_config.mamba_cache_mode,
-            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.

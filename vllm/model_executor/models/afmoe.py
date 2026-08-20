@@ -47,7 +47,6 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
@@ -232,7 +231,7 @@ class AfmoeAttention(nn.Module):
 
         # Only create rotary embeddings for local attention
         if self.is_local_attention:
-            self.rotary_emb = get_rope(
+            self.rotary_emb: nn.Module | None = get_rope(
                 self.head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
@@ -408,10 +407,6 @@ class AfmoeModel(nn.Module, EagleModelMixin):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
