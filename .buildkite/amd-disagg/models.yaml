@@ -92,7 +92,7 @@ models:
       VLLM_ROCM_USE_SKINNY_GEMM: "0"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
       AITER_DISABLE_FMHA_OPUS: "1"
-    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --mm-encoder-tp-mode data --block-size 16 --attention-backend ROCM_AITER_MLA"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --mm-encoder-tp-mode data --block-size 16"
     prefill:
       tp: "--gpu-memory-utilization 0.9"
     decode:
