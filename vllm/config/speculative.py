@@ -1421,45 +1421,60 @@ class SpeculativeConfig:
                 )
 
     @property
-    def max_num_new_slots_for_drafting(self) -> int:
-        """Return the maximum additional drafting slots per request.
+    def draft_input_cost_params(self) -> tuple[bool, int]:
+        """Return ``(extend_target_batch, fixed_overhead)``.
 
-        The scheduler budget already includes one query slot per decoding request.
-        Let K be ``num_speculative_tokens``. Standard configurations require:
+        For a request with ``Q`` scheduled tokens, the number of draft input tokens is
+        ``extend_target_batch * Q + fixed_overhead``.
 
-        ==================== ============= ======== ================
-        Algorithm            Method        Parallel Additional slots
-        ==================== ============= ======== ================
-        EAGLE3               eagle3        No       0
-        P-EAGLE              eagle3        Yes      K - 1
-        DFlash               dflash        Yes      K
-        DSpark               dspark        Yes      K - 1
-        MTP                  mtp           No       0
-        N-gram               ngram         No       0
-        Draft model          draft_model   No       1
-        PARD                 draft_model   Yes      K
-        ==================== ============= ======== ================
+        ==================== =========== ======== =================== ==============
+        Algorithm            Method      Parallel Extend target batch Fixed overhead
+        ==================== =========== ======== =================== ==============
+        N-gram               ngram       No       Yes                 0
+        MTP                  mtp         No       Yes                 0
+        EAGLE3               eagle3      No       Yes                 0
+        P-EAGLE              eagle3      Yes      Yes                 K - 1
+        DFlash               dflash      Yes      No                  K + 1
+        DSpark               dspark      Yes      No                  K
+        DSpark (speculators) dspark      Yes      No                  K + 1
+        Draft model          draft_model No       Yes                 1
+        PARD                 draft_model Yes      Yes                 K
+        ==================== =========== ======== =================== ==============
+
+        ``K`` is ``num_speculative_tokens``.
         """
         num_draft_tokens = self.num_speculative_tokens
 
         if self.use_dflash():
-            # DFlash uses one bonus query followed by K mask queries.
-            return num_draft_tokens
+            # One bonus/anchor query plus K mask queries.
+            return False, num_draft_tokens + 1
+
+        if self.use_dspark():
+            # Native DSpark uses K queries when the anchor predicts token 0.
+            # Speculators-format checkpoints retain DFlash's bonus-anchor layout and
+            # therefore need K + 1 queries.
+            hf_config = (
+                self.draft_model_config.hf_config
+                if self.draft_model_config is not None
+                else None
+            )
+            sample_from_anchor = getattr(hf_config, "sample_from_anchor", True)
+            return False, num_draft_tokens + int(not sample_from_anchor)
 
         if self.parallel_drafting:
             if self.uses_draft_model():
                 # PARD does not shift the existing input, so all K query
                 # positions require additional slots.
-                return num_draft_tokens
+                return True, num_draft_tokens
 
             # The existing query is reused; only masked queries need new slots.
-            return num_draft_tokens - 1
+            return True, num_draft_tokens - 1
 
         if self.uses_draft_model():
             # The autoregressive draft-model input retains one unsliced token.
-            return 1
+            return True, 1
 
-        return 0
+        return True, 0
 
     def use_gemma4_mtp(self) -> bool:
         return (

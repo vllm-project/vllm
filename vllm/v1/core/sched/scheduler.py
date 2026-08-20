@@ -255,6 +255,10 @@ class Scheduler(SchedulerInterface):
         # reserve between a chunk boundary and the prefill end.
         self.num_prefill_lookahead = 0
         self.dynamic_sd_lookup: list[int] | None = None
+        # Draft input cost per request: optionally extend the target batch,
+        # then add a fixed overhead.
+        self.draft_extend_target_batch = False
+        self.draft_fixed_overhead = 0
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
@@ -269,6 +273,10 @@ class Scheduler(SchedulerInterface):
                     if speculative_config.use_multi_module_mtp()
                     else 1
                 )
+            (
+                self.draft_extend_target_batch,
+                self.draft_fixed_overhead,
+            ) = speculative_config.draft_input_cost_params
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -473,6 +481,24 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _get_num_draft_input_tokens(self, num_target_tokens: int) -> int:
+        """Return the draft input size for one scheduled request."""
+        return (
+            self.draft_extend_target_batch * num_target_tokens
+            + self.draft_fixed_overhead
+        )
+
+    def _get_request_token_budget(
+        self, token_budget: int, draft_budget: int
+    ) -> int:
+        """Limit a request's token budget by the available draft capacity."""
+        remaining_draft_budget = draft_budget - self.draft_fixed_overhead
+        if remaining_draft_budget < 0:
+            return 0
+        if self.draft_extend_target_batch:
+            return min(token_budget, remaining_draft_budget)
+        return token_budget
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -494,9 +520,7 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
-        spec = self.vllm_config.speculative_config
-        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
-        input_budget = self.scheduler_config.max_num_batched_tokens
+        draft_budget = self.scheduler_config.max_num_batched_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
@@ -524,7 +548,10 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            if input_budget <= draft_slots:
+            request_token_budget = self._get_request_token_budget(
+                token_budget, draft_budget
+            )
+            if request_token_budget == 0:
                 break
 
             if (
@@ -562,9 +589,7 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(
-                num_new_tokens, token_budget, input_budget - draft_slots
-            )
+            num_new_tokens = min(num_new_tokens, request_token_budget)
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -660,7 +685,7 @@ class Scheduler(SchedulerInterface):
                             scheduled_running_reqs.remove(preempted_req)
                             restored = num_scheduled_tokens.pop(preempted_req_id)
                             token_budget += restored
-                            input_budget += restored + draft_slots
+                            draft_budget += self._get_num_draft_input_tokens(restored)
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
@@ -698,7 +723,7 @@ class Scheduler(SchedulerInterface):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
-            input_budget -= num_new_tokens + draft_slots
+            draft_budget -= self._get_num_draft_input_tokens(num_new_tokens)
             req_index += 1
 
             # Speculative decode related.
@@ -749,7 +774,10 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if input_budget <= draft_slots:
+                request_token_budget = self._get_request_token_budget(
+                    token_budget, draft_budget
+                )
+                if request_token_budget == 0:
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
@@ -924,7 +952,6 @@ class Scheduler(SchedulerInterface):
                     # compute to a cadence-aligned step.
                     break
                 else:
-                    request_token_budget = min(token_budget, input_budget - draft_slots)
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -1131,7 +1158,7 @@ class Scheduler(SchedulerInterface):
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
-                input_budget -= num_new_tokens + draft_slots
+                draft_budget -= self._get_num_draft_input_tokens(num_new_tokens)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:
@@ -1171,7 +1198,7 @@ class Scheduler(SchedulerInterface):
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
         assert token_budget >= 0
-        assert input_budget >= 0
+        assert draft_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
