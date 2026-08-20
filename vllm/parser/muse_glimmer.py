@@ -10,7 +10,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     FunctionCall,
 )
-from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.abstract_parser import DelegatingParser, StreamState
 from vllm.reasoning.muse_glimmer_reasoning_parser import (
     MuseGlimmerReasoningParser,
 )
@@ -36,17 +36,86 @@ class MuseGlimmerParser(DelegatingParser):
             return None
         return reasoner._response_recipient(text)
 
-    def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
-    ) -> bool:
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        """End frontend reasoning only when handing off to a tool parser.
+
+        The bare reasoning parser also treats ``to=user`` as an end marker so
+        the engine can activate a caller's structured-output grammar. The
+        composite frontend must keep parsing that channel itself to strip ATEM
+        framing and surface the answer, matching ``is_reasoning_end_streaming``.
+        """
         if not isinstance(self._reasoning_parser, MuseGlimmerReasoningParser):
-            return super().is_reasoning_end_streaming(input_ids, delta_ids)
+            return super().is_reasoning_end(input_ids)
         recipient = self._muse_recipient(input_ids)
         return self._tool_parser is not None and recipient not in (
             None,
             "self",
             "user",
         )
+
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        if not isinstance(self._reasoning_parser, MuseGlimmerReasoningParser):
+            return super().is_reasoning_end_streaming(input_ids, delta_ids)
+        if self._reasoning_parser._tool_handoff_deferred:
+            return False
+        recipient = self._muse_recipient(input_ids)
+        return self._tool_parser is not None and recipient not in (
+            None,
+            "self",
+            "user",
+        )
+
+    def finalize_generation(
+        self,
+        delta_message: DeltaMessage | None,
+        request: ChatCompletionRequest | ResponsesRequest,
+        state: StreamState,
+    ) -> DeltaMessage | None:
+        delta_message = super().finalize_generation(delta_message, request, state)
+        reasoner = self._reasoning_parser
+        if not (
+            isinstance(reasoner, MuseGlimmerReasoningParser)
+            and isinstance(self._tool_parser, MuseGlimmerToolParser)
+            and reasoner._tool_handoff_deferred
+        ):
+            return delta_message
+
+        remainder = reasoner._tool_channel_remainder(state.previous_text)
+        reasoner._tool_handoff_deferred = False
+        reasoner._tool_handoff_done = True
+        if not remainder:
+            return delta_message
+
+        tool_delta, state.function_name_returned = self._extract_tool_calls_streaming(
+            previous_text="",
+            current_text=remainder,
+            delta_text=remainder,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+            tool_call_idx=state.history_tool_call_cnt,
+            tool_call_id_type=state.tool_call_id_type,
+            function_name_returned=state.function_name_returned,
+        )
+        self._append_unstreamed_tool_args(tool_delta)
+        if tool_delta is None:
+            return delta_message
+        if delta_message is None:
+            return tool_delta
+        delta_message.reasoning = (delta_message.reasoning or "") + (
+            tool_delta.reasoning or ""
+        ) or None
+        delta_message.content = (delta_message.content or "") + (
+            tool_delta.content or ""
+        ) or None
+        if tool_delta.tool_calls:
+            delta_message.tool_calls = (delta_message.tool_calls or []) + list(
+                tool_delta.tool_calls
+            )
+        return delta_message
 
     def extract_reasoning_streaming(
         self,

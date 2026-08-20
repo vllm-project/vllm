@@ -32,8 +32,14 @@ _REASONING_OPEN = "to=self<|message|>"
 _ASSISTANT_TURN_OPEN = "<|start|>assistant"
 # A channel header: ``to=<recipient><|message|>`` where recipient is ``self``
 # (reasoning), ``user`` (final answer) or ``<tool>[.<fn>]`` (tool call).
-_CHANNEL_HEADER_RE = re.compile(r"to=(?P<recipient>[^\s<]+)<\|message\|>")
-_HEADER_PAT = r"to=[^\s<]+<\|message\|>"
+_CHANNEL_HEADER_RE = re.compile(
+    r"(?:<\|start\|>assistant\s*)?to=(?P<recipient>[^\s<]+)<\|message\|>"
+)
+_FRAMED_TOOL_HEADER_PAT = (
+    r"<\|start\|>assistant\s+to=(?!(?:self|user)<\|message\|>)"
+    r"[^\s<]+<\|message\|>"
+)
+_FRAMED_TOOL_HEADER_RE = re.compile(_FRAMED_TOOL_HEADER_PAT)
 # Collapse the gap between reasoning blocks so multiple to=self spans join.
 _COLLAPSE_RE = re.compile(
     r"<\|eom\|>(?:(?!to=self<\|message\|>).)*?to=self<\|message\|>", re.DOTALL
@@ -46,26 +52,20 @@ _CONTENT_RE = re.compile(
 _STRIP_REASONING_RE = re.compile(
     r"(?:<\|start\|>assistant\s*)?to=self<\|message\|>.*?<\|eom\|>", re.DOTALL
 )
-# An UNTERMINATED trailing reasoning span. The model sometimes leaves the
-# analysis channel WITHOUT emitting <|eom|>, writing a bare
-# ``to=<tool><|message|>`` header instead (observed deterministically for a call
-# with EMPTY arguments on a tool that has optional parameters; reproduced on
-# other engines too, so it is a model-side defect, not engine-specific).
-#
-# These two patterns MUST therefore stop at the next channel header rather than
-# running to end-of-text. An unbounded ``...$`` version consumes the real tool
-# call along with the reasoning: `is_reasoning_end` then never fires, the parser
-# never leaves the reasoning phase, the tool parser is never invoked, and the
-# entire generation is dropped (empty reasoning, empty content, no tool call).
+# An UNTERMINATED trailing reasoning span. A bare ``to=<tool><|message|>`` is
+# ambiguous with quoted reasoning text, so only a fully framed assistant tool
+# message may end the span. Malformed bare tool switches are intentionally
+# dropped rather than promoted into calls the model may not have intended.
 _STRIP_OPEN_REASONING_RE = re.compile(
     r"(?:<\|start\|>assistant\s*)?to=self<\|message\|>"
-    r"(?:(?!<\|eom\|>)(?!" + _HEADER_PAT + r").)*"
-    r"(?=" + _HEADER_PAT + r"|$)",
+    r"(?:(?!<\|eom\|>)(?!" + _FRAMED_TOOL_HEADER_PAT + r").)*"
+    r"(?=" + _FRAMED_TOOL_HEADER_PAT + r"|$)",
     re.DOTALL,
 )
 _OPEN_REASONING_RE = re.compile(
-    r"to=self<\|message\|>((?:(?!<\|eom\|>)(?!" + _HEADER_PAT + r").)*)"
-    r"(?=" + _HEADER_PAT + r"|$)",
+    r"to=self<\|message\|>"
+    r"((?:(?!<\|eom\|>)(?!" + _FRAMED_TOOL_HEADER_PAT + r").)*)"
+    r"(?=" + _FRAMED_TOOL_HEADER_PAT + r"|$)",
     re.DOTALL,
 )
 # Markers whose PREFIX could appear at the tail of an OPEN (still-streaming) body.
@@ -122,6 +122,8 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         self._emitted_reasoning: str = ""
         self._emitted_content: str = ""
         self._tool_handoff_done: bool = False
+        self._tool_handoff_deferred: bool = False
+        self._initial_recipient: str | None = None
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -131,11 +133,18 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         vLLM's serving default is ``skip_special_tokens=True``, which strips
         ``<|start|>`` / ``<|message|>`` / ``<|eom|>`` / ``<|eot|>`` before the
         parsers run, collapsing reasoning into content and breaking channel
-        scoping. ``structured_outputs`` is deliberately left alone so a caller's
-        ``response_format`` still reaches the grammar backend, which applies it
-        once ``is_reasoning_end`` fires.
+        scoping. When tools are active, caller-provided output constraints are
+        cleared because the engine would otherwise apply the answer schema to
+        MuseGlimmer's ATEM tool channel.
         """
         request.skip_special_tokens = False
+        if request.tools and request.tool_choice != "none":
+            request.structured_outputs = None
+            if isinstance(request, ResponsesRequest):
+                if request.text is not None and request.text.format is not None:
+                    request.text = None
+            else:
+                request.response_format = None
         return request
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
@@ -162,6 +171,16 @@ class MuseGlimmerReasoningParser(ReasoningParser):
     ) -> bool:
         return self.is_reasoning_end(list(input_ids))
 
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """Continue classifying text in the prompt's open ATEM channel."""
+        try:
+            text = self.model_tokenizer.decode(prompt_token_ids)
+        except Exception:
+            return
+        recipients = _CHANNEL_HEADER_RE.findall(_current_assistant_turn(text))
+        if recipients:
+            self._initial_recipient = recipients[-1]
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # Content-id slicing is unreliable for multi-token markers; the serving
         # path uses extract_reasoning() for the final split.
@@ -186,10 +205,9 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         the first header would pin the turn to ``user`` for good and strand the
         tool call.
 
-        A ``to=user`` header inside a still-open reasoning span (no ``<|eom|>``
-        yet) counts as reasoning text, because the model sometimes writes one as
-        an example mid-thought. Tool headers are not held back that way -- the
-        model legitimately opens a tool channel without closing reasoning first.
+        Headers quoted inside a still-open reasoning span count as reasoning
+        text. Only a fully framed assistant tool message can switch away from
+        unterminated reasoning.
         """
         current_turn = _current_assistant_turn(text)
         without_closed_reasoning = _STRIP_REASONING_RE.sub("", current_turn)
@@ -220,13 +238,14 @@ class MuseGlimmerReasoningParser(ReasoningParser):
                 return scoped[match.start() :]
         return ""
 
-    @staticmethod
-    def _classify_bodies(text: str) -> tuple[str, str]:
+    def _classify_bodies(self, text: str) -> tuple[str, str]:
         """Split ``text`` into (reasoning_body, content_body), channel-aware.
         Framing markers and tool channels contribute nothing -- the tool parser
-        owns those. A body ends at ``<|eom|>`` / ``<|eot|>``, at the next channel
-        header, or at end-of-text (an OPEN body, which is held back).
+        owns those. A body ends at ``<|eom|>`` / ``<|eot|>``, at a valid channel
+        boundary, or at end-of-text (an OPEN body, which is held back).
         """
+        if self._initial_recipient is not None:
+            text = f"to={self._initial_recipient}<|message|>{text}"
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
         pos = 0
@@ -240,7 +259,11 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             eom = text.find(_EOM, body_start)
             eot = text.find(_EOT, body_start)
             terminators = [p for p in (eom, eot) if p != -1]
-            next_header = _CHANNEL_HEADER_RE.search(text, body_start)
+            next_header = (
+                _FRAMED_TOOL_HEADER_RE.search(text, body_start)
+                if recipient == "self"
+                else _CHANNEL_HEADER_RE.search(text, body_start)
+            )
             if next_header is not None:
                 terminators.append(next_header.start())
             body_end = min(terminators) if terminators else n
@@ -285,9 +308,8 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         matches = _REASONING_RE.findall(collapsed)
         reasoning = "\n".join(matches) if matches else None
         # Truncation fallback: generation stopped inside a to=self block, so
-        # there is no closing <|eom|>. Bounded at the next channel header so a
-        # real tool call that follows a header-less channel switch is not
-        # absorbed into the reasoning field.
+        # there is no closing <|eom|>. A fully framed tool call still bounds the
+        # partial reasoning so it can be forwarded to the tool parser.
         open_match = _OPEN_REASONING_RE.search(model_output)
         if open_match and open_match.group(1):
             partial = open_match.group(1)
@@ -341,13 +363,21 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         # ``to=<tool><|message|>`` header onward) to the tool parser, exactly
         # once. This fires on the delta ``is_reasoning_end`` flips, so the header
         # becomes the tool parser's opening context instead of visible content.
-        # ``to=user`` answers yield no remainder -- this parser streams them.
+        # If that delta also completes visible answer text, emit the answer first
+        # and defer the handoff one delta. ``to=user`` answers yield no remainder.
         handoff = ""
         if not self._tool_handoff_done:
             remainder = self._tool_channel_remainder(current_text)
             if remainder:
-                handoff = remainder
-                self._tool_handoff_done = True
+                if self._tool_handoff_deferred:
+                    handoff = remainder
+                    self._tool_handoff_done = True
+                    self._tool_handoff_deferred = False
+                elif content_delta:
+                    self._tool_handoff_deferred = True
+                else:
+                    handoff = remainder
+                    self._tool_handoff_done = True
         if handoff:
             return DeltaMessage(reasoning=reasoning_delta or None, content=handoff)
         if reasoning_delta and content_delta:
