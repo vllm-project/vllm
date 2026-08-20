@@ -780,7 +780,8 @@ class GemmRsAr:
         )
 
     def should_run(self, x: torch.Tensor) -> bool:
-        # Small-M shapes are supported but faster on the existing LL path.
+        # Use the same threshold for RS and AR for now. Small-M shapes are
+        # supported but faster on the existing LL path.
         return x.shape[0] >= 128
 
     def __call__(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:

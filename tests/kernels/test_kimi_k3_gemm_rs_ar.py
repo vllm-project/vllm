@@ -181,7 +181,6 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
     # This module pulls in cute_dsl, which is unavailable off CUDA, so importing
     # it at module level would fail collection. Import it where it is used, as
     # `kda.py` does.
-    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import GemmRS
 
     device = torch.device("cuda", local_rank)
     torch.accelerator.set_device_index(device)

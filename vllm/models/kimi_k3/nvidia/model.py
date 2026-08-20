@@ -194,7 +194,12 @@ def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) 
             all_reduce=all_reduce,
         )
     except RuntimeError as e:
-        logger.warning_once("%s is disabled because initialization failed: %s", mode, e)
+        logger.warning_once(
+            "%s is disabled because initialization failed: %s. This may mean "
+            "the TP ranks do not share one NVLink domain.",
+            mode,
+            e,
+        )
         return False
     if all_reduce:
         logger.info_once(

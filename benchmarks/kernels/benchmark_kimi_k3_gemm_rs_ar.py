@@ -398,7 +398,7 @@ def print_results(results: list[dict[str, float | int | str]]) -> None:
 
 def main() -> None:
     args = parse_args()
-    assert args.m and min(args.m) >= 128
+    assert args.m and min(args.m) > 0
     assert args.n % 256 == 0
     assert args.num_workspaces > 0
     assert args.warmup_replays >= 0
