@@ -181,6 +181,8 @@ class _SM90State:
         self.device = device
         self.num_heads = num_heads
         self.kv_dtype = kv_dtype
+        self.max_tokens = max_tokens
+        self.topk_width = topk_width
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.sm_scale = sm_scale
@@ -205,9 +207,22 @@ class _SM90State:
 
     def plan(self, num_tokens: int, topk_width: int) -> None:
         """Plan outside graph capture; CPU indptrs keep plan() sync-free."""
+        # Callers disagree on topk_width: the builder passes
+        # metadata.topk_tokens (index_topk) while forward_mqa passes the
+        # topk buffer's actual row width (kpool-widened). kv_indices rows
+        # are always spaced by the buffer width, so normalize to it —
+        # otherwise the two call sites never share the planned_shape cache
+        # (forcing a replan inside CUDA graph capture) and the schedule is
+        # built with the wrong row stride.
+        topk_width = self.topk_width
         if self.planned_shape == (num_tokens, topk_width):
             return
-        qo = torch.arange(num_tokens + 1, dtype=torch.int32)
+        # use_cuda_graph=True makes the wrapper copy qo/kv indptr into its
+        # fixed (max_tokens+1)-sized buffers with exact-size copy_, so the
+        # indptr must always be full-size. Rows past num_tokens are padded
+        # empty (qo_indptr flat at num_tokens) — zero-query rows read no q
+        # and schedule no work.
+        qo = torch.arange(self.max_tokens + 1, dtype=torch.int32).clamp_(max=num_tokens)
         kv = qo * topk_width
         self.wrapper.plan(
             qo.to(self.device),
