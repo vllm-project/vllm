@@ -127,6 +127,9 @@ pub struct EngineCoreRequest {
     /// Stable session identity shared by related requests.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// OTel GenAI operation name for Prometheus latency histogram labels.
+    #[serde(default)]
+    pub operation_name: Option<String>,
 }
 
 impl EngineCoreRequest {
