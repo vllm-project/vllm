@@ -141,12 +141,14 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert vllm_config.kv_transfer_config is not None
         assert kv_cache_config is not None, "kv_cache_config is required"
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        save_decode_cache = extra_config.get("save_decode_cache", False)
         # Capacity-only: contributes its segment to the store pool but transfers
         # no KV, so the KV-cache-shape invariants below cannot be reached.
-        self._capacity_only = self.kv_role == "kv_consumer" and not (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "enable_lookup", True
-            )
+        self._capacity_only = (
+            self.kv_role == "kv_consumer"
+            and not extra_config.get("enable_lookup", True)
+            and not save_decode_cache
         )
         if not self._capacity_only:
             self._validate_kv_cache_config(vllm_config, kv_cache_config)
