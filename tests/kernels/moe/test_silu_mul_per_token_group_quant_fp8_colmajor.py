@@ -13,6 +13,7 @@ from vllm.triton_utils import triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE = current_platform.device_type
 FLOAT8_DTYPE = torch.float8_e4m3fn
 GROUP_SIZE = 128
 
@@ -61,7 +62,7 @@ def reference_quant(x: torch.Tensor, use_ue8m0: bool):
 
 def reference(x: torch.Tensor, use_ue8m0: bool) -> tuple[torch.Tensor, torch.Tensor]:
     T, N = x.size()
-    ref_act_out = torch.empty((T, N // 2), dtype=torch.bfloat16, device="cuda")
+    ref_act_out = torch.empty((T, N // 2), dtype=torch.bfloat16, device=DEVICE)
     torch.ops._C.silu_and_mul(ref_act_out, x)
     return reference_quant(ref_act_out, use_ue8m0)
 
@@ -93,7 +94,7 @@ def reference_with_clamp(
 def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
     set_random_seed(42)
 
-    input = torch.rand((T, N), dtype=torch.bfloat16, device="cuda")
+    input = torch.rand((T, N), dtype=torch.bfloat16, device=DEVICE)
 
     use_ue8m0 = is_deep_gemm_e8m0_used()
 
@@ -122,7 +123,7 @@ def test_silu_mul_fp8_quant_deep_gemm_clamp(T: int, N: int, clamp_limit: float):
     # Use a wide distribution so values routinely exceed both clamp limits and
     # the clamp branch is actually exercised (uniform [0, 1) inputs would never
     # trigger it).
-    input = torch.randn((T, N), dtype=torch.bfloat16, device="cuda") * 8.0
+    input = torch.randn((T, N), dtype=torch.bfloat16, device=DEVICE) * 8.0
 
     use_ue8m0 = is_deep_gemm_e8m0_used()
 

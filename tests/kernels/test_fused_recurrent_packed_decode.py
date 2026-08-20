@@ -4,13 +4,20 @@
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
 )
 
+DEVICE = current_platform.device_type
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Gated delta rule Triton kernels require a CUDA-alike or XPU device.",
+)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("strided_mixed_qkv", [False, True])
 def test_fused_recurrent_packed_decode_matches_reference(
@@ -26,7 +33,7 @@ def test_fused_recurrent_packed_decode_matches_reference(
     V = 128
     qkv_dim = 2 * (H * K) + (HV * V)
 
-    device = torch.device("cuda")
+    device = torch.device(DEVICE)
 
     if strided_mixed_qkv:
         # Simulate a packed view into a larger projection buffer:
@@ -102,10 +109,9 @@ def test_fused_recurrent_packed_decode_matches_reference(
     torch.testing.assert_close(state_packed, state_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
 def test_packed_decode_supports_large_batch_head_grid():
     B, H, HV, K, V = 1024, 8, 64, 1, 1
-    device = torch.device("cuda")
+    device = torch.device(DEVICE)
     gates = torch.empty((B, HV), device=device)
     params = torch.empty((HV,), device=device)
     out = torch.empty((B, 1, HV, V), device=device)

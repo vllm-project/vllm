@@ -37,9 +37,10 @@ from vllm.triton_utils.allocation import set_triton_allocator
 
 
 def _is_capturing_or_compiling() -> bool:
-    # torch.cuda.is_current_stream_capturing() is unavailable on non-CUDA (XPU) torch.
-    return torch.compiler.is_compiling() or (
-        current_platform.is_cuda_alike() and torch.cuda.is_current_stream_capturing()
+    # The accelerator API dispatches to the active backend.
+    return (
+        torch.compiler.is_compiling()
+        or torch.accelerator.current_stream().is_capturing()
     )
 
 
