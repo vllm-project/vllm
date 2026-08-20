@@ -27,6 +27,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.utils.import_utils import has_humming
 
+# make_humming_moe_quant_config stores per-sublayer humming LayerConfigs but the
+# config-plumbing asserts below never read them, so a placeholder satisfies the
+# required arg without pulling in the humming package.
+_PLACEHOLDER_HUMMING_CONFIGS = {"w13": None, "w2": None}
+
 
 def test_mxfp4_weight_with_block_fp8_activation_is_supported():
     """MXFP4 weight + block-FP8 (group-128) activation is an allowed pair."""
@@ -91,6 +96,7 @@ def test_block_fp8_activation_quant_config_is_block_quantized():
         quant_dtype=current_platform.fp8_dtype(),
         weight_dtype="float4e2m1",
         activation_group_shape=GroupShape(row=1, col=128),
+        humming_configs=_PLACEHOLDER_HUMMING_CONFIGS,
     )
     assert qc.is_block_quantized
     assert qc.block_shape == [1, 128]
@@ -110,6 +116,7 @@ def test_default_activation_quant_config_defers_to_humming():
     qc = make_humming_moe_quant_config(
         quant_dtype=current_platform.fp8_dtype(),
         weight_dtype="float4e2m1",
+        humming_configs=_PLACEHOLDER_HUMMING_CONFIGS,
     )
     assert not qc.is_block_quantized
     assert qc.per_act_token_quant
