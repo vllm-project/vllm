@@ -738,18 +738,19 @@ def test_per_tensor_fp8_shared_expert_fse_is_incompatible() -> None:
     )
 
 
-def test_mxfp4_store_dtype_fp8_shared_expert_fse_is_incompatible() -> None:
-    """Routed experts become MXFP4 while the shared-expert linears stay FP8."""
+@pytest.mark.parametrize("store_dtype", ["mxfp4", "nvfp4"])
+def test_store_dtype_fp8_shared_expert_fse_is_incompatible(store_dtype: str) -> None:
+    """Any routed-expert storage override rules out fusing the shared expert."""
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        _fp8_config(store_dtype="mxfp4"),
+        _fp8_config(store_dtype=store_dtype),
         "model.layers.0.mlp.experts",
         "model.layers.0.mlp.shared_experts",
     )
 
     assert not compatible
     assert reason == (
-        "FP8 stores routed experts as MXFP4 while shared experts at "
-        "model.layers.0.mlp.shared_experts remain FP8"
+        f"FP8 stores routed experts as {store_dtype}, which is not supported "
+        "for fused shared experts at model.layers.0.mlp.shared_experts"
     )
 
 

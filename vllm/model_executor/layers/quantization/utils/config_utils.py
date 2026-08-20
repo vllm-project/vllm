@@ -149,11 +149,12 @@ def is_shared_expert_quant_fse_compatible(
         )
 
     if isinstance(quant_config, Fp8Config):
-        if quant_config.store_dtype == "mxfp4":
+        if quant_config.store_dtype is not None:
             return (
                 False,
-                "FP8 stores routed experts as MXFP4 while shared experts at "
-                f"{shared_expert_prefix} remain FP8",
+                f"FP8 stores routed experts as {quant_config.store_dtype}, which "
+                f"is not supported for fused shared experts at "
+                f"{shared_expert_prefix}",
             )
 
         # Serialized per-tensor checkpoints store 0-D or size-1 scales, which
