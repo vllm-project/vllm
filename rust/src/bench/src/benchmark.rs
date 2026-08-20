@@ -134,6 +134,17 @@ pub(crate) async fn fetch_spec_decode_metrics(
         Err(_) => return None,
     };
 
+    parse_spec_decode_metrics(&text)
+}
+
+/// Parse spec decode counters from Prometheus text exposition format.
+///
+/// Matches on the metric name (the part before any labels) rather than the
+/// whole line so label values cannot be mistaken for metric names, and only
+/// reads `_total` counter samples — skipping e.g. `_created` timestamp series,
+/// which would otherwise be summed into the counts (mirrors the Python fix
+/// in vllm#41916).
+pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics> {
     let mut num_drafts: u64 = 0;
     let mut num_draft_tokens: u64 = 0;
     let mut num_accepted_tokens: u64 = 0;
@@ -145,24 +156,25 @@ pub(crate) async fn fetch_spec_decode_metrics(
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if !line.starts_with("vllm:spec_decode") {
+        let first_token = match line.split_whitespace().next() {
+            Some(t) => t,
+            None => continue,
+        };
+        let metric_name = first_token.split('{').next().unwrap_or(first_token);
+        if !metric_name.starts_with("vllm:spec_decode") || !metric_name.ends_with("_total") {
             continue;
         }
         found_spec_decode = true;
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-        let val = match parts.last().and_then(|s| s.parse::<f64>().ok()) {
+        let val = match line.split_whitespace().last().and_then(|s| s.parse::<f64>().ok()) {
             Some(v) => v as u64,
             None => continue,
         };
 
-        if line.contains("num_drafts") {
+        if metric_name.contains("num_drafts") {
             num_drafts += val;
-        } else if line.contains("num_draft_tokens") {
+        } else if metric_name.contains("num_draft_tokens") {
             num_draft_tokens += val;
-        } else if line.contains("num_accepted_tokens_per_pos") {
+        } else if metric_name.contains("num_accepted_tokens_per_pos") {
             // Parse position label: position="N"
             if let Some(start) = line.find("position=\"") {
                 let start = start + "position=\"".len();
@@ -172,7 +184,7 @@ pub(crate) async fn fetch_spec_decode_metrics(
                     *accepted_per_pos.entry(pos).or_insert(0) += val;
                 }
             }
-        } else if line.contains("num_accepted_tokens") {
+        } else if metric_name.contains("num_accepted_tokens") {
             num_accepted_tokens += val;
         }
     }
@@ -502,12 +514,11 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     downloaded.as_str()
                 }
             };
-            let output_len = config.sharegpt_output_len.unwrap_or(config.random_output_len);
             crate::datasets::speed_bench::load_speed_bench_dataset(
                 tok,
                 path,
                 config.num_prompts,
-                output_len,
+                config.speed_bench_output_len,
                 config.seed,
                 &config.request_id_prefix,
                 config.speed_bench_category.as_deref(),
@@ -1873,6 +1884,52 @@ mod tests {
             num_accepted_tokens: accepted_tokens,
             accepted_per_pos: per_pos.iter().copied().collect(),
         }
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_sums_counters_across_engines() {
+        let text = "\
+# TYPE vllm:spec_decode_num_drafts_total counter
+vllm:spec_decode_num_drafts_total{model_name=\"m\",engine=\"0\"} 100.0
+vllm:spec_decode_num_drafts_total{model_name=\"m\",engine=\"1\"} 50.0
+vllm:spec_decode_num_draft_tokens_total{model_name=\"m\",engine=\"0\"} 700.0
+vllm:spec_decode_num_accepted_tokens_total{model_name=\"m\",engine=\"0\"} 300.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"0\",engine=\"0\"} 80.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"1\",engine=\"0\"} 40.0
+vllm:num_requests_running{model_name=\"m\"} 0
+";
+        let m = parse_spec_decode_metrics(text).unwrap();
+        assert_eq!(m.num_drafts, 150);
+        assert_eq!(m.num_draft_tokens, 700);
+        assert_eq!(m.num_accepted_tokens, 300);
+        assert_eq!(m.accepted_per_pos, [(0, 80), (1, 40)].into_iter().collect());
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_skips_created_series_and_label_values() {
+        // `_created` timestamps must not be summed into counters, and metric
+        // matching must key off the metric name, not substrings inside label
+        // values (vllm#41916).
+        let text = "\
+vllm:spec_decode_num_drafts_total{model_name=\"m\"} 100.0
+vllm:spec_decode_num_drafts_created{model_name=\"m\"} 1.7863e+09
+vllm:spec_decode_num_draft_tokens_total{model_name=\"m\"} 700.0
+vllm:spec_decode_num_draft_tokens_created{model_name=\"m\"} 1.7863e+09
+vllm:spec_decode_num_accepted_tokens_total{model_name=\"num_drafts\"} 300.0
+";
+        let m = parse_spec_decode_metrics(text).unwrap();
+        assert_eq!(m.num_drafts, 100);
+        assert_eq!(m.num_draft_tokens, 700);
+        assert_eq!(m.num_accepted_tokens, 300);
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_none_without_spec_metrics() {
+        let text = "\
+vllm:num_requests_running{model_name=\"m\"} 0
+vllm:prefix_cache_queries_total{model_name=\"m\"} 0
+";
+        assert!(parse_spec_decode_metrics(text).is_none());
     }
 
     #[test]

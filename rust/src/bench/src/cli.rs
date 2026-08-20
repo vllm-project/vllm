@@ -176,7 +176,8 @@ pub struct BenchServeArgs {
     #[arg(long)]
     pub tokenizer: Option<String>,
 
-    /// Tokenizer mode (auto, hf, slow, mistral).
+    /// Tokenizer mode (auto, hf, slow, mistral). Accepted for Python CLI
+    /// compatibility; non-auto values are ignored with a warning.
     #[arg(long, default_value = "auto")]
     pub tokenizer_mode: String,
 
@@ -535,8 +536,16 @@ pub struct BenchServeArgs {
 
     /// SPEED-Bench config/split (qualitative, throughput_1k, throughput_2k, throughput_8k,
     /// throughput_16k, throughput_32k).
-    #[arg(long, default_value = "qualitative")]
+    #[arg(
+        long,
+        visible_alias = "speed-bench-dataset-subset",
+        default_value = "qualitative"
+    )]
     pub speed_bench_config: SpeedBenchConfig,
+
+    /// Number of output tokens per request (SPEED-Bench dataset).
+    #[arg(long, default_value_t = 4096)]
+    pub speed_bench_output_len: usize,
 
     /// Filter SPEED-Bench by category (e.g. low_entropy, high_entropy, coding, math).
     #[arg(long)]
