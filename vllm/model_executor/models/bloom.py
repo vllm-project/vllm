@@ -107,6 +107,7 @@ class BloomAttention(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.query_key_value",
+            fused_qkv_interleaved=True,
         )
         self.dense = RowParallelLinear(
             self.hidden_size,
@@ -294,24 +295,6 @@ class BloomModel(nn.Module):
             return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
-
-    def _repack_qkv(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        # BLOOM's fused QKV is laid out as (num_heads * 3 * head_size) on its
-        # output dim (0), while vLLM expects (3 * num_heads * head_size).
-        num_heads = self.config.num_attention_heads
-        for name, loaded_weight in weights:
-            if "query_key_value" in name:
-                shape = loaded_weight.shape
-                loaded_weight = loaded_weight.view((num_heads, 3, -1) + shape[1:])
-                loaded_weight = loaded_weight.transpose(0, 1)
-                loaded_weight = loaded_weight.reshape(shape)
-            yield name, loaded_weight
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(self._repack_qkv(weights))
 
 
 class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
