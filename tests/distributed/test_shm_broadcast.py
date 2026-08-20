@@ -791,9 +791,7 @@ def test_remote_subscribe_addr_unique_concurrent_writers(
 def _make_arena(n_reader: int = 2, slot_bytes: int = 4 << 20, n_slots: int = 3):
     """Writer arena plus attached per-reader arenas (same process)."""
     writer = ShmTensorArena(n_reader, slot_bytes, n_slots)
-    readers = [
-        ShmTensorArena(*writer.handle(), reader_rank=i) for i in range(n_reader)
-    ]
+    readers = [ShmTensorArena(*writer.handle(), reader_rank=i) for i in range(n_reader)]
     return writer, readers
 
 
@@ -907,9 +905,7 @@ def test_arena_pickler_composes(monkeypatch):
     # "big" is a zero-copy view of the reader's slot; "small" is not.
     (idx,) = reader._pending_release
     nbytes = big.numel() * big.element_size()
-    slot_ptr = torch.frombuffer(
-        reader._slot(idx, nbytes), dtype=torch.uint8
-    ).data_ptr()
+    slot_ptr = torch.frombuffer(reader._slot(idx, nbytes), dtype=torch.uint8).data_ptr()
     assert out["big"].data_ptr() == slot_ptr
     assert out["small"].data_ptr() != slot_ptr
     del out

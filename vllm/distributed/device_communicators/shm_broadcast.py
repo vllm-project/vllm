@@ -762,8 +762,7 @@ class _ArenaPickler(pickle.Pickler):
             and obj.device.type == "cpu"
             and obj.layout == torch.strided
             and obj.is_contiguous()
-            and obj.numel() * obj.element_size()
-            >= _ARENA_MIN_BYTES
+            and obj.numel() * obj.element_size() >= _ARENA_MIN_BYTES
         ):
             idx = self.arena.write_tensor(obj)
             if idx is not None:
