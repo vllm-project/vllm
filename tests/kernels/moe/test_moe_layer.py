@@ -1775,17 +1775,12 @@ def _parallel_worker(
             local_failed = True
             local_error = traceback.format_exc()
         finally:
-            # DeepEP buffers are not entirely reusable on B200. Clear the
-            # all2all manager cache after each testpoint there. In particular,
-            # do not do this on ROCm: rocSHMEM cannot reinitialize the allocator
-            # after destroying a DeepEP buffer in the same process.
-            cap = current_platform.get_device_capability()
-            if (
-                current_platform.is_cuda()
-                and cap is not None
-                and cap.major == 10
-                and test_config.backend in DEEPEP_BACKENDS
-            ):
+            # DeepEP managers are not reliably reusable across many subtests in
+            # a single worker process. Tear them down after each DeepEP case so
+            # later subtests do not inherit stale communication state. Skip this
+            # on ROCm: rocSHMEM cannot reinitialize the allocator after a DeepEP
+            # buffer is destroyed in the same process.
+            if current_platform.is_cuda() and test_config.backend in DEEPEP_BACKENDS:
                 torch.accelerator.synchronize()
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
                 if all2all_manager is not None:
