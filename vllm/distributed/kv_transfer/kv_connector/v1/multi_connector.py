@@ -305,10 +305,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         """
         found: list[tuple[str, AbstractContextManager]] = []
         for connector in self._connectors:
-            get_ctx = getattr(connector, "get_mem_pool_context", None)
-            if get_ctx is None:
-                continue
-            if (ctx := get_ctx()) is not None:
+            if (ctx := connector.get_mem_pool_context()) is not None:
                 found.append((type(connector).__name__, ctx))
 
         if len(found) > 1:

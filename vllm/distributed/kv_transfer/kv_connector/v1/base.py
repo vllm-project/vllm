@@ -43,6 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -228,6 +229,13 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Worker-side methods
     # ==============================
+
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Return a custom KV cache allocation context, if configured.
+
+        Returning None uses the engine's default memory pool.
+        """
+        return None
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         """Set the connector metadata from the scheduler.
