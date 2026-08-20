@@ -131,7 +131,7 @@ def mhc_pre_tilelang(
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    from vllm.utils.deep_gemm import is_deep_gemm_supported, tf32_hc_prenorm_gemm
     from vllm.utils.math_utils import cdiv
 
     assert residual.dtype == torch.bfloat16
@@ -161,8 +161,6 @@ def mhc_pre_tilelang(
 
     residual_flat = residual.view(-1, hc_mult, hidden_size)
     num_tokens = residual_flat.shape[0]
-
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     use_deep_gemm = is_deep_gemm_supported()
     if use_deep_gemm:
@@ -320,6 +318,7 @@ def mhc_pre_broadcast_tilelang(
         compute_num_split,
         mhc_pre_big_fuse_broadcast_with_norm_tilelang,
     )
+    from vllm.utils.deep_gemm import is_deep_gemm_supported, tf32_hc_prenorm_gemm
     from vllm.utils.math_utils import cdiv
 
     assert norm_weight is not None, "broadcast mHC pre currently requires fused RMSNorm"
@@ -348,7 +347,11 @@ def mhc_pre_broadcast_tilelang(
     residual_flat = residual
     num_tokens = residual.shape[0]
 
-    n_splits = compute_num_split(64, hidden_size, cdiv(num_tokens, 64))
+    use_deep_gemm = is_deep_gemm_supported()
+    if use_deep_gemm:
+        n_splits = compute_num_split(64, hidden_size, cdiv(num_tokens, 64))
+    else:
+        n_splits = 1
 
     residual_out = torch.empty(
         num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=residual.device
@@ -369,15 +372,22 @@ def mhc_pre_broadcast_tilelang(
         n_splits, num_tokens, dtype=torch.float32, device=residual.device
     )
 
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    if use_deep_gemm:
+        tf32_hc_prenorm_gemm(
+            residual_flat,
+            fn_broadcast,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            n_splits,
+        )
+    else:
+        _torch_hc_prenorm_gemm(
+            residual_flat,
+            fn_broadcast,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+        )
 
-    tf32_hc_prenorm_gemm(
-        residual_flat,
-        fn_broadcast,
-        gemm_out_mul,
-        gemm_out_sqrsum,
-        n_splits,
-    )
     mhc_pre_big_fuse_broadcast_with_norm_tilelang(
         gemm_out_mul,
         gemm_out_sqrsum,
@@ -469,6 +479,7 @@ def mhc_fused_post_pre_tilelang(
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
+    from vllm.utils.deep_gemm import is_deep_gemm_supported, tf32_hc_prenorm_gemm
     from vllm.utils.math_utils import cdiv
 
     assert residual.dtype == torch.bfloat16
@@ -511,8 +522,6 @@ def mhc_fused_post_pre_tilelang(
     x_flat = x.view(num_tokens, hidden_size)
     post_layer_mix_flat = post_layer_mix.view(num_tokens, hc_mult)
     comb_res_mix_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
-
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     use_deep_gemm = is_deep_gemm_supported()
     use_small_fma = num_tokens <= 16
@@ -593,8 +602,6 @@ def mhc_fused_post_pre_tilelang(
 
         residual_cur_2d = residual_cur.view(num_tokens, hc_mult * hidden_size)
         if use_deep_gemm:
-            from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
-
             tf32_hc_prenorm_gemm(
                 residual_cur_2d,
                 fn,
