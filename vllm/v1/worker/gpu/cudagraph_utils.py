@@ -615,76 +615,10 @@ class ModelCudaGraphManager(CudaGraphManager):
                 for k, v in intermediate_tensors.tensors.items():
                     self.intermediate_tensors[k][:num_tokens] = v
 
-        def create_ubatch_forward_fn(
-            desc: BatchExecutionDescriptor,
-        ) -> Callable[[CUDAGraphMode], None]:
-            """DBO variant of `create_forward_fn`, for `desc.num_ubatches > 1`.
-
-            Only FULL is supported (the eager DBO path is also FULL-only via
-            `UBatchRunner.run`; PIECEWISE+DBO is out of scope). Splits a dummy
-            full batch into microbatches via the same `UBatchRunner.prepare`
-            real steps use, then starts the microbatch threads immediately
-            (outside any graph) and defers only the handoff-and-join to the
-            returned `forward_fn`, so that -- exactly like V1's
-            `gpu_ubatch_wrapper.py::_capture_ubatches` -- the two threads'
-            compute/comm stream ops are what actually gets captured, while
-            thread setup and the barrier wait stay off the captured stream.
-            """
-            assert self.ubatch_runner is not None
-            num_tokens = desc.num_tokens
-            num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
-            assert num_reqs is not None
-
-            dummy_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
-            dummy_block_tables = block_tables.get_dummy_block_tables(num_reqs)
-            dummy_slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
-            # Capture with dummy rows marked as padding.
-            input_buffers.is_padding.fill_(True)
-
-            ubatch_state = self.ubatch_runner.prepare(
-                dummy_batch,
-                dummy_block_tables,
-                dummy_slot_mappings,
-                cg_mode=CUDAGraphMode.FULL,
-                for_capture=True,
-            )
-
-            model_inputs = {
-                "input_ids": input_buffers.input_ids[:num_tokens],
-                "positions": input_buffers.positions[:num_tokens],
-                **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
-            }
-            if not self.is_first_pp_rank:
-                model_inputs["input_ids"] = None
-                model_inputs["inputs_embeds"] = None
-                assert intermediate_tensors is not None
-                model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
-
-            # Starts the microbatch threads on `ubatch_runner.capture_stream`
-            # -- the stream `capture()` opens the graph on -- and blocks until
-            # both have reached their `UBatchContext` with their CUDA and
-            # cuBLAS state initialized. Pure CPU/event synchronization, so it
-            # is safe to run before `torch.cuda.graph(...)` opens.
-            finish = self.ubatch_runner.begin_capturable_run(
-                model, model_inputs, ubatch_state, for_capture=True
-            )
-
-            def forward_fn(cg_mode: CUDAGraphMode) -> None:
-                assert cg_mode != CUDAGraphMode.PIECEWISE, (
-                    "DBO does not support PIECEWISE cudagraphs"
-                )
-                model_output = finish()
-                store_capture_output(num_tokens, model_output)
-
-            return forward_fn
-
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
         ) -> Callable[[CUDAGraphMode], None]:
-            if desc.num_ubatches > 1:
-                return create_ubatch_forward_fn(desc)
-
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
 
@@ -709,6 +643,40 @@ class ModelCudaGraphManager(CudaGraphManager):
                 model_inputs["inputs_embeds"] = None
                 assert intermediate_tensors is not None
                 model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
+
+            if desc.num_ubatches > 1:
+                # Split capture, FULL only (the eager DBO path is FULL-only
+                # too; PIECEWISE+DBO is out of scope, as in V1). Build the
+                # dummy microbatches through the same `UBatchRunner.prepare`
+                # real steps use, then start the microbatch threads now --
+                # outside any graph, on `ubatch_runner.capture_stream`, the
+                # stream `capture()` opens the graph on -- and defer only the
+                # handoff-and-join to the returned forward_fn. Exactly like
+                # V1's `gpu_ubatch_wrapper.py::_capture_ubatches`: the two
+                # threads' compute/comm stream ops are what actually gets
+                # captured, while thread setup and the barrier wait (pure
+                # CPU/event synchronization) stay off the captured stream.
+                assert self.ubatch_runner is not None
+                ubatch_state = self.ubatch_runner.prepare(
+                    InputBatch.make_dummy(num_reqs, num_tokens, input_buffers),
+                    block_tables.get_dummy_block_tables(num_reqs),
+                    block_tables.get_dummy_slot_mappings(num_tokens),
+                    cg_mode=CUDAGraphMode.FULL,
+                    for_capture=True,
+                )
+                # Capture with dummy rows marked as padding.
+                input_buffers.is_padding.fill_(True)
+                finish = self.ubatch_runner.begin_capturable_run(
+                    model, model_inputs, ubatch_state, for_capture=True
+                )
+
+                def ubatch_forward_fn(cg_mode: CUDAGraphMode) -> None:
+                    assert cg_mode != CUDAGraphMode.PIECEWISE, (
+                        "DBO does not support PIECEWISE cudagraphs"
+                    )
+                    store_capture_output(num_tokens, finish())
+
+                return ubatch_forward_fn
 
             attn_metadata, slot_mappings = prepare_inputs_to_capture(
                 num_reqs,
