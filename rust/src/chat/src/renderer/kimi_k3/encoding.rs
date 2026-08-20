@@ -63,11 +63,7 @@ impl<'a> K3TokenWriter<'a> {
 /// Render and tokenize one chat request using K3's segment-aware contract.
 pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -> Result<Vec<u32>> {
     let thinking = thinking_enabled(request)?;
-    let thinking_effort = if thinking {
-        thinking_effort(request)?
-    } else {
-        None
-    };
+    let thinking_effort = thinking.then(|| thinking_effort(request)).transpose()?;
     let tools = request_tools(request);
     let mut out = K3TokenWriter::new(tokenizer);
 
@@ -251,35 +247,40 @@ fn thinking_enabled(request: &ChatRequest) -> Result<bool> {
         != Some("none"))
 }
 
-fn thinking_effort(request: &ChatRequest) -> Result<Option<String>> {
+fn thinking_effort(request: &ChatRequest) -> Result<String> {
     let effort = if let Some(value) = request.chat_options.template_kwargs.get("thinking_effort") {
-        Some(value.as_str().ok_or_else(|| {
+        value.as_str().ok_or_else(|| {
             Error::ChatTemplate(format!(
                 "template kwarg `thinking_effort` must be a string, got {value}"
             ))
-        })?)
+        })?
     } else if let Some(effort) = request.chat_options.reasoning_effort {
-        (effort != crate::request::ReasoningEffort::None).then_some(effort.as_str())
+        if effort == crate::request::ReasoningEffort::None {
+            DEFAULT_THINKING_EFFORT
+        } else {
+            effort.as_str()
+        }
     } else if let Some(value) = request.chat_options.template_kwargs.get("reasoning_effort") {
         let effort = value.as_str().ok_or_else(|| {
             Error::ChatTemplate(format!(
                 "template kwarg `reasoning_effort` must be a string, got {value}"
             ))
         })?;
-        (effort != "none").then_some(effort)
+        if effort == "none" {
+            DEFAULT_THINKING_EFFORT
+        } else {
+            effort
+        }
     } else {
-        Some(DEFAULT_THINKING_EFFORT)
+        DEFAULT_THINKING_EFFORT
     };
 
-    let Some(effort) = effort else {
-        return Ok(None);
-    };
     if !VALID_THINKING_EFFORTS.contains(&effort) {
         return Err(Error::ChatTemplate(format!(
             "unsupported thinking_effort={effort:?}; supported values are `low`, `high`, and `max`"
         )));
     }
-    Ok(Some(effort.to_string()))
+    Ok(effort.to_string())
 }
 
 fn content_is_empty(content: &ChatContent) -> bool {

@@ -351,7 +351,7 @@ fn native_thinking_true_overrides_standard_none() {
 
     let rendered = render_request(&request);
 
-    assert!(!rendered.contains("type=\"thinking-effort\""));
+    assert!(rendered.contains("thinking_effort=max"));
     assert!(rendered.ends_with("<|open|>think<|sep|>"));
 }
 
@@ -365,7 +365,7 @@ fn enable_thinking_true_overrides_standard_none() {
 
     let rendered = render_request(&request);
 
-    assert!(!rendered.contains("type=\"thinking-effort\""));
+    assert!(rendered.contains("thinking_effort=max"));
     assert!(rendered.ends_with("<|open|>think<|sep|>"));
 }
 
