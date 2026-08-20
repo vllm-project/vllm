@@ -8,7 +8,11 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -38,13 +42,26 @@ _PA_GLUON_MAX_QUERY_GROUP_SIZE = 64
 # Query group sizes the gluon paged-attention decode kernel is validated for: 8, 16
 _PA_GLUON_QUERY_GROUP_SIZES = (8, 16)
 
-# Enable PA decode gluon when the shuffle KV cache layout is on (the kernel
-# reads K/V in that layout) and the head config is one of the above.
-ENABLE_PA_GLUON = lambda num_heads_q, num_heads_kv: (
-    rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-    and num_heads_q % num_heads_kv == 0
-    and num_heads_q // num_heads_kv in _PA_GLUON_QUERY_GROUP_SIZES
-)
+# The kernel is only validated for this head size and kernel block size.
+_PA_GLUON_HEAD_SIZE = 128
+_PA_GLUON_BLOCK_SIZE = 128
+
+
+def _pa_gluon_supports(num_heads_q: int, num_heads_kv: int, head_size: int) -> bool:
+    """Whether the head config can use the PA decode gluon kernel.
+
+    Requires the shuffle KV cache layout (the kernel reads K/V in that layout)
+    plus a head config the kernel is validated for. Both the advertised kernel
+    block sizes and the decode dispatch go through this, so a config can never
+    be offered a 128-token page that gluon will then decline to serve.
+    """
+    return (
+        rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        and num_heads_kv > 0
+        and num_heads_q % num_heads_kv == 0
+        and num_heads_q // num_heads_kv in _PA_GLUON_QUERY_GROUP_SIZES
+        and head_size == _PA_GLUON_HEAD_SIZE
+    )
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
@@ -710,12 +727,14 @@ class AiterFlashAttentionMetadataBuilder(
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
-        
+
         # Uniform-decode assumption does not hold for the
         # drafter's first forward after a target step: it inherits the target's
         # per-request query lengths, so rows can be longer than gluon's limit or
         # ragged. Those batches need the real split, which costs a sync.
-        if rocm_aiter_ops.is_shuffle_kv_cache_enabled() and (
+        # _PA_GLUON_MAX_QUERY_LEN only binds when gluon is the decode consumer,
+        # so test that rather than the shuffle layout alone.
+        if _pa_gluon_supports(self.num_heads_q, self.num_heads_kv, self.headdim) and (
             max_query_len > _PA_GLUON_MAX_QUERY_LEN
             or num_tokens != num_reqs * max_query_len
         ):
@@ -782,8 +801,21 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-            return [MultipleOf(16)]
+        if not rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            return [16, 32]
+        # Only gluon serves 128-token pages; the pa_fwd_asm/ll4mi decode
+        # fallback is limited to 16 and 32. Advertise 128 only when gluon can
+        # run so selection never picks a page we cannot serve.
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.model_config is not None:
+            mc = vllm_config.model_config
+            pc = vllm_config.parallel_config
+            if _pa_gluon_supports(
+                mc.get_num_attention_heads(pc),
+                mc.get_num_kv_heads(pc),
+                mc.get_head_size(),
+            ):
+                return [16, 32, 128]
         return [16, 32]
 
     @classmethod
@@ -1221,7 +1253,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
                 # check if we can use the gluon paged-attention decode kernel
                 use_gluon = (
-                    ENABLE_PA_GLUON(self.num_heads, self.num_kv_heads)
+                    _pa_gluon_supports(
+                        self.num_heads, self.num_kv_heads, self.head_size
+                    )
+                    and key_cache.shape[1] == _PA_GLUON_BLOCK_SIZE
                     and decode_query_len is not None
                     and decode_query_len <= _PA_GLUON_MAX_QUERY_LEN
                     and decode_query_len * (self.num_heads // self.num_kv_heads)
