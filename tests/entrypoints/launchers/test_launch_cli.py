@@ -3,6 +3,8 @@
 """Unit tests for the `vllm launch` CLI subcommand."""
 
 import argparse
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -109,3 +111,58 @@ def test_launch_registered_in_main():
     assert hasattr(launch_module, "cmd_init")
     subcmds = launch_module.cmd_init()
     assert any(s.name == "launch" for s in subcmds)
+
+
+def test_public_lazy_exports_apply_runtime_environment_once():
+    script = """
+import sys
+
+import vllm
+
+assert "torch" not in sys.modules
+vllm.RequestOutput
+override_module = sys.modules["vllm.env_override"]
+vllm.SamplingParams
+
+from torch._inductor.lowering import FALLBACK_ALLOW_LIST
+
+assert sys.modules["vllm.env_override"] is override_module
+assert "vllm::runtime_override_probe" in FALLBACK_ALLOW_LIST
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "runtime_import",
+    [
+        pytest.param("import vllm.compilation.compiler_interface", id="compilation"),
+        pytest.param("import vllm.config", id="config"),
+        pytest.param("import vllm.v1.worker.gpu_model_runner", id="v1"),
+        pytest.param("import vllm.v1.worker.gpu.model_runner", id="v2"),
+        pytest.param("import vllm\nvllm.RequestOutput", id="lazy-export"),
+    ],
+)
+def test_runtime_imports_preserve_environment_overrides(runtime_import):
+    script = f"""
+import os
+
+{runtime_import}
+from torch._inductor.lowering import FALLBACK_ALLOW_LIST
+
+assert "vllm::runtime_override_probe" in FALLBACK_ALLOW_LIST
+assert os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] == "1"
+assert os.environ["TORCHINDUCTOR_COMPILE_THREADS"] == "1"
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr

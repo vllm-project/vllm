@@ -8,10 +8,12 @@ from .version import __version__, __version_tuple__  # isort:skip
 
 import typing
 
-# The environment variables override should be imported before any other
-# modules to ensure that the environment variables are set before any
-# other modules are imported.
-import vllm.env_override  # noqa: F401
+from vllm._environment import (
+    apply_pre_torch_environment,
+    apply_runtime_environment,
+)
+
+apply_pre_torch_environment()
 
 MODULE_ATTRS = {
     "AsyncEngineArgs": ".engine.arg_utils:AsyncEngineArgs",
@@ -66,6 +68,7 @@ else:
         from importlib import import_module
 
         if name in MODULE_ATTRS:
+            apply_runtime_environment()
             module_name, attr_name = MODULE_ATTRS[name].split(":")
             module = import_module(module_name, __package__)
             return getattr(module, attr_name)
