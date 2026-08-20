@@ -119,16 +119,40 @@ class DSparkVariant(Enum):
     DEEPSEEK_V4 = "DSparkDraftModel"
 
     @classmethod
-    def from_config(cls, hf_config: PretrainedConfig) -> "DSparkVariant":
-        """Resolve the variant of a config already known to be DSpark.
+    def declared(cls, hf_config: PretrainedConfig) -> "DSparkVariant | None":
+        """The variant a config names, or None if it names no DSpark drafter.
 
-        Must be called before the DeepSeek-V4 branch rewrites `architectures`.
+        A Qwen3 DSpark draft may ship the synthesised `DSparkDraftModel` name
+        rather than its own, so that name only counts paired with `qwen3`.
         """
         declared = _architectures(hf_config)
         for variant in cls:
             if variant is not cls.DEEPSEEK_V4 and variant.value in declared:
                 return variant
-        return cls.DEEPSEEK_V4
+        if (
+            cls.DEEPSEEK_V4.value in declared
+            and getattr(hf_config, "model_type", None) == "qwen3"
+        ):
+            return cls.QWEN3
+        return None
+
+    @classmethod
+    def detected(cls, hf_config: PretrainedConfig) -> "DSparkVariant | None":
+        """The variant auto-detection claims, or None if it claims nothing.
+
+        K3 declares a DSpark architecture but is deliberately not auto-routed:
+        without an explicit method a K3 draft stays a plain draft model.
+        """
+        variant = cls.declared(hf_config)
+        return None if variant is cls.K3 else variant
+
+    @classmethod
+    def from_config(cls, hf_config: PretrainedConfig) -> "DSparkVariant":
+        """Resolve the variant of a config already known to be DSpark.
+
+        Must be called before the branches below rewrite `architectures`.
+        """
+        return cls.declared(hf_config) or cls.DEEPSEEK_V4
 
 
 def _is_dspark_draft(model: str, hf_config: PretrainedConfig) -> bool:
@@ -138,8 +162,7 @@ def _is_dspark_draft(model: str, hf_config: PretrainedConfig) -> bool:
     reliably named `*dspark*` (e.g. DeepSeek-V4-Flash-0731, which is otherwise
     routed to MTP and dies in the weight loader), so ask the config first.
     """
-    declared = _architectures(hf_config)
-    if any(variant.value in declared for variant in DSparkVariant):
+    if DSparkVariant.detected(hf_config) is not None:
         return True
     if _is_deepseek_v4_dspark(hf_config):
         return True
@@ -406,6 +429,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
@@ -430,7 +454,12 @@ class SpeculativeConfig:
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
-                {"n_predict": n_predict, "architectures": ["DeepSeekMTPModel"]}
+                {
+                    "n_predict": n_predict,
+                    "architectures": [
+                        "DeepseekV32MTPModel" if use_v32_mtp else "DeepSeekMTPModel"
+                    ],
+                }
             )
         if hf_config.model_type == "deepseek_v4":
             hf_config.model_type = "deepseek_mtp"
@@ -549,7 +578,10 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
-        if hf_config.architectures[0] == "NemotronH_Super_Omni_Reasoning_V3":
+        if hf_config.architectures[0] in (
+            "NemotronH_Super_Omni_Reasoning_V3",
+            "NemotronH_Omni_Reasoning_V3",
+        ):
             # Promote VLM's text_config so MTP detection below fires correctly
             hf_config = hf_config.text_config
 
@@ -695,8 +727,7 @@ class SpeculativeConfig:
             hf_config.model_type = "inkling_mtp"
             hf_config.update(
                 {
-                    # Inkling currently exposes only the first checkpoint depth.
-                    "n_predict": 1,
+                    "n_predict": checkpoint_depths,
                     "num_nextn_predict_layers": checkpoint_depths,
                     "chain_hidden_post_norm": mtp_config.get(
                         "chain_hidden_post_norm", False
@@ -840,14 +871,10 @@ class SpeculativeConfig:
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
-                hf_text_config = self.target_model_config.hf_text_config
                 self._reject_mtp_on_dspark(
-                    hf_text_config, self.target_model_config.model
+                    self.target_model_config.hf_text_config,
+                    self.target_model_config.model,
                 )
-                if hf_text_config.model_type == "deepseek_v32":
-                    # FIXME(luccafong): cudagraph with v32 MTP is not supported,
-                    # remove this when the issue is fixed.
-                    self.enforce_eager = True
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
                 # Align the quantization of draft model for cases such as
@@ -1032,7 +1059,11 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
-                elif "dflash" in self.draft_model_config.model.lower():
+                elif (
+                    "dflash" in self.draft_model_config.model.lower()
+                    or "MuseGlimmerAssistantModel"
+                    in self.draft_model_config.architectures
+                ):
                     self.method = "dflash"
                 elif _is_dspark_draft(
                     self.draft_model_config.model, self.draft_model_config.hf_config
@@ -1093,15 +1124,24 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
 
-                # Resolved before the DeepSeek-V4 branch below rewrites
-                # ``architectures``, so every later branch reads one answer.
+                # Resolved before the branches below rewrite ``architectures``,
+                # so every later branch reads one answer.
                 dspark_variant = (
                     DSparkVariant.from_config(self.draft_model_config.hf_config)
                     if self.method == "dspark"
                     else None
                 )
 
-                if dspark_variant is DSparkVariant.DEEPSEEK_V4:
+                if (
+                    dspark_variant is DSparkVariant.QWEN3
+                    and DSparkVariant.DEEPSEEK_V4.value
+                    in self.draft_model_config.architectures
+                ):
+                    self.draft_model_config.hf_config.architectures = [
+                        DSparkVariant.QWEN3.value
+                    ]
+                    self.update_arch_()
+                elif dspark_variant is DSparkVariant.DEEPSEEK_V4:
                     # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
                     # and its weights ship in the target checkpoint.
                     self.draft_model_config.hf_config.model_type = "deepseek_v4"
@@ -1129,15 +1169,6 @@ class SpeculativeConfig:
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
-
-                if (
-                    dspark_variant is DSparkVariant.K3
-                    and self.target_parallel_config.decode_context_parallel_size > 1
-                ):
-                    raise ValueError(
-                        "MLA DSpark does not currently support decode context "
-                        "parallelism; set decode_context_parallel_size=1."
-                    )
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
@@ -1169,43 +1200,11 @@ class SpeculativeConfig:
                         "`num_speculative_tokens` was not provided"
                     )
 
-                if (
-                    self.draft_model_config.hf_config.model_type == "inkling_mtp"
-                    and self.num_speculative_tokens != 1
-                ):
-                    raise ValueError(
-                        "Inkling MTP currently supports exactly one speculative token"
-                    )
-
                 if self.dspark_draft_topk is not None and self.method != "dspark":
                     raise ValueError("dspark_draft_topk is only supported by DSpark")
 
                 dspark_draft_topk = None
                 if self.method == "dspark":
-                    # DSpark is a semi-autoregressive *block* drafter. A
-                    # speculative length smaller than the checkpoint's block
-                    # feeds the block / Markov-head machinery an unsupported
-                    # layout and yields incorrect (garbled) output rather than
-                    # merely lower acceptance. Require num_speculative_tokens to
-                    # be at least the block size (e.g. 5 or 7 for DeepSeek-V4).
-                    dspark_block_size = getattr(
-                        self.draft_model_config.hf_config,
-                        "dspark_block_size",
-                        None,
-                    )
-                    if (
-                        dspark_block_size is not None
-                        and self.num_speculative_tokens < dspark_block_size
-                    ):
-                        raise ValueError(
-                            "DSpark requires num_speculative_tokens >= "
-                            f"dspark_block_size ({dspark_block_size}); got "
-                            f"{self.num_speculative_tokens}. Smaller values "
-                            "produce incorrect output. Use "
-                            f"num_speculative_tokens={dspark_block_size} or "
-                            "larger (e.g. 7)."
-                        )
-
                     hf_config = self.draft_model_config.hf_config
                     dspark_draft_topk = self.dspark_draft_topk
                     if dspark_draft_topk is None:

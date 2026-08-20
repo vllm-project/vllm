@@ -187,20 +187,6 @@ def test_explicit_dspark_is_accepted(tmp_path):
 
 
 @pytest.mark.cpu_test
-def test_dspark_below_block_size_is_rejected(tmp_path):
-    """Pre-existing policy, pinned here because the mtp error now cites it."""
-    target = _checkpoint(tmp_path, "DeepSeek-V4-Flash-0731", **_DSPARK_KEYS)
-
-    with pytest.raises(ValueError, match=r"num_speculative_tokens >= dspark"):
-        SpeculativeConfig(
-            method="dspark",
-            num_speculative_tokens=4,
-            target_model_config=target,
-            target_parallel_config=ParallelConfig(),
-        )
-
-
-@pytest.mark.cpu_test
 @pytest.mark.parametrize("keys", [_DSPARK_KEYS, _PRO_DSPARK])
 def test_dspark_drafter_detected_from_config_keys(keys):
     """Both shipped DSpark checkpoints, whose layer counts and target layer ids
@@ -246,9 +232,6 @@ def test_dspark_draft_detected_without_dspark_in_the_name():
     assert _is_dspark_draft(
         "deepseek-ai/DeepSeek-V4-Flash-0731", _hf_config(**_DSPARK_KEYS)
     )
-    assert _is_dspark_draft(
-        "Inferact/Kimi-K3", PretrainedConfig(architectures=["K3DSparkModel"])
-    )
     assert not _is_dspark_draft("deepseek-ai/DeepSeek-V4-Flash", _hf_config())
 
 
@@ -271,6 +254,27 @@ def test_variant_resolved_from_declared_architecture(architecture, expected):
     config = PretrainedConfig(architectures=[architecture])
 
     assert DSparkVariant.from_config(config) is expected
+
+
+@pytest.mark.cpu_test
+def test_synthesised_architecture_with_qwen3_resolves_to_qwen3():
+    """A Qwen3 DSpark draft may declare the synthesised `DSparkDraftModel`
+    name (#52197). Without the `model_type` pairing it would fall through to
+    DEEPSEEK_V4 and have its `model_type` rewritten to `deepseek_v4`."""
+    config = PretrainedConfig(architectures=["DSparkDraftModel"], model_type="qwen3")
+
+    assert DSparkVariant.from_config(config) is DSparkVariant.QWEN3
+    assert _is_dspark_draft("some/qwen3-draft", config)
+
+
+@pytest.mark.cpu_test
+def test_k3_draft_is_not_auto_routed_to_dspark():
+    """K3 declares a DSpark architecture but upstream leaves it a plain draft
+    model unless the method is explicit; detection must not widen that."""
+    config = PretrainedConfig(architectures=["K3DSparkModel"], model_type="k3_dspark")
+
+    assert not _is_dspark_draft("Inferact/Kimi-K3", config)
+    assert DSparkVariant.from_config(config) is DSparkVariant.K3
 
 
 @pytest.mark.cpu_test

@@ -31,7 +31,7 @@ from vllm.config import config
 from vllm.connections import global_http_connection
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.api_server import init_app_state
+from vllm.entrypoints.launchers.api_server.entry import init_app_state
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -52,7 +52,7 @@ from vllm.entrypoints.pooling.scoring.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
-from vllm.entrypoints.serve.utils.error_response import create_error_response
+from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -836,8 +836,7 @@ async def run_batch(
                     error_msg=f"URL {request.url} was used. "
                     "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
                     " /v1/audio/transcriptions, /v1/audio/translations, /score, "
-                    " /rerank. See vllm/entrypoints/openai/api_server.py "
-                    "for supported score/rerank versions.",
+                    " /rerank.",
                 )
             )
 
@@ -848,7 +847,7 @@ async def run_batch(
 
 
 async def main(args: Namespace):
-    from vllm.entrypoints.openai.api_server import build_async_engine_client
+    from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client
     from vllm.usage.usage_lib import UsageContext
 
     validate_run_batch_args(args)

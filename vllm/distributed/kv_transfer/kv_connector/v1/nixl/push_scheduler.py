@@ -60,6 +60,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
     hooks.
     """
 
+    _TRANSFER_MODE: str = "push"
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -290,6 +292,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
     def build_connector_meta(

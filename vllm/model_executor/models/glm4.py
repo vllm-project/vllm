@@ -252,15 +252,14 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -293,11 +292,10 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
         # Skip the speculative (MTP) layers, which are loaded by the
         # draft model instead.
         num_nextn_layers = getattr(self.config, "num_nextn_predict_layers", 0)
-        skip_prefixes += [
+        skip_prefixes = [
             f"model.layers.{self.config.num_hidden_layers + i}."
             for i in range(num_nextn_layers)
         ]
