@@ -18,7 +18,6 @@ if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
 from tests.v1.simple_kv_offload.test_scheduler import (  # noqa: E402
-    BLOCK_SIZE,
     _BYTES_PER_BLOCK,
     _make_kv_cache_config,
 )
@@ -32,9 +31,10 @@ def test_live_tensor_bytes_can_exceed_config_estimate() -> None:
 
     config_blocks = compute_num_offload_blocks_from_configs([gpu_config], capacity)
 
+    # Block-outermost layout: each row is one scheduler block with padded bytes.
     kv_caches = {
         "layer_0": torch.zeros(
-            (2, num_gpu_blocks, BLOCK_SIZE, 1, 16),
+            (num_gpu_blocks, _BYTES_PER_BLOCK * 2),
             dtype=torch.float16,
             device="cuda",
         )
