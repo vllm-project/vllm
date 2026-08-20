@@ -272,15 +272,15 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         key: str,
         value: _V,
     ) -> bool:
-        """Insert ``value`` if it fits in ``cache``.
+        """Insert `value` if it fits in `cache`.
 
-        ``cachetools.Cache`` raises ``ValueError("value too large")`` when a
-        single item exceeds ``maxsize``. An item bigger than the whole
+        `cachetools.Cache` raises `ValueError("value too large")` when a
+        single item exceeds `maxsize`. An item bigger than the whole
         processor cache can never be a hit, so skip the insert and serve it
         uncached instead of aborting engine startup.
 
         LRU P0/P1 caches call this so they stay mirrored. SHM subclasses do
-        not use it; they already skip oversize items in ``put()``.
+        not use it; they already skip oversize items in `put()`.
 
         Args:
             cache: The LRU cache to update.
@@ -288,7 +288,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
             value: Value to insert.
 
         Returns:
-            ``True`` if the item was cached, otherwise ``False``.
+            `True` if the item was cached, otherwise `False`.
         """
         item_size = cache.getsizeof(value)
         if item_size > cache.maxsize:
