@@ -307,35 +307,14 @@ re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
 def maybe_wrap_mistral_common_tokenizer(tokenizer: TokenizerLike) -> TokenizerLike:
-    """Return a tokenizer the structured-output backends can consume.
-
-    ``transformers>=5.5`` returns a ``MistralCommonBackend`` for Mistral repos
-    under the default ``tokenizer_mode="auto"``. That class subclasses
-    ``PreTrainedTokenizerBase`` rather than ``PreTrainedTokenizerFast``, and it
-    does not implement the tokenizer surface the grammar backends rely on, so
-    each backend fails on it in its own way. Wrapping it in vLLM's
-    ``MistralTokenizer`` exposes the vocabulary and conversion helpers the
-    backends already support for ``tokenizer_mode="mistral"``.
-
-    This covers both tokenizer engines a ``MistralCommonBackend`` can carry --
-    tekken (Mistral-Nemo, Codestral) and SentencePiece (Mistral-7B-v0.1,
-    Mixtral-8x7B-v0.1) -- because both fail the same way unwrapped.
-
-    Any other tokenizer is returned unchanged.
-
-    `MistralTokenizer` is imported lazily because `vllm.tokenizers.mistral` pulls
-    in a large dependency tree, and this module is imported by
-    `vllm.v1.worker.gpu_model_runner`.
-    """
+    """The grammar backends cannot consume a `MistralCommonBackend` directly."""
     if not isinstance(tokenizer, MistralCommonBackend):
         return tokenizer
 
+    # Deferred: `vllm.tokenizers.mistral` pulls in a large dependency tree, and
+    # this module is imported by `vllm.v1.worker.gpu_model_runner`.
     from vllm.tokenizers.mistral import MistralTokenizer
 
-    logger.debug_once(
-        "Wrapping %s in MistralTokenizer for structured output.",
-        type(tokenizer).__name__,
-    )
     return MistralTokenizer(tokenizer)
 
 
