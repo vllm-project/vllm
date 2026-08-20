@@ -61,6 +61,17 @@ uv pip install -U vllm \
     --extra-index-url https://wheels.vllm.ai/nightly # add variant subdirectory here if needed
 ```
 
+!!! tip "Nightly wheel index priority"
+
+    Keep `uv`'s default index priority when installing from vLLM nightly
+    indices. Do not add `--index-strategy unsafe-best-match` for these
+    commands: if the latest PyPI release has a higher public version than the
+    nightly wheel, best-match resolution can select the PyPI wheel instead of
+    the requested CUDA variant. To force a CUDA variant, add the variant
+    subdirectory to the vLLM index URL, for example
+    `https://wheels.vllm.ai/nightly/cu129`, and verify the installed vLLM
+    version includes the expected CUDA variant suffix.
+
 !!! warning "`pip` caveat"
 
     Using `pip` to install from nightly indices is _not supported_, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
