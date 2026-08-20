@@ -221,15 +221,14 @@ class StructuredOutputManager:
         self,
         request: "Request",
         spec_tokens: Sequence[int],
-        committed_len: int | None = None,
+        spec_tokens_committed: bool = False,
     ) -> int:
         """Return the first constrained index within `spec_tokens`.
         Returns `len(spec_tokens) + 1` if no token should be constrained after
         accepting all `spec_tokens`.
 
-        `committed_len` is the length of prefix in `request.all_token_ids` that are
-        committed before `spec_tokens`. When omitted, all tokens are assumed to be
-        committed.
+        `spec_tokens_committed` is True if spec_tokens is already in
+        `request.all_token_ids`.
         """
         if self.enable_in_reasoning:
             return 0
@@ -255,26 +254,39 @@ class StructuredOutputManager:
         if structured_req.reasoning_ended:
             return 0
 
-        if not spec_tokens:
-            return 1
-
         # TODO: Build a read-only Sequence view over (committed, delta)
         # instead of copying the entire committed prefix into `simulated`.
-        # TODO: Try search from right to left or binary search
-        all_token_ids = request.all_token_ids
-        if committed_len is None:
-            simulated = list(all_token_ids)
+        if spec_tokens_committed:
+            if not spec_tokens or not reasoner.is_reasoning_end_streaming(
+                request.all_token_ids, spec_tokens
+            ):
+                return len(spec_tokens) + 1
+
+            num_spec_tokens = len(spec_tokens)
+            simulated = request.all_token_ids.copy()
         else:
-            simulated = list(islice(all_token_ids, committed_len))
-        delta: list[int] = []
-        for i, token in enumerate[int](spec_tokens):
-            if token == -1:
-                break
-            simulated.append(token)
-            delta.append(token)
-            if reasoner.is_reasoning_end_streaming(simulated, delta):
+            # spec tokens that haven't yet been committed may contain -1 pads
+            try:
+                num_spec_tokens = spec_tokens.index(-1)
+            except ValueError:
+                num_spec_tokens = len(spec_tokens)
+
+            if num_spec_tokens <= 0:
+                return len(spec_tokens) + 1
+
+            simulated = [*request.all_token_ids, *islice(spec_tokens, num_spec_tokens)]
+            if not reasoner.is_reasoning_end_streaming(
+                simulated, islice(spec_tokens, num_spec_tokens)
+            ):
+                return len(spec_tokens) + 1
+
+        for i in range(num_spec_tokens - 1, 0, -1):
+            simulated.pop()
+            if not reasoner.is_reasoning_end_streaming(
+                simulated, islice(spec_tokens, i)
+            ):
                 return i + 1
-        return len(spec_tokens) + 1
+        return 1
 
     def validate_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
         """Return the longest unconstrained or grammar-valid prefix of `spec_tokens`."""
@@ -427,9 +439,7 @@ class StructuredOutputManager:
             assert isinstance(grammar, StructuredOutputGrammar)
 
         constraint_start = self._get_constraint_start(
-            request,
-            new_token_ids,
-            committed_len=len(request.all_token_ids) - len(new_token_ids),
+            request, new_token_ids, spec_tokens_committed=True
         )
         # Early return only when the constraint hasn't started.
         # Otherwise, latch structured_req.reasoning_ended.
