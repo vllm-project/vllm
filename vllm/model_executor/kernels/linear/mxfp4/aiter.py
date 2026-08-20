@@ -7,7 +7,13 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kMxfp4Dynamic,
 )
 from vllm.platforms import current_platform
@@ -187,19 +193,39 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             layer.weight_scale = Parameter(
                 layer.weight_scale.data.T.contiguous(), requires_grad=False
             )
+        expose_input_quant_key(layer, self)
+
+    def input_quant_key(self) -> QuantKey | None:
+        # QuantKey does not encode scale layout. Advertise only the Triton
+        # gemm_afp4wfp4 layout (plain packed fp4 + column-major e8m0) that a
+        # producer can emit with AITER's public dynamic_mxfp4_quant. The ASM
+        # gemm_a4w4 / preshuffled-weight-scale branches stay on the in-kernel
+        # quant path.
+        if self.use_asm_gemm:
+            return None
+        return kMxfp4Dynamic
 
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            x_q, x_scales = qa.data, qa.scale
+            out_dtype = qa.orig_dtype if self.out_dtype is None else self.out_dtype
+        else:
+            assert isinstance(x, torch.Tensor)
+            x_q, x_scales = x, None
+            out_dtype = self.out_dtype
         y = torch.ops.vllm.gemm_with_dynamic_quant(
-            x,
+            x_q,
             layer.weight,
             layer.weight_scale,
             self.use_asm_gemm,
-            self.out_dtype,
+            out_dtype,
+            x_scales,
         )
         if bias is not None:
             y = y + bias
