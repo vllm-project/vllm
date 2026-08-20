@@ -168,6 +168,79 @@ def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
     assert torch.count_nonzero(experts.w13_weight[1]) == 0
 
 
+def test_deepseek_v4_mega_moe_weight_loader_uses_static_expert_map():
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    experts = DeepseekV4MegaMoEExperts(
+        vllm_config,
+        num_experts=4,
+        num_local_experts=2,
+        experts_start_idx=2,
+        top_k=2,
+        hidden_size=128,
+        intermediate_size=128,
+        physical_to_logical_map=torch.tensor([2, 0, 3, 1]),
+    )
+
+    expert_1 = torch.full((128, 64), 5, dtype=torch.uint8)
+    expert_3 = torch.full((128, 64), 9, dtype=torch.uint8)
+
+    assert experts.weight_loader(
+        experts.w13_weight,
+        expert_1,
+        "experts.w13_weight",
+        shard_id="w1",
+        expert_id=1,
+        return_success=True,
+    )
+    assert experts.weight_loader(
+        experts.w13_weight,
+        expert_3,
+        "experts.w13_weight",
+        shard_id="w1",
+        expert_id=3,
+        return_success=True,
+    )
+
+    assert torch.equal(experts.w13_weight[0, :128], expert_3)
+    assert torch.equal(experts.w13_weight[1, :128], expert_1)
+
+
+def test_deepseek_v4_mega_moe_weight_loader_populates_static_replicas():
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    experts = DeepseekV4MegaMoEExperts(
+        vllm_config,
+        num_experts=6,
+        num_local_experts=3,
+        experts_start_idx=3,
+        top_k=2,
+        hidden_size=128,
+        intermediate_size=128,
+        num_logical_experts=4,
+        physical_to_logical_map=torch.tensor([0, 1, 2, 3, 2, 2]),
+    )
+
+    expert_2 = torch.full((128, 64), 7, dtype=torch.uint8)
+
+    assert experts.weight_loader(
+        experts.w13_weight,
+        expert_2,
+        "experts.w13_weight",
+        shard_id="w1",
+        expert_id=2,
+        return_success=True,
+    )
+
+    assert torch.count_nonzero(experts.w13_weight[0]) == 0
+    assert torch.equal(experts.w13_weight[1, :128], expert_2)
+    assert torch.equal(experts.w13_weight[2, :128], expert_2)
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="DeepSeek V4 MegaMoE fused input staging requires CUDA.",

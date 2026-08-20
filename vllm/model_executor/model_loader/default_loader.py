@@ -370,8 +370,13 @@ class DefaultModelLoader(BaseModelLoader):
         # When EPLB is enabled, redundant physical expert slots may map to
         # logical experts that belong to other ranks in the default partition.
         # The weight loader needs to see ALL logical expert weights so it can
-        # populate these redundant slots.  Skip the filter entirely.
-        if parallel_config.enable_eplb:
+        # populate these redundant slots. A static DSV4 map can likewise assign
+        # different logical experts to each rank on every layer. Skip the filter
+        # entirely in either case.
+        if (
+            parallel_config.enable_eplb
+            or parallel_config.eplb_config.expert_map_path is not None
+        ):
             return
 
         num_experts = model_config.get_num_experts()

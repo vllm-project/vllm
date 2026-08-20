@@ -48,6 +48,14 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4.expert_map import (
+    get_expert_map_layer_index,
+    get_num_expert_map_layers,
+    load_static_expert_map,
+    remap_expert_params_mapping,
+    remap_router_expert_ids,
+    remap_router_weight,
+)
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -313,6 +321,23 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         self.quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
+        eplb_config = parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
+        expert_map_path = eplb_config.expert_map_path
+        self.static_expert_map = (
+            load_static_expert_map(
+                expert_map_path,
+                num_layers=get_num_expert_map_layers(self.config),
+                num_experts=self.config.n_routed_experts,
+                num_physical_experts=(
+                    self.config.n_routed_experts + eplb_config.num_redundant_experts
+                ),
+                num_expert_groups=getattr(self.config, "n_group", 1) or 1,
+            )
+            if expert_map_path is not None
+            else None
+        )
         self.pad_shared_expert = getattr(
             self.quant_config, "weight_block_size", None
         ) is not None and not _use_sequence_parallel(vllm_config)
@@ -403,8 +428,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 ckpt_gate_proj_name="w1",
                 ckpt_down_proj_name="w2",
                 ckpt_up_proj_name="w3",
-                num_experts=self.config.n_routed_experts,
+                num_experts=(
+                    self.static_expert_map.shape[1]
+                    if self.static_expert_map is not None
+                    else self.config.n_routed_experts
+                ),
             )
+        static_expert_mappings: dict[int, list[tuple[str, str, int, str]]] = {}
         expert_scale_suffix = (
             ".weight_scale"
             if getattr(self.config, "expert_dtype", "fp4") == "fp4"
@@ -437,6 +467,19 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             if "confidence_head." in name:
                 loaded_confidence_head = True
 
+            static_layer_map = None
+            if self.static_expert_map is not None and ".ffn." in name:
+                layer_idx = get_expert_map_layer_index(name)
+                static_layer_map = self.static_expert_map[layer_idx]
+                if not self.enable_eplb and name.endswith(
+                    (".ffn.gate.weight", ".ffn.gate.bias")
+                ):
+                    loaded_weight = remap_router_weight(loaded_weight, static_layer_map)
+                elif not self.enable_eplb and name.endswith(".ffn.gate.tid2eid"):
+                    loaded_weight = remap_router_expert_ids(
+                        loaded_weight, static_layer_map
+                    )
+
             # ``.scale`` -> per-method scale suffix.
             if name.endswith(".scale"):
                 suffix = (
@@ -459,7 +502,19 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                     and loaded_weight.dtype == torch.float8_e8m0fnu
                 ):
                     loaded_weight = loaded_weight.view(torch.uint8)
-                for param_name, weight_name, expert_id, shard_id in expert_mapping:
+                layer_expert_mapping = expert_mapping
+                if static_layer_map is not None and not use_mega_moe:
+                    if layer_idx not in static_expert_mappings:
+                        static_expert_mappings[layer_idx] = remap_expert_params_mapping(
+                            expert_mapping, static_layer_map
+                        )
+                    layer_expert_mapping = static_expert_mappings[layer_idx]
+                for (
+                    param_name,
+                    weight_name,
+                    expert_id,
+                    shard_id,
+                ) in layer_expert_mapping:
                     if weight_name not in name:
                         continue
                     name_mapped = name.replace(weight_name, param_name)

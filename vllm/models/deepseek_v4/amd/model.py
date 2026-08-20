@@ -182,6 +182,10 @@ class DeepseekV4MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        if vllm_config.parallel_config.eplb_config.expert_map_path is not None:
+            raise NotImplementedError(
+                "Static DSV4 expert maps are currently supported only on NVIDIA."
+            )
         self.prefix = prefix
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)

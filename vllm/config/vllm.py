@@ -1108,6 +1108,17 @@ class VllmConfig:
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
+            if self.parallel_config.eplb_config.expert_map_path is not None:
+                dsv4_architectures = {
+                    "DeepseekV4ForCausalLM",
+                    "DeepSeekV4MTPModel",
+                    "DSparkDraftModel",
+                }
+                if dsv4_architectures.isdisjoint(self.model_config.architectures):
+                    raise ValueError(
+                        "eplb_config.expert_map_path is supported only for DSV4."
+                    )
+
         if (
             self.model_config is not None
             and self.model_config.enable_return_routed_experts

@@ -156,6 +156,7 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
+| `expert_map_path` | NVIDIA DSV4-only path to a static physical-to-logical expert map | `null` |
 
 For example:
 
@@ -175,6 +176,55 @@ vllm serve Qwen/Qwen3-30B-A3B \
             --eplb-config.num_redundant_experts 2 \
             --eplb-config.log_balancedness true
     ```
+
+### Static DSV4 expert placement
+
+On NVIDIA, DSV4 can apply a fixed expert placement while loading the checkpoint.
+Without redundant slots, set `expert_map_path` without `--enable-eplb`. The map
+reorders expert weights, router weights, router correction biases, and
+hash-router expert IDs before inference starts.
+
+The JSON file contains a physical-to-logical expert map. It can be one list
+shared by every DSV4 and MTP layer:
+
+```json
+[2, 0, 3, 1]
+```
+
+or one list per layer:
+
+```json
+[
+  [2, 0, 3, 1],
+  [1, 3, 0, 2]
+]
+```
+
+Every list must assign each logical expert at least once. Without redundant
+experts, this makes each list a permutation. For grouped routing in that mode,
+each physical group must contain all experts from exactly one logical group;
+whole groups and experts within a group may be reordered. When using a per-layer
+map with MTP or DSpark, include the draft layers after the target layers. Start
+the server with expert parallelism and the map path:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V4-Flash \
+  --tensor-parallel-size 8 \
+  --enable-expert-parallel \
+  --eplb-config '{"expert_map_path":"/path/to/expert-map.json"}'
+```
+
+For a map with repeated logical IDs, its width must equal the logical expert
+count plus `num_redundant_experts`. Enable EPLB so the router can select a fixed
+physical replica; the static map disables load recording and rearrangement:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V4-Flash \
+  --tensor-parallel-size 8 \
+  --enable-expert-parallel \
+  --enable-eplb \
+  --eplb-config '{"expert_map_path":"/path/to/expert-map.json","num_redundant_experts":8}'
+```
 
 ### Expert Distribution Formula
 
