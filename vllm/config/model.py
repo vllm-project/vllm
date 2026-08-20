@@ -262,6 +262,12 @@ class ModelConfig:
     equivalent exponential-race sampling. FP64 preserves lower-tail sampling
     events that fp32 uniform/exponential draws can truncate, at the cost of
     significantly lower throughput on most GPUs."""
+    enable_trace_replay: bool = False
+    """Whether to allow requests to set
+    `SamplingParams.trace_decode_token_ids`, which forces decoding to follow a
+    predetermined token sequence while still computing real logprobs. Reserved
+    for debugging and RL workflows: enabling it reserves a per-request trace
+    buffer, so it is off by default."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -424,6 +430,7 @@ class ModelConfig:
             "return_sampling_mask",
             "logprobs_mode",
             "use_fp64_gumbel",
+            "enable_trace_replay",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
