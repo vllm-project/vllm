@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Signed-off-by: vLLM CI Bot <vllm-ci@users.noreply.github.com>
-# Signed-off-by: vLLM CI Bot <vllm-ci@users.noreply.github.com>
 """Unit tests for GranitePythonicToolParser.
 
 Covers:
