@@ -330,7 +330,7 @@ steps:
   key: async-engine-inputs-utils-worker-config-cpu
   depends_on:
   - image-build-cpu
-  timeout_in_minutes: 65
+  timeout_in_minutes: 25
   source_file_dependencies:
   - vllm/assets/
   - vllm/config/
@@ -373,22 +373,30 @@ steps:
   - tests/transformers_utils
   - tests/config
   device: cpu-small
+  parallelism: 4
   commands:
-  - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s test_envs.py
-  - pytest -v -s test_inputs.py
-  - pytest -v -s test_outputs.py
-  - pytest -v -s test_pooling_params.py
-  - pytest -v -s test_ray_env.py
-  - pytest -v -s test_sampling_params.py
-  - pytest -v -s -m 'cpu_test' multimodal
-  - pytest -v -s renderers
-  - pytest -v -s reasoning
-  - pytest -v -s tool_parsers
-  - pytest -v -s tokenizers_
-  - pytest -v -s parser
-  - pytest -v -s transformers_utils
-  - pytest -v -s config
+  # Timing-balanced static split (remeasured on build 83920). Total command
+  # time ~53m + ~1.9m setup means even a perfect 3-way split floors at ~19.6m,
+  # so tokenizers_ (17.4m, 1369 nodes, longest node 0.20m) is pytest-sharded
+  # across shards 0-1 and everything else is grouped for ~13m/shard.
+  # An index outside 0-3 would skip every guard and pass empty; fail it instead.
+  - case "$$BUILDKITE_PARALLEL_JOB" in 0|1|2|3) ;; *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" && exit 1;; esac
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || python3 standalone_tests/lazy_imports.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_envs.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_inputs.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_outputs.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_pooling_params.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_ray_env.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_sampling_params.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -m 'cpu_test' multimodal
+  - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s renderers
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s reasoning
+  - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s tool_parsers
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s tokenizers_ --num-shards=2 --shard-id=0
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s tokenizers_ --num-shards=2 --shard-id=1
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s parser
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s transformers_utils
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s config
 
 - label: ":nvidia: (A100) Batch Invariance"
   key: batch-invariance-a100
