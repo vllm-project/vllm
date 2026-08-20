@@ -1527,7 +1527,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
 
-# TODO: Retire this standalone ROCm coverage after
+# TODO(akaratza): Retire this standalone ROCm coverage after
 # tests/distributed/test_eplb_spec_decode.py is enabled and validated on ROCm.
 # The upstream parity job currently skips that entire module on ROCm.
 - label: ":amd: (MI300) Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy" # TBD
