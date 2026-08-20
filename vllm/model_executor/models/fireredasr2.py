@@ -260,7 +260,7 @@ class FireRedASR2MultiModalProcessor(
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
             speech_lengths=MultiModalFieldConfig.batched("audio"),
-            fake_token_lengths=MultiModalFieldConfig.batched("audio"),
+            fake_token_lengths=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -332,7 +332,10 @@ class FireRedASR2ForConditionalGeneration(
             "net.0": "pre_layer_norm",
             "net.1": "linear_expand",
             "net.4": "linear_project",
-        }
+        },
+        orig_to_new_prefix={
+            "model.encoder.audio_encoder.positional_encoding.pe": None,
+        },
     )
 
     supports_transcription_only = True
@@ -477,8 +480,6 @@ class FireRedASR2ForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self, skip_prefixes=["model.encoder.audio_encoder.positional_encoding.pe"]
-        )
+        loader = AutoWeightsLoader(self)
 
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
