@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
+use thiserror_ext::AsReport as _;
 use tokio::sync::Semaphore;
 
 use crate::backends::{RequestFuncInput, RequestFuncOutput, get_backend};
@@ -17,7 +18,7 @@ use crate::metrics::steady_state;
 use crate::output::console::print_results;
 use crate::output::json::{append_result, build_result_json, compute_result_filename, save_result};
 use crate::rate_control::compute_schedule;
-use crate::ready_checker::wait_for_endpoint;
+use crate::ready_checker::{get_first_model, wait_for_endpoint};
 
 /// Pre-resolve the hostname in `base_url` and pin all resolved IPs on the
 /// client builder via [`reqwest::ClientBuilder::resolve_to_addrs`].  This
@@ -72,12 +73,12 @@ pub fn pre_resolve_dns(
             v4.extend(v6);
             if !v4.is_empty() {
                 let ips: Vec<_> = v4.iter().map(|a| a.ip()).collect();
-                println!("Pre-resolved {host} -> {ips:?}");
+                tracing::info!(host, addresses = ?ips, "pre-resolved benchmark endpoint DNS");
                 builder = builder.resolve_to_addrs(host, &v4);
             }
         }
         Err(e) => {
-            eprintln!("Warning: DNS pre-resolution for '{host}' failed: {e}");
+            tracing::warn!(host, error = %e.as_report(), "failed to pre-resolve benchmark endpoint DNS");
         }
     }
 
@@ -133,6 +134,17 @@ pub(crate) async fn fetch_spec_decode_metrics(
         Err(_) => return None,
     };
 
+    parse_spec_decode_metrics(&text)
+}
+
+/// Parse spec decode counters from Prometheus text exposition format.
+///
+/// Matches on the metric name (the part before any labels) rather than the
+/// whole line so label values cannot be mistaken for metric names, and only
+/// reads `_total` counter samples — skipping e.g. `_created` timestamp series,
+/// which would otherwise be summed into the counts (mirrors the Python fix
+/// in vllm#41916).
+pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics> {
     let mut num_drafts: u64 = 0;
     let mut num_draft_tokens: u64 = 0;
     let mut num_accepted_tokens: u64 = 0;
@@ -144,24 +156,25 @@ pub(crate) async fn fetch_spec_decode_metrics(
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if !line.starts_with("vllm:spec_decode") {
+        let first_token = match line.split_whitespace().next() {
+            Some(t) => t,
+            None => continue,
+        };
+        let metric_name = first_token.split('{').next().unwrap_or(first_token);
+        if !metric_name.starts_with("vllm:spec_decode") || !metric_name.ends_with("_total") {
             continue;
         }
         found_spec_decode = true;
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-        let val = match parts.last().and_then(|s| s.parse::<f64>().ok()) {
+        let val = match line.split_whitespace().last().and_then(|s| s.parse::<f64>().ok()) {
             Some(v) => v as u64,
             None => continue,
         };
 
-        if line.contains("num_drafts") {
+        if metric_name.contains("num_drafts") {
             num_drafts += val;
-        } else if line.contains("num_draft_tokens") {
+        } else if metric_name.contains("num_draft_tokens") {
             num_draft_tokens += val;
-        } else if line.contains("num_accepted_tokens_per_pos") {
+        } else if metric_name.contains("num_accepted_tokens_per_pos") {
             // Parse position label: position="N"
             if let Some(start) = line.find("position=\"") {
                 let start = start + "position=\"".len();
@@ -171,7 +184,7 @@ pub(crate) async fn fetch_spec_decode_metrics(
                     *accepted_per_pos.entry(pos).or_insert(0) += val;
                 }
             }
-        } else if line.contains("num_accepted_tokens") {
+        } else if metric_name.contains("num_accepted_tokens") {
             num_accepted_tokens += val;
         }
     }
@@ -280,40 +293,6 @@ pub(crate) fn assign_lora_modules(
     Some(out)
 }
 
-/// Fetch the first model from the server's /v1/models endpoint.
-async fn get_first_model_from_server(
-    base_url: &str,
-    client: &reqwest::Client,
-    extra_headers: &Option<std::collections::HashMap<String, String>>,
-) -> Result<(String, String)> {
-    let url = format!("{base_url}/v1/models");
-    let mut request = client.get(&url);
-    if let Some(headers) = extra_headers {
-        for (k, v) in headers {
-            request = request.header(k, v);
-        }
-    }
-    // Add API key from environment
-    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    let response = request.send().await?;
-    let data: serde_json::Value = response.json().await?;
-
-    if let Some(models) = data.get("data").and_then(|d| d.as_array())
-        && let Some(first) = models.first()
-    {
-        let id = first.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let root = first.get("root").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
-        return Ok((id, root));
-    }
-
-    Err(BenchError::Config(format!(
-        "No models found on the server at {base_url}"
-    )))
-}
-
 /// Run the complete benchmark.
 ///
 /// This is the core orchestrator matching Python's benchmark() + main_async().
@@ -346,10 +325,19 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     let (model_id, model_name) = if let Some(ref m) = config.model {
         (m.clone(), config.model_name.clone())
     } else {
-        println!("Model not specified, fetching first model from server...");
-        let (name, id) =
-            get_first_model_from_server(&config.base_url, &client, &config.extra_headers).await?;
-        println!("First model name: {name}, first model id: {id}");
+        tracing::info!(base_url = %config.base_url, "fetching first model from server");
+        let (name, id) = get_first_model(
+            &config.base_url,
+            &client,
+            &config.extra_headers,
+            config.ready_check_timeout_sec,
+        )
+        .await?;
+        tracing::info!(
+            model_name = name,
+            model_id = id,
+            "selected first model from server"
+        );
         (id, Some(name))
     };
 
@@ -358,10 +346,14 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         None
     } else {
         let tid = config.tokenizer_id.as_deref().unwrap_or(&model_id);
-        println!("Loading tokenizer: {tid}");
-        let server_info = Some((config.base_url.as_str(), model_id.as_str()));
-        let t = crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info)?;
-        println!("Tokenizer loaded successfully.");
+        tracing::info!(tokenizer = tid, "loading tokenizer");
+        let server_info = Some((
+            config.base_url.as_str(),
+            model_id.as_str(),
+            config.ready_check_timeout_sec,
+        ));
+        let t =
+            crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info).await?;
         Some(t)
     };
     let has_tokenizer = tokenizer.is_some();
@@ -421,7 +413,12 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             config.num_prompts, config.random_batch_size, config.is_reranker,
         ),
     };
-    println!("Generating {dataset_label}...");
+    tracing::info!(
+        dataset = ?config.dataset_name,
+        prompts = config.num_prompts,
+        description = %dataset_label,
+        "generating benchmark dataset"
+    );
     let gen_start = Instant::now();
 
     let mut input_requests = match config.dataset_name {
@@ -472,7 +469,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             let path = match config.dataset_path.as_deref() {
                 Some(p) => p,
                 None => {
-                    downloaded = crate::datasets::sharegpt::download_sharegpt_dataset()?;
+                    downloaded = crate::datasets::sharegpt::download_sharegpt_dataset().await?;
                     downloaded.as_str()
                 }
             };
@@ -512,16 +509,16 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 None => {
                     downloaded = crate::datasets::speed_bench::download_speed_bench(
                         config.speed_bench_config,
-                    )?;
+                    )
+                    .await?;
                     downloaded.as_str()
                 }
             };
-            let output_len = config.sharegpt_output_len.unwrap_or(config.random_output_len);
             crate::datasets::speed_bench::load_speed_bench_dataset(
                 tok,
                 path,
                 config.num_prompts,
-                output_len,
+                config.speed_bench_output_len,
                 config.seed,
                 &config.request_id_prefix,
                 config.speed_bench_category.as_deref(),
@@ -543,7 +540,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     config.hf_subset.as_deref(),
                     config.hf_split.as_deref(),
                     config.num_prompts,
-                )?;
+                )
+                .await?;
             crate::datasets::hf_dataset::load_hf_dataset(
                 tok,
                 &downloaded_path,
@@ -608,18 +606,19 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     };
 
     let gen_elapsed = gen_start.elapsed();
-    println!(
-        "Generated {} prompts in {:.2}s",
-        input_requests.len(),
-        gen_elapsed.as_secs_f64()
+    tracing::info!(
+        prompts = input_requests.len(),
+        elapsed_seconds = gen_elapsed.as_secs_f64(),
+        "generated benchmark dataset"
     );
 
     let filtered_count =
         filter_requests_by_max_model_len(&mut input_requests, config.max_model_len);
     if filtered_count > 0 {
-        println!(
-            "Filtered {filtered_count} prompt(s) above --max-model-len {}.",
-            config.max_model_len.unwrap()
+        tracing::info!(
+            filtered_prompts = filtered_count,
+            max_model_len = config.max_model_len.unwrap(),
+            "filtered prompts above maximum model length"
         );
     }
     if input_requests.is_empty() {
@@ -670,7 +669,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
 
     // Ready check
     if config.ready_check_timeout_sec > 0 {
-        println!("Starting initial single prompt test run...");
+        tracing::info!("starting initial single-prompt test run");
         let test_output = wait_for_endpoint(
             config.backend,
             &client,
@@ -685,7 +684,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 test_output.error
             )));
         }
-        println!("Initial test run completed.");
+        tracing::info!("initial single-prompt test run completed");
     }
 
     // Verify and fix prompt token lengths against the server's /tokenize endpoint.
@@ -703,12 +702,15 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         DatasetName::Random | DatasetName::PrefixRepetition
     );
     if verifiable_dataset && has_token_ids && !config.backend.is_pooling() {
-        println!("Using prompt_token_ids, skipping server-side tokenizer verification.");
+        tracing::info!(
+            reason = "prompt_token_ids",
+            "skipping server tokenizer verification"
+        );
     }
     if verifiable_dataset && !has_token_ids && !config.backend.is_pooling() {
         let cache_key = tokenizer_verify_cache_key(&config.base_url, &model_id);
         if is_tokenizer_verified(&cache_key) {
-            println!("Tokenizer verified in previous run (cached), skipping verification.");
+            tracing::info!(reason = "cached", "skipping server tokenizer verification");
         } else {
             let num_special =
                 tokenizer.as_ref().map(|t| t.num_special_tokens_to_add()).unwrap_or(0);
@@ -723,14 +725,17 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             .await?
             {
                 SampleVerifyOutcome::Passed => {
-                    println!("Sample verification passed, skipping full verification.");
+                    tracing::info!("tokenizer sample verification passed");
                     mark_tokenizer_verified(&cache_key);
                 }
                 SampleVerifyOutcome::Skipped(reason) => {
-                    println!("Server /tokenize unavailable ({reason}), skipping verification.");
+                    tracing::warn!(
+                        reason = %reason,
+                        "server tokenizer unavailable; skipping prompt verification"
+                    );
                 }
                 SampleVerifyOutcome::Mismatch => {
-                    println!("Sample verification found mismatch, running full verify+fix...");
+                    tracing::warn!("tokenizer sample mismatch; verifying and fixing all prompts");
                     match verify_and_fix_prompt_lengths(
                         &client,
                         &config.base_url,
@@ -742,16 +747,16 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     .await
                     {
                         Ok(()) => {
-                            println!(
-                                "All {} prompts verified: exact token length match.",
-                                input_requests.len()
+                            tracing::info!(
+                                prompts = input_requests.len(),
+                                "verified exact prompt token lengths"
                             );
                             mark_tokenizer_verified(&cache_key);
                         }
                         Err(BenchError::TokenizeUnavailable(reason)) => {
-                            println!(
-                                "Server /tokenize became unavailable during verification \
-                                 ({reason}); proceeding with client-side token counts."
+                            tracing::warn!(
+                                reason = %reason,
+                                "server tokenizer became unavailable; using client token counts"
                             );
                         }
                         Err(e) => return Err(e),
@@ -763,7 +768,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
 
     // Warmup
     if config.num_warmups > 0 {
-        println!("Warming up with {} requests...", config.num_warmups);
+        tracing::info!(requests = config.num_warmups, "starting benchmark warmup");
         run_warmup(
             config.backend,
             &client,
@@ -776,7 +781,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             config.disable_tqdm,
         )
         .await;
-        println!("Warmup run completed.");
+        tracing::info!(requests = config.num_warmups, "benchmark warmup completed");
     }
 
     // Start profiler if requested (immediate mode — no batch threshold)
@@ -814,28 +819,22 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     let spec_decode_before =
         fetch_spec_decode_metrics(&config.base_url, &client, &config.extra_headers).await;
     if spec_decode_before.is_some() {
-        println!("Speculative decoding detected, will collect metrics.");
+        tracing::info!("detected speculative decoding; collecting metrics");
     }
 
     // Main benchmark
-    println!("Starting main benchmark run...");
     let distribution = if config.burstiness == 1.0 {
         "Poisson process"
     } else {
         "Gamma distribution"
     };
-    println!(
-        "Traffic request rate: {}",
-        if config.request_rate.is_infinite() {
-            "inf".to_string()
-        } else {
-            format!("{}", config.request_rate)
-        }
-    );
-    println!("Burstiness factor: {} ({distribution})", config.burstiness);
-    println!(
-        "Maximum request concurrency: {}",
-        config.max_concurrency.unwrap_or(config.num_prompts)
+    tracing::info!(
+        request_rate = config.request_rate,
+        burstiness = config.burstiness,
+        distribution,
+        max_concurrency = config.max_concurrency.unwrap_or(config.num_prompts),
+        prompts = config.num_prompts,
+        "starting main benchmark run"
     );
 
     // Pre-assign LoRA adapters to each request (None when --lora-modules not set).
@@ -847,11 +846,11 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     );
     if let (Some(modules), Some(_)) = (config.lora_modules.as_ref(), lora_assignments.as_ref()) {
         let names: Vec<&str> = modules.iter().map(|s| s.as_ref()).collect();
-        println!(
-            "LoRA adapters ({}): {:?} [assignment={:?}]",
-            modules.len(),
-            names,
-            config.lora_assignment
+        tracing::info!(
+            adapters = modules.len(),
+            names = ?names,
+            assignment = ?config.lora_assignment,
+            "assigned LoRA adapters"
         );
     }
 
@@ -1125,7 +1124,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     if let Some((cancel_tx, task)) = profile_task {
         let _ = cancel_tx.send(());
         if let Err(e) = task.await {
-            eprintln!("WARNING: Profile background task failed: {e}");
+            tracing::error!(error = %e.as_report(), "profiler background task failed");
         }
     }
 
@@ -1289,12 +1288,14 @@ pub(crate) async fn start_profiler_immediate(
     base_url: &str,
     extra_headers: &Option<std::collections::HashMap<String, String>>,
 ) {
-    println!("Starting profiler...");
     let profile_url = format!("{base_url}/start_profile");
+    tracing::info!(url = %profile_url, "starting profiler");
     match send_profile_request(client, &profile_url, extra_headers).await {
-        Ok(true) => println!("Profiler started"),
-        Ok(false) => eprintln!("WARNING: Profiler start request returned non-success"),
-        Err(e) => eprintln!("WARNING: Failed to start profiler: {e}"),
+        Ok(true) => tracing::info!(url = %profile_url, "profiler started"),
+        Ok(false) => tracing::warn!(url = %profile_url, "profiler start request was unsuccessful"),
+        Err(e) => {
+            tracing::warn!(url = %profile_url, error = %e.as_report(), "failed to start profiler")
+        }
     }
 }
 
@@ -1304,12 +1305,14 @@ pub(crate) async fn stop_profiler_immediate(
     base_url: &str,
     extra_headers: &Option<std::collections::HashMap<String, String>>,
 ) {
-    println!("Stopping profiler...");
     let profile_url = format!("{base_url}/stop_profile");
+    tracing::info!(url = %profile_url, "stopping profiler");
     match send_profile_request(client, &profile_url, extra_headers).await {
-        Ok(true) => println!("Profiler stopped"),
-        Ok(false) => eprintln!("WARNING: Profiler stop request returned non-success"),
-        Err(e) => eprintln!("WARNING: Failed to stop profiler: {e}"),
+        Ok(true) => tracing::info!(url = %profile_url, "profiler stopped"),
+        Ok(false) => tracing::warn!(url = %profile_url, "profiler stop request was unsuccessful"),
+        Err(e) => {
+            tracing::warn!(url = %profile_url, error = %e.as_report(), "failed to stop profiler")
+        }
     }
 }
 
@@ -1371,25 +1374,30 @@ pub(crate) async fn profile_on_batch_threshold(
     duration_secs: f64,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    println!(
-        "Waiting for batch size >= {threshold} before starting profiler \
-         (will capture {duration_secs}s)..."
+    tracing::info!(
+        threshold,
+        duration_seconds = duration_secs,
+        "waiting for profiler batch threshold"
     );
 
     loop {
         if let Some(running) = fetch_num_requests_running(client, base_url).await
             && running >= threshold
         {
-            println!("Batch size {running} >= {threshold}, starting profiler...");
+            tracing::info!(
+                running_requests = running,
+                threshold,
+                "profiler batch threshold reached"
+            );
             break;
         }
         // Wait 500ms or until the benchmark signals cancellation
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             _ = &mut cancel_rx => {
-                eprintln!(
-                    "NOTE: Benchmark finished before batch threshold {threshold} was reached; \
-                     profiling skipped."
+                tracing::warn!(
+                    threshold,
+                    "benchmark finished before profiler batch threshold; skipping profiling"
                 );
                 return;
             }
@@ -1398,13 +1406,13 @@ pub(crate) async fn profile_on_batch_threshold(
 
     let start_url = format!("{base_url}/start_profile");
     match send_profile_request(client, &start_url, extra_headers).await {
-        Ok(true) => println!("Profiler started"),
+        Ok(true) => tracing::info!(url = %start_url, "profiler started"),
         Ok(false) => {
-            eprintln!("WARNING: Profiler start request returned non-success");
+            tracing::warn!(url = %start_url, "profiler start request was unsuccessful");
             return;
         }
         Err(e) => {
-            eprintln!("WARNING: Failed to start profiler: {e}");
+            tracing::warn!(url = %start_url, error = %e.as_report(), "failed to start profiler");
             return;
         }
     }
@@ -1413,15 +1421,17 @@ pub(crate) async fn profile_on_batch_threshold(
     tokio::select! {
         _ = tokio::time::sleep(std::time::Duration::from_secs_f64(duration_secs)) => {}
         _ = &mut cancel_rx => {
-            println!("Benchmark finished, stopping profiler early...");
+            tracing::info!("benchmark finished; stopping profiler early");
         }
     }
 
     let stop_url = format!("{base_url}/stop_profile");
     match send_profile_request(client, &stop_url, extra_headers).await {
-        Ok(true) => println!("Profiler stopped after capturing"),
-        Ok(false) => eprintln!("WARNING: Profiler stop request returned non-success"),
-        Err(e) => eprintln!("WARNING: Failed to stop profiler: {e}"),
+        Ok(true) => tracing::info!(url = %stop_url, "profiler stopped after capture"),
+        Ok(false) => tracing::warn!(url = %stop_url, "profiler stop request was unsuccessful"),
+        Err(e) => {
+            tracing::warn!(url = %stop_url, error = %e.as_report(), "failed to stop profiler")
+        }
     }
 }
 
@@ -1502,10 +1512,11 @@ async fn verify_and_fix_prompt_lengths(
                 let excess = tokens.len().saturating_sub(expected_input_len);
                 let compensate = if excess > 0 && last_excess == Some(excess) {
                     if _iter == 1 {
-                        eprintln!(
-                            "Prompt {i}: server consistently adds {excess} extra token(s) \
-                             (likely BOS), compensating target to {}.",
-                            expected_input_len.saturating_sub(excess),
+                        tracing::warn!(
+                            prompt_index = i,
+                            extra_tokens = excess,
+                            adjusted_target = expected_input_len.saturating_sub(excess),
+                            "server consistently adds prompt tokens; compensating verification target"
                         );
                     }
                     excess
@@ -1563,7 +1574,10 @@ async fn verify_and_fix_prompt_lengths(
 
     let fc = fixed_count.load(std::sync::atomic::Ordering::Relaxed);
     if fc > 0 {
-        println!("Fixed {fc} prompt(s) via server tokenize/detokenize convergence.");
+        tracing::info!(
+            fixed_prompts = fc,
+            "fixed prompt lengths using server tokenizer"
+        );
     }
 
     Ok(())
@@ -1818,7 +1832,7 @@ async fn sample_verify_prompts(
     let tokenize_url = format!("{base_url}/tokenize");
     let api_key = std::env::var("OPENAI_API_KEY").ok();
 
-    println!("Sampling {sample_size} prompts for verification...");
+    tracing::info!(sample_size, "sampling prompts for tokenizer verification");
 
     for (i, request) in requests.iter().enumerate().take(sample_size) {
         let tokens = match server_tokenize(
@@ -1841,9 +1855,11 @@ async fn sample_verify_prompts(
 
         let expected = request.prompt_len + num_special;
         if tokens.len() != expected {
-            println!(
-                "Prompt {i}: expected {expected} tokens, server returned {}",
-                tokens.len()
+            tracing::warn!(
+                prompt_index = i,
+                expected_tokens = expected,
+                actual_tokens = tokens.len(),
+                "tokenizer verification sample mismatch"
             );
             return Ok(SampleVerifyOutcome::Mismatch);
         }
@@ -1868,6 +1884,52 @@ mod tests {
             num_accepted_tokens: accepted_tokens,
             accepted_per_pos: per_pos.iter().copied().collect(),
         }
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_sums_counters_across_engines() {
+        let text = "\
+# TYPE vllm:spec_decode_num_drafts_total counter
+vllm:spec_decode_num_drafts_total{model_name=\"m\",engine=\"0\"} 100.0
+vllm:spec_decode_num_drafts_total{model_name=\"m\",engine=\"1\"} 50.0
+vllm:spec_decode_num_draft_tokens_total{model_name=\"m\",engine=\"0\"} 700.0
+vllm:spec_decode_num_accepted_tokens_total{model_name=\"m\",engine=\"0\"} 300.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"0\",engine=\"0\"} 80.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"1\",engine=\"0\"} 40.0
+vllm:num_requests_running{model_name=\"m\"} 0
+";
+        let m = parse_spec_decode_metrics(text).unwrap();
+        assert_eq!(m.num_drafts, 150);
+        assert_eq!(m.num_draft_tokens, 700);
+        assert_eq!(m.num_accepted_tokens, 300);
+        assert_eq!(m.accepted_per_pos, [(0, 80), (1, 40)].into_iter().collect());
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_skips_created_series_and_label_values() {
+        // `_created` timestamps must not be summed into counters, and metric
+        // matching must key off the metric name, not substrings inside label
+        // values (vllm#41916).
+        let text = "\
+vllm:spec_decode_num_drafts_total{model_name=\"m\"} 100.0
+vllm:spec_decode_num_drafts_created{model_name=\"m\"} 1.7863e+09
+vllm:spec_decode_num_draft_tokens_total{model_name=\"m\"} 700.0
+vllm:spec_decode_num_draft_tokens_created{model_name=\"m\"} 1.7863e+09
+vllm:spec_decode_num_accepted_tokens_total{model_name=\"num_drafts\"} 300.0
+";
+        let m = parse_spec_decode_metrics(text).unwrap();
+        assert_eq!(m.num_drafts, 100);
+        assert_eq!(m.num_draft_tokens, 700);
+        assert_eq!(m.num_accepted_tokens, 300);
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_none_without_spec_metrics() {
+        let text = "\
+vllm:num_requests_running{model_name=\"m\"} 0
+vllm:prefix_cache_queries_total{model_name=\"m\"} 0
+";
+        assert!(parse_spec_decode_metrics(text).is_none());
     }
 
     #[test]

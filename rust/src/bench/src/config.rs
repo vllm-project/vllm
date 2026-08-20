@@ -196,6 +196,7 @@ pub struct BenchConfig {
     pub speed_bench_config: SpeedBenchConfig,
     pub speed_bench_category: Option<String>,
     pub speed_bench_max_input_len: Option<usize>,
+    pub speed_bench_output_len: usize,
     pub hf_split: Option<String>,
     pub hf_subset: Option<String>,
     pub hf_output_len: Option<usize>,
@@ -288,10 +289,18 @@ impl BenchConfig {
                     }
                     Some(other) => {
                         // extra_body was not an object — just use sampling params
-                        eprintln!(
-                            "Warning: --extra-body is not a JSON object, sampling params may be lost"
+                        let value_type = match &other {
+                            serde_json::Value::Null => "null",
+                            serde_json::Value::Bool(_) => "boolean",
+                            serde_json::Value::Number(_) => "number",
+                            serde_json::Value::String(_) => "string",
+                            serde_json::Value::Array(_) => "array",
+                            serde_json::Value::Object(_) => unreachable!(),
+                        };
+                        tracing::warn!(
+                            value_type,
+                            "sampling parameters may be lost because --extra-body is not a JSON object"
                         );
-                        let _ = other;
                         sampling_params
                     }
                     None => sampling_params,
@@ -489,9 +498,9 @@ impl BenchConfig {
                 _ => {}
             }
             if !args.skip_chat_template {
-                eprintln!(
-                    "NOTE: client-side chat template rendering is not supported; custom \
-                     dataset prompts are sent raw (equivalent to --skip-chat-template)."
+                tracing::warn!(
+                    dataset = "custom",
+                    "client-side chat template rendering is unsupported; sending prompts raw"
                 );
             }
         }
@@ -570,9 +579,10 @@ impl BenchConfig {
             }
 
             if ignore_eos {
-                eprintln!(
-                    "WARNING: --ignore-eos is set with --multi-turn. The server may not \
-                     respect output length limits, causing unbounded context growth."
+                tracing::warn!(
+                    ignore_eos,
+                    multi_turn = true,
+                    "output length limits may be ignored, causing unbounded context growth"
                 );
             }
 
@@ -629,6 +639,15 @@ impl BenchConfig {
             return Err(BenchError::Config(
                 "--profile-duration requires --profile-batch-threshold".into(),
             ));
+        }
+
+        if args.tokenizer_mode != "auto" {
+            tracing::warn!(
+                mode = %args.tokenizer_mode,
+                "--tokenizer-mode is ignored by the Rust client; tokenizer resolution always \
+                 follows the HF tokenizer.json -> tiktoken -> server-side /tokenize fallback \
+                 chain (mistral_common tokenizers are not supported locally)"
+            );
         }
 
         Ok(BenchConfig {
@@ -718,6 +737,7 @@ impl BenchConfig {
             speed_bench_config: args.speed_bench_config,
             speed_bench_category: args.speed_bench_category.clone(),
             speed_bench_max_input_len: args.speed_bench_max_input_len,
+            speed_bench_output_len: args.speed_bench_output_len,
             hf_split: args.hf_split.clone(),
             hf_subset: args.hf_subset.clone(),
             hf_output_len: args.hf_output_len,
@@ -870,6 +890,22 @@ mod tests {
             "--model",
             "test-model",
         ]
+    }
+
+    #[test]
+    fn test_speed_bench_flags_match_python() {
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--speed-bench-dataset-subset",
+            "throughput_8k",
+        ]);
+        assert!(matches!(
+            args.speed_bench_config,
+            crate::cli::SpeedBenchConfig::Throughput8k
+        ));
+        assert_eq!(args.speed_bench_output_len, 4096);
     }
 
     #[test]

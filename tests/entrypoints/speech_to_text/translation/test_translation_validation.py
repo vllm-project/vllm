@@ -28,27 +28,33 @@ def _get_rocm_attention_config(model_name):
 
     Whisper uses cross-attention (ENCODER_DECODER) which ROCM_AITER_FA does
     not support. For Whisper we use ROCM_AITER_UNIFIED_ATTN (or TRITON_ATTN
-    as fallback); other models can use ROCM_AITER_FA.
+    as fallback). Other models use ROCM_AITER_FA only on supported CDNA3+
+    hardware and otherwise use the platform default.
     """
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():
         return None
 
-    if "whisper" in model_name.lower():
-        try:
-            from vllm.platforms.rocm import _ON_MI3XX
+    try:
+        from vllm.platforms.rocm import get_cdna_version
 
-            if _ON_MI3XX:
-                return {"backend": "ROCM_AITER_UNIFIED_ATTN"}
-        except ImportError:
-            logger.warning(
-                "Could not import _ON_MI3XX from rocm platform, "
-                "falling back to TRITON_ATTN for Whisper."
-            )
+        cdna_version = get_cdna_version()
+    except ImportError:
+        logger.warning(
+            "Could not check cdna version from rocm platform; "
+            "using a compatible fallback attention backend."
+        )
+        cdna_version = -1
+
+    if "whisper" in model_name.lower():
+        if cdna_version > 2:
+            return {"backend": "ROCM_AITER_UNIFIED_ATTN"}
         return {"backend": "TRITON_ATTN"}
 
-    return {"backend": "ROCM_AITER_FA"}
+    if cdna_version > 2:
+        return {"backend": "ROCM_AITER_FA"}
+    return None
 
 
 def _get_server_args(attention_config):

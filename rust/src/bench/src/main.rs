@@ -12,7 +12,7 @@ use clap::Parser;
 #[command(
     name = "vllm-bench",
     about = "Benchmark online serving throughput",
-    version
+    version = vllm_build_info::VERSION
 )]
 struct Cli {
     #[command(flatten)]
@@ -20,6 +20,8 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    vllm_tracing::init_tracing("Bench");
+
     let cli = Cli::parse();
     vllm_bench::prepare_process();
 
