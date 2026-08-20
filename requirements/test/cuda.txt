@@ -250,7 +250,7 @@ fastparquet==2024.11.0
     # via genai-perf
 fastrlock==0.8.2
     # via cupy-cuda12x
-fastsafetensors==0.3.2
+fastsafetensors==0.3.3
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
@@ -360,8 +360,10 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.22.0
+huggingface-hub==1.26.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   accelerate
     #   datasets
     #   evaluate

@@ -31,6 +31,21 @@ def _prepack_experts(w: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.convert_weight_packed(w)
 
 
+def _deterministic_expert_routes(
+    block_sizes: tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create top-1 routes with exact per-expert block occupancies."""
+    topk_ids = torch.cat(
+        [
+            torch.full((size,), expert, dtype=torch.int32)
+            for expert, size in enumerate(block_sizes)
+        ]
+    )
+    topk_ids = topk_ids.view(-1, 1)
+    topk_weights = torch.ones(topk_ids.shape, dtype=torch.float32)
+    return topk_weights, topk_ids
+
+
 # ===========================================================================
 # FP8 W8A16 MoE
 # ===========================================================================
@@ -217,6 +232,40 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
         is_vnni=True,
     )
     torch.testing.assert_close(out_inplace, out, atol=0, rtol=0)
+
+
+def test_w8a16_block_fp8_cpu_fused_moe_small_expert_blocks():
+    """Test FP8 BRGEMM at exact and multi-block expert boundaries."""
+    set_random_seed(0)
+    block_sizes = (4, 5, 33)
+    N, K, E = 128, 128, len(block_sizes)
+    M = sum(block_sizes)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
+    w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
+    topk_weight, topk_ids = _deterministic_expert_routes(block_sizes)
+
+    ref_out = ref_w8a16_block_fp8_moe(
+        a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
+    )
+    pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
+    out = ops.fused_experts_cpu(
+        a,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        False,
+        ops.CPUQuantMethod.FP8_W8A16,
+        w1_s,
+        w2_s,
+        None,
+        None,
+        BLOCK_SIZE,
+        is_vnni=True,
+    )
+
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
 
 # ===========================================================================
@@ -433,6 +482,48 @@ def test_mxfp4_cpu_fused_moe(M, N, K, E, topk, seed):
         None,  # w1_zero
         None,  # w2_zero
         None,  # block_size
+    )
+
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
+
+
+def test_mxfp4_cpu_fused_moe_small_expert_blocks():
+    """Test MXFP4 BRGEMM at exact and multi-block expert boundaries."""
+    set_random_seed(0)
+    block_sizes = (4, 5, 33)
+    N, K, E = 128, 128, len(block_sizes)
+    M = sum(block_sizes)
+    dtype = torch.bfloat16
+
+    a = torch.randn(M, K, dtype=dtype) / 10
+    w1_bf16 = torch.randn(E, 2 * N, K, dtype=dtype) / 10
+    w1q, w1s = MXFP4QuantizeUtil.quantize(w1_bf16)
+    w1s = w1s.reshape(E, 2 * N, K // 32)
+    w1dq = MXFP4QuantizeUtil.dequantize(w1q, dtype, w1s)
+
+    w2_bf16 = torch.randn(E, K, N, dtype=dtype) / 10
+    w2q, w2s = MXFP4QuantizeUtil.quantize(w2_bf16)
+    w2s = w2s.reshape(E, K, N // 32)
+    w2dq = MXFP4QuantizeUtil.dequantize(w2q, dtype, w2s)
+
+    topk_weight, topk_ids = _deterministic_expert_routes(block_sizes)
+    ref_out = ref_mxfp4_fused_moe(a, w1dq, w2dq, topk_weight, topk_ids, 1)
+
+    pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
+    pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
+    out = ops.fused_experts_cpu(
+        a,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        False,
+        ops.CPUQuantMethod.MXFP4,
+        pw1s,
+        pw2s,
+        None,
+        None,
+        None,
     )
 
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)

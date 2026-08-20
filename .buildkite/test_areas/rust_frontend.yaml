@@ -102,6 +102,7 @@ steps:
   source_file_dependencies:
   - rust/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/v1/engine/

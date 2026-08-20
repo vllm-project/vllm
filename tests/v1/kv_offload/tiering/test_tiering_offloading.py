@@ -403,6 +403,53 @@ class TestTieringOffloadingManager:
         # Next lookup should succeed
         assert count_hits(self.manager, blocks) == 3
 
+    @pytest.mark.parametrize(
+        ("successful_indices", "expected_results"),
+        [
+            (
+                (0, 2),
+                [LookupResult.HIT, LookupResult.MISS, LookupResult.HIT],
+            ),
+            (
+                None,
+                [LookupResult.MISS, LookupResult.MISS, LookupResult.MISS],
+            ),
+        ],
+        ids=["partial", "legacy-full-failure"],
+    )
+    def test_failed_promotion_keeps_only_successful_blocks(
+        self, manager_setup, successful_indices, expected_results
+    ):
+        blocks = to_keys(range(3))
+        for block in blocks:
+            self.secondary_tier1.blocks[block] = True
+
+        def submit_partial(job_metadata: JobMetadata) -> None:
+            successful_keys = (
+                None
+                if successful_indices is None
+                else tuple(blocks[i] for i in successful_indices)
+            )
+            self.secondary_tier1.completed_jobs.append(
+                JobResult(
+                    job_id=job_metadata.job_id,
+                    success=False,
+                    successful_keys=successful_keys,
+                )
+            )
+
+        self.secondary_tier1.submit_load = submit_partial
+
+        for block in blocks:
+            assert self.manager.lookup(block, _CTX) is LookupResult.RETRY
+
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        assert [
+            self.primary_tier.lookup(block, _CTX) for block in blocks
+        ] == expected_results
+
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
         """Resolved lookups report one sync delay sample on allocation."""
         self._start_request()

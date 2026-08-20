@@ -292,6 +292,7 @@ def evaluate_gsm8k_offline(
     temperature: float = 0.0,
     gen_prefix: str = "",
     use_chat_completions: bool = False,
+    chat_template_kwargs: dict[str, object] | None = None,
 ) -> dict[str, float | int]:
     """Evaluate GSM8K accuracy using an offline vllm.LLM object.
 
@@ -300,6 +301,7 @@ def evaluate_gsm8k_offline(
 
     When ``use_chat_completions=True``, prompts go through the chat template via
     ``llm.chat()`` instead of raw completion (for instruction-tuned models).
+    ``chat_template_kwargs`` are forwarded to ``llm.chat()`` when provided.
     """
     from vllm import SamplingParams
 
@@ -318,7 +320,11 @@ def evaluate_gsm8k_offline(
     tic = time.perf_counter()
     if use_chat_completions:
         conversations = [[{"role": "user", "content": p}] for p in prompts]
-        outputs = llm.chat(conversations, sampling_params)
+        outputs = llm.chat(
+            conversations,
+            sampling_params,
+            chat_template_kwargs=chat_template_kwargs,
+        )
     else:
         outputs = llm.generate(prompts, sampling_params)
     latency = time.perf_counter() - tic

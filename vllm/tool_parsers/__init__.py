@@ -58,6 +58,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "glm47_moe_tool_parser",
         "Glm47MoeModelToolParser",
     ),
+    "ling3": (
+        "ling3_tool_parser",
+        "Ling3ToolParser",
+    ),
     "granite-20b-fc": (
         "granite_20b_fc_tool_parser",
         "Granite20bFCToolParser",

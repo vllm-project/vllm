@@ -814,6 +814,8 @@ def nvfp4_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     is_scale_swizzled: bool = True,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -833,6 +835,8 @@ def nvfp4_moe_quant_config(
         per_out_ch_quant=False,
         block_shape=None,
         is_scale_swizzled=is_scale_swizzled,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
@@ -1374,6 +1378,11 @@ class FusedMoEConfig:
     @property
     def is_act_and_mul(self) -> bool:
         return self.activation.is_gated
+
+    @property
+    def w13_num_shards(self) -> int:
+        """Number of shards fused into w13: gate and up for gated, up only."""
+        return 2 if self.is_act_and_mul else 1
 
     @property
     def tp_size(self):
