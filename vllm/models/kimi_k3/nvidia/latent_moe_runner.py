@@ -11,6 +11,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
@@ -103,6 +104,15 @@ class LatentMoERunner(MoERunner):
             assert transform is not None
             norm = transform.norm
             assert norm is not None
+            from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+                TrtLlmMxfp4ExpertsMonolithic,
+            )
+
+            experts_cls = getattr(self._quant_method, "experts_cls", None)
+            self.moe_config.defer_moe_finalize = (
+                experts_cls is TrtLlmMxfp4ExpertsMonolithic
+                and self.moe_config.hidden_dim == self.moe_config.hidden_dim_unpadded
+            )
             from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import (
                 KimiK3LatentMoETailOp,
             )
@@ -110,11 +120,24 @@ class LatentMoERunner(MoERunner):
             op = KimiK3LatentMoETailOp.initialize(
                 hidden_size=transform.up_proj.weight.shape[0],
                 latent_size=norm.weight.shape[0],
+                experts_per_token=(
+                    self.moe_config.experts_per_token
+                    if self.moe_config.use_deferred_moe_finalize
+                    else 0
+                ),
                 dtype=norm.weight.dtype,
                 device=norm.weight.device,
                 rms_eps=norm.variance_epsilon,
             )
             self._k3_latent_moe_tail_op = op
+            self.moe_config.defer_moe_finalize_max_num_tokens = (
+                op.contract.max_num_tokens
+                if self.moe_config.use_deferred_moe_finalize
+                else -1
+            )
+        else:
+            self.moe_config.defer_moe_finalize = False
+            self.moe_config.defer_moe_finalize_max_num_tokens = -1
 
     def _get_zero_residual(
         self,
@@ -177,7 +200,7 @@ class LatentMoERunner(MoERunner):
 
     def _small_batch_tail(
         self,
-        fused_output: torch.Tensor,
+        fused_output: torch.Tensor | UnfinalizedMoEOutput,
         shared_output: torch.Tensor,
         trunc_size: int | None,
     ) -> torch.Tensor:
@@ -303,6 +326,22 @@ class LatentMoERunner(MoERunner):
                 hidden_states,
             )
         )
+
+        if (
+            og_hidden_dim_pre_xform is None
+            and self.moe_config.should_defer_moe_finalize(hidden_states.shape[0])
+        ):
+            unfinalized = self._forward_impl(
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+                input_ids,
+            )
+            shared_output, fused_output = _unpack(unfinalized)
+            assert shared_output is not None
+            assert isinstance(fused_output, UnfinalizedMoEOutput)
+            result = self._small_batch_tail(fused_output, shared_output, None)
+            return self._maybe_add_zero_expert_output(result)
 
         result = self._forward_entry(
             hidden_states,

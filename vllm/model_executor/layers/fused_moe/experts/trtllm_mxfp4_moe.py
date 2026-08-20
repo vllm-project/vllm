@@ -11,6 +11,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -215,7 +218,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         from flashinfer import trtllm_fp4_block_scale_moe
 
         if a1q_scale is not None:
@@ -225,18 +228,22 @@ class TrtLlmMxfp4ExpertsMonolithic(
             assert hidden_states.dtype == torch.bfloat16
             x_quant = hidden_states
             x_scale = None
-        output = torch.empty(
-            *hidden_states.shape[:-1],
-            self.hidden_dim_unpadded,
-            dtype=torch.bfloat16,
-            device=hidden_states.device,
-        )
+        num_tokens = hidden_states.shape[0]
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        output = None
+        if not defer:
+            output = torch.empty(
+                *hidden_states.shape[:-1],
+                self.hidden_dim_unpadded,
+                dtype=torch.bfloat16,
+                device=hidden_states.device,
+            )
 
         routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
+            num_tokens=num_tokens,
             device=hidden_states.device,
         )
-        trtllm_fp4_block_scale_moe(
+        result = trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=x_quant,
@@ -262,15 +269,22 @@ class TrtLlmMxfp4ExpertsMonolithic(
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
-            do_finalize=True,
+            do_finalize=not defer,
             activation_type=self._flashinfer_activation_type(activation),
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             output=output,
             routing_replay_out=routing_replay_out,
         )
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
-        )
+        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        if defer:
+            return UnfinalizedMoEOutput(
+                gemm2_permuted=result[0],
+                expert_weights=result[1],
+                expanded_idx_to_permuted_idx=result[2]
+                .to(torch.int32)
+                .view(num_tokens, self.topk),
+            )
+        assert output is not None
         return output
 
 
