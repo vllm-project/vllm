@@ -420,7 +420,7 @@ def _compact_conv_state_kernel(
 
 @triton.heuristics(
     {
-        "BV": lambda args: 32 if args["ALIGN_MODE"] else 16,
+        "BV": lambda args: 8 if args["ALIGN_MODE"] else 16,
         "num_warps": lambda args: 1,
     }
 )
