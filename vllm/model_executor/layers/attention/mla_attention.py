@@ -245,6 +245,7 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
@@ -308,6 +309,16 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 _FP8_DTYPE = current_platform.fp8_dtype()
+
+
+def _is_mla_bmm_requantization_allowed(kv_b_proj: torch.nn.Module) -> bool:
+    """Whether online BMM weight quantization preserves checkpoint precision."""
+    return not (
+        getattr(kv_b_proj, "quant_config", None) is not None
+        and isinstance(
+            getattr(kv_b_proj, "quant_method", None), UnquantizedLinearMethod
+        )
+    )
 
 
 def _detect_output_quant_key(
@@ -617,11 +628,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 use_pcp=self.use_pcp,
             )
 
-        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        allow_bmm_requantization = _is_mla_bmm_requantization_allowed(self.kv_b_proj)
+        self.is_aiter_triton_fp8_bmm_enabled = (
+            rocm_aiter_ops.is_fp8bmm_enabled() and allow_bmm_requantization
+        )
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         self.is_aiter_triton_fp4_bmm_enabled = (
             rocm_aiter_ops.is_fp4bmm_enabled()
+            and allow_bmm_requantization
             and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
