@@ -132,52 +132,6 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             phase="auto",
         )
 
-    def _make_compact_inputs(
-        self,
-        x: torch.Tensor,
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
-        layer,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        del layer
-
-        assert self.local_to_global_experts is not None
-        local_to_global = self.local_to_global_experts
-
-        token_indices_per_expert: list[torch.Tensor] = []
-        topk_slots_per_expert: list[torch.Tensor] = []
-        num_tokens_per_expert_list: list[int] = []
-
-        for global_expert_id in local_to_global:
-            if global_expert_id < 0:
-                num_tokens_per_expert_list.append(0)
-                continue
-
-            token_indices, topk_slots = torch.where(topk_ids == global_expert_id)
-            num_tokens = token_indices.numel()
-            num_tokens_per_expert_list.append(num_tokens)
-
-            if num_tokens > 0:
-                token_indices_per_expert.append(token_indices)
-                topk_slots_per_expert.append(topk_slots)
-
-        num_tokens_per_expert = torch.tensor(
-            num_tokens_per_expert_list,
-            dtype=torch.int32,
-            device=x.device,
-        )
-
-        if not token_indices_per_expert:
-            empty_indices = torch.empty((0,), dtype=torch.long, device=x.device)
-            compact_x = x.new_empty((0, x.shape[-1]))
-            return compact_x, num_tokens_per_expert, empty_indices, empty_indices
-
-        token_indices = torch.cat(token_indices_per_expert)
-        topk_slots = torch.cat(topk_slots_per_expert)
-        compact_x = x.index_select(0, token_indices)
-
-        return compact_x, num_tokens_per_expert, token_indices, topk_slots
-
     def apply(
         self,
         layer,
@@ -190,63 +144,94 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         del shared_experts, shared_experts_input
 
         assert self.group_size is not None
-        compact_x, num_tokens_per_expert, token_indices, topk_slots = (
-            self._make_compact_inputs(
-                x,
-                topk_ids,
-                topk_weights,
-                layer,
-            )
-        )
-
-        output = torch.zeros_like(x)
-        if compact_x.numel() == 0:
-            return output
 
         if layer.apply_router_weight_on_input:
             if topk_ids.shape[1] != 1:
                 raise NotImplementedError(
                     "apply_router_weight_on_input is only supported for topk=1."
                 )
-            route_weights = topk_weights[token_indices, topk_slots].to(compact_x.dtype)
-            compact_x = compact_x * route_weights.unsqueeze(-1)
+            x = x * topk_weights.to(x.dtype)
+            gather_topk_weights = torch.ones_like(topk_weights)
+        else:
+            gather_topk_weights = topk_weights
 
-        compact_w13 = self._ark_moe(
-            compact_x,
+        num_rows, hidden_size = x.shape
+        topk = topk_ids.shape[1]
+        num_moe_inputs = num_rows * topk
+        output = torch.empty_like(x)
+
+        if num_moe_inputs == 0:
+            return output
+
+        expert_map = layer.expert_map
+        local_num_experts = layer.w13_weight.shape[0]
+        total_experts_num = layer.global_num_experts
+
+        remapped_hidden_states = torch.empty(
+            (num_moe_inputs, hidden_size),
+            dtype=x.dtype,
+            device=x.device,
+        )
+        rows_per_expert = torch.zeros(
+            (local_num_experts,),
+            dtype=torch.int32,
+            device=x.device,
+        )
+        unpermuted_row_to_permuted_row = torch.empty(
+            (num_rows, topk),
+            dtype=torch.int32,
+            device=x.device,
+        )
+
+        torch.ops._moe_C.remap_hidden_states(
+            hidden_states=x,
+            hidden_states_scales=None,
+            remapped_hidden_states=remapped_hidden_states,
+            remapped_hidden_states_scales=None,
+            expert_map=expert_map,
+            rows_per_expert=rows_per_expert,
+            unpermuted_row_to_permuted_row=unpermuted_row_to_permuted_row,
+            topk_ids=topk_ids,
+            total_experts_num=total_experts_num,
+            local_experts_num=local_num_experts,
+        )
+
+        gemm1_output = self._ark_moe(
+            remapped_hidden_states,
             layer.w13_weight,
             layer.w13_scales,
-            num_tokens_per_expert,
+            rows_per_expert,
             self.group_size,
         )
 
         activation = layer.activation
         activated_size = (
-            compact_w13.shape[-1] // 2 if activation.is_gated else compact_w13.shape[-1]
+            gemm1_output.shape[-1] // 2
+            if activation.is_gated
+            else gemm1_output.shape[-1]
         )
-        compact_activated = compact_w13.new_empty(
-            (compact_w13.shape[0], activated_size)
-        )
+        act_output = gemm1_output.new_empty((gemm1_output.shape[0], activated_size))
         apply_moe_activation(
             activation,
-            compact_activated,
-            compact_w13,
+            act_output,
+            gemm1_output,
         )
 
-        compact_out = self._ark_moe(
-            compact_activated,
+        gemm2_output = self._ark_moe(
+            act_output,
             layer.w2_weight,
             layer.w2_scales,
-            num_tokens_per_expert,
+            rows_per_expert,
             self.group_size,
         )
 
-        if not layer.apply_router_weight_on_input:
-            route_weights = topk_weights[token_indices, topk_slots].to(
-                compact_out.dtype
-            )
-            compact_out = compact_out * route_weights.unsqueeze(-1)
-
-        output.index_add_(0, token_indices, compact_out.to(output.dtype))
+        torch.ops._moe_C.moe_gather(
+            output,
+            gemm2_output,
+            gather_topk_weights,
+            unpermuted_row_to_permuted_row,
+            local_num_experts,
+        )
         return output
 
 
