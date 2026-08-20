@@ -175,10 +175,15 @@ cleanup_instances() {
   done
 
   PROCESS_GROUPS=()
-  wait_for_gpu_memory_release
 }
 
-trap 'rc=$?; cleanup_instances || true; exit $rc' EXIT
+cleanup_on_exit() {
+  local rc=$?
+  cleanup_instances || true
+  exit "$rc"
+}
+
+trap cleanup_on_exit EXIT
 trap 'exit 130' SIGINT SIGTERM
 
 get_num_gpus() {
@@ -289,6 +294,7 @@ run_tests_for_model() {
 
   # ── Cleanup ──
   cleanup_instances
+  wait_for_gpu_memory_release
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────
