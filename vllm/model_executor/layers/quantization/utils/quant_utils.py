@@ -5,7 +5,7 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple
 
 import numpy
 import torch
@@ -23,6 +23,13 @@ FP4_DTYPE = torch.uint8
 MXFP_SCALE_DTYPE = torch.uint8
 INT4_DTYPE = scalar_types.uint4b8
 INT8_DTYPE = scalar_types.uint8b128
+
+
+def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
+    """Return a stable short name for torch and ScalarType dtypes."""
+    if isinstance(dtype, ScalarType):
+        return str(dtype)
+    return fx.graph.dtype_abbrs[dtype]
 
 
 def weight_amax(
@@ -60,6 +67,28 @@ def amax_for_moe_weight_quant(amax: torch.Tensor, moe_tp_size: int) -> torch.Ten
             group=get_ep_group().device_group,
         )
     return amax
+
+
+def amax_for_moe_activation_quant(
+    a_scale: torch.Tensor, enable_eplb: bool
+) -> torch.Tensor:
+    """Reduce a per-expert activation scale to one value shared by all experts.
+
+    Note: when EPLB is enabled and since this quantization scales get
+    folded into the per-expert dequantization alphas, we can only
+    ensure that the quant/dequant scales match by having a single
+    quantization scale shared across all ranks.
+    """
+    a_max = a_scale.max().to(torch.float32)
+    if enable_eplb:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        torch.distributed.all_reduce(
+            a_max,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_ep_group().device_group,
+        )
+    return a_max
 
 
 def get_fp8_min_max() -> tuple[float, float]:
@@ -130,7 +159,7 @@ class ScaleDesc:
         group_shape = d.get(self.group_shape, str(self.group_shape))
 
         return (
-            f"{fx.graph.dtype_abbrs[self.dtype]},"
+            f"{_dtype_abbr(self.dtype)},"
             f"{'static' if self.static else 'dynamic'},{group_shape}"
         )
 
@@ -156,13 +185,8 @@ class QuantKey:
 
     def __str__(self):
         scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
-        dtype_description = (
-            fx.graph.dtype_abbrs[self.dtype]
-            if isinstance(self.dtype, torch.dtype)
-            else self.dtype
-        )
         return (
-            f"QuantKey({dtype_description},"
+            f"QuantKey({_dtype_abbr(self.dtype)},"
             f"scale({self.scale}),{scale2_str}"
             f"{'a' if not self.symmetric else ''}symmetric)"
         )
@@ -582,7 +606,7 @@ def is_layer_skipped(
     ignored_layers: list[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
     *,
-    skip_with_substr: bool = False,
+    match_mode: Literal["exact", "substring", "suffix"] = "exact",
 ) -> bool:
     def prefix_full_match(prefix: str, ignored_layers: list[str]) -> bool:
         return prefix in ignored_layers
@@ -591,7 +615,22 @@ def is_layer_skipped(
     def substr_match(prefix: str, ignored_layers: list[str]) -> bool:
         return any(layer in prefix for layer in ignored_layers)
 
-    match_func = substr_match if skip_with_substr else prefix_full_match
+    # Match abbreviated module paths at a component boundary. For example,
+    # ``b_proj`` matches ``model.layers.0.self_attn.b_proj`` but not
+    # ``model.layers.0.self_attn.q_b_proj``.
+    def suffix_match(prefix: str, ignored_layers: list[str]) -> bool:
+        return any(
+            prefix == layer or prefix.endswith(f".{layer}") for layer in ignored_layers
+        )
+
+    if match_mode == "exact":
+        match_func = prefix_full_match
+    elif match_mode == "substring":
+        match_func = substr_match
+    elif match_mode == "suffix":
+        match_func = suffix_match
+    else:
+        raise ValueError(f"Unsupported layer skip match mode: {match_mode}")
 
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
@@ -627,14 +666,11 @@ def is_layer_skipped(
                     "are quantized. All shards of fused layers "
                     "to have the same precision."
                 )
-    elif "experts" in prefix and not skip_with_substr:
+    elif "experts" in prefix and match_mode == "exact":
         expert_ignore_layers = filter(
             lambda layer_name: "experts" in layer_name, ignored_layers
         )
-        return any(
-            prefix in layer_name if not skip_with_substr else layer_name in prefix
-            for layer_name in expert_ignore_layers
-        )
+        return any(prefix in layer_name for layer_name in expert_ignore_layers)
     else:
         is_skipped = match_func(prefix, ignored_layers)
 

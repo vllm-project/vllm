@@ -305,7 +305,7 @@ async def run_vllm_async(
     disable_detokenize: bool = False,
     warmup_requests: list[SampleRequest] | None = None,
 ) -> float:
-    from vllm.entrypoints.openai.api_server import (
+    from vllm.entrypoints.launchers.api_server.entry import (
         build_async_engine_client_from_engine_args,
     )
 
@@ -523,7 +523,7 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
-def _to_serve_args(args) -> argparse.Namespace:
+def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
     """Translate throughput args into a namespace the shared get_samples reads.
 
     ``get_samples`` (used by ``bench serve``) expects ~45 attributes; the
