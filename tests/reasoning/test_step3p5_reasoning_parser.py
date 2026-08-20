@@ -25,12 +25,11 @@ SIMPLE_REASONING = {
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
-# need to get into parser again to remove newline after </think>
 COMPLETE_REASONING = {
     "output": "This is a reasoning section</think>",
     "reasoning": "This is a reasoning section",
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 NO_CONTENT = {
     "output": "This is content",
@@ -72,7 +71,7 @@ COMPLETE_REASONING_WITH_THINK = {
     "output": "<think>This is a reasoning section</think>",
     "reasoning": "This is a reasoning section",
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 MULTIPLE_LINES_WITH_THINK = {
     "output": "<think>This\nThat</think>This is the rest\nThat",
@@ -301,9 +300,8 @@ def test_reasoning(
 
     # Test is_reasoning_end
     output_ids = step3p5_tokenizer.convert_tokens_to_ids(output)
-    if streaming:
-        is_reasoning_end = parser.is_reasoning_end(output_ids)
-        assert is_reasoning_end == param_dict["is_reasoning_end"]
+    is_reasoning_end = parser.is_reasoning_end(output_ids)
+    assert is_reasoning_end == param_dict["is_reasoning_end"]
 
     # Test extract_content
     if param_dict["content"] is not None:
