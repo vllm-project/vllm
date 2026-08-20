@@ -83,11 +83,18 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
-        tokenizer = self.info.get_tokenizer()
-        dummy_prompt = tokenizer.encode(
-            dummy_text,
-            **self.info.default_tok_params.get_encode_kwargs(),
-        )
+        tokenizer = self.info.ctx.tokenizer
+        dummy_prompt: list[int]
+        if tokenizer is None:
+            # Tokenizer-less models (e.g. `skip_tokenizer_init=True`) only
+            # accept embeddings and have an empty dummy text, so there are no
+            # prompt tokens.
+            dummy_prompt = []
+        else:
+            dummy_prompt = tokenizer.encode(
+                dummy_text,
+                **self.info.default_tok_params.get_encode_kwargs(),
+            )
 
         return ProcessorInputs(
             prompt=dummy_prompt,
