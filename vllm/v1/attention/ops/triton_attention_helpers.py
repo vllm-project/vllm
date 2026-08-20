@@ -210,9 +210,7 @@ def compute_tile_loop_bounds(
     # edge of the sliding window. In that case, the union of possible keys is
     # bounded by the normal left window and the end of any multimodal range
     # intersecting this query block.
-    can_prune_sliding = (not USE_R_SWA) and (
-        (not USE_MM_PREFIX) or MM_PREFIX_CLAMP_SW
-    )
+    can_prune_sliding = (not USE_R_SWA) and ((not USE_MM_PREFIX) or MM_PREFIX_CLAMP_SW)
     if SLIDING_WINDOW > 0 and can_prune_sliding:
         # Query rows covered by this Q-block
         qpos_lo = q_block_local_idx * BLOCK_Q
@@ -239,10 +237,7 @@ def compute_tile_loop_bounds(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
                 )
                 range_end = tl.load(
-                    mm_prefix_range_ptr
-                    + seq_idx * MAX_MM_RANGES * 2
-                    + i * 2
-                    + 1
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
                 )
                 intersects_query_block = (
                     (range_start < range_end)
