@@ -954,6 +954,14 @@ def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
             def get(self, prop):
                 return self._cap.get(prop)
 
+            def set(self, prop, value):
+                # get_video_metadata probes the stream end with a seek;
+                # keep the simulated frame counter aligned with rewinds.
+                result = self._cap.set(prop, value)
+                if prop == cv2.CAP_PROP_POS_FRAMES:
+                    self._current_frame = int(value) - 1
+                return result
+
             def isOpened(self):
                 return self._cap.isOpened()
 
