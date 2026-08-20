@@ -1,25 +1,25 @@
+# SPDX-License-License: Apache-2.0
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """vLLM-native multimodal processor for GLM-5-Next.
 
 Ports the GLM-5-Next image/video preprocessing pipeline (``smart_resize`` +
-Qwen-VL-style patchify + GLM-5-Next dynamic-fps frame sampling) so vLLM no
-longer depends on the transformers model classes ``GlmgaImageProcessor``,
-``GlmgaVideoProcessor`` and ``Glm46VProcessor``. Only stable transformers
-framework primitives (``BaseImageProcessorFast`` / ``TorchvisionBackend``,
-``BaseVideoProcessor``, ``ProcessorMixin``, ``BatchFeature``, ``SizeDict`` ...)
-are reused -- the GLM-5-Next-specific logic lives here.
+Qwen-VL-style patchify + GLM-5-Next fps-interval frame sampling) so vLLM does
+not depend on transformers' GLM-5-Next processor classes. Only stable
+transformers framework primitives (``BaseImageProcessorFast`` /
+``BaseVideoProcessor``, ``ProcessorMixin``, ``BatchFeature``, ``SizeDict``)
+are reused.
 
-The math is a faithful port of the training-side reference (``smart_resize``
-with separate ``h_factor`` / ``w_factor`` / ``t_factor``, ``patch_expand_factor``
-baked into the spatial factor, and the 10-D view->permute->reshape patchify that
-yields ``(N, C*temporal_patch_size*patch_size**2) = (N, 1176)`` patches).
+The checkpoint's ``processor_config.json`` is the source of truth: a nested
+``image_processor`` / ``video_processor`` config in the token-budget style
+(``min_image_tokens`` / ``max_image_tokens``, ``patch_expand_factor``,
+``resize_mode``, ``fps_interval``, ``max_frame_count_dynamic``). Pixel budgets
+are derived from the token bounds; there is no ``size``-edge budget.
 """
 
 import json
 import math
 import os
-from typing import cast
 
 import numpy as np
 import torch
@@ -60,11 +60,131 @@ from transformers.video_utils import (
 
 logger = logging.get_logger(__name__)
 
-# Serving cap on max pixels. The checkpoint ships an absurd ``size.longest_edge``
-# (~9.6M image / ~100M video pixels) that makes vLLM's startup encoder-profiling
-# reserve huge activation memory and starve the KV cache (300B weights already
-# fill the GPU). ~1.25M px is a sane serving cap.
+# Serving cap on max pixels. The checkpoint's ``max_image_tokens`` (8000 image /
+# 240000 video) implies pixel budgets of 12.5M / 376M px that would make vLLM's
+# startup encoder-profiling reserve huge activation memory and starve the KV
+# cache (300B weights already fill the GPU). ~1.25M px is a sane serving cap.
 _MM_MAX_PIXELS = 1_254_400
+
+# Frame-sampler fallbacks (mirror the checkpoint's fps_interval=2 /
+# max_frame_count_dynamic=2048); used when neither the request nor the
+# processor config overrides them.
+GLM_VIDEO_DEFAULT_FPS = 2.0
+GLM_VIDEO_DEFAULT_MAX_FRAMES = 2048
+
+
+def glm_sample_frame_indices(
+    total_frames: int,
+    fps: float,
+    duration: float,
+    *,
+    target_fps: float | None = None,
+    max_frame_count: int | None = None,
+    temporal_patch_size: int = 2,
+) -> list[int]:
+    """GLM video frame sampling (training-reference parity).
+
+    ``target_fps`` is the ``fps_interval`` request knob. The greedy walk
+    advances at ``1 / (temporal_patch_size * target_fps)`` seconds, so on
+    frame-dense sources it collects more candidates than ``extract_t`` and
+    the ``> extract_t`` fixup re-spreads the picks uniformly with
+    ``np.linspace`` -- that fallback is the intended reference behavior, not
+    an accident. Short clips (fewer frames than ``extract_t``) are spread at
+    evenly spaced timestamps (``floor`` sampling; the linspace variant
+    samples frames unevenly and cost 4 points on video grounding evals).
+    Request overrides: ``target_fps`` -> fps interval, ``max_frame_count``
+    -> frame cap.
+    """
+    max_frame_idx = total_frames - 1
+    if not duration:
+        duration = (round(max_frame_idx / fps) + 1) if fps else 0
+    if max_frame_count is None:
+        max_frame_count = GLM_VIDEO_DEFAULT_MAX_FRAMES
+    if target_fps is None:
+        target_fps = GLM_VIDEO_DEFAULT_FPS
+
+    extract_t = int(duration * target_fps)
+    extract_t = min(extract_t, int(max_frame_count))
+
+    duration_per_frame = 1 / fps
+    timestamps = [i * duration_per_frame for i in range(total_frames)]
+    max_second = int(duration)
+
+    if total_frames < extract_t:
+        frame_indices = [
+            math.floor(_i * total_frames / extract_t) for _i in range(extract_t)
+        ]
+    else:
+        frame_indices = []
+        current_second = 0.0
+        inv_fps = 1 / (temporal_patch_size * target_fps)
+        for frame_index in range(total_frames):
+            if timestamps[frame_index] >= current_second:
+                current_second += inv_fps
+                frame_indices.append(frame_index)
+                if current_second >= max_second:
+                    break
+
+    if len(frame_indices) < extract_t:
+        if len(frame_indices) == 0:
+            start, end = 0, max(total_frames - 1, 0)
+        else:
+            start, end = frame_indices[0], frame_indices[-1]
+        frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
+    elif len(frame_indices) > extract_t:
+        frame_indices = np.linspace(0, total_frames - 1, extract_t, dtype=int).tolist()
+
+    seen, uniq = set(), []
+    for idx in frame_indices:
+        if idx not in seen:
+            seen.add(idx)
+            uniq.append(int(idx))
+
+    if len(uniq) & 1:
+        uniq.append(uniq[-1])
+
+    return uniq
+
+
+def _ceil_to_factor(value: int, factor: int) -> int:
+    """Round a positive integer upward to the nearest multiple of factor."""
+    return math.ceil(value / factor) * factor
+
+
+def _fit_aligned_size_within_budget(
+    t: int,
+    h: int,
+    w: int,
+    h_factor: int,
+    w_factor: int,
+    max_pixels: int,
+) -> tuple[int, int]:
+    """Largest proportional size whose upward-aligned canvas fits the budget.
+
+    Binary search on the unaligned content height; each candidate is rounded
+    upward to h_factor/w_factor, so the returned canvas always satisfies
+    ``t * aligned_h * aligned_w <= max_pixels``.
+    """
+    minimum_pixels = t * h_factor * w_factor
+    if max_pixels < minimum_pixels:
+        raise ValueError(
+            f"max_pixels={max_pixels} is too small. At least "
+            f"{minimum_pixels} pixels are required for one aligned patch."
+        )
+
+    low, high = 1, h
+    best_h, best_w = h_factor, w_factor
+    while low <= high:
+        content_h = (low + high) // 2
+        content_w = max(1, math.floor(w * content_h / h))
+        aligned_h = _ceil_to_factor(content_h, h_factor)
+        aligned_w = _ceil_to_factor(content_w, w_factor)
+        if t * aligned_h * aligned_w <= max_pixels:
+            best_h, best_w = aligned_h, aligned_w
+            low = content_h + 1
+        else:
+            high = content_h - 1
+    return best_h, best_w
 
 
 def smart_resize(
@@ -74,49 +194,144 @@ def smart_resize(
     t_factor: int = 1,
     h_factor: int = 28,
     w_factor: int = 28,
-    min_pixels: int = 112 * 112,
+    min_pixels: int = 56 * 56,
     max_pixels: int = 14 * 14 * 4 * 1280,
 ) -> tuple[int, int]:
-    """GLM-5-Next ``smart_resize``: snap (h, w) to multiples of the spatial
-    factor under a ``t_bar * h_bar * w_bar`` pixel budget.
+    """GLM-5-Next ``smart_resize``: upward-aligned canvas under a
+    ``t_bar * h_bar * w_bar`` pixel budget.
 
-    ``h_factor`` / ``w_factor`` carry ``patch_expand_factor`` (unlike Qwen-VL's
-    single ``factor``); ``t_factor`` is ``temporal_patch_size``. For a still
-    image ``t = t_factor = temporal_patch_size`` so ``t_bar = temporal_patch_size``.
-
-    Sides shorter than the spatial factor are first upscaled to the factor, and
-    the shrink branch clamps to at least one factor -- without the clamp a slim
-    side floors to 0 once ``t`` (frame count) eats into the pixel budget.
+    Height/width always round UP to their factors (content is then padded,
+    never cropped or distorted); an over-budget canvas is refit by binary
+    search instead of one-shot square-root scaling. ``h_factor`` /
+    ``w_factor`` carry ``patch_expand_factor`` on top of
+    ``patch_size * merge_size``; ``t_factor`` is ``temporal_patch_size``. For
+    a still image ``t = t_factor = temporal_patch_size`` so ``t_bar =
+    temporal_patch_size``.
     """
-    if t < t_factor:
-        raise ValueError(f"t:{t} must be >= temporal_factor:{t_factor}")
-    if h == 0 or w == 0:
-        raise ValueError(f"something wrong with shape, h or w is 0, got {h}, {w}")
+    if min(t, h, w, t_factor, h_factor, w_factor) <= 0:
+        raise ValueError("Image dimensions and alignment factors must be positive.")
+    if min_pixels <= 0 or max_pixels <= 0:
+        raise ValueError("min_pixels and max_pixels must be positive.")
+    if min_pixels > max_pixels:
+        raise ValueError("min_pixels must be less than or equal to max_pixels.")
 
-    if h < h_factor or w < w_factor:
-        scale = max(h_factor / h, w_factor / w)
-        h = int(h * scale)
-        w = int(w * scale)
-
-    if max(h, w) / min(h, w) > 200:
-        raise ValueError(
-            f"absolute aspect ratio must be smaller than 200, "
-            f"got {max(h, w) / min(h, w)}"
-        )
-
-    h_bar = round(h / h_factor) * h_factor
-    w_bar = round(w / w_factor) * w_factor
-    t_bar = round(t / t_factor) * t_factor
+    t_bar = max(t_factor, round(t / t_factor) * t_factor)
+    h_bar = _ceil_to_factor(h, h_factor)
+    w_bar = _ceil_to_factor(w, w_factor)
 
     if t_bar * h_bar * w_bar > max_pixels:
-        beta = math.sqrt((t * h * w) / max_pixels)
-        h_bar = max(h_factor, math.floor(h / beta / h_factor) * h_factor)
-        w_bar = max(w_factor, math.floor(w / beta / w_factor) * w_factor)
+        h_bar, w_bar = _fit_aligned_size_within_budget(
+            t=t_bar,
+            h=h,
+            w=w,
+            h_factor=h_factor,
+            w_factor=w_factor,
+            max_pixels=max_pixels,
+        )
     elif t_bar * h_bar * w_bar < min_pixels:
         beta = math.sqrt(min_pixels / (t * h * w))
-        h_bar = math.ceil(h * beta / h_factor) * h_factor
-        w_bar = math.ceil(w * beta / w_factor) * w_factor
+        h_bar = _ceil_to_factor(max(1, math.ceil(h * beta)), h_factor)
+        w_bar = _ceil_to_factor(max(1, math.ceil(w * beta)), w_factor)
+
+        # Alignment can push a candidate slightly over a tight max_pixels
+        # budget. Refit it when that happens.
+        if t_bar * h_bar * w_bar > max_pixels:
+            h_bar, w_bar = _fit_aligned_size_within_budget(
+                t=t_bar,
+                h=h,
+                w=w,
+                h_factor=h_factor,
+                w_factor=w_factor,
+                max_pixels=max_pixels,
+            )
+
     return h_bar, w_bar
+
+
+def _get_pad_content_size(
+    image_height: int,
+    image_width: int,
+    canvas_height: int,
+    canvas_width: int,
+    allow_upscale: bool = False,
+) -> tuple[int, int]:
+    """Aspect-ratio-preserving content size that fits the canvas.
+
+    Oversized images are shrunk proportionally. Small images are enlarged
+    only when ``allow_upscale``. Padding is applied after the resize.
+    """
+    scale = min(canvas_height / image_height, canvas_width / image_width)
+    if not allow_upscale:
+        scale = min(1.0, scale)
+    content_height = max(1, min(canvas_height, math.floor(image_height * scale)))
+    content_width = max(1, min(canvas_width, math.floor(image_width * scale)))
+    return content_height, content_width
+
+
+def _resize_or_pad(
+    stacked_images: torch.Tensor,
+    target_height: int,
+    target_width: int,
+    resize_mode: str,
+    resample: "PILImageResampling | tvF.InterpolationMode | int | None",
+    resize,
+    allow_upscale: bool = False,
+) -> torch.Tensor:
+    """Resize onto the aligned canvas, or keep the aspect ratio and
+    zero-pad the right/bottom sides (``resize_mode="pad"``)."""
+    height, width = stacked_images.shape[-2:]
+
+    if resize_mode == "resize":
+        return resize(
+            stacked_images,
+            size=SizeDict(height=target_height, width=target_width),
+            resample=resample,
+        )
+
+    if resize_mode != "pad":
+        raise ValueError("resize_mode must be either 'resize' or 'pad'.")
+
+    content_height, content_width = _get_pad_content_size(
+        image_height=height,
+        image_width=width,
+        canvas_height=target_height,
+        canvas_width=target_width,
+        allow_upscale=allow_upscale,
+    )
+
+    if (content_height, content_width) != (height, width):
+        stacked_images = resize(
+            stacked_images,
+            size=SizeDict(height=content_height, width=content_width),
+            resample=resample,
+        )
+
+    # torchvision padding order: [left, top, right, bottom] -> pad only the
+    # right and bottom sides.
+    return tvF.pad(
+        stacked_images,
+        padding=[0, 0, target_width - content_width, target_height - content_height],
+        fill=0,
+    )
+
+
+def _pixel_budget(
+    min_image_tokens: int | None,
+    max_image_tokens: int | None,
+    patch_size: int,
+    merge_size: int,
+    temporal_patch_size: int,
+) -> tuple[int, int]:
+    """(min_pixels, max_pixels) from the token bounds of
+    ``processor_config.json``; one vision token covers
+    ``temporal_patch_size * (patch_size * merge_size) ** 2`` pixels."""
+    if min_image_tokens is None or max_image_tokens is None:
+        raise ValueError(
+            "min_image_tokens and max_image_tokens must be provided by "
+            "processor_config.json (or per-call kwargs)."
+        )
+    factor = temporal_patch_size * (patch_size * merge_size) ** 2
+    return min_image_tokens * factor, max_image_tokens * factor
 
 
 class Glm5NextImageProcessorKwargs(ImagesKwargs, total=False):  # type: ignore[call-arg]
@@ -124,19 +339,24 @@ class Glm5NextImageProcessorKwargs(ImagesKwargs, total=False):  # type: ignore[c
     temporal_patch_size: int | None
     merge_size: int | None
     patch_expand_factor: int | None
+    resize_mode: str | None
+    min_image_tokens: int | None
+    max_image_tokens: int | None
 
 
-class Glm5NextImageProcessorFast(BaseImageProcessorFast):
+class Glm5NextImageProcessor(BaseImageProcessorFast):
     """Fast (torchvision) image processor for GLM-5-Next.
 
-    ``patch_expand_factor`` (checkpoint ships 2) multiplies into the
-    ``smart_resize`` spatial factor ``patch_size * merge_size``; dropping it
-    (as GLM-4V's processor does) yields a wrong patch grid.
+    ``patch_expand_factor`` multiplies into the ``smart_resize`` spatial
+    factor ``patch_size * merge_size``. ``resize_mode`` picks the geometry:
+    ``"pad"`` (default) preserves the aspect ratio and zero-pads the
+    right/bottom of the upward-aligned canvas, ``"resize"`` stretches onto
+    it. Defaults mirror the checkpoint's ``image_processor`` config.
     """
 
     do_resize = True
     resample = PILImageResampling.BICUBIC
-    size = {"shortest_edge": 112 * 112, "longest_edge": 28 * 28 * 15000}
+    size = {"longest_edge": 1}  # unused: budgets come from the token bounds
     do_rescale = True
     do_normalize = True
     image_mean = OPENAI_CLIP_MEAN
@@ -145,28 +365,12 @@ class Glm5NextImageProcessorFast(BaseImageProcessorFast):
     patch_size = 14
     temporal_patch_size = 2
     merge_size = 2
-    patch_expand_factor = 2
+    patch_expand_factor = 1
+    resize_mode = "pad"
+    min_image_tokens = 16
+    max_image_tokens = 8000
     valid_kwargs = Glm5NextImageProcessorKwargs
     model_input_names = ["pixel_values", "image_grid_thw"]
-
-    def __init__(self, **kwargs: Unpack[Glm5NextImageProcessorKwargs]) -> None:
-        super().__init__(**kwargs)
-        if self.size is not None and (
-            self.size.get("shortest_edge", None) is None
-            or self.size.get("longest_edge", None) is None
-        ):
-            raise ValueError(
-                "size must contain 'shortest_edge' and 'longest_edge' keys."
-            )
-
-    def _standardize_kwargs(self, **kwargs) -> dict:
-        kwargs = super()._standardize_kwargs(**kwargs)
-        size = kwargs.get("size", self.size)
-        if size is not None and (not size.shortest_edge or not size.longest_edge):
-            raise ValueError(
-                "size must contain 'shortest_edge' and 'longest_edge' keys."
-            )
-        return kwargs
 
     def _preprocess(
         self,
@@ -183,10 +387,21 @@ class Glm5NextImageProcessorFast(BaseImageProcessorFast):
         temporal_patch_size: int,
         merge_size: int,
         patch_expand_factor: int,
+        resize_mode: str | None,
+        min_image_tokens: int | None,
+        max_image_tokens: int | None,
         disable_grouping: bool | None,
         return_tensors: str | TensorType | None,
         **kwargs,
     ) -> BatchFeature:
+        resize_mode = resize_mode if resize_mode is not None else self.resize_mode
+        min_pixels, max_pixels = _pixel_budget(
+            min_image_tokens if min_image_tokens is not None else self.min_image_tokens,
+            max_image_tokens if max_image_tokens is not None else self.max_image_tokens,
+            patch_size,
+            merge_size,
+            temporal_patch_size,
+        )
         grouped_images, grouped_images_index = group_images_by_shape(
             images, disable_grouping=disable_grouping
         )
@@ -201,13 +416,17 @@ class Glm5NextImageProcessorFast(BaseImageProcessorFast):
                     t_factor=temporal_patch_size,
                     h_factor=patch_size * merge_size * patch_expand_factor,
                     w_factor=patch_size * merge_size * patch_expand_factor,
-                    min_pixels=size.shortest_edge,
-                    max_pixels=size.longest_edge,
+                    min_pixels=min_pixels,
+                    max_pixels=max_pixels,
                 )
-                stacked_images = self.resize(
+                stacked_images = _resize_or_pad(
                     stacked_images,
-                    size=SizeDict(height=resized_height, width=resized_width),
+                    target_height=resized_height,
+                    target_width=resized_width,
+                    resize_mode=resize_mode,
                     resample=resample,
+                    resize=self.resize,
+                    allow_upscale=(temporal_patch_size * height * width < min_pixels),
                 )
             resized_images_grouped[shape] = stacked_images
 
@@ -293,12 +512,19 @@ class Glm5NextImageProcessorFast(BaseImageProcessorFast):
         self, height: int, width: int, images_kwargs: dict | None = None
     ) -> int:
         """Number of image patches (pre-merge) for a given (height, width)."""
-        patch_size = (images_kwargs or {}).get("patch_size", self.patch_size)
-        merge_size = (images_kwargs or {}).get("merge_size", self.merge_size)
-        patch_expand_factor = (images_kwargs or {}).get(
+        images_kwargs = images_kwargs or {}
+        patch_size = images_kwargs.get("patch_size", self.patch_size)
+        merge_size = images_kwargs.get("merge_size", self.merge_size)
+        patch_expand_factor = images_kwargs.get(
             "patch_expand_factor", self.patch_expand_factor
         )
-        size = (images_kwargs or {}).get("size", self.size)
+        min_pixels, max_pixels = _pixel_budget(
+            images_kwargs.get("min_image_tokens", self.min_image_tokens),
+            images_kwargs.get("max_image_tokens", self.max_image_tokens),
+            patch_size,
+            merge_size,
+            self.temporal_patch_size,
+        )
         resized_height, resized_width = smart_resize(
             t=self.temporal_patch_size,
             h=height,
@@ -306,8 +532,8 @@ class Glm5NextImageProcessorFast(BaseImageProcessorFast):
             t_factor=self.temporal_patch_size,
             h_factor=patch_size * merge_size * patch_expand_factor,
             w_factor=patch_size * merge_size * patch_expand_factor,
-            min_pixels=size["shortest_edge"],
-            max_pixels=size["longest_edge"],
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
         )
         grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
         return grid_h * grid_w
@@ -319,20 +545,27 @@ class Glm5NextVideoProcessorKwargs(VideosKwargs, total=False):  # type: ignore[c
     temporal_patch_size: int
     merge_size: int
     patch_expand_factor: int
-    max_duration: int
-    max_image_size: dict
+    resize_mode: str | None
+    target_fps: float | None
+    max_frames: int | None
+    fps_interval: int | None
+    max_frame_count_dynamic: int | None
+    min_image_tokens: int | None
+    max_image_tokens: int | None
 
 
 class Glm5NextVideoProcessor(BaseVideoProcessor):
     """Fast video processor for GLM-5-Next.
 
-    Shares ``smart_resize`` and the patchify with the image processor, and adds
-    GLM-5-Next's dynamic-fps frame sampling (``DYNAMIC_FPS_THRES``).
+    Shares ``smart_resize`` / the pad-mode geometry / the patchify with the
+    image processor, and adds GLM-5-Next's frame sampling
+    (``glm_sample_frame_indices``: ``fps_interval`` semantics with a
+    temporal-patch-scaled greedy walk). Defaults mirror the checkpoint's
+    ``video_processor`` config.
     """
 
     resample = PILImageResampling.BICUBIC
-    size = {"shortest_edge": 112 * 112, "longest_edge": 28 * 28 * 2 * 30000}
-    max_image_size = {"longest_edge": 28 * 28 * 2 * 30000}
+    size = {"longest_edge": 1}  # unused: budgets come from the token bounds
     image_mean = OPENAI_CLIP_MEAN
     image_std = OPENAI_CLIP_STD
     do_resize = True
@@ -342,32 +575,17 @@ class Glm5NextVideoProcessor(BaseVideoProcessor):
     do_sample_frames = True
     patch_size = 14
     temporal_patch_size = 2
-    patch_expand_factor = 2
-    max_duration = 300
+    patch_expand_factor = 1
     merge_size = 2
     valid_kwargs = Glm5NextVideoProcessorKwargs
     num_frames = 16
     fps = 2
+    fps_interval = 2.0
+    max_frame_count_dynamic = 2048
+    resize_mode = "pad"
+    min_image_tokens = 16
+    max_image_tokens = 240000
     model_input_names = ["pixel_values_videos", "video_grid_thw"]
-
-    def __init__(self, **kwargs: Unpack[Glm5NextVideoProcessorKwargs]) -> None:
-        super().__init__(**kwargs)
-        if self.size is not None and (
-            self.size.get("shortest_edge", None) is None
-            or self.size.get("longest_edge", None) is None
-        ):
-            raise ValueError(
-                "size must contain 'shortest_edge' and 'longest_edge' keys."
-            )
-
-    def _standardize_kwargs(self, **kwargs) -> dict:
-        kwargs = super()._standardize_kwargs(**kwargs)
-        size = kwargs.get("size", self.size)
-        if size is not None and (not size.shortest_edge or not size.longest_edge):
-            raise ValueError(
-                "size must contain 'shortest_edge' and 'longest_edge' keys."
-            )
-        return kwargs
 
     def sample_frames(
         self,
@@ -375,7 +593,12 @@ class Glm5NextVideoProcessor(BaseVideoProcessor):
         fps: int | float | None = None,
         **kwargs,
     ) -> np.ndarray:
-        """Sample frame indices at a duration-dependent target fps."""
+        """Sample frame indices with GLM's fps-interval policy.
+
+        ``fps`` / ``target_fps``, ``max_frames`` and ``fps_interval`` /
+        ``max_frame_count_dynamic`` are the overrides described in
+        :func:`glm_sample_frame_indices`.
+        """
         if metadata is None or getattr(metadata, "fps", None) is None:
             raise ValueError(
                 "Asked to sample frames per second but no video metadata was "
@@ -383,66 +606,18 @@ class Glm5NextVideoProcessor(BaseVideoProcessor):
                 "pass in `VideoMetadata` object or set `do_sample_frames=False`."
             )
 
-        total_frames = metadata.total_num_frames
-        max_frame_idx = total_frames - 1
-        duration = metadata.duration or round(max_frame_idx / metadata.fps) + 1
-
-        dynamic_fps_thres = {30: 3, 300: 1, 2400: 0.5}
-        max_frame_count_dynamic = kwargs.get("max_frames") or 640
-        max_duration = 2400
-        effective_duration = min(duration, max_duration)
-        target_fps = kwargs.get("target_fps")
+        target_fps = fps if fps is not None else kwargs.get("target_fps")
         if target_fps is None:
-            if effective_duration <= 30:
-                target_fps = dynamic_fps_thres[30]
-            elif effective_duration <= 300:
-                target_fps = dynamic_fps_thres[300]
-            else:
-                target_fps = dynamic_fps_thres[2400]
-
-        extract_t = int(effective_duration * target_fps * self.temporal_patch_size)
-        extract_t = min(extract_t, max_frame_count_dynamic)
-
-        duration_per_frame = 1 / metadata.fps
-        timestamps = [i * duration_per_frame for i in range(total_frames)]
-        max_second = int(duration)
-
-        if total_frames < extract_t:
-            frame_indices = [
-                math.floor(_i * total_frames / extract_t) for _i in range(extract_t)
-            ]
-        else:
-            frame_indices = []
-            current_second = 0.0
-            inv_fps = 1 / (self.temporal_patch_size * target_fps)
-            for frame_index in range(total_frames):
-                if timestamps[frame_index] >= current_second:
-                    current_second += inv_fps
-                    frame_indices.append(frame_index)
-                    if current_second >= max_second:
-                        break
-
-        if len(frame_indices) < extract_t:
-            if len(frame_indices) == 0:
-                start, end = 0, max(total_frames - 1, 0)
-            else:
-                start, end = frame_indices[0], frame_indices[-1]
-            frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
-        elif len(frame_indices) > extract_t:
-            frame_indices = np.linspace(
-                0, total_frames - 1, extract_t, dtype=int
-            ).tolist()
-
-        seen, uniq = set(), []
-        for idx in frame_indices:
-            if idx not in seen:
-                seen.add(idx)
-                uniq.append(idx)
-
-        if len(uniq) & 1:
-            uniq.append(uniq[-1])
-
-        return np.array(uniq)
+            target_fps = self.fps_interval
+        indices = glm_sample_frame_indices(
+            metadata.total_num_frames,
+            metadata.fps,
+            metadata.duration or 0,
+            target_fps=target_fps,
+            max_frame_count=kwargs.get("max_frames") or self.max_frame_count_dynamic,
+            temporal_patch_size=self.temporal_patch_size,
+        )
+        return np.array(indices)
 
     def _preprocess(
         self,
@@ -460,6 +635,9 @@ class Glm5NextVideoProcessor(BaseVideoProcessor):
         temporal_patch_size: int | None = None,
         patch_expand_factor: int | None = None,
         merge_size: int | None = None,
+        resize_mode: str | None = None,
+        min_image_tokens: int | None = None,
+        max_image_tokens: int | None = None,
         return_tensors: str | TensorType | None = None,
         **kwargs,
     ) -> BatchFeature:
@@ -471,9 +649,14 @@ class Glm5NextVideoProcessor(BaseVideoProcessor):
             else self.temporal_patch_size
         )
         merge_size = merge_size if merge_size is not None else self.merge_size
-        if size is None:
-            # Base converts the ``size`` dict to a ``SizeDict`` at init.
-            size = cast(SizeDict, self.size)
+        resize_mode = resize_mode if resize_mode is not None else self.resize_mode
+        min_pixels, max_pixels = _pixel_budget(
+            min_image_tokens if min_image_tokens is not None else self.min_image_tokens,
+            max_image_tokens if max_image_tokens is not None else self.max_image_tokens,
+            patch_size,
+            merge_size,
+            temporal_patch_size,
+        )
         grouped_videos, grouped_videos_index = group_videos_by_shape(videos)
         resized_videos_grouped = {}
         for shape, stacked_videos in grouped_videos.items():
@@ -489,14 +672,18 @@ class Glm5NextVideoProcessor(BaseVideoProcessor):
                     t_factor=temporal_patch_size,
                     h_factor=patch_size * merge_size * patch_expand_factor,
                     w_factor=patch_size * merge_size * patch_expand_factor,
-                    min_pixels=size.shortest_edge,
-                    max_pixels=size.longest_edge,
+                    min_pixels=min_pixels,
+                    max_pixels=max_pixels,
                 )
                 stacked_videos = stacked_videos.view(b * t_len, c, h, w)
-                stacked_videos = self.resize(
+                stacked_videos = _resize_or_pad(
                     stacked_videos,
-                    size=SizeDict(height=resized_height, width=resized_width),
+                    target_height=resized_height,
+                    target_width=resized_width,
+                    resize_mode=resize_mode,
                     resample=resample,
+                    resize=self.resize,
+                    allow_upscale=(num_frames * height * width < min_pixels),
                 )
                 stacked_videos = stacked_videos.view(
                     b, t_len, c, resized_height, resized_width
@@ -628,31 +815,36 @@ class Glm5NextProcessor(ProcessorMixin):
         """Build the processor directly from the checkpoint config.
 
         The GLM-5-Next checkpoint stores its image/video processor configs inside
-        ``processor_config.json`` (no standalone ``preprocessor_config.json``),
-        and declares a custom ``processor_class`` that ``AutoProcessor`` cannot
-        resolve. We read the configs here, cap ``size.longest_edge`` to a serving
-        budget, and instantiate the vLLM-native sub-processors.
+        ``processor_config.json`` (nested ``image_processor`` / ``video_processor``,
+        token-budget style, no standalone ``preprocessor_config.json``) and
+        declares a custom ``processor_class`` that ``AutoProcessor`` cannot
+        resolve. We read the configs here, cap the token budgets to a serving
+        pixel limit, and instantiate the vLLM-native sub-processors.
         """
         from transformers import AutoTokenizer
 
         model_path = pretrained_model_name_or_path
         tokenizer = AutoTokenizer.from_pretrained(model_path, **kwargs)
 
-        ip_cfg = dict(get_image_processor_config(model_path))
-        if isinstance(ip_cfg.get("size"), dict):
-            ip_cfg["size"]["longest_edge"] = min(
-                ip_cfg["size"].get("longest_edge", _MM_MAX_PIXELS), _MM_MAX_PIXELS
-            )
-        image_processor = Glm5NextImageProcessorFast(
+        def _cap_cfg(cfg: dict) -> dict:
+            # Cap the pixel budget to the serving limit via max_image_tokens.
+            if cfg.get("max_image_tokens") is not None:
+                ps = cfg.get("patch_size", 14)
+                ms = cfg.get("merge_size", 2)
+                tps = cfg.get("temporal_patch_size", 2)
+                cfg["max_image_tokens"] = min(
+                    cfg["max_image_tokens"],
+                    _MM_MAX_PIXELS // (tps * (ps * ms) ** 2),
+                )
+            return cfg
+
+        ip_cfg = _cap_cfg(dict(get_image_processor_config(model_path)))
+        image_processor = Glm5NextImageProcessor(
             **{k: v for k, v in ip_cfg.items() if k != "image_processor_type"}
         )
 
         with open(os.path.join(model_path, "processor_config.json")) as f:
-            vp_cfg = json.load(f)["video_processor"]
-        if isinstance(vp_cfg.get("size"), dict):
-            vp_cfg["size"]["longest_edge"] = min(
-                vp_cfg["size"].get("longest_edge", _MM_MAX_PIXELS), _MM_MAX_PIXELS
-            )
+            vp_cfg = _cap_cfg(dict(json.load(f)["video_processor"]))
         video_processor = Glm5NextVideoProcessor(
             **{k: v for k, v in vp_cfg.items() if k != "video_processor_type"}
         )
@@ -840,7 +1032,7 @@ class Glm5NextProcessor(ProcessorMixin):
 
 
 __all__ = [
-    "Glm5NextImageProcessorFast",
+    "Glm5NextImageProcessor",
     "Glm5NextVideoProcessor",
     "Glm5NextProcessor",
     "smart_resize",

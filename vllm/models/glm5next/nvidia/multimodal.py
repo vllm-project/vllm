@@ -50,6 +50,7 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
 )
 from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.multimodal.parse import ImageSize
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -636,14 +637,13 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     """Wires up the vLLM-native processor for the multimodal checkpoint.
 
     The checkpoint's ``processor_config.json`` declares a custom ``processor_class``
-    (``Glm46VProcessor``) and stores its image/video processor configs inline (no
-    standalone ``preprocessor_config.json``), so ``AutoProcessor`` cannot resolve
-    the config. We bypass it and build our own ``Glm5NextProcessor``
-    (``vllm/transformers_utils/processors/glm5next.py``), a faithful port of the
-    training-side pipeline that no longer imports transformers' ``GlmgaImageProcessor``
-    / ``GlmgaVideoProcessor`` / ``Glm46VProcessor``. The port applies
-    ``patch_expand_factor`` (checkpoint ships 2) inside ``smart_resize``'s spatial
-    factor; dropping it (as GLM-4V's processor does) yields a wrong patch grid.
+    and stores its image/video processor configs inline (no standalone
+    ``preprocessor_config.json``), so ``AutoProcessor`` cannot resolve the
+    config. We bypass it and build our own ``Glm5NextProcessor``
+    (``vllm/transformers_utils/processors/glm5next.py``), a port of the
+    training-side pipeline that no longer imports transformers' GLM processor
+    classes. The port applies ``patch_expand_factor`` (checkpoint ships 1)
+    inside ``smart_resize``'s spatial factor.
     """
 
     def get_hf_processor(self, **kwargs: object):
@@ -654,3 +654,83 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             proc = Glm5NextProcessor.from_pretrained(self.ctx.model_config.model)
             self._glm5_hf_processor = proc
         return proc
+
+    def _processor_pixel_budget(self, proc) -> tuple[int, int]:
+        from vllm.transformers_utils.processors.glm5next import _pixel_budget
+
+        return _pixel_budget(
+            proc.min_image_tokens,
+            proc.max_image_tokens,
+            proc.patch_size,
+            proc.merge_size,
+            proc.temporal_patch_size,
+        )
+
+    def _get_image_max_pixels(self) -> int:
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        if (override := mm_kwargs.get("max_pixels")) is not None:
+            return int(override)
+        return self._processor_pixel_budget(self.get_hf_processor().image_processor)[1]
+
+    def _get_video_max_pixels(self) -> int:
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        if (override := mm_kwargs.get("max_pixels")) is not None:
+            return int(override)
+        return self._processor_pixel_budget(self.get_hf_processor().video_processor)[1]
+
+    def _get_vision_info(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        num_frames: int = 16,
+        do_resize: bool = True,
+        max_image_pixels: int = 28 * 28 * 2 * 30000,
+    ) -> tuple[ImageSize, int]:
+        """GLM-5-Next canvas geometry for token budgeting and dummy inputs.
+
+        The inherited Glm4v path resolves the pixel budget from
+        ``size.longest_edge`` and resizes with GLM-4V's ``smart_resize``. This
+        checkpoint's ``processor_config.json`` ships the token-budget style
+        (``min_image_tokens`` / ``max_image_tokens``) with no ``size`` key, and
+        the alignment factor carries ``patch_expand_factor`` — resolve both
+        from the vLLM-native processor so profiling matches runtime geometry.
+        """
+        from vllm.transformers_utils.processors.glm5next import smart_resize
+
+        vision_config = self.get_hf_config().vision_config
+        patch_size = vision_config.patch_size
+        merge_size = vision_config.spatial_merge_size
+        temporal_patch_size = vision_config.temporal_patch_size
+
+        image_processor = self.get_hf_processor().image_processor
+        factor = patch_size * merge_size * image_processor.patch_expand_factor
+        # Keep the profiling search viable when the caller's budget is below
+        # one aligned canvas of the requested duration.
+        max_image_pixels = max(max_image_pixels, temporal_patch_size * factor * factor)
+
+        if do_resize:
+            t = num_frames if num_frames > temporal_patch_size else temporal_patch_size
+            resized_height, resized_width = smart_resize(
+                t=t,
+                h=image_height,
+                w=image_width,
+                t_factor=temporal_patch_size,
+                h_factor=factor,
+                w_factor=factor,
+                min_pixels=1,
+                max_pixels=max_image_pixels,
+            )
+            preprocessed_size = ImageSize(width=resized_width, height=resized_height)
+        else:
+            preprocessed_size = ImageSize(width=image_width, height=image_height)
+
+        padded_num_frames = num_frames + (-num_frames % temporal_patch_size)
+        grid_t = max(padded_num_frames // temporal_patch_size, 1)
+        grid_h = preprocessed_size.height // patch_size
+        grid_w = preprocessed_size.width // patch_size
+
+        num_patches = grid_t * grid_h * grid_w
+        num_vision_tokens = num_patches // (merge_size**2)
+
+        return preprocessed_size, num_vision_tokens
