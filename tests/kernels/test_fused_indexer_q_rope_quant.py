@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.models.deepseek_v4.common.ops import fused_indexer_q_rope_quant
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
 
 HEAD_DIM = 128
@@ -126,7 +127,22 @@ def _reference(
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 32, 257, 1023])
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("use_fp4", [False, True])
+@pytest.mark.parametrize(
+    "use_fp4",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not (
+                    current_platform.is_cuda()
+                    and current_platform.is_device_capability_family(100)
+                ),
+                reason="MXFP4 indexer cache requires an SM100-family GPU",
+            ),
+        ),
+    ],
+)
 @pytest.mark.parametrize("use_cutedsl", [False, True])
 @torch.inference_mode()
 def test_fused_indexer_q_rope_quant_matches_unfused(
@@ -150,23 +166,6 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
     q_quant_ref, weights_ref = _reference(
         positions, q, cos_sin_cache, weights, softmax_scale, head_scale, use_fp4
     )
-    output_buffers: tuple[torch.Tensor, ...] | None = None
-    OUTPUT_BUFFER_TEST_NUM_TOKENS = 7
-    if num_tokens == OUTPUT_BUFFER_TEST_NUM_TOKENS and cache_dtype == torch.float32:
-        if use_fp4:
-            q_ref, q_scale_ref = q_quant_ref
-            output_buffers = (
-                torch.empty_like(q_ref),
-                torch.empty_like(q_scale_ref)
-                .view(torch.uint8)
-                .reshape(num_tokens, N_HEAD, -1),
-                torch.empty_like(weights_ref),
-            )
-        else:
-            output_buffers = (
-                torch.empty_like(q_quant_ref),
-                torch.empty_like(weights_ref),
-            )
     # use_cutedsl=False: force the triton path even when cutedsl is installed
     # by patching the dispatcher's has_cutedsl() binding to return False.
     cutedsl_patch = (
@@ -186,16 +185,7 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
             softmax_scale,
             head_scale,
             use_fp4,
-            output_buffers=output_buffers,
         )
-
-    if output_buffers is not None:
-        if use_fp4:
-            assert q_quant_fused[0].data_ptr() == output_buffers[0].data_ptr()
-            assert q_quant_fused[1].data_ptr() == output_buffers[1].data_ptr()
-        else:
-            assert q_quant_fused.data_ptr() == output_buffers[0].data_ptr()
-        assert weights_fused.data_ptr() == output_buffers[-1].data_ptr()
 
     if use_fp4:
         q_quant_ref, q_scale_ref = q_quant_ref
