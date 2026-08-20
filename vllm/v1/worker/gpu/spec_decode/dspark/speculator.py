@@ -43,20 +43,6 @@ class DSparkSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
-        # A draft-only noise token can make the input embedding vocabulary
-        # wider than the target vocabulary used by rejection sampling.
-        target_vocab_size = vllm_config.model_config.get_vocab_size()
-        if self.vocab_size != target_vocab_size:
-            self.vocab_size = target_vocab_size
-            if self.draft_logits is not None:
-                self.draft_logits = torch.zeros(
-                    self.max_num_reqs,
-                    self.num_speculative_steps,
-                    self.vocab_size,
-                    dtype=torch.float32,
-                    device=device,
-                )
-
         # Whether to sample from the anchor position. When True, uses anchor-as-first
         # (N slots, each position predicts the next token). When False, uses 1+N
         # fill-in block (anchor is a bonus token).

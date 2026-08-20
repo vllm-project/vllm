@@ -176,8 +176,6 @@ class Qwen3DSparkModel(DFlashQwen3Model):
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
-    model_cls = Qwen3DSparkModel
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
@@ -187,7 +185,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
-        self.model = self.model_cls(
+        self.model = Qwen3DSparkModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,

@@ -289,20 +289,6 @@ def test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states():
 
 
 @pytest.mark.skip_global_cleanup
-def test_qwen3_omni_dspark_uses_dedicated_model_class():
-    from vllm.model_executor.models.qwen3_omni_dspark import (
-        Qwen3OmniDSparkAttention,
-        Qwen3OmniDSparkDecoderLayer,
-        Qwen3OmniDSparkForCausalLM,
-        Qwen3OmniDSparkModel,
-    )
-
-    assert Qwen3OmniDSparkForCausalLM.model_cls is Qwen3OmniDSparkModel
-    assert Qwen3OmniDSparkModel.decoder_layer_cls is Qwen3OmniDSparkDecoderLayer
-    assert Qwen3OmniDSparkDecoderLayer.attention_cls is Qwen3OmniDSparkAttention
-
-
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     ("input_vocab_size", "draft_vocab_size", "weights", "error"),
     [
@@ -316,14 +302,12 @@ def test_qwen3_omni_dspark_uses_dedicated_model_class():
         ),
     ],
 )
-def test_qwen3_omni_dspark_rejects_incomplete_vocab_weights(
+def test_qwen3_dspark_rejects_incomplete_vocab_weights(
     input_vocab_size, draft_vocab_size, weights, error
 ):
-    from vllm.model_executor.models.qwen3_omni_dspark import (
-        Qwen3OmniDSparkForCausalLM,
-    )
+    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 
-    model = Qwen3OmniDSparkForCausalLM.__new__(Qwen3OmniDSparkForCausalLM)
+    model = Qwen3DSparkForCausalLM.__new__(Qwen3DSparkForCausalLM)
     nn.Module.__init__(model)
     object.__setattr__(
         model,
@@ -337,38 +321,6 @@ def test_qwen3_omni_dspark_rejects_incomplete_vocab_weights(
 
     with pytest.raises(ValueError, match=error):
         model.load_weights(weights)
-
-
-@pytest.mark.skip_global_cleanup
-def test_dspark_probabilistic_buffer_uses_target_output_vocab():
-    from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
-
-    def init_parent(self, vllm_config, device):
-        self.vocab_size = 101
-        self.draft_logits = torch.empty(2, 3, 101, device=device)
-        self.draft_model_config = SimpleNamespace(
-            hf_config=SimpleNamespace(
-                sample_from_anchor=True,
-                dspark_draft_topk=None,
-            ),
-            get_hidden_size=lambda: 8,
-        )
-        self.speculative_config = SimpleNamespace(enable_adaptive_verification=False)
-        self.num_speculative_steps = 3
-        self.max_num_tokens = 16
-        self.max_num_reqs = 2
-        self.dtype = torch.float32
-        self.draft_tokens = torch.empty(2, 3, dtype=torch.long, device=device)
-
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(get_vocab_size=lambda: 100)
-    )
-    with patch.object(DFlashSpeculator, "__init__", init_parent):
-        speculator = DSparkSpeculator(vllm_config, torch.device("cpu"))
-
-    assert speculator.vocab_size == 100
-    assert speculator.draft_logits.shape == (2, 3, 100)
 
 
 if __name__ == "__main__":
