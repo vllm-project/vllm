@@ -12,11 +12,16 @@ from vllm._custom_ops import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.triton_merge_attn_states import (
-    mask_empty_context,
-)
-from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
 )
+
+pytestmark = [
+    pytest.mark.skip_global_cleanup,
+    pytest.mark.skipif(
+        not current_platform.is_cuda_alike(),
+        reason="merge_attn_states kernels require CUDA or ROCm.",
+    ),
+]
 
 
 # Naive PyTorch Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
@@ -76,32 +81,6 @@ DTYPES = [torch.float32, torch.half, torch.bfloat16]
 all_case_info: list[tuple] = []
 
 
-def test_mask_empty_context() -> None:
-    query_lens = torch.tensor([2] + [1] * 31 + [131, 1], dtype=torch.int32)
-    query_start_loc = torch.cat(
-        (torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0))
-    ).cuda()
-    context_lens = torch.tensor([4] * 32 + [0, 3], dtype=torch.int32)
-    context_start_loc = torch.cat(
-        (torch.zeros(1, dtype=torch.int32), context_lens.cumsum(0))
-    ).cuda()
-    num_heads, num_tokens, head_dim = 4, 165, 16
-    lse = torch.randn(num_heads, num_tokens, device="cuda")
-    output = torch.randn(num_tokens, num_heads, head_dim, device="cuda")
-    # Empty-context rows carry undefined (possibly non-finite) attention output.
-    output[33:164] = float("nan")
-
-    expected_lse = lse.clone()
-    expected_lse[:, 33:164] = float("-inf")
-    expected_output = output.clone()
-    expected_output[33:164] = 0.0
-
-    mask_empty_context(lse, output, query_start_loc, context_start_loc)
-
-    torch.testing.assert_close(lse, expected_lse)
-    torch.testing.assert_close(output, expected_output)
-
-
 @pytest.mark.parametrize("merge_fn", [merge_attn_states_cuda, merge_attn_states_triton])
 @pytest.mark.parametrize("output_dtype", [torch.float32, torch.half, torch.bfloat16])
 def test_merge_attn_states_both_empty(merge_fn, output_dtype) -> None:
@@ -117,8 +96,7 @@ def test_merge_attn_states_both_empty(merge_fn, output_dtype) -> None:
     )
     suffix_lse = torch.randn(num_heads, num_tokens, device="cuda")
 
-    # Tokens 2 and 3 are empty on both sides (mask_empty_context already zeroed
-    # their outputs and set both LSEs to -inf).
+    # Tokens 2 and 3 are empty on both sides.
     empty = slice(2, 4)
     prefix_lse[:, empty] = float("-inf")
     suffix_lse[:, empty] = float("-inf")
@@ -183,12 +161,6 @@ def test_merge_attn_states(
     input_dtype: torch.dtype,
     use_fp8: bool,
 ):
-    if not current_platform.is_cuda():
-        pytest.skip(
-            "Currently only support compare triton merge_attn_states "
-            "with custom cuda merge_attn_states kernel"
-        )
-
     NUM_TOKENS = num_tokens
     NUM_HEADS = num_query_heads
     HEAD_SIZE = head_size

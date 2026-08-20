@@ -122,7 +122,7 @@ class Parser:
         self._tool_parser: ToolParser | None = None
         if self.__class__.reasoning_parser_cls is not None:
             self._reasoning_parser = self.__class__.reasoning_parser_cls(
-                tokenizer, *args, **kwargs
+                tokenizer, *args, model_config=model_config, **kwargs
             )
         if self.__class__.tool_parser_cls is not None:
             self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
@@ -366,6 +366,10 @@ class Parser:
         """Parse a single streaming delta, orchestrating reasoning then
         tool call extraction via internal stream state.
         """
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Return the number of reasoning tokens in generated token IDs."""
+        return 0
 
 
 class DelegatingParser(Parser):
@@ -938,6 +942,12 @@ class DelegatingParser(Parser):
                 delta_message = None
 
         return delta_message
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count reasoning tokens through the configured reasoning parser."""
+        if self._reasoning_parser is None:
+            return 0
+        return self._reasoning_parser.count_reasoning_tokens(token_ids)
 
     def _flush_engine_parsers(
         self, delta_message: DeltaMessage | None

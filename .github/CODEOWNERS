@@ -12,10 +12,12 @@
 /vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
 /vllm/model_executor/model_loader @22quinn
 /vllm/model_executor/layers/batch_invariant.py @yewentao256
+/vllm/model_executor/custom_op.py @shen-shanshan
 /vllm/ir @ProExpertProg
 /vllm/kernels/ @ProExpertProg @tjtanaa
 /vllm/kernels/helion @ProExpertProg @zou3519
-/vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
+/vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa @shen-shanshan
+/vllm/multimodal/media @Isotr0py
 /vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
 /CMakeLists.txt @tlrmchlsmth @LucasWilkinson @Harry-Chen
 /cmake @tlrmchlsmth @LucasWilkinson @Harry-Chen
@@ -79,6 +81,8 @@
 /vllm/v1/executor @njhill
 /vllm/v1/worker @njhill
 /vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche @ivanium
+/vllm/v1/worker/encoder_cudagraph.py @shen-shanshan
+/vllm/v1/worker/encoder_cudagraph_defs.py @shen-shanshan
 
 # Model runner V2
 /vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
@@ -100,7 +104,8 @@
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye @AndreasKaratzas
 /tests/kernels/ir @ProExpertProg @tjtanaa
 /tests/models @DarkLight1337 @ywang96 @AndreasKaratzas
-/tests/multimodal @DarkLight1337 @ywang96 @NickLucche
+/tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
+/tests/multimodal/media @Isotr0py
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
@@ -176,21 +181,25 @@ mkdocs.yaml @hmellor
 /vllm/third_party/flash_linear_attention @ZJY0516 @vadiklyutiy
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
-/vllm/**/*rocm* @tjtanaa @dllehr-amd
+/vllm/**/*rocm* @tjtanaa @dllehr-amd @shen-shanshan
 /docker/Dockerfile.rocm* @tjtanaa @dllehr-amd @AndreasKaratzas
 /vllm/v1/attention/backends/rocm*.py @tjtanaa @dllehr-amd
 /vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
 /vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
 /vllm/model_executor/layers/fused_moe/rocm*.py @tjtanaa @dllehr-amd
-/csrc/rocm @tjtanaa @dllehr-amd
+/csrc/rocm @tjtanaa @dllehr-amd @hongxiayang
 /requirements/*rocm* @tjtanaa @AndreasKaratzas
 /tests/**/*rocm* @tjtanaa @AndreasKaratzas
-/docs/**/*rocm* @tjtanaa
+/docs/**/*rocm* @tjtanaa @hongxiayang
 /vllm/**/*quark* @tjtanaa
 /tests/**/*quark* @tjtanaa @AndreasKaratzas
-/docs/**/*quark* @tjtanaa
+/docs/**/*quark* @tjtanaa @hongxiayang
 /vllm/**/*aiter* @tjtanaa @AndreasKaratzas
 /tests/**/*aiter* @tjtanaa @AndreasKaratzas
+
+# AMD per-model amd/ subtrees
+/vllm/models/*/amd @tjtanaa @dllehr-amd @hongxiayang
+/vllm/models/deepseek_v4/amd @tjtanaa @dllehr-amd @hongxiayang @zyongye
 
 # TPU
 /vllm/v1/worker/tpu* @NickLucche

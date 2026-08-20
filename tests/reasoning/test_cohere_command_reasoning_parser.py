@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from collections import UserDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,6 +25,8 @@ from vllm.reasoning.cohere_command_reasoning_parser import (
     CohereCommand3ReasoningParser,
     CohereCommand4ReasoningParser,
     _has_effective_tools,
+    _melody_citations_to_vllm,
+    _melody_sources_to_vllm,
     _response_format_type,
     _schema_dict_from_structured_outputs,
     convert_schema_to_structural_tags,
@@ -33,19 +35,11 @@ from vllm.sampling_params import StructuredOutputsParams
 
 
 @dataclass
-class ExpectedToolCall:
-    id: str
-    name: str
-    arguments: dict
-
-
-@dataclass
 class ReasoningCase:
     parser_cls: Any
     model_output: str
     expected_reasoning: str | None
     expected_content: str | None
-    expected_tool_calls: list[ExpectedToolCall] = field(default_factory=list)
 
 
 REASONING_CASES = [
@@ -65,9 +59,6 @@ REASONING_CASES = [
     {"tool_call_id": "0", "tool_name": "foo", "parameters": {"query": "query1"}}
 ]
 <|END_ACTION|>""",
-            expected_tool_calls=[
-                ExpectedToolCall(id="0", name="foo", arguments={"query": "query1"}),
-            ],
         ),
         id="cmd3-single_tool_call",
     ),
@@ -87,9 +78,6 @@ REASONING_CASES = [
     {"tool_call_id": "0", "tool_name": "foo", "parameters": {"query": "query1"}}
 ]
 <|END_ACTION|>""",
-            expected_tool_calls=[
-                ExpectedToolCall(id="0", name="foo", arguments={"query": "query1"}),
-            ],
         ),
         id="cmd4-single_tool_call",
     ),
@@ -234,29 +222,8 @@ class TestExtractReasoning:
         assert reasoning == case.expected_reasoning
 
         content = "".join(content_parts) if content_parts else None
-        if case.expected_tool_calls:
-            assert content is None or content == ""
-        else:
-            assert content == case.expected_content
-
-        accumulated: dict[int, dict] = {}
-        for d in tool_call_deltas:
-            idx = d["index"]
-            if idx not in accumulated:
-                accumulated[idx] = {"id": "", "name": "", "arguments": ""}
-            if d["id"]:
-                accumulated[idx]["id"] = d["id"]
-            if d["name"]:
-                accumulated[idx]["name"] = d["name"]
-            if d["arguments"]:
-                accumulated[idx]["arguments"] += d["arguments"]
-
-        assert len(accumulated) == len(case.expected_tool_calls)
-        for i, expected_tc in enumerate(case.expected_tool_calls):
-            tc = accumulated[i]
-            assert tc["id"] == expected_tc.id
-            assert tc["name"] == expected_tc.name
-            assert json.loads(tc["arguments"]) == expected_tc.arguments
+        assert content == case.expected_content
+        assert tool_call_deltas == []
 
 
 class TestIsReasoningEnd:
@@ -623,3 +590,68 @@ class TestAdjustRequestTools:
         types = _content_types(o.structured_outputs.structural_tag)
         assert "grammar" in types
         assert "json_schema" in types
+
+
+class TestMelodySourceResolution:
+    """Pin the parser-side source resolution (see
+    ``_melody_sources_to_vllm``). The parser receives melody's numeric
+    ``(tool_call_index, tool_result_indices)`` addressing and resolves
+    it against a ``position_to_source`` map handed in by
+    ``CohereServingChatV2._apply_cohere_template_kwargs`` -- the same
+    map that would otherwise live in the serving layer's resolver.
+    """
+
+    @staticmethod
+    def _fake_melody_source(bucket: int, indices: list[int]) -> Any:
+        return SimpleNamespace(tool_call_index=bucket, tool_result_indices=indices)
+
+    def test_multi_index_source_fans_out(self):
+        from vllm.entrypoints.cohere.cohere_chat_message import CitationSource
+
+        position_map: dict[tuple[int, int], CitationSource] = {
+            (0, 0): CitationSource(type="document", id="d0", document={"id": "d0"}),
+            (0, 1): CitationSource(type="document", id="d1", document={"id": "d1"}),
+        }
+        raw = [self._fake_melody_source(0, [0, 1])]
+        out = _melody_sources_to_vllm(raw, position_map)
+        assert [s.id for s in out] == ["d0", "d1"]
+        # Verify type / payload were plumbed through, not just the id.
+        assert out[0].type == "document"
+        assert out[0].document == {"id": "d0"}
+
+    def test_unresolvable_position_skipped(self):
+        from vllm.entrypoints.cohere.cohere_chat_message import CitationSource
+
+        position_map: dict[tuple[int, int], CitationSource] = {
+            (0, 0): CitationSource(type="document", id="d0"),
+        }
+        raw = [self._fake_melody_source(9, [0])]
+        assert _melody_sources_to_vllm(raw, position_map) == []
+
+    def test_missing_position_map_drops_all_sources(self):
+        # A parser instance without a position map (parser wired
+        # outside of ``CohereServingChatV2``) can't attribute anything,
+        # so every source is dropped. Callers downstream will see the
+        # citation with empty ``sources`` and drop it entirely.
+        raw = [self._fake_melody_source(0, [0])]
+        assert _melody_sources_to_vllm(raw, None) == []
+
+    def test_citations_pass_through_is_thinking_tag(self):
+        from vllm.entrypoints.cohere.cohere_chat_message import CitationSource
+
+        position_map: dict[tuple[int, int], CitationSource] = {
+            (0, 0): CitationSource(type="document", id="d0"),
+        }
+        raw = [
+            SimpleNamespace(
+                start_index=0,
+                end_index=5,
+                text="hello",
+                is_thinking=True,
+                sources=[self._fake_melody_source(0, [0])],
+            )
+        ]
+        out = _melody_citations_to_vllm(raw, position_map)
+        assert out is not None
+        assert out[0].type == "THINKING_CONTENT"
+        assert out[0].sources[0].id == "d0"

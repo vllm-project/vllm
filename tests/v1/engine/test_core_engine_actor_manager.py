@@ -308,13 +308,8 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
             executor_class=_DummyExecutor,
             log_stats=False,
             addresses=addresses,
-            num_api_servers=2,
-        ) as (
-            engine_manager,
-            _coordinator,
-            _addresses_out,
-            _tensor_queue,
-        ):
+        ) as engine_launch:
+            engine_manager = engine_launch.engine_manager
             assert isinstance(engine_manager, CoreEngineActorManager)
 
             # API-server children bind to the pre-allocated ports.
