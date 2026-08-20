@@ -28,6 +28,7 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
 from tests.kernels.moe.utils import TestMLP, make_test_weights, moe_quantize_weights
 from vllm.config import (
     CompilationConfig,
+    EPLBConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -1774,13 +1775,17 @@ def _parallel_worker(
             local_failed = True
             local_error = traceback.format_exc()
         finally:
-            # DeepEP managers are not reliably reusable across many subtests in
-            # a single worker process. Tear them down after each DeepEP case so
-            # later subtests do not inherit stale communication state.
-            if test_config.backend in {
-                "deepep_low_latency",
-                "deepep_high_throughput",
-            }:
+            # DeepEP buffers are not entirely reusable on B200. Clear the
+            # all2all manager cache after each testpoint there. In particular,
+            # do not do this on ROCm: rocSHMEM cannot reinitialize the allocator
+            # after destroying a DeepEP buffer in the same process.
+            cap = current_platform.get_device_capability()
+            if (
+                current_platform.is_cuda()
+                and cap is not None
+                and cap.major == 10
+                and test_config.backend in DEEPEP_BACKENDS
+            ):
                 torch.accelerator.synchronize()
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
                 if all2all_manager is not None:
@@ -1909,6 +1914,12 @@ def test_moe_layer(
     # moe_backend=flashinfer_trtllm / flashinfer_cutlass / flashinfer_cutedsl
     # (BF16, FP8 and NVFP4 paths), and VLLM_USE_FLASHINFER_MOE_INT4=1.
 
+    # Repeated NIXL memory registration in this broad layer matrix fails on
+    # gfx950. NIXL EPLB is covered by dedicated tests, so use Gloo here to
+    # preserve the layer/EPLB coverage.
+    eplb_config = EPLBConfig(
+        communicator="torch_gloo" if enable_eplb and on_gfx950() else None
+    )
     parallel_config = ParallelConfig(
         pipeline_parallel_size=1,
         data_parallel_size=dp_size,
@@ -1916,6 +1927,7 @@ def test_moe_layer(
         enable_expert_parallel=use_ep,
         all2all_backend=backend,
         enable_eplb=enable_eplb,
+        eplb_config=eplb_config,
     )
 
     compilation_config = CompilationConfig()
