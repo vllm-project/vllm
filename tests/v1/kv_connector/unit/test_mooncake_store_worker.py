@@ -36,6 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
 
@@ -173,7 +174,7 @@ def _make_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMeta:
     return ReqMeta(
         req_id=req_id,
         token_len_chunk=32,
-        block_ids=([0, 1],),
+        block_ids=([1, 2],),
         block_hashes=block_hashes,
         can_save=True,
     )
@@ -183,7 +184,7 @@ def _make_multi_group_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMe
     return ReqMeta(
         req_id=req_id,
         token_len_chunk=32,
-        block_ids=([0, 1], [2, 3]),
+        block_ids=([1, 2], [3, 4]),
         block_hashes=block_hashes,
         can_save=True,
     )
@@ -517,7 +518,7 @@ def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -543,7 +544,7 @@ def test_store_sending_thread_delta_strides_with_local_phase():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -569,7 +570,7 @@ def test_tp_sharded_group_saves_every_block_on_every_rank():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -595,7 +596,7 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=16,
-            block_ids=([0],),
+            block_ids=([1],),
             block_hashes=[b"a0"],
             can_save=True,
         ),
@@ -614,7 +615,7 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -686,6 +687,69 @@ def test_partial_tail_offload_skips_null_source_blocks():
     assert addrs == [[0x1000 + 2 * 256], [0x1000 + 3 * 256]]
 
 
+def test_store_sending_thread_skips_null_sparse_group_blocks():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = (
+        lambda keys, addrs, sizes, replicate_config: [256] * len(keys)
+    )
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=16,
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([256])
+    db_mamba = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+    )
+    db_mamba.set_kv_caches_base_addr([0x2000])
+    db_mamba.set_block_len([512])
+
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db_full, db_mamba],
+    )
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=48,
+            block_ids=([1, 2, 3], [NULL_BLOCK_ID, 4, NULL_BLOCK_ID]),
+            block_hashes=[b"a0", b"a1", b"a2"],
+            can_save=True,
+        ),
+    )
+
+    keys, addrs, _, _ = store.batch_put_from_multi_buffers.call_args.args
+    mamba_keys = [key for key in keys if "@group:1" in key]
+    assert [key.rsplit("@", 1)[-1] for key in mamba_keys] == [b"a1".hex()]
+    assert all(addr[0] >= 0x2000 for key, addr in zip(keys, addrs) if "@group:1" in key)
+
+
 def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
     store = MagicMock()
     store.batch_is_exist.return_value = [1, 0, 0]
@@ -752,7 +816,7 @@ def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -859,7 +923,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=48,
-            block_ids=([0, 1, 2], [2, 1, 0]),
+            block_ids=([1, 2, 3], [3, 2, 1]),
             block_hashes=[b"a0", b"a1", b"a2"],
             can_save=True,
         ),
@@ -867,8 +931,8 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
 
     db0.prepare_value.assert_not_called()
     db1.prepare_value.assert_not_called()
-    db0.prepare_values.assert_called_once_with([(0, 16), (32, 48)], [0, 1, 2])
-    db1.prepare_values.assert_called_once_with([(16, 32), (32, 48)], [2, 1, 0])
+    db0.prepare_values.assert_called_once_with([(0, 16), (32, 48)], [1, 2, 3])
+    db1.prepare_values.assert_called_once_with([(16, 32), (32, 48)], [3, 2, 1])
 
     keys, addrs, sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     assert [key.rsplit("@", 1)[-1] for key in keys] == [
@@ -877,7 +941,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
         "6131",
         "6132",
     ]
-    assert addrs == [[0x1000], [0x1200], [0x2200], [0x2000]]
+    assert addrs == [[0x1100], [0x1300], [0x2400], [0x2200]]
     assert sizes == [[256], [256], [512], [512]]
 
 
@@ -1250,7 +1314,7 @@ def test_store_sending_thread_multiple_segments_share_logical_group_id():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
     ]
-    assert addrs == [[0x1000, 0x2000], [0x1100, 0x2100]]
+    assert addrs == [[0x1100, 0x2100], [0x1200, 0x2200]]
     assert sizes == [[256, 256], [256, 256]]
     assert config.group_ids == [
         "vllm-mooncake-store:test-model@6130",
@@ -1301,7 +1365,7 @@ def test_store_sending_thread_group_ids_share_across_kv_cache_groups():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6130",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6131",
     ]
-    assert addrs == [[0x1000], [0x1100], [0x3200], [0x3300]]
+    assert addrs == [[0x1100], [0x1200], [0x3300], [0x3400]]
     assert sizes == [[256], [256], [256], [256]]
     # Different vLLM KV cache groups for the same prefix chunk share the
     # same Mooncake lifecycle group id.
@@ -1935,7 +1999,7 @@ def test_store_sending_thread_clamps_token_len_to_lcm():
         ReqMeta(
             req_id="r0",
             token_len_chunk=33,
-            block_ids=([0, 1, 2],),
+            block_ids=([1, 2, 3],),
             block_hashes=[b"a0", b"a1", b"a2"],
             can_save=True,
         ),
@@ -1974,7 +2038,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
-            block_ids=([0, 1],),
+            block_ids=([1, 2],),
             block_hashes=[b"a0", b"a1"],
             can_save=True,
         ),
@@ -2050,7 +2114,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
         ReqMeta(
             req_id="r0",
             token_len_chunk=64,
-            block_ids=([0, 1], list(range(8))),
+            block_ids=([1, 2], list(range(1, 9))),
             block_hashes=hs,
             can_save=True,
         ),
@@ -2126,7 +2190,7 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
         ReqMeta(
             req_id="r0",
             token_len_chunk=64,
-            block_ids=([0, 1], list(range(8))),
+            block_ids=([1, 2], list(range(1, 9))),
             block_hashes=hs,
             can_save=True,
         ),
@@ -2196,7 +2260,7 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
-            block_ids=([0], list(range(4))),
+            block_ids=([1], list(range(1, 5))),
             block_hashes=hs,
             can_save=True,
             token_ids=list(range(32)),
@@ -2222,7 +2286,7 @@ def _make_event_store_req(token_len: int, token_ids_start: int = 0) -> ReqMeta:
     return ReqMeta(
         req_id="r0",
         token_len_chunk=token_len,
-        block_ids=(list(range(num_blocks)),),
+        block_ids=(list(range(1, num_blocks + 1)),),
         block_hashes=[f"a{i}".encode() for i in range(num_blocks)],
         can_save=True,
         token_ids=list(range(token_ids_start, token_len)),
