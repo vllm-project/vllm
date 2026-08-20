@@ -187,3 +187,31 @@ def test_merge_multimodal_embeddings_no_sync():
         _merge_multimodal_embeddings(
             inputs_embeds, multimodal_embeddings, is_multimodal
         )
+
+
+@pytest.mark.cpu_test
+def test_weights_mapper_combination_and_mapping():
+    """Test WeightsMapper prefix, suffix, substr rules and operator combining."""
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    mapper1 = WeightsMapper(
+        orig_to_new_prefix={"model.layers.": "decoder.layers."},
+        orig_to_new_suffix={".weight": ".qweight"},
+    )
+    mapper2 = WeightsMapper(
+        orig_to_new_substr={"embed_tokens": "token_embedding"},
+    )
+
+    combined_mapper = mapper1 | mapper2
+
+    names = [
+        "model.layers.0.embed_tokens.weight",
+        "model.layers.0.attn.bias",
+    ]
+
+    mapped = combined_mapper.apply_list(names)
+
+    assert mapped == [
+        "decoder.layers.0.token_embedding.qweight",
+        "decoder.layers.0.attn.bias",
+    ]
