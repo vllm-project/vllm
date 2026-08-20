@@ -267,7 +267,15 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
         if self.use_cudagraph:
-            # Carry the per-rank prefix sum so SiTU can skip padding rows.
+            # Carry the per-rank prefix sum so SiTU can skip padding rows. The
+            # decode path leaves the meta None, so attach psum to a carrier
+            # whose expert_num_tokens stays None (the indexed experts read only
+            # psum here).
+            if expert_tokens_meta is None:
+                expert_tokens_meta = mk.ExpertTokensMetadata(
+                    expert_num_tokens=None,
+                    expert_num_tokens_cpu=None,
+                )
             expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
 
         if not quant_config.is_block_quantized and not defer_input_quant:
