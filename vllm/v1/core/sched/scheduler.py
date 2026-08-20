@@ -275,8 +275,8 @@ class Scheduler(SchedulerInterface):
             if self.use_eagle and not self.use_eagle_block_drop:
                 logger.warning(
                     "EAGLE trailing prefix-cache block dropping is disabled. "
-                    "This is experimental and may affect model outputs or "
-                    "speculative-token acceptance rates."
+                    "This is experimental and may affect speculative-token "
+                    "acceptance rates."
                 )
 
         # Create the KV cache manager.
