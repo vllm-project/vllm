@@ -889,6 +889,19 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     put_step=put_step,
                     put_step_rank=put_step_rank,
                 ):
+                    block_idx = start // db.block_size
+                    group_blocks = block_ids_per_group[g_idx]
+                    if block_idx >= len(group_blocks) or (
+                        group_blocks[block_idx] == NULL_BLOCK_ID
+                    ):
+                        logger.debug(
+                            "Skipping unavailable Mooncake store source block "
+                            "(req=%s, group=%d, block=%d)",
+                            req_id,
+                            g_idx,
+                            block_idx,
+                        )
+                        continue
                     starts.append(start)
                     ends.append(end)
                     keys.append(db.key_for(block_hash))
