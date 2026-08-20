@@ -16,11 +16,15 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -37,6 +41,9 @@ from vllm.model_executor.layers.mhc import (
     MHCPreOp,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    is_shared_expert_quant_fse_compatible,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -59,6 +66,8 @@ from vllm.model_executor.models.utils import (
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+
+logger = init_logger(__name__)
 
 
 class DeepseekV4MLP(nn.Module):
@@ -154,48 +163,11 @@ class DeepseekV4MLP(nn.Module):
         return x
 
 
-def _shared_experts_are_fp4(config, layer_idx: int | None = None) -> bool:
-    """Whether the shared experts are MXFP4 and thus fusable.
-
-    ``layer_idx=None`` resolves the model-wide default (global scheme), used by
-    the main-model weight loader / mapper callers that operate per-model.
-    """
-    quant_cfg = getattr(config, "quantization_config", None)
-    if quant_cfg is None:
-        return False
-    if layer_idx is None:
-        base = None
-    elif layer_idx >= config.num_hidden_layers:
-        base = f"mtp.{layer_idx - config.num_hidden_layers}.ffn.shared_experts"
-    else:
-        base = f"layers.{layer_idx}.ffn.shared_experts"
-    if base and any(e.startswith(base) for e in (quant_cfg.get("exclude") or [])):
-        return False
-    entry = (
-        (quant_cfg.get("layer_quant_config") or {}).get(f"{base}.w1") if base else None
-    )
-    if entry is None:
-        entry = quant_cfg.get("global_quant_config")
-    return ((entry or {}).get("weight") or {}).get("dtype") == "fp4"
-
-
-def _fuse_shared_experts_enabled(config, prefix: str = "") -> bool:
-    """Whether to fuse the shared expert into the routed MXFP4 grouped GEMM.
-
-    Fusion fuses the shared expert into the routed experts' MXFP4 grouped GEMM,
-    so it only applies where the shared expert is the same precision as the
-    routed experts. Some layers may carry a shared expert in a different quantization
-    than the routed experts; when so, it runs as its own linear and must not be fused.
-    """
-    if not (
-        current_platform.is_rocm()
-        and getattr(config, "n_shared_experts", None)
+def _fuse_shared_experts_enabled(config) -> bool:
+    return bool(
+        getattr(config, "n_shared_experts", None)
         and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         and not get_current_vllm_config().parallel_config.enable_expert_parallel
-    ):
-        return False
-    return _shared_experts_are_fp4(
-        config, extract_layer_index(prefix) if prefix else None
     )
 
 
@@ -255,9 +227,25 @@ class DeepseekV4MoE(nn.Module):
 
         self.n_shared_experts = config.n_shared_experts
 
-        self.fuse_shared_experts = _fuse_shared_experts_enabled(config, prefix)
+        # TODO: Historically, only `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`
+        # is checked to enable FSE for DeepSeek-v4, despite AITER not being used.
+        # This should be cleaned up and use `resolve_layer_fused_shared_expert`.
+        fse_requested = _fuse_shared_experts_enabled(config)
+        if fse_requested:
+            fse_compatible, fse_reason = is_shared_expert_quant_fse_compatible(
+                quant_config,
+                f"{prefix}.experts",
+                f"{prefix}.shared_experts",
+            )
+            if not fse_compatible:
+                logger.warning(
+                    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
+                    "cannot be enabled: %s.",
+                    fse_reason,
+                )
+        self.is_fused_shared_expert_enabled = fse_requested and fse_compatible
 
-        if config.n_shared_experts is None or self.fuse_shared_experts:
+        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -282,8 +270,9 @@ class DeepseekV4MoE(nn.Module):
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             n_shared_experts=(
-                config.n_shared_experts if self.fuse_shared_experts else None
+                config.n_shared_experts if self.is_fused_shared_expert_enabled else None
             ),
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
             gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -307,22 +296,17 @@ class DeepseekV4MoE(nn.Module):
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
 
         org_shape = hidden_states.shape
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the MoERunner class
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=hidden_states,
-                input_ids=input_ids,
-            )
-        else:
-            router_logits, _ = self.gate(hidden_states)
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=hidden_states,
+            input_ids=input_ids,
+        )
 
         return final_hidden_states.view(org_shape)
+
+
+# Hidden sizes supported by AITER mhc_pre_big_fuse_rmsnorm.
+_AITER_MHC_FUSED_RMSNORM_SIZES = frozenset({1280, 2560, 4096, 7168})
 
 
 class DeepseekV4DecoderLayer(nn.Module):
@@ -404,9 +388,18 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.mhc_pre = MHCPreOp()
         self.mhc_post = MHCPostOp()
         self.mhc_fused_post_pre = MHCFusedPostPreOp()
-        self.use_fused_mhc = HAS_TILELANG_MHC and not (
-            HAS_AITER_MHC and self.hidden_size % 256 == 0
+        # AITER mhc kernels (pre/post/fused) require hc_mult == 4.
+        use_aiter_mhc = (
+            HAS_AITER_MHC and self.hidden_size % 256 == 0 and self.hc_mult == 4
         )
+        # Prefer AITER fused post+pre when eligible; otherwise TileLang.
+        self.use_fused_mhc = use_aiter_mhc or HAS_TILELANG_MHC
+        # Fold attn/ffn RMSNorm into MHC only when the active backend's
+        # fused-rmsnorm path supports this hidden size.
+        if use_aiter_mhc:
+            self.fuse_mhc_rmsnorm = self.hidden_size in _AITER_MHC_FUSED_RMSNORM_SIZES
+        else:
+            self.fuse_mhc_rmsnorm = HAS_TILELANG_MHC and self.use_fused_mhc
 
     def hc_pre(
         self,
@@ -414,7 +407,13 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_fn: torch.Tensor,
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ):
+        """Reduce HC residual streams to the next sub-layer input.
+
+        When ``norm_weight`` is set, RMSNorm is fused into the pre kernel.
+        """
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
             fn=hc_fn,
@@ -425,6 +424,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             hc_sinkhorn_eps=self.hc_eps,
             hc_post_mult_value=self.hc_post_alpha,
             sinkhorn_repeat=self.hc_sinkhorn_iters,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
         )
         return layer_input, post_mix, res_mix
 
@@ -446,11 +447,20 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        attn_norm_weight = self.attn_norm.weight if self.fuse_mhc_rmsnorm else None
+        attn_norm_eps = (
+            self.attn_norm.variance_epsilon if self.fuse_mhc_rmsnorm else 0.0
+        )
         if residual is None:
             # Run standalone hc_pre on first layer
             residual = x
             x, post_mix, res_mix = self.hc_pre(
-                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
             )
         else:
             residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
@@ -466,11 +476,16 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self.hc_eps,
                 self.hc_post_alpha,
                 self.hc_sinkhorn_iters,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
             )
 
-        x = self.attn_norm(x)
+        if not self.fuse_mhc_rmsnorm:
+            x = self.attn_norm(x)
         x = self.attn(positions, x, None)
 
+        ffn_norm_weight = self.ffn_norm.weight if self.fuse_mhc_rmsnorm else None
+        ffn_norm_eps = self.ffn_norm.variance_epsilon if self.fuse_mhc_rmsnorm else 0.0
         residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
             x,
             residual,
@@ -484,8 +499,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_eps,
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
+            norm_weight=ffn_norm_weight,
+            norm_eps=ffn_norm_eps,
         )
-        x = self.ffn_norm(x)
+        if not self.fuse_mhc_rmsnorm:
+            x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
 
@@ -551,7 +569,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.rms_norm_eps = config.rms_norm_eps
 
         # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4Attention.attn_gemm_parallel_execute
+        # DeepseekV4Attention._run_parallel_input_projections
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
         # Disable them on ROCm because of hang issues.
@@ -589,6 +607,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
             ),
             prefix=f"{prefix}.layers",
+        )
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers,
+            DeepseekV4MoE,
+            "ffn",
         )
 
         if get_pp_group().is_last_rank:
@@ -693,7 +716,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
             )
             if (idx + 1) in self.aux_hidden_state_layers:
-                # On the unfused (aiter) path the layer already applied hc_post,
+                # On the unfused path the layer already applied hc_post,
                 # so hidden_states is the reconstructed stream; on the fused
                 # path reconstruct it via hc_post before averaging.
                 if layer.use_fused_mhc:
@@ -750,6 +773,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
+        def _resolve_param_name(name: str) -> str:
+            inv_name = f"{name}_inv"
+            if name not in params_dict and inv_name in params_dict:
+                return inv_name
+            return name
+
         # TP for attention
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -766,7 +795,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # diverge from how the module was built if per-layer quantization ever
         # mixes fused and non-fused layers.
         fuse_by_layer = {
-            extract_layer_index(mod_name): mod.fuse_shared_experts
+            extract_layer_index(mod_name): mod.is_fused_shared_expert_enabled
             for mod_name, mod in self.named_modules()
             if isinstance(mod, DeepseekV4MoE)
         }
@@ -803,10 +832,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
                 if is_pp_missing_parameter(name, self):
                     break
-                param = params_dict[name]
+                param_name = _resolve_param_name(name)
+                param = params_dict[param_name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
+                loaded_params.add(param_name)
                 break
             else:
                 if ".experts." in name:
@@ -857,12 +887,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 else:
                     if is_pp_missing_parameter(name, self):
                         continue
-                    param = params_dict[name]
+                    param_name = _resolve_param_name(name)
+                    param = params_dict[param_name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
+                    loaded_params.add(param_name)
                     continue
 
         return loaded_params
@@ -875,7 +906,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # redirected shared-expert weights route through the expert loader.
         n_shared = getattr(self.config, "n_shared_experts", 0) or 0
         num_experts = self.config.n_routed_experts + (
-            n_shared if _fuse_shared_experts_enabled(self.config) else 0
+            n_shared if self.is_fused_shared_expert_enabled else 0
         )
         return fused_moe_make_expert_params_mapping(
             self,
@@ -934,6 +965,7 @@ def _make_deepseek_v4_weights_mapper(
             "head.weight": "lm_head.weight",
             "embed.weight": "embed_tokens.weight",
             ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
+            ".input_scale": ".input_scale_2",
         },
         orig_to_new_substr=substr_map,
     )
@@ -945,6 +977,10 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
     hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -952,15 +988,14 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         config = vllm_config.model_config.hf_config
         self.config = config
         expert_dtype = getattr(config, "expert_dtype", "fp4")
-        fuse_shared_experts = _fuse_shared_experts_enabled(config)
-        if expert_dtype != "fp4" or fuse_shared_experts:
-            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
-                expert_dtype, fuse_shared_experts=fuse_shared_experts
-            )
-
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if expert_dtype != "fp4" or self.model.is_fused_shared_expert_enabled:
+            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
+                expert_dtype,
+                fuse_shared_experts=self.model.is_fused_shared_expert_enabled,
+            )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,

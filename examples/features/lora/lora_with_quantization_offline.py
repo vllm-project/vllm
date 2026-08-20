@@ -5,6 +5,7 @@ This example shows how to use LoRA with different quantization techniques
 for offline inference.
 
 Requires HuggingFace credentials for access.
+The bitsandbytes example also requires installing vllm-bnb-plugin.
 """
 
 import gc
