@@ -102,7 +102,7 @@ class TestExtractToolCalls:
 
     def test_mixed_content_and_call(self, parser, mock_request):
         """Text before/after a tool call should appear in content."""
-        output = "Sure, let me check the weather.\nget_weather(location=\"London\")"
+        output = "Sure, let me check the weather.\nget_weather(location="London")"
         result = parser.extract_tool_calls(output, mock_request)
 
         assert result.tools_called is True
