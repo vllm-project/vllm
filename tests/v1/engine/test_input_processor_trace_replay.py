@@ -73,7 +73,7 @@ def test_trace_longer_than_remaining_context_is_truncated():
     assert params.max_tokens == 4
 
 
-def _validate(enable_trace_replay: bool, use_v2_model_runner: bool) -> None:
+def _validate(enable_trace_replay: bool) -> None:
     """Run _validate_params' trace gating with the rest of verify() stubbed."""
     processor = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -84,7 +84,6 @@ def _validate(enable_trace_replay: bool, use_v2_model_runner: bool) -> None:
         speculative_config=None,
         structured_outputs_config=None,
         tokenizer=None,
-        use_v2_model_runner=use_v2_model_runner,
     )
     params = SamplingParams(trace_decode_token_ids=[1, 2, 3])
     with patch.object(SamplingParams, "verify"):
@@ -93,13 +92,8 @@ def _validate(enable_trace_replay: bool, use_v2_model_runner: bool) -> None:
 
 def test_trace_request_rejected_when_feature_disabled():
     with pytest.raises(VLLMValidationError, match="--enable-trace-replay"):
-        _validate(enable_trace_replay=False, use_v2_model_runner=True)
+        _validate(enable_trace_replay=False)
 
 
-def test_trace_request_rejected_on_model_runner_v1():
-    with pytest.raises(VLLMValidationError, match="model runner V2"):
-        _validate(enable_trace_replay=True, use_v2_model_runner=False)
-
-
-def test_trace_request_accepted_on_model_runner_v2_when_enabled():
-    _validate(enable_trace_replay=True, use_v2_model_runner=True)
+def test_trace_request_accepted_when_feature_enabled():
+    _validate(enable_trace_replay=True)

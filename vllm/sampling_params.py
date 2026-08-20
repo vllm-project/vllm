@@ -346,14 +346,6 @@ class SamplingParams(
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
-    routed_experts_prompt_start: int = 0
-    """When enable_return_routed_experts is active, skip the first
-    routed_experts_prompt_start prompt tokens from the returned routing
-    data. In multi-turn agent scenarios, set this to the length of the
-    already-returned prefix to avoid duplicating routing for prompt tokens
-    covered by earlier turns. Default 0 returns routing for all prompt
-    tokens."""
-
     # Fields used for bad words
     bad_words: list[str] | None = None
     """Words that are not allowed to be generated. More precisely, only the
@@ -374,6 +366,13 @@ class SamplingParams(
     and terminate early, saving time and tokens."""
 
     # Debugging / RL-specific parameters. Not intended for production serving.
+    routed_experts_prompt_start: int = 0
+    """When enable_return_routed_experts is active, skip the first
+    routed_experts_prompt_start prompt tokens from the returned routing
+    data. In multi-turn agent scenarios, set this to the length of the
+    already-returned prefix to avoid duplicating routing for prompt tokens
+    covered by earlier turns. Default 0 returns routing for all prompt
+    tokens."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
