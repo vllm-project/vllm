@@ -36,8 +36,8 @@ may choose to specify the backend to use by setting the
 `--structured-outputs-config.backend` flag to `vllm serve`. The default backend is `auto`,
 which will try to choose an appropriate backend based on the details of the
 request. You may also choose a specific backend, along with
-some options. A full set of options is available in the `vllm serve --help`
-text.
+some options. A full set of options is available with
+`vllm serve --help=StructuredOutputsConfig`.
 
 Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
 

@@ -17,6 +17,9 @@ from starlette.background import BackgroundTask, BackgroundTasks
 from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.cli._utils import (
+    VLLM_SUBCMD_PARSER_EPILOG as VLLM_SUBCMD_PARSER_EPILOG,
+)
+from vllm.entrypoints.cli._utils import (
     cli_env_setup as cli_env_setup,
 )
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
@@ -26,13 +29,6 @@ from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
-
-VLLM_SUBCMD_PARSER_EPILOG = (
-    "For full list:            vllm {subcmd} --help=all\n"
-    "For a section:            vllm {subcmd} --help=ModelConfig    (case-insensitive)\n"  # noqa: E501
-    "For a flag:               vllm {subcmd} --help=max-model-len  (_ or - accepted)\n"  # noqa: E501
-    "Documentation:            https://docs.vllm.ai\n"
-)
 
 
 async def listen_for_disconnect(request: Request) -> None:
