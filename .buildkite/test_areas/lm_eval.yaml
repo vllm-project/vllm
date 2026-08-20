@@ -389,6 +389,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
 
 - label: ":nvidia: (H200) MRCR Eval Small Models"
+  key: lm-eval-mrcr-small-models
   device: h200_35gb
   timeout_in_minutes: 25
   source_file_dependencies:
