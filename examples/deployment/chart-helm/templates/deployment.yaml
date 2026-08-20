@@ -65,6 +65,8 @@ spec:
           volumeMounts:
           - name: {{ .Release.Name }}-storage
             mountPath: /data
+          - name: dshm
+            mountPath: /dev/shm
 
         {{- with .Values.extraContainers }}
         {{ toYaml . | nindent 8 }}
@@ -104,6 +106,10 @@ spec:
         - name: {{ .Release.Name }}-storage
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-storage-claim     
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.dshmSizeLimit | default "4Gi" }}
 
       {{- with .Values.nodeSelector }}
       nodeSelector:
