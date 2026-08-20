@@ -1142,7 +1142,7 @@ class SpeculativeConfig:
                     and self.draft_model_config.hf_config.model_type
                     not in ("step3p5_mtp", "inkling_mtp")
                 ):
-                    logger.warning(
+                    logger.warning_once(
                         "Enabling num_speculative_tokens > 1 will run "
                         "multiple times of forward on same MTP layer"
                         ", which may result in lower acceptance rate"
