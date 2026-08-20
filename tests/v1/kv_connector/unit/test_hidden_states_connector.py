@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
 )
 
 
@@ -68,13 +69,17 @@ def test_find_group_id_locates_hidden_group_last():
 
 def test_find_group_id_raises_when_no_hidden_group_and_multiple_groups():
     cfg = _config(_full(16), _full(16))
-    with pytest.raises(ValueError, match="Could not uniquely identify"):
+    with pytest.raises(
+        ValueError, match="isolated in exactly one KV cache group"
+    ):
         ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg)
 
 
 def test_find_group_id_raises_when_multiple_hidden_groups():
     cfg = _config(_hidden(22), _hidden(22))
-    with pytest.raises(ValueError, match="Could not uniquely identify"):
+    with pytest.raises(
+        ValueError, match="isolated in exactly one KV cache group"
+    ):
         ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg)
 
 
@@ -99,19 +104,37 @@ def test_get_block_size_falls_back_to_cache_config_when_no_kv_cache_config():
     assert block_size == 16
 
 
-# ---- MLA-verifier absorption ------------------------------------------------
+# ---- DSV4 isolation and connector lookup -----------------------------------
 
 
-def test_find_group_id_errors_clearly_when_absorbed_by_mla_swa_verifier():
-    # HiddenStateCacheSpec subclasses MLAAttentionSpec, so an MLA + sliding-
-    # window MLA verifier absorbs it into the MLA group instead of isolating it.
+def test_find_group_id_locates_wrapped_hidden_group_and_block_size():
+    hidden = _hidden(22)
+    hidden_group = UniformTypeKVCacheSpecs(
+        block_size=22, kv_cache_specs={"cache_only_layers.61": hidden}
+    )
+    cfg = _config(_full(528), hidden_group)
+    assert ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg) == 1
+
+    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=528))
+    assert ExampleHiddenStatesConnector._get_cache_block_size(
+        vllm_config, cfg, cache_kv_group_id=1
+    ) == 22
+
+
+def test_dsv4_groups_isolate_hidden_states_for_connector():
+    # HiddenStateCacheSpec is an MLAAttentionSpec subclass. The DSV4 grouping
+    # path must nevertheless leave it in a hidden-only UniformType group.
     dt = torch.bfloat16
     spec = {
         "layers.0.mla": MLAAttentionSpec(
             block_size=64, num_kv_heads=1, head_size=576, dtype=dt
         ),
         "layers.1.swa": SlidingWindowMLASpec(
-            block_size=64, num_kv_heads=1, head_size=576, dtype=dt, sliding_window=512
+            block_size=64,
+            num_kv_heads=1,
+            head_size=1024,
+            dtype=dt,
+            sliding_window=512,
         ),
         "cache_only_layers.61": _hidden(64),
     }
@@ -120,7 +143,22 @@ def test_find_group_id_errors_clearly_when_absorbed_by_mla_swa_verifier():
         speculative_config=None,
     )
     groups = get_kv_cache_groups(vllm_config, spec)
-    assert not any(isinstance(g.kv_cache_spec, HiddenStateCacheSpec) for g in groups)
+    hidden_groups = [
+        group
+        for group in groups
+        if "cache_only_layers.61" in group.layer_names
+    ]
+    assert len(hidden_groups) == 1
+    assert isinstance(hidden_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs)
+    assert all(
+        isinstance(inner, HiddenStateCacheSpec)
+        for inner in hidden_groups[0].kv_cache_spec.kv_cache_specs.values()
+    )
     cfg = SimpleNamespace(kv_cache_groups=groups)
-    with pytest.raises(ValueError, match="MLA verifiers are unsupported"):
+    hidden_group_id = next(
+        gid for gid, group in enumerate(groups) if group is hidden_groups[0]
+    )
+    assert (
         ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg)
+        == hidden_group_id
+    )

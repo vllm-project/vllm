@@ -2241,6 +2241,84 @@ def test_group_and_unify_kv_cache_specs_mixed_page_size_groups():
     assert layer_names == {"mla.0", "mla.1", "swa.0"}
 
 
+def new_hidden_state_spec(block_size=16):
+    return HiddenStateCacheSpec(
+        block_size=block_size,
+        num_kv_heads=4,
+        head_size=4096,
+        dtype=torch.bfloat16,
+    )
+
+
+def _dsv4_specs_with_hidden():
+    return {
+        "mla.0": new_mla_spec(),
+        "mla.1": new_mla_spec(),
+        "swa.0": new_swa_mla_spec(head_size=1024),
+        "cache_only_layers.0": new_hidden_state_spec(),
+    }
+
+
+def test_group_and_unify_kv_cache_specs_excludes_hidden_state():
+    specs = _dsv4_specs_with_hidden()
+    grouped = group_and_unify_kv_cache_specs(specs)
+    grouped_without_hidden = group_and_unify_kv_cache_specs(
+        {name: spec for name, spec in specs.items() if "cache_only" not in name}
+    )
+
+    assert grouped is not None
+    assert grouped_without_hidden is not None
+    assert {
+        name for group in grouped for name in group.kv_cache_specs
+    } == {"mla.0", "mla.1", "swa.0"}
+    assert [sorted(group.get_page_sizes()) for group in grouped] == [
+        sorted(group.get_page_sizes()) for group in grouped_without_hidden
+    ]
+    assert set(specs) == {
+        "mla.0", "mla.1", "swa.0", "cache_only_layers.0"
+    }
+
+
+def test_hidden_state_page_does_not_force_dsv4_packing():
+    # The hidden-state page is intentionally much larger than the attention
+    # pages. It must not make an otherwise uniform MLA/SWA layout enter DSV4
+    # tuple packing.
+    specs = {
+        "mla.0": new_mla_spec(),
+        "swa.0": new_swa_mla_spec(),
+        "cache_only_layers.0": new_hidden_state_spec(),
+    }
+    assert group_and_unify_kv_cache_specs(specs) is None
+
+
+def test_get_kv_cache_groups_isolates_hidden_state():
+    specs = _dsv4_specs_with_hidden()
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    assert {
+        name for group in groups for name in group.layer_names
+    } == set(specs)
+    assert sum(
+        "cache_only_layers.0" in group.layer_names for group in groups
+    ) == 1
+
+    hidden_group = next(
+        group for group in groups if "cache_only_layers.0" in group.layer_names
+    )
+    assert isinstance(hidden_group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    assert hidden_group.layer_names == ["cache_only_layers.0"]
+    assert list(hidden_group.kv_cache_spec.kv_cache_specs) == [
+        "cache_only_layers.0"
+    ]
+    assert all(
+        isinstance(spec, HiddenStateCacheSpec)
+        for spec in hidden_group.kv_cache_spec.kv_cache_specs.values()
+    )
+    assert hidden_group.kv_cache_spec.block_size == specs[
+        "cache_only_layers.0"
+    ].block_size
+
+
 def new_indexer_mla_spec(block_size=16):
     # Sparse-attention indexer k_cache: an MLAAttentionSpec with a much smaller
     # page size than the main MLA attention (uint8, small head), so their pages
