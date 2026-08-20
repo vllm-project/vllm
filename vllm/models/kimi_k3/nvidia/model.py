@@ -155,6 +155,8 @@ def shard_sequence_parallel_mlp(
 
 
 def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
+    # Both feature flags may be enabled; the worker's static SP topology binds
+    # its singleton to exactly one mode.
     all_reduce = not use_sequence_parallel
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
     enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_KIMI_K3_GEMM_RS
@@ -241,7 +243,6 @@ class KimiMLP(nn.Module):
             use_sequence_parallel,
             can_shard_sequence_parallel,
         )
-        self.run_gemm_rs_ar = self.shard_sequence_parallel and run_gemm_rs_ar
         replicate = use_sequence_parallel and not self.shard_sequence_parallel
 
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -263,13 +264,20 @@ class KimiMLP(nn.Module):
             disable_tp=replicate,
             prefix=f"{prefix}.down_proj",
         )
-        if self.run_gemm_rs_ar:
+        self.gemm_rs_ar = None
+        # RS requires sequence sharding; AR operates on replicated tokens.
+        use_gemm_rs_ar = self.shard_sequence_parallel or (
+            not use_sequence_parallel and reduce_results
+        )
+        if use_gemm_rs_ar and run_gemm_rs_ar:
             from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 
-            self.run_gemm_rs_ar = get_gemm_rs_ar().can_run(self.down_proj)
-            if not self.run_gemm_rs_ar:
+            gemm_rs_ar = get_gemm_rs_ar()
+            if gemm_rs_ar.can_run(self.down_proj):
+                self.gemm_rs_ar = gemm_rs_ar
+            else:
                 logger.warning_once(
                     "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
                     prefix,
@@ -297,14 +305,8 @@ class KimiMLP(nn.Module):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
 
-        if self.run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
-                get_gemm_rs_ar,
-            )
-
-            gemm_rs_ar = get_gemm_rs_ar()
-            if gemm_rs_ar.should_run(x):
-                return gemm_rs_ar(x, self.down_proj.weight)
+        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
+            return self.gemm_rs_ar(x, self.down_proj.weight)
 
         x, _ = self.down_proj(x)
         if self.shard_sequence_parallel:

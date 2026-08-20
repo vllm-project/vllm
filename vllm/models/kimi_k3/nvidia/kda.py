@@ -491,14 +491,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        self.run_gemm_rs_ar = run_gemm_rs_ar
-        if self.run_gemm_rs_ar:
+        self.gemm_rs_ar = None
+        if run_gemm_rs_ar:
             from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 
-            self.run_gemm_rs_ar = get_gemm_rs_ar().can_run(self.o_proj)
-            if not self.run_gemm_rs_ar:
+            gemm_rs_ar = get_gemm_rs_ar()
+            if gemm_rs_ar.can_run(self.o_proj):
+                self.gemm_rs_ar = gemm_rs_ar
+            else:
                 logger.warning_once(
                     "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
                     prefix,
@@ -543,14 +545,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        if self.run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
-                get_gemm_rs_ar,
-            )
-
-            gemm_rs_ar = get_gemm_rs_ar()
-            if gemm_rs_ar.should_run(core_attn_out):
-                return gemm_rs_ar(core_attn_out, self.o_proj.weight)
+        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(core_attn_out):
+            return self.gemm_rs_ar(core_attn_out, self.o_proj.weight)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture

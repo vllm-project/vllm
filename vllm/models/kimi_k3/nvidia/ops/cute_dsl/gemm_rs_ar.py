@@ -692,6 +692,13 @@ class GemmRsAr:
     """Own the symmetric workspace for Kimi-K3 GEMM-RS/AR launches.
 
     All TP ranks must belong to one NVLink domain for multimem instructions.
+
+    Each instance is bound to either RS or AR. A vLLM worker has one static
+    sequence-parallel topology, so the process-wide singleton only needs one
+    mode. Two independent mode-specific singletons would lift that restriction
+    but duplicate the large symmetric workspace. A future mixed-mode design
+    should instead use lightweight RS/AR frontends over one shared multicast
+    workspace; that is outside this integration's current scope.
     """
 
     def __init__(self, *, max_M: int, N: int, all_reduce: bool = False) -> None:
@@ -830,23 +837,29 @@ _gemm_rs_ar: GemmRsAr | None = None
 
 
 def init_gemm_rs_ar(max_M: int, N: int, *, all_reduce: bool = False) -> None:
-    """Collectively initialize the process-wide GEMM-RS/AR state."""
+    """Collectively initialize the process-wide, mode-bound GEMM-RS/AR state."""
     global _gemm_rs_ar
     if _gemm_rs_ar is not None:
-        assert (
-            _gemm_rs_ar.max_M >= max_M
-            and _gemm_rs_ar.N == N
-            and _gemm_rs_ar.all_reduce == all_reduce
-        )
+        if _gemm_rs_ar.all_reduce != all_reduce:
+            current = "AR" if _gemm_rs_ar.all_reduce else "RS"
+            requested = "AR" if all_reduce else "RS"
+            raise RuntimeError(
+                f"GEMM-RS/AR is already initialized for {current}; "
+                f"a worker cannot reinitialize it for {requested}"
+            )
+        assert _gemm_rs_ar.max_M >= max_M and _gemm_rs_ar.N == N
         return
     _gemm_rs_ar = GemmRsAr(max_M=max_M, N=N, all_reduce=all_reduce)
 
 
 def warmup_gemm_rs_ar() -> int:
     """Compile every reachable dispatch for the initialized GEMM-RS/AR mode."""
+    # Initialization can be disabled or fail when multicast is unavailable.
     if _gemm_rs_ar is None:
         return 0
-    for BN, cta_group in ((128, 1), (128, 2), (256, 2)):
+    # Keep these profiles in sync with the dispatch in GemmRsAr.__call__.
+    profiles = ((128, 1), (128, 2), (256, 2))
+    for BN, cta_group in profiles:
         Sm100GemmRsArBF16.compile(
             _gemm_rs_ar.rank,
             _gemm_rs_ar.world_size,
@@ -854,9 +867,9 @@ def warmup_gemm_rs_ar() -> int:
             cta_group,
             _gemm_rs_ar.all_reduce,
         )
-    return 3
+    return len(profiles)
 
 
 def get_gemm_rs_ar() -> GemmRsAr:
-    assert _gemm_rs_ar is not None, "GEMM-RS is not initialized"
+    assert _gemm_rs_ar is not None, "GEMM-RS/AR is not initialized"
     return _gemm_rs_ar

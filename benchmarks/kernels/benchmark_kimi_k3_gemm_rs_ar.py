@@ -44,9 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         choices=("rs", "ar"),
-        nargs="+",
-        default=["rs", "ar"],
-        help="Collective modes to benchmark.",
+        default="rs",
+        help="Collective mode to benchmark.",
     )
     parser.add_argument(
         "--m",
@@ -350,59 +349,56 @@ def benchmark_shape(
 
 def print_results(results: list[dict[str, float | int | str]]) -> None:
     results_df = pd.DataFrame(results)
-    for mode in results_df["mode"].unique():
-        collective = str(mode)
-        mode_df = results_df[results_df["mode"] == mode]
-        end_to_end = (
-            mode_df[
-                [
-                    "M",
-                    "N",
-                    "K",
-                    "ring_ll_us",
-                    "ldmc_us",
-                    "gemm_rs_ar_us",
-                    "speedup_vs_ring_ll",
-                    "speedup_vs_ldmc",
-                ]
+    collective = str(results_df["mode"].iloc[0])
+    end_to_end = (
+        results_df[
+            [
+                "M",
+                "N",
+                "K",
+                "ring_ll_us",
+                "ldmc_us",
+                "gemm_rs_ar_us",
+                "speedup_vs_ring_ll",
+                "speedup_vs_ldmc",
             ]
-            .rename(
-                columns={
-                    "ring_ll_us": f"Torch GEMM + NCCL {collective} (RING_LL) (us)",
-                    "ldmc_us": f"Torch GEMM + NCCL {collective} (LDMC) (us)",
-                    "gemm_rs_ar_us": f"GEMM-{collective} (us)",
-                    "speedup_vs_ring_ll": "Speedup vs RING_LL",
-                    "speedup_vs_ldmc": "Speedup vs LDMC",
-                }
-            )
-            .round(3)
+        ]
+        .rename(
+            columns={
+                "ring_ll_us": f"Torch GEMM + NCCL {collective} (RING_LL) (us)",
+                "ldmc_us": f"Torch GEMM + NCCL {collective} (LDMC) (us)",
+                "gemm_rs_ar_us": f"GEMM-{collective} (us)",
+                "speedup_vs_ring_ll": "Speedup vs RING_LL",
+                "speedup_vs_ldmc": "Speedup vs LDMC",
+            }
         )
-        components = (
-            mode_df[["M", "N", "K", "torch_gemm_us", "best_nccl_us", "gemm_rs_ar_us"]]
-            .rename(
-                columns={
-                    "torch_gemm_us": "Torch GEMM (us)",
-                    "best_nccl_us": f"NCCL {collective} (best) (us)",
-                    "gemm_rs_ar_us": f"GEMM-{collective} (us)",
-                }
-            )
-            .round(2)
+        .round(3)
+    )
+    components = (
+        results_df[["M", "N", "K", "torch_gemm_us", "best_nccl_us", "gemm_rs_ar_us"]]
+        .rename(
+            columns={
+                "torch_gemm_us": "Torch GEMM (us)",
+                "best_nccl_us": f"NCCL {collective} (best) (us)",
+                "gemm_rs_ar_us": f"GEMM-{collective} (us)",
+            }
         )
+        .round(2)
+    )
 
-        print(f"### {collective} end-to-end latency")
-        print(end_to_end.to_markdown(index=False))
-        print(f"\n### {collective} component latency")
-        print(components.to_markdown(index=False))
-        print(
-            f"\nNCCL {collective} (best) is the faster of RING_LL and LDMC "
-            "for each shape.\n"
-        )
+    print(f"### {collective} end-to-end latency")
+    print(end_to_end.to_markdown(index=False))
+    print(f"\n### {collective} component latency")
+    print(components.to_markdown(index=False))
+    print(
+        f"\nNCCL {collective} (best) is the faster of RING_LL and LDMC "
+        "for each shape.\n"
+    )
 
 
 def main() -> None:
     args = parse_args()
     assert args.m and min(args.m) >= 128
-    assert len(set(args.mode)) == len(args.mode)
     assert args.n % 256 == 0
     assert args.num_workspaces > 0
     assert args.warmup_replays >= 0
@@ -436,31 +432,29 @@ def main() -> None:
     def device_barrier() -> None:
         pynccl_comm.all_reduce(sync_input, sync_output)
 
-    results = []
-    for mode in args.mode:
-        gemm_rs_ar = GemmRsAr(
-            max_M=max(args.m),
-            N=args.n,
-            all_reduce=mode == "ar",
+    gemm_rs_ar = GemmRsAr(
+        max_M=max(args.m),
+        N=args.n,
+        all_reduce=args.mode == "ar",
+    )
+    results = [
+        benchmark_shape(
+            gemm_rs_ar,
+            args.mode,
+            M,
+            args.n,
+            K,
+            args.num_workspaces,
+            args.warmup_replays,
+            args.samples,
+            tp_group.device_group,
+            tp_group.cpu_group,
+            device_barrier,
         )
-        results.extend(
-            benchmark_shape(
-                gemm_rs_ar,
-                mode,
-                M,
-                args.n,
-                K,
-                args.num_workspaces,
-                args.warmup_replays,
-                args.samples,
-                tp_group.device_group,
-                tp_group.cpu_group,
-                device_barrier,
-            )
-            for K in K_values
-            for M in args.m
-        )
-        del gemm_rs_ar
+        for K in K_values
+        for M in args.m
+    ]
+    del gemm_rs_ar
 
     if tp_group.rank_in_group == 0:
         print_results(results)

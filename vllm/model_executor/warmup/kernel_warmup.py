@@ -97,6 +97,9 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
 
 
 def _warmup_kimi_k3_gemm_rs_ar() -> None:
+    # Kimi-K3 model construction imports this module only when GEMM-RS/AR is
+    # enabled and initializes its singleton before kernel_warmup runs. Avoid
+    # importing it here so other models do not compile the RS/AR variants.
     module = sys.modules.get("vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar")
     if module is None:
         return

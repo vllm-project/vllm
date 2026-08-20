@@ -254,15 +254,10 @@ steps:
   working_dir: "/vllm-workspace/"
   num_devices: 2
   source_file_dependencies:
-    - vllm/envs.py
-    - vllm/model_executor/warmup/kernel_warmup.py
-    - vllm/models/kimi_k3/nvidia/kda.py
-    - vllm/models/kimi_k3/nvidia/mla.py
-    - vllm/models/kimi_k3/nvidia/model.py
-    - vllm/models/kimi_k3/nvidia/ops/cute_dsl/gemm_rs.py
-    - tests/kernels/test_kimi_k3_gemm_rs.py
+    - vllm/models/kimi_k3/nvidia/ops/cute_dsl/gemm_rs_ar.py
+    - tests/kernels/test_kimi_k3_gemm_rs_ar.py
   commands:
-    - pytest -v -s tests/kernels/test_kimi_k3_gemm_rs.py
+    - pytest -v -s tests/kernels/test_kimi_k3_gemm_rs_ar.py
 
 - label: ":nvidia: (L4) Distributed 2-Node"
   key: 2-node-test-4-gpus

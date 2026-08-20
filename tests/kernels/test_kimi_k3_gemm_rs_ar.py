@@ -213,6 +213,8 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
             generator=weight_generator,
         )
 
+    # Production binds one mode per worker; exercise both mode-bound instances
+    # sequentially in this test without implying that both are initialized.
     for all_reduce in (False, True):
         _run_mode(
             all_reduce=all_reduce,
