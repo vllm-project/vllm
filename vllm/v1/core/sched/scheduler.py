@@ -1857,15 +1857,24 @@ class Scheduler(SchedulerInterface):
                 )
                 if advance_token_ids:
                     if not grammar.accept_tokens(req_id, advance_token_ids):
-                        logger.error(
-                            "Unexpected: grammar rejected tokens %s for request %s. "
-                            "Terminating request.",
-                            advance_token_ids,
-                            req_id,
-                        )
-                        request.status = RequestStatus.FINISHED_ERROR
-                        request.resumable = False
-                        stopped = True
+                        if grammar.is_terminated():
+                            del request._output_token_ids[num_output_tokens_before:]
+                            del request._all_token_ids[
+                                request.num_prompt_tokens + num_output_tokens_before :
+                            ]
+                            new_token_ids = []
+                            request.status = RequestStatus.FINISHED_STOPPED
+                            stopped = True
+                        else:
+                            logger.error(
+                                "Unexpected: grammar rejected tokens %s for "
+                                "request %s. Terminating request.",
+                                advance_token_ids,
+                                req_id,
+                            )
+                            request.status = RequestStatus.FINISHED_ERROR
+                            request.resumable = False
+                            stopped = True
                     elif grammar.is_terminated():
                         request.status = RequestStatus.FINISHED_STOPPED
                         stopped = True
