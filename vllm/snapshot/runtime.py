@@ -608,7 +608,8 @@ class LocalSnapshotTools:
             sorted(
                 (key, value)
                 for key, value in os.environ.items()
-                if key.startswith(prefixes) and key not in {"VLLM_SNAPSHOT_TIMEOUT_S"}
+                if key.startswith(prefixes)
+                and key not in {"VLLM_API_KEY", "VLLM_SNAPSHOT_TIMEOUT_S"}
             )
         )
         return selected + self._plugin_identity()
