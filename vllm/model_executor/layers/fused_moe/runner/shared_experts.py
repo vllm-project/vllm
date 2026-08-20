@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from enum import IntEnum
 
 import torch
@@ -52,6 +53,7 @@ class SharedExperts(torch.nn.Module):
         # index is always 0 and the second output list element is ignored.
         self.enable_dbo = enable_dbo
         self._output: list[torch.Tensor | None] = [None, None]
+        self._precomputed_output: list[torch.Tensor | None] = [None, None]
         self._layer = layer
         self._moe_config = moe_config
 
@@ -122,6 +124,8 @@ class SharedExperts(torch.nn.Module):
         self,
         shared_experts_input: torch.Tensor,
     ):
+        if self._precomputed_output[self._output_idx] is not None:
+            return
         experts_order = self._determine_shared_experts_order(shared_experts_input)
 
         if experts_order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
@@ -157,16 +161,43 @@ class SharedExperts(torch.nn.Module):
 
     @property
     def output(self) -> torch.Tensor:
-        assert self._output[self._output_idx] is not None
-        output = self._output[self._output_idx]
-        self._output[self._output_idx] = None
+        output_idx = self._output_idx
+        precomputed_output = self._precomputed_output[output_idx]
+        if precomputed_output is not None:
+            self._precomputed_output[output_idx] = None
+            return precomputed_output
+
+        assert self._output[output_idx] is not None
+        output = self._output[output_idx]
+        self._output[output_idx] = None
         return output
+
+    @contextmanager
+    def use_precomputed_output(
+        self,
+        output: torch.Tensor,
+    ) -> Generator[None, None, None]:
+        """Use a shared-expert output produced by an enclosing fusion."""
+
+        output_idx = self._output_idx
+        if (
+            self._output[output_idx] is not None
+            or self._precomputed_output[output_idx] is not None
+        ):
+            raise RuntimeError("shared expert output slot is already occupied")
+        self._precomputed_output[output_idx] = output
+        try:
+            yield
+        finally:
+            self._precomputed_output[output_idx] = None
 
     def forward(
         self,
         shared_experts_input: torch.Tensor,
         order: SharedExpertsOrder,
     ):
+        if self._precomputed_output[self._output_idx] is not None:
+            return None
         experts_order = self._determine_shared_experts_order(shared_experts_input)
 
         if order != experts_order:
