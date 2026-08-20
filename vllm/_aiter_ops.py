@@ -207,6 +207,31 @@ def if_aiter_supported(func: Callable) -> Callable:
     return wrapper
 
 
+def _validate_rocm_aiter_fused_moe_shared_expert_args(
+    shared_w1: torch.Tensor | None,
+    shared_w2: torch.Tensor | None,
+    shared_w1_scale: torch.Tensor | None,
+    shared_w2_scale: torch.Tensor | None,
+    shared_expert_id: int,
+) -> bool:
+    shared_tensors = (shared_w1, shared_w2, shared_w1_scale, shared_w2_scale)
+    has_shared_expert = any(tensor is not None for tensor in shared_tensors)
+    if has_shared_expert:
+        if not all(tensor is not None for tensor in shared_tensors):
+            raise ValueError(
+                "Heterogeneous fused MoE requires both shared weights and scales."
+            )
+        if shared_expert_id < 0:
+            raise ValueError(
+                "Heterogeneous fused MoE requires a non-negative shared expert ID."
+            )
+    elif shared_expert_id >= 0:
+        raise ValueError(
+            "A non-negative shared expert ID requires shared weights and scales."
+        )
+    return has_shared_expert
+
+
 def _rocm_aiter_fused_moe_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -238,6 +263,14 @@ def _rocm_aiter_fused_moe_impl(
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
 ) -> torch.Tensor:
+    has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
+        shared_w1,
+        shared_w2,
+        shared_w1_scale,
+        shared_w2_scale,
+        shared_expert_id,
+    )
+
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
 
@@ -254,16 +287,7 @@ def _rocm_aiter_fused_moe_impl(
         extra_kwargs["beta"] = beta
         extra_kwargs["linear_beta"] = linear_beta
 
-    shared_tensors = (shared_w1, shared_w2, shared_w1_scale, shared_w2_scale)
-    if any(tensor is not None for tensor in shared_tensors):
-        if not all(tensor is not None for tensor in shared_tensors):
-            raise ValueError(
-                "Heterogeneous fused MoE requires both shared weights and scales."
-            )
-        if shared_expert_id < 0:
-            raise ValueError(
-                "Heterogeneous fused MoE requires a non-negative shared expert ID."
-            )
+    if has_shared_expert:
         extra_kwargs.update(
             shared_w1=shared_w1,
             shared_w2=shared_w2,
@@ -2051,26 +2075,46 @@ class rocm_aiter_ops:
 
         return "gate_mode" in inspect.signature(fused_moe).parameters
 
+    @staticmethod
+    def _probe_dsv4_i384_fhmoe_capability(required_max_tokens: int) -> bool:
+        """Probe AITER's DSV4 native-I384 FHMoE contract."""
+        if type(required_max_tokens) is not int or required_max_tokens <= 0:
+            return False
+
+        try:
+            import inspect
+
+            import aiter.fhmoe as fhmoe
+            from aiter.fused_moe import fused_moe
+
+            params = inspect.signature(fused_moe).parameters
+            max_tokens = getattr(fhmoe, "DSV4_I384_FHMOE_MAX_TOKENS", None)
+        except (ImportError, TypeError, ValueError):
+            return False
+
+        return (
+            type(max_tokens) is int
+            and max_tokens >= required_max_tokens
+            and all(
+                name in params
+                for name in (
+                    "shared_w1",
+                    "shared_w2",
+                    "shared_w1_scale",
+                    "shared_w2_scale",
+                    "shared_expert_id",
+                )
+            )
+        )
+
     @classmethod
     @if_aiter_supported
     @functools.cache
-    def fused_moe_supports_heterogeneous_shared_expert(cls) -> bool:
-        """Whether AITER accepts native-FP8 shared-expert tensors."""
-        import inspect
-
-        from aiter.fused_moe import fused_moe
-
-        params = inspect.signature(fused_moe).parameters
-        return all(
-            name in params
-            for name in (
-                "shared_w1",
-                "shared_w2",
-                "shared_w1_scale",
-                "shared_w2_scale",
-                "shared_expert_id",
-            )
-        )
+    def fused_moe_supports_heterogeneous_shared_expert(
+        cls, required_max_tokens: int
+    ) -> bool:
+        """Whether AITER supports DSV4 native-I384 FHMoE through the given M."""
+        return cls._probe_dsv4_i384_fhmoe_capability(required_max_tokens)
 
     @staticmethod
     def register_ops_once() -> None:

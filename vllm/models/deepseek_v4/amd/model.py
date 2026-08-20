@@ -172,12 +172,32 @@ class DeepseekV4MLP(nn.Module):
         return x
 
 
-_FHMOE_MIN_DECODE_TOKENS = 2
-_FHMOE_MAX_DECODE_TOKENS = 8
+_FHMOE_MAX_TOKENS = 2048
 
 
 def _use_heterogeneous_fhmoe(num_tokens: int) -> bool:
-    return _FHMOE_MIN_DECODE_TOKENS <= num_tokens <= _FHMOE_MAX_DECODE_TOKENS
+    return 0 < num_tokens <= _FHMOE_MAX_TOKENS
+
+
+def _validate_heterogeneous_routes(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    experts_per_token: int,
+) -> None:
+    if (
+        topk_weights.ndim != 2
+        or topk_ids.ndim != 2
+        or topk_weights.shape != topk_ids.shape
+    ):
+        raise ValueError(
+            "Heterogeneous fused MoE routes must have equal two-dimensional shapes."
+        )
+    expected_columns = experts_per_token + 1
+    if topk_weights.shape[1] != expected_columns:
+        raise ValueError(
+            "Heterogeneous fused MoE routes must have exactly "
+            f"{expected_columns} columns, got {topk_weights.shape[1]}."
+        )
 
 
 def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
@@ -198,14 +218,23 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         reasons.append("EPLB is enabled")
     if parallel_config.tensor_parallel_size != 8:
         reasons.append("tensor parallelism is not 8")
+    if parallel_config.data_parallel_size != 1:
+        reasons.append("data parallelism is enabled")
+    if parallel_config.prefill_context_parallel_size != 1:
+        reasons.append("prefill context parallelism is enabled")
     if vllm_config.kernel_config.moe_backend != "aiter":
         reasons.append("the MoE backend is not AITER")
     if vllm_config.model_config.dtype != torch.bfloat16:
         reasons.append("the model dtype is not BF16")
     if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
         reasons.append("AITER shared-expert fusion is not enabled")
-    if not rocm_aiter_ops.fused_moe_supports_heterogeneous_shared_expert():
-        reasons.append("AITER lacks heterogeneous shared-expert support")
+    if not rocm_aiter_ops.fused_moe_supports_heterogeneous_shared_expert(
+        _FHMOE_MAX_TOKENS
+    ):
+        reasons.append(
+            "AITER lacks DSV4 I384 heterogeneous shared-expert support through "
+            f"{_FHMOE_MAX_TOKENS} input rows"
+        )
 
     expected_model = {
         "n_routed_experts": 384,
@@ -215,6 +244,7 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         "moe_intermediate_size": 3072,
         "hidden_act": "silu",
         "expert_dtype": "fp4",
+        "topk_method": "noaux_tc",
     }
     for name, expected in expected_model.items():
         if getattr(config, name, None) != expected:
@@ -255,8 +285,9 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         return False
 
     logger.info_once(
-        "Using AITER DeepSeek V4 heterogeneous MoE for 2-8 decode tokens "
-        "(native intermediate width 384).",
+        "Using AITER DeepSeek V4 heterogeneous MoE for up to %d MoE input rows "
+        "(M) per invocation (native intermediate width 384).",
+        _FHMOE_MAX_TOKENS,
     )
     return True
 
@@ -415,6 +446,11 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
     ) -> torch.Tensor:
         if shared_experts is not None or shared_experts_input is not None:
             raise ValueError("The heterogeneous expert owns the shared path.")
+        _validate_heterogeneous_routes(
+            topk_weights,
+            topk_ids,
+            self.moe_config.experts_per_token,
+        )
         if any(
             tensor is None
             for tensor in (
