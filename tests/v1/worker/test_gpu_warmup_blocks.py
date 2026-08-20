@@ -129,6 +129,18 @@ class _StepRecorder:
         return None
 
 
+class _SamplerRecorder:
+    def __init__(self) -> None:
+        self.requests = []
+        self.applied_staged_writes = 0
+
+    def add_request(self, req_idx, prompt_len, sampling_params) -> None:
+        self.requests.append((req_idx, prompt_len, sampling_params))
+
+    def apply_staged_writes(self) -> None:
+        self.applied_staged_writes += 1
+
+
 def _assert_covers_lookahead(
     steps: list[tuple[list[int], int, int]], num_lookahead_tokens: int
 ) -> None:
@@ -157,6 +169,29 @@ def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahea
     )
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+
+
+def test_warmup_kernels_exercises_temperature_only_rejection_path():
+    runner = _make_runner([_attention_group()], NUM_SPEC_STEPS)
+    sampler = _SamplerRecorder()
+    runner.rejection_sampler = object()
+    runner.sampler = sampler
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={f"_warmup_{i}_": i for i in range(runner.max_num_reqs)}
+    )
+    recorder = _StepRecorder()
+
+    warmup_kernels(runner, recorder.execute_model, recorder.sample_tokens)
+
+    assert sampler.applied_staged_writes == 1
+    assert len(sampler.requests) == runner.max_num_reqs
+    for req_idx, prompt_len, sampling_params in sampler.requests:
+        assert req_idx in range(runner.max_num_reqs)
+        assert prompt_len == runner.decode_query_len + 1
+        assert sampling_params.temperature == 0.9
+        assert sampling_params.top_p == 1.0
+        assert sampling_params.top_k == 0
+        assert sampling_params.min_p == 0.0
 
 
 def test_mixed_warmup_reserves_lookahead_blocks():
