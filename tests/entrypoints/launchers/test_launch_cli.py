@@ -184,7 +184,7 @@ assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == {worker_method!r}
     return result.stdout, set(json.loads(report))
 
 
-def test_snapshot_actions_preserve_complete_vllm_environment(
+def test_snapshot_environment_contract(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from vllm.entrypoints.cli import main as cli_main
@@ -194,6 +194,7 @@ def test_snapshot_actions_preserve_complete_vllm_environment(
             cli_main, name, lambda: pytest.fail("snapshot mutated the environment")
         )
     monkeypatch.setattr(snapshot_cli, "run_inspect", lambda _args: None)
+    monkeypatch.setenv("VLLM_API_KEY", "secret")
     monkeypatch.setenv("VLLM_USER_SETTING", "configured")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
     vllm_env = lambda: {
@@ -204,6 +205,9 @@ def test_snapshot_actions_preserve_complete_vllm_environment(
     _run_cli(["snapshot", "inspect", "/tmp/vllm-snapshot"])
 
     assert vllm_env() == before
+    environment = dict(LocalSnapshotTools()._environment_identity())
+    assert environment["VLLM_USER_SETTING"] == "configured"
+    assert "VLLM_API_KEY" not in environment
 
 
 def parse_snapshot(*argv: str):
