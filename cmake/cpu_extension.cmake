@@ -669,6 +669,10 @@ else()
             AT_BUILD_ARM_VEC256_WITH_SLEEF# PyTorch requires this to enable Sleef for SIMD and SVE
             CPU_CAPABILITY=SVE128
             CPU_CAPABILITY_SVE128)
+        if (VLLM_OPENBLAS_LIB)
+            target_compile_definitions(_C_SVE256 PRIVATE VLLM_HAS_OPENBLAS)
+            target_compile_definitions(_C_SVE128 PRIVATE VLLM_HAS_OPENBLAS)
+        endif()
     endif()
 endif()
 
