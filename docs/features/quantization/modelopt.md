@@ -33,6 +33,36 @@ following `quantization.quant_algo` values:
     [Engine Arguments](../../configuration/engine_args.md) page and shown by
     `vllm serve --help=KernelConfig`.
 
+### Dynamic NVFP4 global activation scaling
+
+Serialized `NVFP4` checkpoints may set
+`quantization.activation_scheme: dynamic` in `hf_quant_config.json`. For dense
+linear layers, vLLM then derives one FP32 global activation scale from the
+current invocation instead of using the checkpoint's `input_scale`. Per-block
+activation scales remain part of the normal NVFP4 quantization.
+
+This mode currently:
+
+- accepts FP16 or BF16 activations;
+- requires an NVIDIA Blackwell GPU and the FlashInfer CUTLASS NVFP4 backend;
+- does not support `VLLM_BATCH_INVARIANT` or FusedMoE layers; and
+- requires fused output partitions to share the same `weight_scale_2`.
+
+The checkpoint must still include all standard serialized NVFP4 metadata:
+
+```json
+{
+  "producer": {"name": "modelopt"},
+  "quantization": {
+    "quant_algo": "NVFP4",
+    "activation_scheme": "dynamic",
+    "group_size": 16,
+    "kv_cache_quant_algo": null,
+    "exclude_modules": []
+  }
+}
+```
+
 ## Quantizing HuggingFace Models with PTQ
 
 You can quantize HuggingFace models using the example scripts provided in the Model Optimizer repository. The primary script for LLM PTQ is typically found within the `examples/llm_ptq` directory.

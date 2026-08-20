@@ -27,6 +27,17 @@ from vllm.utils.flashinfer import (
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
+_NVFP4_GLOBAL_SCALE_DENOMINATOR = 6.0 * torch.finfo(torch.float8_e4m3fn).max
+
+
+def _dynamic_nvfp4_global_scales(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return one quantization/dequantization scale pair for this invocation."""
+    amax = x.abs().amax().to(torch.float32).clamp_min(1.0e-6)
+    input_dequant_scale = amax / _NVFP4_GLOBAL_SCALE_DENOMINATOR
+    return input_dequant_scale.reciprocal(), input_dequant_scale
+
 
 class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cutedsl backend."""
@@ -100,6 +111,8 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     def input_quant_key(self) -> QuantKey | None:
         """This kernel supports dynamic quantization of the input. By
         convention, pre-quantized blockscales must use the swizzled layout."""
+        if self.config.dynamic_input_global_scale:
+            return None
         return kNvfp4Dynamic
 
     @classmethod
@@ -141,19 +154,35 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
 
+        if self.config.dynamic_input_global_scale and isinstance(x, torch.Tensor):
+            if x.dtype not in (torch.float16, torch.bfloat16):
+                raise ValueError(
+                    "Dynamic NVFP4 global activation scaling requires FP16 or BF16 "
+                    f"input, got {x.dtype}."
+                )
+            if x.numel() == 0:
+                return x.new_empty((*x.shape[:-1], output_size))
+
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
             x_fp4, x_blockscale = qa.data, qa.scale
             x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_bytes)
             output_dtype = qa.orig_dtype
             output_shape = [*qa.orig_shape[:-1], output_size]
+            alpha = layer.alpha
         else:
             assert isinstance(x, torch.Tensor)
             output_dtype = x.dtype
             output_shape = [*x.shape[:-1], output_size]
+            if self.config.dynamic_input_global_scale:
+                input_quant_scale, input_dequant_scale = _dynamic_nvfp4_global_scales(x)
+                alpha = input_dequant_scale * layer.weight_global_scale
+            else:
+                input_quant_scale = layer.input_global_scale_inv
+                alpha = layer.alpha
             x_fp4, x_blockscale = scaled_fp4_quant(
                 x,
-                layer.input_global_scale_inv,
+                input_quant_scale,
                 is_sf_swizzled_layout=True,
                 backend="flashinfer-cutlass",
                 padded_n=x.shape[-1] + weights_padding_bytes * 2,
@@ -164,7 +193,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight,
             x_blockscale,
             layer.weight_scale,
-            layer.alpha,
+            alpha,
             output_dtype,
             backend="cutlass",
         )
@@ -316,8 +345,10 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
             return True, None
         return (
             False,
-            "FlashInfer b12x requires SM120+ and FlashInfer "
-            "with Sm120BlockScaledDenseGemmKernel",
+            (
+                "FlashInfer b12x requires SM120+ and FlashInfer "
+                "with Sm120BlockScaledDenseGemmKernel"
+            ),
         )
 
     @classmethod
