@@ -1572,5 +1572,5 @@ class SpeculativeConfig:
     def __repr__(self) -> str:
         return (
             f"SpeculativeConfig(method={self.method!r}, model={self.model!r}, "
-            f"num_spec_tokens={self.num_speculative_tokens!r})"
+            f"num_speculative_tokens={self.num_speculative_tokens!r})"
         )
