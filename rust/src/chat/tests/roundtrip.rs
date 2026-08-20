@@ -55,8 +55,12 @@ enum ThinkingBehavior {
     Toggleable { default: bool },
     /// The chat template always behaves as `value` for this fixture.
     Always { value: bool },
-    /// The chat template uses HY3-style `reasoning_effort` values.
-    ReasoningEffort { default: bool },
+    /// The chat template selects thinking mode through `reasoning_effort`.
+    ReasoningEffort {
+        default: bool,
+        enabled: &'static str,
+        disabled: &'static str,
+    },
 }
 
 impl ThinkingBehavior {
@@ -64,7 +68,7 @@ impl ThinkingBehavior {
         match self {
             Self::Toggleable { default } => default,
             Self::Always { value } => value,
-            Self::ReasoningEffort { default } => default,
+            Self::ReasoningEffort { default, .. } => default,
         }
     }
 
@@ -80,8 +84,8 @@ impl ThinkingBehavior {
                 None,        // use default template behavior
             ],
             Self::ReasoningEffort { .. } => vec![
-                Some(true),  // reasoning_effort=high
-                Some(false), // reasoning_effort=no_think
+                Some(true),  // explicitly enable thinking
+                Some(false), // explicitly disable thinking
                 None,        // use default template behavior
             ],
         }
@@ -98,10 +102,12 @@ impl ThinkingBehavior {
                     request.chat_options.template_kwargs.insert(key.to_string(), thinking.into());
                 }
             }
-            Self::ReasoningEffort { .. } => {
+            Self::ReasoningEffort {
+                enabled, disabled, ..
+            } => {
                 request.chat_options.template_kwargs.insert(
                     "reasoning_effort".to_string(),
-                    if thinking { "high" } else { "no_think" }.into(),
+                    if thinking { enabled } else { disabled }.into(),
                 );
             }
         }
@@ -277,7 +283,11 @@ impl RoundtripCase {
             assistant_stop_suffix: "<｜hy_eos:opensource｜>",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
-            thinking_behavior: ThinkingBehavior::ReasoningEffort { default: false },
+            thinking_behavior: ThinkingBehavior::ReasoningEffort {
+                default: false,
+                enabled: "high",
+                disabled: "no_think",
+            },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
         }
