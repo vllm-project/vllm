@@ -274,11 +274,21 @@ class MoERunner(MoERunnerInterface):
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
             can_overlap = lambda: self._quant_method.mk_can_overlap_shared_experts
+            # Routed experts that quantize their activations copy the input into
+            # a fresh buffer, breaking any aliasing with the shared expert input;
+            # unquantized ones consume it in place. See SharedExperts for why
+            # multi-stream overlap requires the former.
+            routed_input_is_quantized = lambda: (
+                self.routed_experts.quant_method.moe_quant_config is not None
+                and self.routed_experts.quant_method.moe_quant_config.quant_dtype
+                is not None
+            )
             self._shared_experts = SharedExperts(
                 shared_experts,
                 moe_config=moe_config,
                 enable_dbo=enable_dbo,
                 mk_can_overlap_shared_experts=can_overlap,
+                routed_input_is_quantized=routed_input_is_quantized,
             )
 
         # Needed for string -> MoERunner layer lookup in custom ops.
