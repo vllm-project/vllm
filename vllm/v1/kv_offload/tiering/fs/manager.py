@@ -17,6 +17,7 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 
 import functools
 import json
+import mmap
 import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar
@@ -210,19 +211,49 @@ class FileSystemTierManager(SecondaryTierManager):
                 with open(config_path, "w") as f:
                     json.dump(mapper.get_run_config(), f, indent=2, sort_keys=True)
 
-        # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
-        # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
-        # rather than failing every block. Keep one mode across all roots.
-        self._use_o_direct = all(
-            probe_o_direct(os.path.dirname(path)) for path in config_paths
-        )
-        if not self._use_o_direct:
-            logger.warning(
-                "O_DIRECT is not supported at one or more paths in '%s'; "
-                "falling back to buffered I/O for the '%s' KV offload tier.",
-                root_dir,
-                tier_type,
-            )
+        # Detect direct-I/O support and alignment independently for each root.
+        # The I/O layer also checks every transfer's size and buffer address;
+        # only an ineligible operation falls back to buffered I/O.
+        self._o_direct_supported: list[bool] = []
+        self._direct_io_alignments: list[int] = []
+        self._filesystem_block_sizes: list[int] = []
+        for root, config_path in zip(self._root_dirs, config_paths):
+            directory = os.path.dirname(config_path)
+            supported = probe_o_direct(directory)
+            try:
+                filesystem_block_size = os.statvfs(directory).f_bsize
+            except OSError as exc:
+                logger.warning(
+                    "Could not query filesystem block size for '%s': %s.",
+                    root,
+                    exc,
+                )
+                filesystem_block_size = 0
+            # probe_o_direct performs a page-sized transfer from a page-aligned
+            # mmap. Its success proves page alignment is valid. statvfs.f_bsize
+            # is informational here: NFS commonly reports its 1 MiB preferred
+            # transfer size rather than the kernel's strict O_DIRECT alignment.
+            direct_io_alignment = mmap.PAGESIZE if supported else 0
+            self._o_direct_supported.append(supported)
+            self._direct_io_alignments.append(direct_io_alignment)
+            self._filesystem_block_sizes.append(filesystem_block_size)
+            if not supported:
+                logger.warning(
+                    "O_DIRECT is unavailable at '%s'; operations on this "
+                    "root will use buffered I/O.",
+                    root,
+                )
+            else:
+                logger.info(
+                    "O_DIRECT enabled at '%s' with validated alignment %d "
+                    "bytes (statvfs block size %d bytes).",
+                    root,
+                    direct_io_alignment,
+                    filesystem_block_size,
+                )
+
+        # Preserve the historical aggregate attribute for callers and tests.
+        self._use_o_direct = all(self._o_direct_supported)
 
         if len(self.file_mappers) > 1:
             logger.info(
@@ -279,9 +310,15 @@ class FileSystemTierManager(SecondaryTierManager):
                 self._primary_kv_view,
                 offsets,
                 self._block_size,
-                self._use_o_direct,
+                o_direct_supported,
+                direct_io_alignment,
             )
-            for paths, offsets in zip(paths_by_root, offsets_by_root)
+            for paths, offsets, o_direct_supported, direct_io_alignment in zip(
+                paths_by_root,
+                offsets_by_root,
+                self._o_direct_supported,
+                self._direct_io_alignments,
+            )
         ]
         self._pool.enqueue_store(job_metadata.job_id, len(tasks), tasks)
 
@@ -305,8 +342,20 @@ class FileSystemTierManager(SecondaryTierManager):
             indices_by_root[root_idx].append(key_idx)
 
         tasks = []
-        for root_idx, (paths, offsets, key_indices) in enumerate(
-            zip(paths_by_root, offsets_by_root, indices_by_root)
+        for root_idx, (
+            paths,
+            offsets,
+            key_indices,
+            o_direct_supported,
+            direct_io_alignment,
+        ) in enumerate(
+            zip(
+                paths_by_root,
+                offsets_by_root,
+                indices_by_root,
+                self._o_direct_supported,
+                self._direct_io_alignments,
+            )
         ):
 
             def load_task(
@@ -314,6 +363,8 @@ class FileSystemTierManager(SecondaryTierManager):
                 paths: list[str] = paths,
                 offsets: list[int] = offsets,
                 key_indices: list[int] = key_indices,
+                o_direct_supported: bool = o_direct_supported,
+                direct_io_alignment: int = direct_io_alignment,
             ) -> None:
                 try:
                     batch_load_block(
@@ -321,7 +372,8 @@ class FileSystemTierManager(SecondaryTierManager):
                         self._primary_kv_view,
                         offsets,
                         self._block_size,
-                        self._use_o_direct,
+                        o_direct_supported,
+                        direct_io_alignment,
                     )
                 except Exception as exc:
                     num_succeeded = getattr(exc, "num_succeeded", 0)

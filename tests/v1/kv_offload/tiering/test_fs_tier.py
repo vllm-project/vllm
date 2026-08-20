@@ -319,6 +319,33 @@ def test_hash_sharding_requires_distinct_roots(tmp_path):
         )
 
 
+def test_o_direct_capability_is_tracked_per_root(tmp_path, monkeypatch):
+    import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
+
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    roots = [tmp_path / "direct", tmp_path / "buffered"]
+    monkeypatch.setattr(
+        mgr_mod,
+        "probe_o_direct",
+        lambda directory: str(roots[0]) in directory,
+    )
+
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=",".join(str(root) for root in roots),
+        path_sharding="by_block_hash",
+    )
+    try:
+        assert tier._o_direct_supported == [True, False]
+        assert tier._direct_io_alignments == [mmap.PAGESIZE, 0]
+        assert all(size > 0 for size in tier._filesystem_block_sizes)
+        assert tier._use_o_direct is False
+    finally:
+        tier.shutdown()
+
+
 @pytest.mark.parametrize("use_c_ext", [True, False])
 def test_block_hash_sharding_preserves_full_rows_and_root_affinity(
     tmp_path, monkeypatch, use_c_ext
@@ -565,6 +592,54 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
             assert torch.allclose(tensor[bid], expected[i])
     finally:
         tier.shutdown()
+
+
+def test_o_direct_alignment_check_uses_size_and_buffer_address():
+    from vllm.v1.kv_offload.tiering.fs.io import O_DIRECT, _can_use_o_direct
+
+    if not O_DIRECT:
+        pytest.skip("O_DIRECT is unavailable on this platform")
+
+    tensor = _page_aligned_zero_tensor(1, _BLOCK_ELEMENTS)
+    view = memoryview(tensor.numpy()).cast("B")
+
+    assert _can_use_o_direct(view, len(view), mmap.PAGESIZE, True)
+    assert not _can_use_o_direct(view[:-1], len(view) - 1, mmap.PAGESIZE, True)
+    assert not _can_use_o_direct(view[1:], len(view) - 1, mmap.PAGESIZE, True)
+    assert not _can_use_o_direct(view, len(view), mmap.PAGESIZE, False)
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_unaligned_direct_io_falls_back(tmp_path, monkeypatch, use_c_ext):
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    block_size = mmap.PAGESIZE + 1
+    source = bytearray(os.urandom(block_size))
+    destination = bytearray(block_size)
+    path = str(tmp_path / "unaligned.bin")
+
+    io_mod.batch_store_block(
+        [path],
+        memoryview(source),
+        [0],
+        block_size,
+        True,
+        mmap.PAGESIZE,
+    )
+    io_mod.batch_load_block(
+        [path],
+        memoryview(destination),
+        [0],
+        block_size,
+        True,
+        mmap.PAGESIZE,
+    )
+
+    assert destination == source
 
 
 def test_wait_idle_blocks_until_tasks_complete():
