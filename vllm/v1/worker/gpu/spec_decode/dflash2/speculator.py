@@ -127,8 +127,6 @@ class DFlash2Speculator(DFlashSpeculator):
         self._cached_candidate_ids = torch.zeros(
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
-        if self.draft_logits is not None:
-            self.draft_logits.fill_(-float("inf"))
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # fp32 so the walk and the rejection that checks it read the same
