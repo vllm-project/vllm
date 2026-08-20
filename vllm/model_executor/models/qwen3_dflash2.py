@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
-from functools import cache
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -11,15 +8,9 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather,
-)
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
 
 from .qwen3_dflash import (
     DFlashQwen3DecoderLayer,
@@ -27,35 +18,6 @@ from .qwen3_dflash import (
     DFlashQwen3Model,
 )
 from .utils import maybe_prefix
-
-logger = init_logger(__name__)
-
-
-@cache
-def _flashinfer_topk() -> Callable[..., tuple[torch.Tensor, torch.Tensor]] | None:
-    """FlashInfer's radix top-k, or None for torch.topk.
-
-    This top-k spans the vocabulary and is the selector's largest single cost,
-    where the radix kernel is about twice torch.topk.
-    """
-    if not current_platform.is_cuda():
-        return None
-    if not has_flashinfer():
-        logger.info_once(
-            "flashinfer is unavailable; the DFlash2 selector uses torch.topk, "
-            "at roughly half the speed."
-        )
-        return None
-    from flashinfer import top_k
-
-    return top_k
-
-
-def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
-    impl = _flashinfer_topk()
-    if impl is None or not scores.is_cuda:
-        return torch.topk(scores, k, dim=-1)
-    return impl(scores, k, sorted=True, deterministic=True)
 
 
 def _grouped_conv(
@@ -310,32 +272,19 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         draft_config = self.config.dflash_config
-        self.output_multiplier = float(draft_config.get("output_multiplier", 1.0))
         softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
-        self.final_logit_softcapping = softcap if softcap > 0 else None
+        self.candidate_logits_processor = LogitsProcessor(
+            vllm_config.model_config.get_vocab_size(),
+            scale=float(draft_config.get("output_multiplier", 1.0)),
+            soft_cap=softcap if softcap > 0 else None,
+        )
 
     def compute_candidates(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        selector = self.model.candidate_selector
-        logits = self.lm_head.quant_method.apply(self.lm_head, hidden_states, bias=None)
-        num_pad = self.lm_head.shard_indices.num_org_vocab_padding
-        if num_pad > 0:
-            logits[..., -num_pad:] = -float("inf")
-        values, ids = _topk(logits, selector.top_k)
-        ids = ids.to(torch.int64) + self.lm_head.shard_indices.org_vocab_start_index
-
-        if get_tensor_model_parallel_world_size() > 1:
-            values = tensor_model_parallel_all_gather(values, dim=-1)
-            ids = tensor_model_parallel_all_gather(ids, dim=-1)
-            values, selected = _topk(values, selector.top_k)
-            ids = ids.gather(-1, selected)
-
-        values = values.float() * self.output_multiplier
-        if self.final_logit_softcapping is not None:
-            cap = self.final_logit_softcapping
-            values = torch.tanh(values / cap) * cap
-        return ids, values
+        return self.candidate_logits_processor.get_top_k_tokens(
+            self.lm_head, hidden_states, self.model.candidate_selector.top_k
+        )
 
 
 EntryClass = DFlash2Qwen3ForCausalLM
