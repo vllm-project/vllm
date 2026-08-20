@@ -16,6 +16,8 @@ def mhc_pre_aiter(
     hc_post_mult_value: float,
     sinkhorn_repeat: int,
     n_splits: int = 1,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Forward pass for mHC pre block.
@@ -31,6 +33,8 @@ def mhc_pre_aiter(
         hc_post_mult_value: post-mix multiplier value
         sinkhorn_repeat: number of sinkhorn iterations
         n_splits: split-k factor;
+        norm_weight: optional RMSNorm weight fused into the pre kernel
+        norm_eps: epsilon for the fused RMSNorm when norm_weight is set
 
     Returns:
         post_mix: shape (..., hc_mult), dtype torch.float32
@@ -52,6 +56,8 @@ def mhc_pre_aiter(
         hc_sinkhorn_eps,
         hc_post_mult_value,
         sinkhorn_repeat,
+        norm_weight,
+        norm_eps,
     )
 
 
@@ -66,6 +72,8 @@ def _mhc_pre_aiter_fake(
     hc_post_mult_value: float,
     sinkhorn_repeat: int,
     n_splits: int = 1,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     hc_mult = residual.shape[-2]
     hidden_size = residual.shape[-1]
@@ -124,6 +132,94 @@ def _mhc_post_aiter_fake(
     return torch.empty_like(residual)
 
 
+def mhc_fused_post_pre_aiter(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    n_splits: int = 1,
+    tile_n: int = 1,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused mHC post + next mHC pre on ROCm via AITER.
+
+    Returns residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur.
+    """
+    hidden_size = residual.shape[-1]
+    assert hidden_size % 256 == 0
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return rocm_aiter_ops.mhc_fused_post_pre(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        norm_weight,
+        norm_eps,
+    )
+
+
+def _mhc_fused_post_pre_aiter_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    n_splits: int = 1,
+    tile_n: int = 1,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    hc_mult = residual.shape[-2]
+    hidden_size = residual.shape[-1]
+    outer_shape = residual.shape[:-2]
+    post_mix = torch.empty(
+        *outer_shape,
+        hc_mult,
+        1,
+        dtype=torch.float32,
+        device=residual.device,
+    )
+    comb_mix = torch.empty(
+        *outer_shape,
+        hc_mult,
+        hc_mult,
+        dtype=torch.float32,
+        device=residual.device,
+    )
+    layer_input = torch.empty(
+        *outer_shape,
+        hidden_size,
+        dtype=torch.bfloat16,
+        device=residual.device,
+    )
+    return torch.empty_like(residual), post_mix, comb_mix, layer_input
+
+
 direct_register_custom_op(
     op_name="mhc_pre_aiter",
     op_func=mhc_pre_aiter,
@@ -135,4 +231,10 @@ direct_register_custom_op(
     op_func=mhc_post_aiter,
     mutates_args=[],
     fake_impl=_mhc_post_aiter_fake,
+)
+direct_register_custom_op(
+    op_name="mhc_fused_post_pre_aiter",
+    op_func=mhc_fused_post_pre_aiter,
+    mutates_args=[],
+    fake_impl=_mhc_fused_post_pre_aiter_fake,
 )
