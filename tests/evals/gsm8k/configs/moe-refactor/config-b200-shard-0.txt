@@ -1,0 +1,3 @@
+DeepSeek-V4-Flash-deepgemm-mega-moe.yaml
+Qwen3-30B-A3B-NvFp4-ModelOpt-marlin.yaml
+Qwen3-30B-A3B-NvFp4-ModelOpt-fi-trtllm.yaml
