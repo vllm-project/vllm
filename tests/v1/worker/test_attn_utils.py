@@ -67,7 +67,7 @@ class _DraftBackend:
         return False
 
 
-def test_attention_checks_only_include_target_graph_layers():
+def test_attention_checks_preserve_global_and_target_scoped_support():
     spec = FullAttentionSpec(
         block_size=16,
         num_kv_heads=1,
@@ -84,10 +84,12 @@ def test_attention_checks_only_include_target_graph_layers():
     ]
     groups = [[target_group, draft_group]]
 
+    # The runner-wide execution mode must still honor the drafter's limit.
     unfiltered = get_attn_cg_support(groups, None)  # type: ignore[arg-type]
     assert unfiltered.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
     assert unfiltered.min_cg_attn_backend == "_DraftBackend"
 
+    # Adaptive verification validates only the target's varlen graphs.
     target_only = get_attn_cg_support(
         groups,
         None,  # type: ignore[arg-type]

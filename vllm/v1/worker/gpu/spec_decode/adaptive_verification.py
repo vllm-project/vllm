@@ -17,6 +17,7 @@ from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
 from vllm.v1.worker.gpu.attn_utils import (
+    get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
 )
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -25,6 +26,7 @@ logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
     from vllm.v1.worker.gpu.input_batch import InputBatch
     from vllm.v1.worker.gpu.states import RequestState
@@ -444,7 +446,9 @@ def maybe_create_adaptive_verification_manager(
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
     max_total_logits: int,
+    vllm_config: "VllmConfig",
     target_layer_names: set[str] | None = None,
+    additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
 ) -> AdaptiveVerificationManager | None:
     if not enable_adaptive_verification:
         return None
@@ -463,12 +467,23 @@ def maybe_create_adaptive_verification_manager(
             "use a backend that does."
         )
 
-    if attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS:
+    target_attn_cg_support = attn_cg_support
+    if target_layer_names is not None:
+        target_attn_cg_support = get_attn_cg_support(
+            attn_groups,
+            vllm_config,
+            checked_layer_names=target_layer_names,
+        )
+        if additional_attn_cg_support is not None:
+            target_attn_cg_support = target_attn_cg_support.narrow(
+                *additional_attn_cg_support
+            )
+    if target_attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS:
         raise ValueError(
             "Adaptive verification captures varlen decode cudagraphs, so every"
             " target attention builder must report AttentionCGSupport.ALWAYS, but "
-            f"{attn_cg_support.min_cg_attn_backend} reports "
-            f"{attn_cg_support.min_cg_support}. Pass "
+            f"{target_attn_cg_support.min_cg_attn_backend} reports "
+            f"{target_attn_cg_support.min_cg_support}. Pass "
             "enable_adaptive_verification=false in the speculative config, or "
             "use a backend that does."
         )

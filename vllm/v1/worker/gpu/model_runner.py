@@ -533,8 +533,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         target_attn_layer_names = None
         if isinstance(self.speculator, DraftModelSpeculator):
-            # Draft prefill reuses these groups, but draft attention is captured
-            # and capability-checked by its own graph manager.
+            # Adaptive verification validates target attention separately.
             target_attn_layer_names = {
                 layer_name
                 for group in self.kv_cache_config.kv_cache_groups
@@ -544,11 +543,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             self.vllm_config,
             self.device,
-            cudagraph_checked_layer_names=target_attn_layer_names,
         )
-        attn_cg_support = attn_cg_support.narrow(
-            *self.model_state.get_additional_cg_support()
-        )
+        additional_attn_cg_support = self.model_state.get_additional_cg_support()
+        attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
         # The speculator clears the flag at load time when the checkpoint has
         # no confidence head, so it holds the effective value.
         self.adaptive_verification = maybe_create_adaptive_verification_manager(
@@ -561,7 +558,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc=self.input_buffers.query_start_loc,
             num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
             max_total_logits=get_max_chunk_logits(self.vocab_size),
+            vllm_config=self.vllm_config,
             target_layer_names=target_attn_layer_names,
+            additional_attn_cg_support=additional_attn_cg_support,
         )
 
         self.block_tables = BlockTables(

@@ -94,7 +94,6 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
-    cudagraph_checked_layer_names: set[str] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -165,11 +164,7 @@ def init_attn_backend(
             else:
                 if hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
-    attn_cg_support_info = get_attn_cg_support(
-        attn_groups,
-        vllm_config,
-        checked_layer_names=cudagraph_checked_layer_names,
-    )
+    attn_cg_support_info = get_attn_cg_support(attn_groups, vllm_config)
     return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 

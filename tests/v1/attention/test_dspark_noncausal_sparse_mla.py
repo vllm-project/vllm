@@ -121,7 +121,7 @@ def _run_sparse_backend_vs_sdpa(
     force_future_dominance: bool = False,
     qk_nope_head_dim: int = 128,
     v_head_dim: int = 128,
-    cpu_query_lens: list[int] | None = None,
+    stale_cpu_query_lens: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run a sparse-MLA backend with the given per-token indices and compute a
     dense per-token SDPA reference over the SAME indices.
@@ -292,10 +292,12 @@ def _run_sparse_backend_vs_sdpa(
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, block_size, device, arange_block_indices=True
     )
-    if cpu_query_lens is not None:
-        assert len(cpu_query_lens) == len(query_lens)
+    if stale_cpu_query_lens is not None:
+        # Adaptive verification updates only device boundaries; the stale CPU
+        # copy proves token_to_req_indices consumes the device layout.
+        assert len(stale_cpu_query_lens) == len(query_lens)
         cpu_query_start_loc = [0]
-        for query_len in cpu_query_lens:
+        for query_len in stale_cpu_query_lens:
             cpu_query_start_loc.append(cpu_query_start_loc[-1] + query_len)
         common_attn_metadata.query_start_loc_cpu = torch.tensor(
             cpu_query_start_loc, dtype=torch.int32
@@ -454,7 +456,7 @@ def test_flashinfer_sparse_mla_adaptive_varlen_matches_sdpa(
         device,
         qk_nope_head_dim=192,
         v_head_dim=256,
-        cpu_query_lens=[4, 4, 4, 4],
+        stale_cpu_query_lens=[4, 4, 4, 4],
     )
 
     torch.testing.assert_close(
