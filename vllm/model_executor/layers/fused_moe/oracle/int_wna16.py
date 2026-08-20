@@ -1104,9 +1104,21 @@ def _humming_wna16_weight_schema(
             "desc_act": quant_config.desc_act,
             "sym": quant_config.is_sym,
         }
+    if isinstance(quant_config, QuantizationArgs):
+        quant_type = getattr(quant_config.type, "value", quant_config.type)
+        quant_strategy = getattr(quant_config.strategy, "value", quant_config.strategy)
+        return {
+            "quant_method": "compressed-tensors",
+            "format": "pack-quantized",
+            "type": str(quant_type),
+            "num_bits": quant_config.num_bits,
+            "strategy": str(quant_strategy),
+            "group_size": quant_config.group_size,
+            "symmetric": quant_config.symmetric,
+        }
     raise TypeError(
-        "Humming WNA16 checkpoint schema requires AutoAWQConfig or "
-        "AutoGPTQConfig, "
+        "Humming WNA16 checkpoint schema requires AutoAWQConfig, "
+        "AutoGPTQConfig or QuantizationArgs, "
         f"got {type(quant_config).__name__}."
     )
 
