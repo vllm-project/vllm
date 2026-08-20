@@ -11,7 +11,7 @@ import torch
 
 from vllm.renderers.paged_shm.client import PagedShmClient
 from vllm.renderers.paged_shm.server import PagedShmServerProc
-from vllm.renderers.paged_shm.types import ShmItem
+from vllm.renderers.paged_shm.types import ShmWriteRequest
 from vllm.utils import random_uuid
 
 # ---------------------------------------------------------------------------
@@ -630,7 +630,7 @@ class TestTimeout:
         try:
             with pytest.raises(RuntimeError, match="Server error"):
                 client.open_write(
-                    [ShmItem(uuid=_unique_uuid(), size=100, use_cache=True)],
+                    [ShmWriteRequest(uuid=_unique_uuid(), size=100, use_cache=True)],
                     timeout=0.0,
                 )
         finally:
@@ -647,7 +647,7 @@ class TestTimeout:
         def _waiter():
             try:
                 alloc = client.open_write(
-                    [ShmItem(uuid=small_uuid, size=100, use_cache=True)],
+                    [ShmWriteRequest(uuid=small_uuid, size=100, use_cache=True)],
                     timeout=5.0,
                 )
                 result_holder["alloc"] = alloc
@@ -685,7 +685,7 @@ class TestTimeout:
         def _waiter():
             try:
                 alloc = client.open_write(
-                    [ShmItem(uuid=small_uuid, size=100, use_cache=True)],
+                    [ShmWriteRequest(uuid=small_uuid, size=100, use_cache=True)],
                     timeout=-1.0,
                 )
                 result_holder["alloc"] = alloc
@@ -713,7 +713,9 @@ class TestTimeout:
     def test_open_read_timeout_zero_raises_value_error(self, client):
         """With timeout=0, open_read on a writing item should raise ValueError."""
         uuid = _unique_uuid()
-        client.open_write([ShmItem(uuid=uuid, size=100, use_cache=True)], timeout=0.0)
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
 
         try:
             with pytest.raises(RuntimeError, match="Server error"):
@@ -726,7 +728,9 @@ class TestTimeout:
     def test_open_read_timeout_positive_succeeds_after_close_write(self, client):
         """With timeout>0, open_read should wait until the item becomes readable."""
         uuid = _unique_uuid()
-        client.open_write([ShmItem(uuid=uuid, size=100, use_cache=True)], timeout=0.0)
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
 
         result_holder = {}
         err_holder = {}
@@ -760,7 +764,9 @@ class TestTimeout:
     def test_open_read_timeout_negative_infinite(self, client):
         """With timeout<0, open_read should wait indefinitely until readable."""
         uuid = _unique_uuid()
-        client.open_write([ShmItem(uuid=uuid, size=100, use_cache=True)], timeout=0.0)
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
 
         result_holder = {}
         err_holder = {}
@@ -907,7 +913,7 @@ class TestPreAllocatedBlocks:
         size = len(data)
 
         # Manually allocate blocks
-        item = ShmItem(uuid=uuid, size=size, use_cache=True)
+        item = ShmWriteRequest(uuid=uuid, size=size, use_cache=True)
         alloc = client.open_write([item], timeout=0.0)
         blocks = alloc[0].blocks
 

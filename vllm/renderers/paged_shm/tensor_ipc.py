@@ -16,7 +16,7 @@ from vllm.multimodal.inputs import (
 from vllm.utils import random_uuid
 
 from .client import PagedShmClient
-from .types import PagedShmTensor, ShmItem
+from .types import PagedShmTensor, ShmWriteRequest
 
 
 class PagedShmTensorIPC:
@@ -73,10 +73,12 @@ class PagedShmTensorIPC:
                         continue
                     elements.append(elem)
 
-        items: list[ShmItem] = []
+        items: list[ShmWriteRequest] = []
         for elem in elements:
             assert isinstance(elem.data, torch.Tensor)
-            item = ShmItem(uuid=random_uuid(), size=elem.data.nbytes, use_cache=True)
+            item = ShmWriteRequest(
+                uuid=random_uuid(), size=elem.data.nbytes, use_cache=True
+            )
             items.append(item)
 
         # 2. Allocate shm for all these mm tensors at once

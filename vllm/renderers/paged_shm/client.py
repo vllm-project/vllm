@@ -23,10 +23,10 @@ from typing import Any
 import numpy as np
 import torch
 import zmq
-from torch._prims_common import DeviceLikeType
 
 from vllm.config import ModelConfig
 
+from ...utils.torch_utils import DeviceLikeType
 from .constant import (
     CLOSE_READ,
     CLOSE_WRITE,
@@ -43,7 +43,7 @@ from .constant import (
     UNPIN,
 )
 from .storage import PagedShmStorage
-from .types import AllocatedShmItem, ShmItem
+from .types import ShmAllocation, ShmWriteRequest
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,9 @@ class _WriteContext:
         if len(self.blocks) > 0:
             return self
 
-        item_spec = ShmItem(uuid=self._uuid, size=self._size, use_cache=self._use_cache)
+        item_spec = ShmWriteRequest(
+            uuid=self._uuid, size=self._size, use_cache=self._use_cache
+        )
         alloc = self._client.open_write([item_spec], timeout=self._timeout)
         self.blocks = alloc[0].blocks
         return self
@@ -379,7 +381,7 @@ class PagedShmClient(_BaseClient):
         if async_write:
             # Allocate blocks synchronously (or use provided ones)
             if blocks is None:
-                item_spec = ShmItem(uuid=uuid, size=size, use_cache=use_cache)
+                item_spec = ShmWriteRequest(uuid=uuid, size=size, use_cache=use_cache)
                 alloc = self.open_write([item_spec], timeout=timeout)
                 blocks = alloc[0].blocks
 
@@ -480,8 +482,8 @@ class PagedShmClient(_BaseClient):
     # ------------------------------------------------------------------
 
     def open_write(
-        self, items: list[ShmItem], timeout: float = 0.0
-    ) -> list[AllocatedShmItem]:
+        self, items: list[ShmWriteRequest], timeout: float = 0.0
+    ) -> list[ShmAllocation]:
         """Allocate blocks for a batch of items to be written."""
         payload = json.dumps(
             {
@@ -494,14 +496,14 @@ class PagedShmClient(_BaseClient):
         status = resp_dict.pop("status", "error")
         if status != "ok":
             raise RuntimeError("Server returned non-ok status")
-        return [AllocatedShmItem(**a) for a in resp_dict["data"]]
+        return [ShmAllocation(**a) for a in resp_dict["data"]]
 
     def close_write(self, uuid: str, open_read: bool = False) -> None:
         """Finalise a write operation for the given UUID."""
         payload = json.dumps({"uuid": uuid, "open_read": open_read})
         self._request(CLOSE_WRITE, payload)
 
-    def open_read(self, uuid: str, timeout: float = 0.0) -> AllocatedShmItem:
+    def open_read(self, uuid: str, timeout: float = 0.0) -> ShmAllocation:
         """Acquire a read reference to an item and return its block list."""
         payload = json.dumps({"uuid": uuid, "timeout": timeout})
         resp = self._request(OPEN_READ, payload)
@@ -509,7 +511,7 @@ class PagedShmClient(_BaseClient):
         status = resp_dict.pop("status", "error")
         if status != "ok":
             raise RuntimeError("Server returned non-ok status")
-        return AllocatedShmItem(**resp_dict["data"])
+        return ShmAllocation(**resp_dict["data"])
 
     def close_read(self, uuid: str) -> None:
         """Release a read reference for the given UUID."""

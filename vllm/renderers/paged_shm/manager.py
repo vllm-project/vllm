@@ -22,7 +22,7 @@ from typing import Any
 
 from vllm.utils.cache import LRUCache
 
-from .types import AllocatedShmItemInternal, ShmItem
+from .types import ShmSlot, ShmWriteRequest
 
 # Special reference count values
 REF_WRITING = -1  # Item is being written (not yet readable)
@@ -42,21 +42,21 @@ class PagedShmManager:
         assert self.size > 0
         assert self.n_block > 0
 
-        # uuid -> AllocatedShmItemInternal
-        self._all_items: dict[str, AllocatedShmItemInternal] = {}
+        # uuid -> ShmSlot
+        self._all_items: dict[str, ShmSlot] = {}
 
         # Initially all blocks are free
         self._free_blocks = deque(range(self.n_block))
         self._total_available_blocks = self.n_block
 
         # LRU cache tracks idle cacheable items by their block count.
-        self._lru_cache: LRUCache[str, AllocatedShmItemInternal] = LRUCache(
+        self._lru_cache: LRUCache[str, ShmSlot] = LRUCache(
             capacity=self.n_block,
             getsizeof=lambda x: x.n_block(),
         )
         self._pinned_items: set[str] = set()
 
-    def open_write(self, items: list[ShmItem]) -> list[AllocatedShmItemInternal]:
+    def open_write(self, items: list[ShmWriteRequest]) -> list[ShmSlot]:
         """
         Allocate blocks for a batch of items. To avoid partial allocation,
         submit multiple items in one batch.
@@ -89,11 +89,11 @@ class PagedShmManager:
         self._evict(total_need)
 
         # 4. Allocate blocks and record.
-        allocated: list[AllocatedShmItemInternal] = []
+        allocated: list[ShmSlot] = []
         for idx, item in enumerate(items):
             need = needs[idx]
             blocks = [self._free_blocks.popleft() for _ in range(need)]
-            new_item = AllocatedShmItemInternal(
+            new_item = ShmSlot(
                 uuid=item.uuid,
                 size=item.size,
                 use_cache=item.use_cache,
@@ -125,7 +125,7 @@ class PagedShmManager:
         else:
             item.ref_count = 1  # start with one reader
 
-    def open_read(self, uuid: str) -> AllocatedShmItemInternal:
+    def open_read(self, uuid: str) -> ShmSlot:
         """
         Increment the read reference count. If the item is idle and cacheable,
         it is removed from the LRU cache (making its blocks unavailable for eviction).
@@ -287,7 +287,7 @@ class PagedShmManager:
             self._all_items.pop(uuid)
             self._free_blocks.extend(victim.blocks)
 
-    def _get_item(self, uuid: str) -> AllocatedShmItemInternal:
+    def _get_item(self, uuid: str) -> ShmSlot:
         """Return the item, or raise ValueError if not found."""
         item = self._all_items.get(uuid)
         if item is None:
