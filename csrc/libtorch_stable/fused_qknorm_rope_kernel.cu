@@ -71,6 +71,20 @@ struct packed_as<uint, 4> {
   using type = uint4;
 };
 
+// head_dim=512 gives vecSize = head_dim/64 = 8, i.e. a 32-byte per-thread
+// vector. No native vector type exceeds 16 bytes (uint4), so pack two uint4;
+// the kernel only reinterprets this as a raw byte buffer, and a 32-byte
+// aligned load/store lowers to two 128-bit accesses.
+struct alignas(16) uint8_pack {
+  uint4 x;
+  uint4 y;
+};
+
+template <>
+struct packed_as<uint, 8> {
+  using type = uint8_pack;
+};
+
 template <typename T>
 __inline__ __device__ T warpReduceSum(T val) {
 #pragma unroll
@@ -587,6 +601,14 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
                 k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim);
       });
       break;
+    case 512:
+      DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
+        fusedQKNormRopeKernel<scalar_t_in, scalar_t_cache, 512, INTERLEAVE>
+            <<<gridDim, blockDim, 0, stream>>>(
+                qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
+                k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim);
+      });
+      break;
     default:
       STD_TORCH_CHECK(
           false, "Unsupported head dimension for fusedQKNormRope: ", head_dim);
@@ -682,6 +704,16 @@ void launchFusedQKNormRopeNTokenHeads(
       case 256:                                                              \
         DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                        \
           fusedQKNormRopeKernelNTokenHeads<scalar_t_in, scalar_t_cache, 256, \
+                                           INTERLEAVE, (N)>                  \
+              <<<gridDim, blockDim, smem_bytes, stream>>>(                   \
+                  qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight, \
+                  k_weight, cos_sin_cache, position_ids, num_tokens,         \
+                  rotary_dim);                                               \
+        });                                                                  \
+        break;                                                               \
+      case 512:                                                              \
+        DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {                        \
+          fusedQKNormRopeKernelNTokenHeads<scalar_t_in, scalar_t_cache, 512, \
                                            INTERLEAVE, (N)>                  \
               <<<gridDim, blockDim, smem_bytes, stream>>>(                   \
                   qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight, \
