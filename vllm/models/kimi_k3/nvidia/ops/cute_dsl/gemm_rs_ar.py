@@ -830,7 +830,9 @@ class GemmRsAr:
             num_ctas,
         )
         if self.all_reduce:
-            # The next launch reuses partial, so return an owning snapshot.
+            # The output may outlive the next launch as an AttnRes prefix, hence output
+            # clone is required here. A future kernel could overlap the copy-out using
+            # an extra warp or the communication warp.
             return self.partial[:M].clone()
         assert output is not None
         return output
