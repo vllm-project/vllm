@@ -70,7 +70,7 @@ HiSparseConnector                          HiSparseConnector
        │ connector metadata                       ├─ host bytes
        │ - page transfers                         ├─ copy scheduling
        │ - block-table replacements               └─ per-layer hot state
-       │ - fully-resident route bit                      │
+       │ - indexer restore readiness                     │
        └───────────────────────────────────────────────►│
        ◄──────── connector worker metadata ─────────────┘
                     enqueued and completed transfer IDs
@@ -112,17 +112,32 @@ memory profiling. Cache binding only attaches storage; it does not infer
 semantic groups from the physical packed-tensor order. The construction cursor
 is discarded with the worker's pinned state.
 
-For a fully resident batch, `HiSparseCacheHandle` uses the normal paged resident
-cache directly. For a hybrid batch, the fused HiSparse kernel checks resident
-pages first, then hot rows, then pinned host memory. No CPU decision is added
-to the decode path. The resolver consumes the existing graph-stable request
-mapping from attention metadata; neither the worker nor individual cache
-handles keep a duplicate mapping.
+Every HiSparse decode batch uses the same fused resolver. It checks resident
+pages first, then hot rows, then pinned host memory. A resident hit exits inside
+the kernel before hot-LRU lookup or host copying; there is no framework-level
+residency route or separate CUDA graph. No CPU decision is added to the decode
+path. The resolver consumes the existing graph-stable request mapping from
+attention metadata; neither the worker nor individual cache handles keep a
+duplicate mapping.
 
 Speculative decoding resolves and consumes each verification step in order.
 Each step receives distinct replayable plan rows while sharing the request's
 hot-cache state, so a later step cannot reuse a hot row before an earlier step
 has consumed it.
+
+## P/D import target
+
+The decoder chooses the landing target once per request from the normal cache
+admission calculation. If the complete imported prefix fits the device pools,
+NIXL transfers it directly into resident GPU pages. Otherwise, if the fixed
+host-backed GPU footprint and host source blocks fit, the request imports into
+the host tier. There is no context-length threshold or other heuristic, and a
+request waiting for capacity retains its choice across admission retries.
+
+A host import reads through a bounded decoder-GPU staging pool before copying
+into registered host memory. Pages needed immediately are mirrored into their
+resident destinations during that copy. Both landing targets then use the same
+fused decode resolver described above.
 
 ## Spill transaction
 
@@ -185,12 +200,12 @@ the same command, output, and cache-resolution boundaries.
 | `PagedCacheView` | immutable data object | shared resident/hot HMA tensor binding |
 | `HiSparseWorker` | connector-owned worker component | worker-wide transfer scheduling and host-pool lifecycle |
 | `HiSparseRuntime` | plain worker-owned component | per-cache host/hot tensors, GPU LRU, and fused resolution |
-| `HiSparseCacheHandle` | plain attention component | resident view, route, and direct worker registration |
+| `HiSparseCacheHandle` | plain attention component | resident view and fused cache resolution |
 | `SparseKVOffloadCommand` | dataclass | opaque scheduler-to-worker work |
 
 ## Performance invariants
 
-- Fully resident attention still reads ordinary paged GPU KV directly.
+- Resident hits bypass hot-LRU lookup and host copies inside the fused resolver.
 - Hot lookup, victim selection, and LRU updates stay on the GPU.
 - A hot miss still copies directly from registered pinned host memory.
 - Top-K resolution stays inside the attention invocation and remains graph

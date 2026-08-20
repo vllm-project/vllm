@@ -352,6 +352,40 @@ class KVCacheManager:
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
 
+    def _lacks_device_capacity(
+        self,
+        required_by_pool: Sequence[int],
+        watermark_by_pool: Sequence[int],
+        reserved_by_pool: Sequence[int],
+    ) -> bool:
+        return any(
+            required + watermark > pool.get_num_free_blocks() - reserved
+            for required, watermark, reserved, pool in zip(
+                required_by_pool,
+                watermark_by_pool,
+                reserved_by_pool,
+                self.block_pools,
+            )
+        )
+
+    def _reclaim_resident_shortage(
+        self,
+        required_by_pool: Sequence[int],
+        watermark_by_pool: Sequence[int],
+        reserved_by_pool: Sequence[int],
+    ) -> None:
+        for pool_id, (required, watermark, reserved, pool) in enumerate(
+            zip(
+                required_by_pool,
+                watermark_by_pool,
+                reserved_by_pool,
+                self.block_pools,
+            )
+        ):
+            shortage = required + watermark + reserved - pool.get_num_free_blocks()
+            if shortage > 0:
+                self.hisparse_coordinator.reclaim_resident_blocks(pool_id, shortage)
+
     def allocate_slots(
         self,
         request: Request,
@@ -527,40 +561,22 @@ class KVCacheManager:
                     host_blocks_to_allocate
                 )
             )
-            full_resident_lacks_capacity = any(
-                required + watermark > pool.get_num_free_blocks() - reserved
-                for required, watermark, reserved, pool in zip(
-                    num_blocks_to_allocate,
-                    watermark_blocks,
-                    reserved_blocks_by_pool,
-                    self.block_pools,
-                )
+            full_resident_lacks_capacity = self._lacks_device_capacity(
+                num_blocks_to_allocate,
+                watermark_blocks,
+                reserved_blocks_by_pool,
             )
             if full_resident_lacks_capacity:
                 if not allow_hisparse_host_import:
-                    for pool_id, (required, watermark, reserved, pool) in enumerate(
-                        zip(
-                            num_blocks_to_allocate,
-                            watermark_blocks,
-                            reserved_blocks_by_pool,
-                            self.block_pools,
-                        )
-                    ):
-                        shortage = (
-                            required + watermark + reserved - pool.get_num_free_blocks()
-                        )
-                        if shortage > 0:
-                            self.hisparse_coordinator.reclaim_resident_blocks(
-                                pool_id, shortage
-                            )
-                    full_resident_lacks_capacity = any(
-                        required + watermark > pool.get_num_free_blocks() - reserved
-                        for required, watermark, reserved, pool in zip(
-                            num_blocks_to_allocate,
-                            watermark_blocks,
-                            reserved_blocks_by_pool,
-                            self.block_pools,
-                        )
+                    self._reclaim_resident_shortage(
+                        num_blocks_to_allocate,
+                        watermark_blocks,
+                        reserved_blocks_by_pool,
+                    )
+                    full_resident_lacks_capacity = self._lacks_device_capacity(
+                        num_blocks_to_allocate,
+                        watermark_blocks,
+                        reserved_blocks_by_pool,
                     )
                     if full_resident_lacks_capacity:
                         return None
@@ -580,39 +596,17 @@ class KVCacheManager:
                             hisparse_host_import=True,
                         )
                     )
-                    host_import_lacks_capacity = any(
-                        required + watermark > pool.get_num_free_blocks() - reserved
-                        for required, watermark, reserved, pool in zip(
+                    host_import_lacks_capacity = self._lacks_device_capacity(
+                        host_import_blocks,
+                        watermark_blocks,
+                        reserved_blocks_by_pool,
+                    )
+                    if host_import_lacks_capacity:
+                        self._reclaim_resident_shortage(
                             host_import_blocks,
                             watermark_blocks,
                             reserved_blocks_by_pool,
-                            self.block_pools,
                         )
-                    )
-                    if host_import_lacks_capacity:
-                        for pool_id, (
-                            required,
-                            watermark,
-                            reserved,
-                            pool,
-                        ) in enumerate(
-                            zip(
-                                host_import_blocks,
-                                watermark_blocks,
-                                reserved_blocks_by_pool,
-                                self.block_pools,
-                            )
-                        ):
-                            shortage = (
-                                required
-                                + watermark
-                                + reserved
-                                - pool.get_num_free_blocks()
-                            )
-                            if shortage > 0:
-                                self.hisparse_coordinator.reclaim_resident_blocks(
-                                    pool_id, shortage
-                                )
                         return None
             if host_lacks_capacity:
                 return None
@@ -664,14 +658,10 @@ class KVCacheManager:
             )
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
-        lacks_capacity = any(
-            required + watermark > pool.get_num_free_blocks() - reserved
-            for required, watermark, reserved, pool in zip(
-                num_blocks_to_allocate,
-                watermark_blocks,
-                reserved_blocks_by_pool,
-                self.block_pools,
-            )
+        lacks_capacity = self._lacks_device_capacity(
+            num_blocks_to_allocate,
+            watermark_blocks,
+            reserved_blocks_by_pool,
         )
         if lacks_capacity and allow_hisparse_host_import and not hisparse_host_import:
             host_import_blocks = self.coordinator.get_num_blocks_to_allocate_by_pool(
@@ -686,14 +676,10 @@ class KVCacheManager:
                 num_tokens_main_model=num_tokens_main_model,
                 hisparse_host_import=True,
             )
-            host_import_lacks_capacity = any(
-                required + watermark > pool.get_num_free_blocks() - reserved
-                for required, watermark, reserved, pool in zip(
-                    host_import_blocks,
-                    watermark_blocks,
-                    reserved_blocks_by_pool,
-                    self.block_pools,
-                )
+            host_import_lacks_capacity = self._lacks_device_capacity(
+                host_import_blocks,
+                watermark_blocks,
+                reserved_blocks_by_pool,
             )
             hisparse_host_import = True
             request.hisparse_host_import = True
@@ -706,25 +692,15 @@ class KVCacheManager:
         ):
             return None
         if lacks_capacity:
-            for pool_id, (required, watermark, reserved, pool) in enumerate(
-                zip(
-                    num_blocks_to_allocate,
-                    watermark_blocks,
-                    reserved_blocks_by_pool,
-                    self.block_pools,
-                )
-            ):
-                shortage = required + watermark + reserved - pool.get_num_free_blocks()
-                if shortage > 0:
-                    self.hisparse_coordinator.reclaim_resident_blocks(pool_id, shortage)
-            lacks_capacity = any(
-                required + watermark > pool.get_num_free_blocks() - reserved
-                for required, watermark, reserved, pool in zip(
-                    num_blocks_to_allocate,
-                    watermark_blocks,
-                    reserved_blocks_by_pool,
-                    self.block_pools,
-                )
+            self._reclaim_resident_shortage(
+                num_blocks_to_allocate,
+                watermark_blocks,
+                reserved_blocks_by_pool,
+            )
+            lacks_capacity = self._lacks_device_capacity(
+                num_blocks_to_allocate,
+                watermark_blocks,
+                reserved_blocks_by_pool,
             )
         if lacks_capacity:
             # Cannot allocate new blocks

@@ -80,7 +80,7 @@ def sync_cudagraph_and_dp_padding(
 
     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
     # so we don't perform request padding for PIECEWISE graphs.
-    # LoRA state is per-rank and needs no cross-rank agreement.
+    # num_active_loras is per-rank and doesn't need cross-rank agreement.
     synced_desc = cudagraph_manager.dispatch(
         num_reqs,
         synced_num_tokens,

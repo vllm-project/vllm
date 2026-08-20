@@ -1490,7 +1490,7 @@ class VllmConfig:
             ):
                 logger.warning(
                     "HiSparse host-resident KV is configured with connector "
-                    "%s. NixlConnector (direct-to-host RDMA) and "
+                    "%s. NixlConnector (GPU-staged host imports) and "
                     "MooncakeStoreConnector (shared-store offload) are the "
                     "validated paths; other connectors are treated as "
                     "debug/fallback paths.",
