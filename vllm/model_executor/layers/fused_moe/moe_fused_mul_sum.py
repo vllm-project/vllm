@@ -26,8 +26,8 @@ def moe_fused_mul_sum_kernel(
     pid_m = tl.program_id(0)
     w_row = topk_weights_ptr + pid_m * top_k
 
-    takes: tuple = ()
-    weights: tuple = ()
+    takes = ()
+    weights = ()
     if has_topk_ids:
         any_valid = 0
         for n in tl.static_range(top_k):
@@ -38,15 +38,15 @@ def moe_fused_mul_sum_kernel(
             if has_expert_map:
                 local_id = tl.load(expert_map_ptr + tl.where(valid, id_val, 0))
                 take = valid & (local_id >= 0)
-            takes += (take,)
-            weights += (tl.load(w_row + n).to(tl.float32),)
+            takes += (take,)  # type: ignore[assignment]
+            weights += (tl.load(w_row + n).to(tl.float32),)  # type: ignore[assignment]
         # All-padding rows early-return untouched (decode contract past num_recv).
         if any_valid == 0:
             return
     else:
         for n in tl.static_range(top_k):
-            takes += (True,)
-            weights += (tl.load(w_row + n).to(tl.float32),)
+            takes += (True,)  # type: ignore[assignment]
+            weights += (tl.load(w_row + n).to(tl.float32),)  # type: ignore[assignment]
 
     n_tiles: tl.constexpr = (hidden_size + BLOCK_K - 1) // BLOCK_K
     a_row = inputs_ptr + pid_m * stride_m
