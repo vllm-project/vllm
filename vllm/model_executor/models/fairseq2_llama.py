@@ -74,10 +74,7 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
 
         params = dict(self.named_parameters())
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(
             self.reshape_fairseq2_weights(name, loaded_weight, params)
             for name, loaded_weight in weights
