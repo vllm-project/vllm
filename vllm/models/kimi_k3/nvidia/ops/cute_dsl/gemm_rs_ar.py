@@ -75,7 +75,7 @@ def multimem_st_16B(dst: cute.Tensor, value: cute.Tensor, *, loc=None, ip=None) 
     llvm.inline_asm(
         None,
         [ptr] + [regs[i].ir_value(loc=loc, ip=ip) for i in range(4)],
-        "multimem.st.weak.global.v4.f32 [$0], {$1, $2, $3, $4};",
+        "multimem.st.relaxed.sys.global.v4.f32 [$0], {$1, $2, $3, $4};",
         "l,r,r,r,r",
         has_side_effects=True,
         loc=loc,
