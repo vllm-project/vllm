@@ -21,6 +21,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
+from vllm.model_executor.model_loader.utils import (
+    configure_quant_config,
+    get_model_architecture,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
@@ -892,11 +896,14 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
-def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | None":
+def get_draft_quant_config(
+    vllm_config: VllmConfig,
+) -> "QuantizationConfig | None":
     """Get quantization config for Draft models.
 
-    Draft models should use their own quantization config instead of the verifier/target
-    model's config. This helper retrieves the draft model's quantization config.
+    Draft models should use their own quantization config instead of the
+    verifier/target model's config. This helper retrieves the draft
+    model's quantization config and attaches packed module mappings.
 
     Args:
         vllm_config: The vLLM configuration object.
@@ -907,11 +914,17 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
     draft_model_config = vllm_config.speculative_config.draft_model_config
     draft_load_config = vllm_config.load_config
 
-    return (
-        VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
-        if draft_model_config
-        else None
+    if not draft_model_config:
+        return None
+
+    quant_config = VllmConfig.get_quantization_config(
+        draft_model_config, draft_load_config
     )
+    if quant_config is not None:
+        draft_cls, _ = get_model_architecture(draft_model_config)
+        configure_quant_config(quant_config, draft_cls)
+
+    return quant_config
 
 
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:

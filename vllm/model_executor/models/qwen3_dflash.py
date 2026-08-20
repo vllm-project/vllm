@@ -437,6 +437,19 @@ class DFlashQwen3Model(nn.Module):
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
+        if (
+            layers_attn
+            and layers_attn[0].qkv_proj.weight.dtype != self._hidden_norm_weight.dtype
+        ):
+            raise NotImplementedError(
+                "DFlash's fused context-KV projection reads "
+                "qkv_proj.weight directly and cannot handle a "
+                "quantized draft model: the dtype differs, and "
+                "process_weights_after_loading has transposed "
+                "the weight to [in, out], so slicing cuts the "
+                "wrong dimension."
+            )
+
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
         kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
