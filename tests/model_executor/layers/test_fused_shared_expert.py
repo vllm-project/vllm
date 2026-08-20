@@ -15,6 +15,7 @@ import vllm.config as vllm_config_module
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
@@ -688,6 +689,98 @@ def test_quark_packed_layer_config_must_match_global_config() -> None:
         quant_config._find_matched_config(
             "model.layers.0.mlp.shared_expert.gate_up_proj", nn.Module()
         )
+
+
+def make_block_fp8_config(ignored_layers: list[str] | None = None) -> Fp8Config:
+    return Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic",
+        ignored_layers=ignored_layers,
+        weight_block_size=[128, 128],
+    )
+
+
+_FP8_SHARED_EXPERT_PROJECTIONS = [
+    "model.layers.0.mlp.shared_experts.gate_up_proj",
+    "model.layers.0.mlp.shared_experts.down_proj",
+]
+
+
+def test_fp8_shared_expert_fse_allows_uniformly_quantized_experts() -> None:
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        make_block_fp8_config(),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert compatible
+    assert reason is None
+
+
+def test_fp8_shared_expert_fse_ignores_non_expert_exclusions() -> None:
+    """Excluding layers that are not experts must not disable FSE."""
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        make_block_fp8_config(
+            [
+                "model.layers.0.input_layernorm",
+                "model.layers.0.mlp.gate",
+                "lm_head",
+            ]
+        ),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert compatible
+    assert reason is None
+
+
+def test_fp8_shared_expert_fse_allows_both_expert_groups_unquantized() -> None:
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        make_block_fp8_config(
+            ["model.layers.0.mlp.experts", *_FP8_SHARED_EXPERT_PROJECTIONS]
+        ),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert compatible
+    assert reason is None
+
+
+@pytest.mark.parametrize(
+    "ignored_layers",
+    [
+        pytest.param(_FP8_SHARED_EXPERT_PROJECTIONS, id="shared-experts-excluded"),
+        pytest.param(["model.layers.0.mlp.experts"], id="routed-experts-excluded"),
+        pytest.param(_FP8_SHARED_EXPERT_PROJECTIONS[:1], id="one-projection-excluded"),
+    ],
+)
+def test_fp8_shared_expert_fse_rejects_asymmetric_exclusions(
+    ignored_layers: list[str],
+) -> None:
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        make_block_fp8_config(ignored_layers),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert not compatible
+    assert reason == (
+        "FP8 uses different quantization configurations for routed and "
+        "shared experts at model.layers.0.mlp.shared_experts"
+    )
+
+
+def test_fp8_shared_expert_fse_requires_serialized_checkpoint() -> None:
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        Fp8Config(is_checkpoint_fp8_serialized=False),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert not compatible
+    assert reason == "FP8 FSE requires an fp8-serialized checkpoint"
 
 
 def test_non_quark_shared_expert_fse_is_incompatible() -> None:
