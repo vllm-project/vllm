@@ -29,7 +29,7 @@ try:
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
     )
     from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace import Status, StatusCode, TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace import (
         SpanKind,  # noqa: F401
@@ -187,6 +187,7 @@ def manual_instrument_otel(
     attributes: dict[str, Any] | None = None,
     context: Context | None = None,
     kind: Any = None,  # SpanKind, but typed as Any for when OTEL unavailable
+    error: BaseException | None = None,
 ):
     """Manually create and end a span with explicit timestamps."""
     if not _IS_OTEL_AVAILABLE:
@@ -207,6 +208,11 @@ def manual_instrument_otel(
     span = tracer.start_span(**span_kwargs)
     if attributes:
         span.set_attributes(attributes)
+    if error:
+        span.record_exception(error)
+        span.set_status(Status(StatusCode.ERROR, str(error)))
+    else:
+        span.set_status(Status(StatusCode.OK))
     if end_time is not None:
         span.end(end_time=end_time)
     else:
