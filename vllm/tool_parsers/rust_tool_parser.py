@@ -337,8 +337,10 @@ class RustToolParser(ToolParser):
                 "Error parsing %s streaming tool call output.",
                 self.rust_parser_name,
             )
-            fallback = self._get_parser().reset()
+            # Convert committed calls before reset clears parser-owned metadata,
+            # including model-provided tool call IDs.
             delta_message = self._delta_message_from_parser_output(parser_output)
+            fallback = self._get_parser().reset()
             if fallback:
                 if delta_message is None:
                     return DeltaMessage(content=fallback)
