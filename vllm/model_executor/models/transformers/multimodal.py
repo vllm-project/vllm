@@ -460,7 +460,14 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         only marking of the tokens an expansion adds around an item."""
         if any(mm_data.values()):
             mm_data = {**mm_data, "return_mm_token_type_ids": True}
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+
+        # The prompt is decoded from tokens that already contain special
+        # tokens, so don't let the tokenizer add them again.
+        return self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(text=prompt, **mm_data),
+            dict(**mm_kwargs, add_special_tokens=False),
+        )
 
     def _get_mm_token_ids(self, modality: str) -> list[int]:
         """Token ids marking where `modality` sits in the prompt, which for some
@@ -598,20 +605,6 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         )
         return mm_placeholders
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> "BatchFeature":
-        # The prompt is decoded from tokens that already contain special
-        # tokens, so don't let the tokenizer add them again.
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, add_special_tokens=False),
-        )
-
     def apply(
         self,
         inputs: ProcessorInputs,
@@ -733,43 +726,6 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                 )
             )
         return updates
-
-    def _apply_hf_processor_main(
-        self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        *,
-        enable_hf_prompt_update: bool,
-    ) -> tuple[list[int], "BatchFeature", bool]:
-        """Tokenize the prompt unexpanded, leaving the expansion for vLLM to splice
-        in, whatever `enable_hf_prompt_update` asks for.
-
-        This differs from `super()` only for a text prompt with
-        `enable_hf_prompt_update`, where `super()` would keep the expanded token
-        ids the HF processor returns. Both routes give the same ids, so forcing
-        this one costs an extra processor call and buys the guarantee that a
-        request bypassing the cache is identical to a cached one.
-
-        A text prompt only arrives with `enable_hf_prompt_update` when there is
-        no multi-modal processor cache. Requests carrying pre-computed
-        embeddings bypass the cache too, but `--enable-mm-embeds` is unsupported
-        here, so they fail validation shortly afterwards.
-        """
-        if isinstance(prompt, str) and enable_hf_prompt_update:
-            logger.warning_once(
-                "Disabling the multi-modal processor cache is extra slow with the "
-                "Transformers modeling backend: the prompt is still tokenized "
-                "unexpanded and the expansion spliced in, to keep the token ids "
-                "identical to what the cache produces, which costs an extra HF "
-                "processor call per request."
-            )
-        return super()._apply_hf_processor_main(
-            prompt,
-            mm_items,
-            hf_processor_mm_kwargs,
-            enable_hf_prompt_update=False,
-        )
 
     def _get_num_image_patches(
         self,
