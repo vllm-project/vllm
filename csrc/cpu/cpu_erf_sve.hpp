@@ -6,7 +6,7 @@
 
 #include <arm_sve.h>
 
-#include "cpu_erf_data.hpp"
+#include "sve/cpu_erf_data.hpp"
 
 namespace vec_op {
 

@@ -65,71 +65,52 @@
 
 #ifdef __aarch64__
   #if defined CPU_CAPABILITY_SVE256 || defined CPU_CAPABILITY_SVE128
-    // Implementation adapted from Arm Optimized Routines (SVE expf):
-    // https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/sve/expf.c
-    #define DEFINE_FAST_EXP                                                    \
-      alignas(16) static constexpr float sve_exp_lane_constants[4] = {         \
-          0x1.62e4p-1f, 0x1.7f7d1cp-20f, 0.5f, 0x1.803f8p17f};                 \
-      constexpr float sve_exp_shift = 0x1.803f8p17f;                           \
-      constexpr float sve_exp_inv_ln2 = 0x1.715476p+0f;                        \
-      constexpr float sve_exp_special_bound = 0x1.5d5e2ap+6f;                  \
-      constexpr float sve_exp_inf_bound = 0x1.62e42fp6f;                       \
-      constexpr float sve_exp_zero_bound = -0x1.9fe368p6f;                     \
-      auto sve_expf_inline =                                                   \
-          [&](svfloat32_t x, const svbool_t pg)                                \
-              __attribute__((always_inline)) {                                 \
-                const svfloat32_t lane_constants =                             \
-                    svld1rq(svptrue_b32(), sve_exp_lane_constants);            \
-                const svfloat32_t z = svmad_x(                                 \
-                    pg, svdup_n_f32(sve_exp_inv_ln2), x, sve_exp_shift);       \
-                const svfloat32_t n = svsub_x(pg, z, sve_exp_shift);           \
-                svfloat32_t r = svmls_lane(x, n, lane_constants, 0);           \
-                r = svmls_lane(r, n, lane_constants, 1);                       \
-                const svfloat32_t scale = svexpa(svreinterpret_u32(z));        \
-                const svfloat32_t r2 = svmul_x(svptrue_b32(), r, r);           \
-                const svfloat32_t poly = svmla_lane(r, r2, lane_constants, 2); \
-                return svmla_x(pg, scale, scale, poly);                        \
-              };                                                               \
-      auto sve_expf_special_case =                                             \
-          [&](svfloat32_t x, const svbool_t pg) __attribute__((noinline)) {    \
-            const svbool_t is_negative = svcmplt(pg, x, 0.0f);                 \
-            const svfloat32_t offset =                                         \
-                svneg_m(svdup_n_f32(23.0f), is_negative, svdup_n_f32(23.0f));  \
-            const svint32_t scale_adjust =                                     \
-                svneg_m(svdup_n_s32(23), is_negative, svdup_n_s32(23));        \
-            x = svmin_x(pg, svmax_x(pg, x, sve_exp_zero_bound),                \
-                        sve_exp_inf_bound);                                    \
-            const svfloat32_t lane_constants =                                 \
-                svld1rq(svptrue_b32(), sve_exp_lane_constants);                \
-            svfloat32_t z =                                                    \
-                svmad_x(pg, svdup_n_f32(sve_exp_inv_ln2), x, sve_exp_shift);   \
-            const svfloat32_t n = svsub_x(pg, z, sve_exp_shift);               \
-            svfloat32_t r = svmls_lane(x, n, lane_constants, 0);               \
-            r = svmls_lane(r, n, lane_constants, 1);                           \
-            z = svsub_x(pg, z, offset);                                        \
-            const svfloat32_t scale = svexpa(svreinterpret_u32(z));            \
-            const svfloat32_t r2 = svmul_x(svptrue_b32(), r, r);               \
-            const svfloat32_t poly = svmla_lane(r, r2, lane_constants, 2);     \
-            const svfloat32_t y = svmla_x(pg, scale, scale, poly);             \
-            return svscale_x(pg, y, scale_adjust);                             \
-          };                                                                   \
-      auto sve_expf = [&](svfloat32_t x) __attribute__((always_inline)) {      \
-        const svbool_t pg = svptrue_b32();                                     \
-        const svbool_t special = svacgt(pg, x, sve_exp_special_bound);         \
-        if (svptest_any(special, special)) {                                   \
-          return sve_expf_special_case(x, pg);                                 \
-        }                                                                      \
-        return sve_expf_inline(x, pg);                                         \
-      };                                                                       \
-      auto fast_exp = [&](const vec_op::FP32Vec16& vec) __attribute__((        \
-                          always_inline)) {                                    \
-        vec_op::FP32Vec16 result(vec_op::uninit);                              \
-        vec_op::unroll_loop<int, vec_op::FP32Vec16::VEC_REG_NUM>([&](int i) {  \
-          result.reg.val[i] = vec_op::FP32Vec16::VectorizedT(                  \
-              sve_expf(static_cast<svfloat32_t>(vec.reg.val[i])));             \
-        });                                                                    \
-        return result;                                                         \
-      };                                                                       \
+    // Implementation adapted from Arm Optimized Routines (experimental SVE
+    // expf):
+    // https://github.com/ARM-software/optimized-routines/blob/v26.01/math/aarch64/experimental/sve/sv_expf_inline.h
+    // fast exponential intended for cases where outputs will be downcasted to
+    // FP16 / BF16 (e.g. attention softmax).
+    // Accurate within 1 ULP for FP16. Accurate within 1 ULP for BF16 for inputs
+    // in [-87.346, max_float] & clamps inputs < -87.346 to zero.
+    // Implementation is similar to exp_u20, but:
+    // - approximates exp(r) - 1 as r instead of r + 0.5 r^2
+    // - does not split natural log (ln) into high / low parts
+    // - avoids special case code by clamping exp(x) to 0 for x < -87.346 and
+    // inf for x > 88.717
+    #define DEFINE_FAST_EXP                                                   \
+      alignas(16) static constexpr float sve_expf_data[4] = {                 \
+          0x1.62e43p-1f, 0x1.715476p+0f, 0x1.803f8p17f, 0.0f};                \
+      constexpr float sve_expf_upper_bound = 0x1.62dea4p+6f;                  \
+      constexpr float sve_expf_lower_bound = -0x1.5d619ap+6f;                 \
+      auto sve_expf_inline =                                                  \
+          [&](svfloat32_t x, const svbool_t pg)                               \
+              __attribute__((always_inline)) {                                \
+                const svfloat32_t lane_constants =                            \
+                    svld1rq(svptrue_b32(), sve_expf_data);                    \
+                const svfloat32_t z = svmla_lane(                             \
+                    svdup_n_f32(sve_expf_data[2]), x, lane_constants, 1);     \
+                const svfloat32_t n = svsub_x(pg, z, sve_expf_data[2]);       \
+                const svfloat32_t r = svmls_lane(x, n, lane_constants, 0);    \
+                const svfloat32_t scale = svexpa(svreinterpret_u32(z));       \
+                svfloat32_t y = svmla_x(pg, scale, scale, r);                 \
+                y = svsel_f32(                                                \
+                    svcmplt_f32(pg, x, svdup_n_f32(sve_expf_lower_bound)),    \
+                    svdup_n_f32(0.0f), y);                                    \
+                y = svsel_f32(                                                \
+                    svcmpgt_f32(pg, x, svdup_n_f32(sve_expf_upper_bound)),    \
+                    svdup_n_f32(INFINITY), y);                                \
+                return y;                                                     \
+              };                                                              \
+      auto fast_exp = [&](const vec_op::FP32Vec16& vec) __attribute__((       \
+                          always_inline)) {                                   \
+        const svbool_t pg = svptrue_b32();                                    \
+        vec_op::FP32Vec16 result(vec_op::uninit);                             \
+        vec_op::unroll_loop<int, vec_op::FP32Vec16::VEC_REG_NUM>([&](int i) { \
+          result.reg.val[i] = vec_op::FP32Vec16::VectorizedT(                 \
+              sve_expf_inline(static_cast<svfloat32_t>(vec.reg.val[i]), pg)); \
+        });                                                                   \
+        return result;                                                        \
+      };                                                                      \
       auto fast_exp_f16 = fast_exp;
   #else
     // Implementation of neon_expf copied from Arm Optimized Routines (expf
@@ -138,9 +119,9 @@
     //
     // Additional fast exponential intended for cases where outputs will be
     // downcasted to FP16 / BF16 (e.g. attention softmax). Accurate within 1 ULP
-    // for FP16 Accurate within 1 ULP for BF16 for inputs in [-87.683, 88.376] &
-    // clamps inputs outside this range to 0 / inf. Implementation is similar to
-    // exp_u20, but:
+    // for FP16. Accurate within 1 ULP for BF16 for inputs in [-87.683, 88.376]
+    // & clamps inputs outside this range to 0 / inf. Implementation is similar
+    // to exp_u20, but:
     // - uses a third degree polynomial approximation for exp(r) instead of a
     // fifth degree one, with coefficients re-tuned.
     // - does not split natural log (ln) into high / low parts

@@ -20,7 +20,7 @@
   #elif defined(CPU_CAPABILITY_SVE128)
     #include "cpu_types_sve128.hpp"
   #else
-    #include "cpu_types_simd.hpp"
+    #include "cpu_types_neon.hpp"
   #endif
 #elif defined(__riscv_v)
   // riscv implementation
