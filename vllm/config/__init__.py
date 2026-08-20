@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
+
+from vllm._environment import apply_runtime_environment
+
+apply_runtime_environment()
 
 from vllm.config.attention import AttentionConfig
 from vllm.config.cache import CacheConfig

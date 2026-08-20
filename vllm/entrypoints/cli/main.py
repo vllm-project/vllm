@@ -9,22 +9,24 @@ import importlib.metadata
 import sys
 from importlib.util import find_spec
 
+from vllm._environment import apply_runtime_environment
+from vllm.entrypoints.cli._utils import cli_env_setup
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
 def main():
+    cli_env_setup()
+    apply_runtime_environment()
+
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.launch
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.run_batch
     import vllm.entrypoints.cli.serve
-    from vllm.entrypoints.serve.utils.api_utils import (
-        VLLM_SUBCMD_PARSER_EPILOG,
-        cli_env_setup,
-    )
+    from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     CMD_MODULES = [
@@ -35,8 +37,6 @@ def main():
         vllm.entrypoints.cli.collect_env,
         vllm.entrypoints.cli.run_batch,
     ]
-
-    cli_env_setup()
 
     # If `--omni` arg is passed to the CLI, delegate to vLLM Omni's entrypoint handling
     if "--omni" in sys.argv:

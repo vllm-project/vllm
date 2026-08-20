@@ -1,88 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E402
-import importlib.util
 import os
 
+from vllm import _environment
 
-def _get_torch_cuda_version():
-    """Peripheral function to _maybe_set_cuda_compatibility_path().
-    PyTorch version must not be determined by importing directly
-    because it will trigger the CUDA initialization, losing the
-    chance to set the LD_LIBRARY_PATH beforehand.
-    """
-    try:
-        spec = importlib.util.find_spec("torch")
-        if not spec:
-            return None
-        if spec.origin:
-            torch_root = os.path.dirname(spec.origin)
-        elif spec.submodule_search_locations:
-            torch_root = spec.submodule_search_locations[0]
-        else:
-            return None
-        version_path = os.path.join(torch_root, "version.py")
-        if not os.path.exists(version_path):
-            return None
-        # Load the version module without importing torch
-        ver_spec = importlib.util.spec_from_file_location("torch.version", version_path)
-        if not ver_spec or not ver_spec.loader:
-            return None
-        module = importlib.util.module_from_spec(ver_spec)
-        # Avoid registering in sys.modules to not confuse future imports
-        ver_spec.loader.exec_module(module)
-        return getattr(module, "cuda", None)
-    except Exception:
-        return None
+_get_torch_cuda_version = _environment._get_torch_cuda_version
 
 
 def _maybe_set_cuda_compatibility_path():
-    """Set LD_LIBRARY_PATH for CUDA forward compatibility if enabled.
+    return _environment._maybe_set_cuda_compatibility_path(_get_torch_cuda_version)
 
-    Must run before 'import torch' since torch loads CUDA shared libraries
-    at import time and the dynamic linker only consults LD_LIBRARY_PATH when
-    a library is first loaded.
-
-    CUDA forward compatibility is only supported on select professional and
-    datacenter NVIDIA GPUs. Consumer GPUs (GeForce, RTX) do not support it
-    and will get Error 803 if compat libs are loaded.
-    """
-    enable = os.environ.get("VLLM_ENABLE_CUDA_COMPATIBILITY", "0").strip().lower() in (
-        "1",
-        "true",
-    )
-    if not enable:
-        return
-
-    cuda_compat_path = os.environ.get("VLLM_CUDA_COMPATIBILITY_PATH", "")
-    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
-        conda_prefix = os.environ.get("CONDA_PREFIX", "")
-        conda_compat = os.path.join(conda_prefix, "cuda-compat")
-        if conda_prefix and os.path.isdir(conda_compat):
-            cuda_compat_path = conda_compat
-    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
-        torch_cuda_version = _get_torch_cuda_version()
-        if torch_cuda_version:
-            default_path = f"/usr/local/cuda-{torch_cuda_version}/compat"
-            if os.path.isdir(default_path):
-                cuda_compat_path = default_path
-    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
-        return
-
-    norm_path = os.path.normpath(cuda_compat_path)
-    existing = os.environ.get("LD_LIBRARY_PATH", "")
-    ld_paths = existing.split(os.pathsep) if existing else []
-
-    if ld_paths and ld_paths[0] and os.path.normpath(ld_paths[0]) == norm_path:
-        return  # Already at the front
-
-    new_paths = [norm_path] + [
-        p for p in ld_paths if not p or os.path.normpath(p) != norm_path
-    ]
-    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_paths)
-
-
-_maybe_set_cuda_compatibility_path()
 
 import torch
 
@@ -90,34 +18,6 @@ from vllm.logger import init_logger
 from vllm.utils.torch_utils import is_torch_equal, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
-
-# set some common config/environment variables that should be set
-# for all processes created by vllm and all processes
-# that interact with vllm workers.
-# they are executed whenever `import vllm` is called.
-
-# see https://github.com/vllm-project/vllm/pull/15951
-# it avoids unintentional cuda initialization from torch.cuda.is_available()
-os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
-
-# see https://github.com/vllm-project/vllm/issues/10480 and
-# https://github.com/vllm-project/vllm/issues/10619.
-os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
-
-# Enable Triton autotuning result caching to disk by default.
-# Without this, Triton re-runs autotuning on every process restart,
-# adding significant latency to the first inference request.
-# This writes autotuning results to TRITON_CACHE_DIR.
-# It can still be overridden by setting TRITON_CACHE_AUTOTUNING=0
-# in the environment.
-os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
-
-# When unset, TileLang routes JIT temp dirs through a world-shared
-# /tmp/tvm-debug-mode-tempdirs/ whose ownership is pinned to whichever
-# user compiled first, breaking every other user on a shared host.
-# Opt into per-process tempdirs unless the user explicitly chose the
-# debug layout (see https://github.com/vllm-project/vllm/issues/41410).
-os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
 
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch

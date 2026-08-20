@@ -14,14 +14,11 @@ from typing import Final
 INIT_PATH: Final = Path("vllm/__init__.py")
 
 # If you need to add items to whitelist, do it here.
-ALLOWED_IMPORTS: Final[frozenset[str]] = frozenset(
-    {
-        "vllm.env_override",
-    }
-)
+ALLOWED_IMPORTS: Final[frozenset[str]] = frozenset()
 ALLOWED_FROM_MODULES: Final[frozenset[str]] = frozenset(
     {
         ".version",
+        "vllm._environment",
     }
 )
 
