@@ -161,6 +161,7 @@ class ActiveKVConnector(KVConnector):
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         self.pre_forward()
+        self.finish_forward()
         finished_req_ids = scheduler_output.finished_req_ids
         kv_connector_output = self.post_forward(finished_req_ids, wait_for_save=False)
         return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)

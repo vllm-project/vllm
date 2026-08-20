@@ -490,9 +490,7 @@ class KVCacheManager:
             reserved_blocks_by_pool = tuple(reserved_blocks)
             assert len(reserved_blocks_by_pool) == len(self.block_pools)
 
-        hisparse_host_import = (
-            allow_hisparse_host_import and request.hisparse_host_import
-        )
+        hisparse_host_import = request.hisparse_host_import
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
@@ -1048,7 +1046,8 @@ class KVCacheManager:
         ):
             ids = mgr.take_new_block_ids()
             if ids:
-                assert group.block_pool_id is not None
+                if group.block_pool_id is None:
+                    continue
                 ids_by_pool.setdefault(group.block_pool_id, []).extend(ids)
         return ids_by_pool
 

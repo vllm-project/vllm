@@ -907,6 +907,12 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
             0,
         )
 
+    def get_num_required_blocks(self, request_id: str) -> int:
+        return max(
+            self.blocks_per_request - len(self.req_to_blocks.get(request_id, ())),
+            0,
+        )
+
     def get_num_host_import_blocks_to_allocate(self, request_id: str) -> int:
         return max(
             self.blocks_per_request - len(self.req_to_blocks.get(request_id, ())),

@@ -163,20 +163,24 @@ class HiSparseCoordinator:
             self.request_states[request_id] = state
         return state
 
-    def require_hot_if_needed(
+    def needs_hot(
+        self,
+        new_computed_blocks: Sequence[Sequence[KVCacheBlock]],
+    ) -> bool:
+        host_group_id = self.host_group_id
+        return host_group_id is not None and bool(new_computed_blocks[host_group_id])
+
+    def commit_computed_blocks(
         self,
         request_id: str,
         new_computed_blocks: Sequence[Sequence[KVCacheBlock]],
         num_local_computed_tokens: int,
     ) -> None:
-        host_group_id = self.host_group_id
-        has_cpu_history = host_group_id is not None and bool(
-            new_computed_blocks[host_group_id]
-        )
+        has_cpu_history = self.needs_hot(new_computed_blocks)
         if self.resident_managers and has_cpu_history:
             state = self._get_request_state(request_id)
             block_size = self.resident_managers[0].block_size
-            num_pages = cdiv(num_local_computed_tokens, block_size)
+            num_pages = num_local_computed_tokens // block_size
             state.valid_pages.update(range(num_pages))
             state.ready_prefix_pages = max(num_pages, state.ready_prefix_pages)
         if not self.resident_managers or has_cpu_history:
@@ -365,7 +369,10 @@ class HiSparseCoordinator:
         host_block_size = self.host_manager.block_size
         num_pages = num_computed_tokens // host_block_size * self.pages_per_host_block
         state = self._get_request_state(request_id)
+        budget = max(self.max_spill_pages - len(self.spills_to_send), 0)
         for page_idx in range(num_pages):
+            if budget == 0:
+                break
             if page_idx in state.pending_pages:
                 continue
             if page_idx in state.valid_pages:
@@ -375,12 +382,13 @@ class HiSparseCoordinator:
                 for manager in self.resident_managers
             ):
                 continue
-            self._plan_spill(
+            if self._plan_spill(
                 request_id,
                 page_idx,
                 release_after=False,
                 after_forward=True,
-            )
+            ):
+                budget -= 1
 
     def cache_host_blocks_when_ready(
         self,
@@ -432,7 +440,7 @@ class HiSparseCoordinator:
         if not self.resident_managers:
             return
         block_size = self.resident_managers[0].block_size
-        num_pages = cdiv(num_computed_tokens, block_size)
+        num_pages = num_computed_tokens // block_size
         state = self._get_request_state(request_id)
         state.valid_pages = set(range(num_pages))
         state.ready_prefix_pages = num_pages

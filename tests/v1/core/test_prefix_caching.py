@@ -338,6 +338,119 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     assert blocks[3] == []
 
 
+def test_hisparse_materialization_respects_per_step_spill_budget():
+    manager = make_hisparse_kv_cache_manager(
+        32,
+        16,
+        enable_caching=True,
+    )
+    coordinator = manager.hisparse_coordinator
+    coordinator.max_spill_pages = 1
+    tokens = list(range(2 * HISPARSE_BLOCK_SIZE))
+    request = make_request("bounded", tokens, HISPARSE_BLOCK_SIZE, sha256)
+
+    assert manager.allocate_slots(request, num_new_tokens=len(tokens)) is not None
+    first = coordinator.build_offload_command([]).page_transfers
+    assert len(first) == 1
+
+    coordinator.plan_prefix_materialization(request.request_id, len(tokens))
+    second = coordinator.build_offload_command([]).page_transfers
+    assert len(second) == 1
+    assert first[0].transfer_id != second[0].transfer_id
+
+
+def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    source_manager = manager.coordinator.single_type_managers[0]
+    source_block = source_manager.block_pool.get_new_blocks(1)[0]
+    source_manager.req_to_blocks["cow"] = [source_block]
+    source_manager._partial_hit_reqs["cow"] = (0, source_block)
+
+    new_blocks = source_manager.allocate_new_blocks(
+        "cow", HISPARSE_BLOCK_SIZE, HISPARSE_BLOCK_SIZE
+    )
+    new_block_ids = manager.take_new_block_ids()
+    copies, retained = manager.take_kv_cache_block_copies()
+
+    assert new_blocks and new_block_ids == {}
+    assert len(copies) == 1
+    assert copies[0].block_pool_id is None
+    assert copies[0].src_block_id == source_block.block_id
+    assert copies[0].dst_block_id == new_blocks[0].block_id
+    assert retained == [source_block, new_blocks[0]]
+
+
+def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
+    manager = make_hisparse_kv_cache_manager(
+        10,
+        16,
+        transfer_device_cache=True,
+    )
+    request = make_request(
+        "partial-import",
+        list(range(6 * HISPARSE_BLOCK_SIZE)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+    imported_tokens = 4 * HISPARSE_BLOCK_SIZE
+
+    assert allocate_external_prefix(manager, request, imported_tokens) is not None
+    assert request.hisparse_host_import
+
+    required = manager.coordinator.get_num_blocks_to_allocate_by_pool(
+        request_id=request.request_id,
+        num_tokens=request.num_tokens,
+        new_computed_blocks=manager.empty_kv_cache_blocks.blocks,
+        num_encoder_tokens=0,
+        total_computed_tokens=imported_tokens,
+        num_local_computed_tokens=imported_tokens,
+        num_tokens_main_model=request.num_tokens,
+        apply_admission_cap=True,
+        hisparse_host_import=True,
+    )
+
+    assert required == (4,)
+
+
+def test_hisparse_host_import_keeps_partial_page_gpu_only():
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    coordinator = manager.hisparse_coordinator
+
+    coordinator.complete_host_import("partial", HISPARSE_BLOCK_SIZE + 1)
+
+    state = coordinator.request_states["partial"]
+    assert state.valid_pages == {0}
+    assert state.ready_prefix_pages == 1
+
+
+def test_hisparse_capacity_query_does_not_require_hot_blocks():
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    coordinator = manager.hisparse_coordinator
+    host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
+    computed: tuple[list[KVCacheBlock], ...] = (
+        [host_pool.blocks[1]],
+        [],
+        [],
+        [],
+    )
+
+    manager.coordinator.get_num_blocks_to_allocate_by_pool(
+        request_id="query-only",
+        num_tokens=HISPARSE_BLOCK_SIZE,
+        new_computed_blocks=computed,
+        num_encoder_tokens=0,
+        total_computed_tokens=HISPARSE_BLOCK_SIZE,
+        num_local_computed_tokens=HISPARSE_BLOCK_SIZE,
+        num_tokens_main_model=HISPARSE_BLOCK_SIZE,
+    )
+
+    assert all(
+        "query-only" not in hot_manager.hot_required
+        for hot_manager in coordinator.hot_managers
+    )
+
+
 @pytest.mark.parametrize("ends_on_page_boundary", [False, True])
 def test_hisparse_external_import_falls_back_to_hard_gpu_footprint(
     ends_on_page_boundary: bool,
@@ -377,6 +490,12 @@ def test_hisparse_external_import_falls_back_to_hard_gpu_footprint(
     assert not resident[-1].is_null
     assert len(hot) == 2
     assert manager.block_pools[0].get_num_free_blocks() == 0
+
+    if not ends_on_page_boundary:
+        request.num_computed_tokens = num_prompt_tokens
+        request.append_output_token_ids(0)
+        assert manager.allocate_slots(request, num_new_tokens=1) is not None
+        assert request.hisparse_host_import
 
 
 @pytest.mark.parametrize("host_num_blocks", [7, 9])

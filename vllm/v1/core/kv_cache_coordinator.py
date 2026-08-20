@@ -246,25 +246,28 @@ class KVCacheCoordinator(ABC):
         hisparse_host_import: bool = False,
     ) -> tuple[int, ...]:
         """Get allocation requirements independently for each block pool."""
-        self.hisparse_coordinator.require_hot_if_needed(
-            request_id,
-            new_computed_blocks,
-            num_local_computed_tokens,
-        )
+        needs_hot = self.hisparse_coordinator.needs_hot(new_computed_blocks)
+        num_external_computed_tokens = total_computed_tokens - num_local_computed_tokens
         required = [0] * len(self.block_pools)
         for i, manager in enumerate(self.single_type_managers):
             group = self.kv_cache_config.kv_cache_groups[i]
             if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
                 continue
             assert group.block_pool_id is not None
-            if hisparse_host_import and isinstance(manager, HiSparseResidentManager):
+            if (
+                hisparse_host_import
+                and num_external_computed_tokens > 0
+                and isinstance(manager, HiSparseResidentManager)
+            ):
                 num_blocks = manager.get_num_host_import_blocks_to_allocate(
                     request_id,
                     num_local_computed_tokens,
-                    total_computed_tokens - num_local_computed_tokens,
+                    num_external_computed_tokens,
                 )
             elif hisparse_host_import and isinstance(manager, HiSparseHotManager):
                 num_blocks = manager.get_num_host_import_blocks_to_allocate(request_id)
+            elif isinstance(manager, HiSparseHotManager) and needs_hot:
+                num_blocks = manager.get_num_required_blocks(request_id)
             elif isinstance(manager, CrossAttentionManager):
                 num_blocks = manager.get_num_blocks_to_allocate(
                     request_id,
@@ -327,6 +330,11 @@ class KVCacheCoordinator(ABC):
                 num_local_computed_tokens,
                 num_external_computed_tokens,
             )
+        self.hisparse_coordinator.commit_computed_blocks(
+            request_id,
+            new_computed_blocks,
+            num_local_computed_tokens,
+        )
         if hisparse_host_import:
             assert num_external_computed_tokens > 0
             for manager in self.single_type_managers:
