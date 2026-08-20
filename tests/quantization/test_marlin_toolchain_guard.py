@@ -92,13 +92,10 @@ def test_no_warning_when_driver_newer(monkeypatch):
 
 
 def _force_awq_marlin_compatible(monkeypatch):
-    monkeypatch.setattr(
-        AutoAWQConfig,
-        "is_awq_marlin_compatible",
-        classmethod(lambda cls, _: True),
-    )
     # override_quantization_method short-circuits on CPU platforms; make the
     # selection path proceed so the driver-mismatch guard is what is tested.
+    # (Marlin compatibility itself is decided later, in get_quant_method via
+    # check_marlin_supported — covered by the verify_marlin_supported tests.)
     import vllm.model_executor.layers.quantization.auto_awq as auto_awq
 
     monkeypatch.setattr(auto_awq.current_platform, "is_cpu", lambda: False)
