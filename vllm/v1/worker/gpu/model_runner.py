@@ -60,7 +60,6 @@ from vllm.multimodal.encoder_budget import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -248,7 +247,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
-            if self.speculative_config.method in ("eagle3", "dflash", "dspark"):
+            if self.speculative_config.method in (
+                "eagle3",
+                "dflash",
+                "dspark",
+                "extract_hidden_states",
+            ):
                 # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
                 if self.use_pp:
@@ -409,6 +413,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logprobs_mode=self.model_config.logprobs_mode,
                 num_speculative_tokens=self.decode_query_len,
                 use_fp64_gumbel=self.model_config.use_fp64_gumbel,
+                enable_trace_replay=self.model_config.enable_trace_replay,
                 reasoning_config=self.vllm_config.reasoning_config,
                 return_sampling_mask=self.model_config.return_sampling_mask,
             )
@@ -517,17 +522,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
-            # When using DCP, each request's KV cache is sharded among different ranks.
-            # As a result, one block on the current rank covers `block_size * cp_size`
-            # tokens in the full, global (unsharded) sequence.
-            max_num_blocks = cdiv(
-                block_table_max_model_len, spec.block_size * self.dcp_size
+            # Let each cache type account for CP. Attention KV is DCP-sharded,
+            # while Mamba/GDN recurrent state is replicated across DCP ranks.
+            max_num_blocks = spec.max_num_blocks_per_req(
+                self.vllm_config, block_table_max_model_len
             )
-            # For Mamba/Hybrid Model, KVCaches need extra blocks for speculative tokens
+            # Preserve each cache type's alignment requirements after applying
+            # its topology-aware block-table width.
             if isinstance(spec, MambaSpec):
-                max_num_blocks = (
-                    max_num_blocks if self.cache_config.enable_prefix_caching else 1
-                ) + spec.num_speculative_blocks
                 max_num_blocks = get_block_table_width(
                     max_num_blocks, spec.block_size, token_alignment=None
                 )
@@ -1966,13 +1968,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def setup_eplb_from_mapping(
         self,
         expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
     ) -> None:
         self.eplb.setup_from_mapping(
             self.model,
             self.model_config,
             expanded_physical_to_logical,
-            old_num_physical_experts,
         )
 
     ########### EPLB methods end ###########
