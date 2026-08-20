@@ -1553,3 +1553,109 @@ class TestClientErrorResponses:
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.json()["error"]["type"] == "BadRequestError"
+
+
+# ======================================================================
+# thinking configuration pass-through
+# ======================================================================
+
+
+class TestThinkingConfig:
+    def test_absent_thinking_leaves_reasoning_untouched(self):
+        """Requests without `thinking` must convert exactly as before."""
+        request = _make_request([{"role": "user", "content": "Hello"}])
+
+        result = _convert(request)
+        assert result.reasoning_effort is None
+        assert result.thinking_token_budget is None
+        assert result.include_reasoning is True
+
+    def test_disabled_clears_reasoning_effort(self):
+        """`disabled` maps to reasoning_effort="none", which is what clears
+        enable_thinking for templates that honor it."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "disabled"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "none"
+
+    def test_disabled_overrides_output_config_effort(self):
+        """`thinking` is applied after output_config so an explicit opt-out wins
+        over an inherited effort ceiling."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "high"},
+            thinking={"type": "disabled"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "none"
+
+    def test_enabled_with_budget_sets_thinking_token_budget(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "enabled", "budget_tokens": 2048},
+        )
+
+        result = _convert(request)
+        assert result.thinking_token_budget == 2048
+
+    def test_enabled_without_budget_pins_nothing(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "enabled"},
+        )
+
+        result = _convert(request)
+        assert result.thinking_token_budget is None
+        assert result.reasoning_effort is None
+
+    def test_adaptive_pins_nothing_and_keeps_effort_ceiling(self):
+        """`adaptive` lets the model choose depth, so only the ceiling from
+        output_config.effort should survive."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "low"},
+            thinking={"type": "adaptive"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "low"
+        assert result.thinking_token_budget is None
+
+    def test_display_omitted_suppresses_reasoning_in_response(self):
+        """`display` controls visibility only -- it must not touch depth."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "adaptive", "display": "omitted"},
+        )
+
+        result = _convert(request)
+        assert result.include_reasoning is False
+        assert result.reasoning_effort is None
+        assert result.thinking_token_budget is None
+
+    def test_display_summarized_keeps_reasoning_included(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "adaptive", "display": "summarized"},
+        )
+
+        result = _convert(request)
+        assert result.include_reasoning is True
+
+    def test_claude_code_payload(self):
+        """The combination Claude Code sends on every request: an effort ceiling
+        plus adaptive thinking with reasoning display omitted."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "high"},
+            thinking={"type": "adaptive", "display": "omitted"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "high"
+        assert result.include_reasoning is False
+        assert result.thinking_token_budget is None
