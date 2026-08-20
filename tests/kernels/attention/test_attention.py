@@ -14,6 +14,8 @@ from vllm.platforms import current_platform
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import set_random_seed
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer

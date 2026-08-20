@@ -196,7 +196,8 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
-        pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8'
+        pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8 &&
+        pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8_block_enabled'
   - label: "XPU Graph"
     depends_on:
       - image-build-xpu

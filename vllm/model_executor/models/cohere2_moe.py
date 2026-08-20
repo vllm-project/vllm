@@ -178,6 +178,7 @@ class Cohere2MoeAttention(nn.Module):
         self.max_position_embeddings = getattr(
             config, "model_max_length", None
         ) or getattr(config, "max_position_embeddings", 8192)
+        assert isinstance(self.max_position_embeddings, int)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
             self.head_dim,
@@ -207,7 +208,7 @@ class Cohere2MoeAttention(nn.Module):
             layer_types is not None
             and layer_types[self.layer_idx] == "sliding_attention"
         ):
-            self.sliding_window = config.sliding_window
+            self.sliding_window = config.sliding_window + 1
 
         # Prefix-dense layers have full attention (no sliding window). When
         # prefix_dense_sliding_window_pattern == 1, they keep RoPE even though
@@ -283,6 +284,7 @@ class Cohere2Moe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        self.shared_experts: Cohere2MoeMLP | None
         if hasattr(config, "num_shared_experts") and config.num_shared_experts > 0:
             self.shared_experts = Cohere2MoeMLP(
                 config=config,
@@ -491,7 +493,6 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        assert getattr(config, "tie_word_embeddings", True)
         self.unpadded_vocab_size = config.vocab_size
         self.quant_config = quant_config
         self.logits_scale = config.logit_scale

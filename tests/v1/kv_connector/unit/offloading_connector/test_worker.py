@@ -191,6 +191,8 @@ def _offloading_config(rank: int = 0) -> OffloadingConfig:
             pcp_size=1,
             dcp_size=1,
             data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
             is_parallelism_agnostic=False,
         ),
     )
