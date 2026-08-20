@@ -39,6 +39,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.amd.mega_moe_experts import (
+    finalize_mega_moe_layers,
+    make_deepseek_v4_mega_expert_params_mapping,
+)
 from vllm.models.deepseek_v4.common.ops import (
     fused_mtp_input_rmsnorm,
     mtp_shared_head_rmsnorm,
@@ -358,13 +362,19 @@ class DeepSeekV4MTP(nn.Module):
         head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
-        expert_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=self.config.n_routed_experts,
-        )
+        first_layer = next(iter(self.model.layers.values()))
+        if getattr(first_layer.mtp_block.ffn, "use_mega_moe", False):
+            expert_mapping = make_deepseek_v4_mega_expert_params_mapping(
+                self.config.n_routed_experts
+            )
+        else:
+            expert_mapping = fused_moe_make_expert_params_mapping(
+                self,
+                ckpt_gate_proj_name="w1",
+                ckpt_down_proj_name="w2",
+                ckpt_up_proj_name="w3",
+                num_experts=self.config.n_routed_experts,
+            )
 
         # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
         # FP4/MXFP4 experts register ``..._weight_scale``. Choose the suffix
@@ -489,6 +499,7 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
+        finalize_mega_moe_layers(self.model.layers)
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
 

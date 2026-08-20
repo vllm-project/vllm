@@ -11,8 +11,10 @@ ROCm port of ``nvidia/dspark.py``. Follows the same nvidia->amd recipe used for
     tilelang / triton / torch) instead of calling the tilelang kernels directly,
     and gate the trailing ``mhc_post`` on ``use_fused_mhc`` (False on the aiter
     path, where the decoder layer already applies hc_post in-layer);
-  * drop the mega-MoE weight path (``make_deepseek_v4_expert_params_mapping`` /
-    ``use_mega_moe`` / ``finalize_mega_moe_weights`` do not exist in amd/model.py).
+  * use the AMD mega-MoE weight path
+    (``make_deepseek_v4_mega_expert_params_mapping`` /
+    ``finalize_mega_moe_layers``) when the draft layers were built with
+    ``--moe-backend flydsl_mega_moe``.
 
 Everything else — the semi-autoregressive drafting hooks, the Markov head, the
 sliding-window context-KV insert, and the checkpoint ``mtp.*`` weight remap — is
@@ -48,6 +50,10 @@ from vllm.model_executor.models.qwen3_dspark import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
+from .mega_moe_experts import (
+    finalize_mega_moe_layers,
+    make_deepseek_v4_mega_expert_params_mapping,
+)
 from .model import (
     DeepseekV4DecoderLayer,
 )
@@ -366,15 +372,19 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         Non-mtp weights (embed/head/main layers) belong to the target model and
         are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
         """
-        # AMD DeepseekV4MoE has no mega-MoE path; always use the standard
-        # per-expert fused-MoE mapping (mirrors amd/mtp.py).
-        expert_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=self.config.n_routed_experts,
-        )
+        first_layer = self.model.layers[0]
+        if getattr(first_layer.ffn, "use_mega_moe", False):
+            expert_mapping = make_deepseek_v4_mega_expert_params_mapping(
+                self.config.n_routed_experts
+            )
+        else:
+            expert_mapping = fused_moe_make_expert_params_mapping(
+                self,
+                ckpt_gate_proj_name="w1",
+                ckpt_down_proj_name="w2",
+                ckpt_up_proj_name="w3",
+                num_experts=self.config.n_routed_experts,
+            )
         expert_scale_suffix = (
             ".weight_scale"
             if getattr(self.config, "expert_dtype", "fp4") == "fp4"
@@ -469,6 +479,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
+        finalize_mega_moe_layers(self.model.layers)
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
