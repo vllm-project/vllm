@@ -30,22 +30,16 @@ class TraceReplayState:
             uva_instead_of_gpu=True,
         )
         self.trace_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
-        # Sticky: set once any request replays, so the per-step paths can use an
-        # O(1) check. Per-request trace_len values protect non-replay requests.
-        self.any_trace = False
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         trace = sampling_params.trace_decode_token_ids
         if trace is not None:
             self.trace_len.np[req_idx] = len(trace)
             self.trace_token_ids.stage_write(req_idx, 0, trace)
-            self.any_trace = True
         else:
             self.trace_len.np[req_idx] = 0
 
     def apply_staged_writes(self) -> None:
-        if not self.any_trace:
-            return
         self.trace_len.copy_to_uva()
         self.trace_token_ids.apply_write()
 
@@ -54,8 +48,6 @@ class TraceReplayState:
         sampled: torch.Tensor,
         idx_mapping: torch.Tensor,
     ) -> None:
-        if not self.any_trace:
-            return
         apply_trace_tokens(
             sampled,
             idx_mapping,
