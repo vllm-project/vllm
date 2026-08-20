@@ -493,9 +493,11 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)
 
+        orig_to_new_prefix: dict[str, str | None] = {"lm_head.": None}
         has_model_prefix = any(name.startswith("model.") for name, _ in weights_list)
         if not has_model_prefix:
-            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+            orig_to_new_prefix[""] = "model."
+        mapper = WeightsMapper(orig_to_new_prefix=orig_to_new_prefix)
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights_list, mapper=mapper)
