@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -37,9 +38,10 @@ class Siglip2VisionEmbeddings(nn.Module):
         self.config = config
         self.embed_dim = config.hidden_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Linear(
-            in_features=config.num_channels * self.patch_size * self.patch_size,
-            out_features=self.embed_dim,
+        self.patch_embedding = ReplicatedLinear(
+            input_size=config.num_channels * self.patch_size * self.patch_size,
+            output_size=self.embed_dim,
+            return_bias=False,
         )
         self.num_patches = config.num_patches
         self.position_embedding_size = int(self.num_patches**0.5)

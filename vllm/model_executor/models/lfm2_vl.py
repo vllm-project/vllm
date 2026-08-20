@@ -22,6 +22,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -499,16 +500,20 @@ class Lfm2VLMultiModalProjector(nn.Module):
         self.projector_use_layernorm = config.projector_use_layernorm
         if self.projector_use_layernorm:
             self.layer_norm = nn.LayerNorm(in_channels)
-        self.linear_1 = nn.Linear(
+        self.linear_1 = ReplicatedLinear(
             in_channels,
             config.projector_hidden_size,
             bias=config.projector_bias,
+            prefix=maybe_prefix(prefix, "linear_1"),
+            return_bias=False,
         )
         self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(
+        self.linear_2 = ReplicatedLinear(
             config.projector_hidden_size,
             config.text_config.hidden_size,
             bias=config.projector_bias,
+            prefix=maybe_prefix(prefix, "linear_2"),
+            return_bias=False,
         )
 
     def forward(
@@ -1259,3 +1264,13 @@ class Lfm2VLForConditionalGeneration(
             connector="multi_modal_projector",
             tower_model="vision_tower",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        downsample_factor = self.config.downsample_factor
+
+        return num_image_tokens * downsample_factor**2
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        downsample_factor = self.config.downsample_factor
+
+        return num_vision_tokens // downsample_factor**2
