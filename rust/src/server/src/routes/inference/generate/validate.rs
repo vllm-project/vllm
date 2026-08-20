@@ -23,7 +23,7 @@ pub(crate) fn validate_request_compat(
         );
     }
 
-    if request.sampling_params.n.unwrap_or(1) > 1 {
+    if request.sampling_params.n.unwrap_or(1) != 1 {
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
