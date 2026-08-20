@@ -3143,6 +3143,9 @@ class rocm_aiter_ops:
         return_lse: bool = False,
         out: torch.Tensor | None = None,
         sink_ptr: torch.Tensor | None = None,
+        q_descale: torch.Tensor | None = None,
+        k_descale: torch.Tensor | None = None,
+        v_descale: torch.Tensor | None = None,
     ):
         """
         Flash attention with variable length sequences.
@@ -3154,6 +3157,22 @@ class rocm_aiter_ops:
         Note: This performs lazy import of aiter.flash_attn_varlen_func
         """
         from aiter import flash_attn_varlen_func
+
+        descales = (q_descale, k_descale, v_descale)
+        if any(descale is not None for descale in descales) and any(
+            descale is None for descale in descales
+        ):
+            raise ValueError(
+                "AITER FP8 attention requires q_descale, k_descale, and "
+                "v_descale together"
+            )
+        extra_kwargs = {}
+        if q_descale is not None:
+            extra_kwargs = {
+                "q_descale": q_descale,
+                "k_descale": k_descale,
+                "v_descale": v_descale,
+            }
 
         return flash_attn_varlen_func(
             q=q,
@@ -3172,6 +3191,7 @@ class rocm_aiter_ops:
             return_lse=return_lse,
             out=out,
             sink_ptr=sink_ptr,
+            **extra_kwargs,
         )
 
     @staticmethod
