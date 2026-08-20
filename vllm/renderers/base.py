@@ -725,7 +725,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_uuid_items
 
-    # TODO: Remove str and tokenization_kwargs after deprecating InputPreprocessor
+    # TODO: Remove str and tokenization_kwargs after deprecating text input in AsyncLLM
     def _process_multimodal(
         self,
         prompt: list[int] | str,
