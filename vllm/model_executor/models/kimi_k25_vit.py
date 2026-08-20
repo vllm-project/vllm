@@ -61,7 +61,11 @@ def get_rope_shape_decorate(func):
 
 
 @get_rope_shape_decorate
-@torch.compile(dynamic=True, disable=current_platform.simple_compile_backend == "tpu")
+@torch.compile(
+    dynamic=True,
+    backend=current_platform.simple_compile_backend,
+    disable=current_platform.simple_compile_backend == "tpu",
+)
 def get_rope_shape(org, interpolation_mode, shape):
     return (
         F.interpolate(
