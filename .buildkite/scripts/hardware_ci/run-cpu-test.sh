@@ -65,7 +65,11 @@ BUILD_RETRY_WAITS=(10 20 40)  # seconds to wait before retry 1/2/3
 build_log="$(mktemp)"
 attempt=1
 while true; do
-    if docker build --progress plain --tag "$IMAGE_NAME" --target vllm-test \
+    # RELEASE-ONLY (torch 2.14.0): torch installs in the `base-common` stage, whose
+    # layer key does not change when the RC is respun under the same version
+    # string, so the local BuildKit cache would restore a pre-revert wheel.
+    # Revert once 2.14.0 is final and published to PyPI.
+    if docker build --progress plain --no-cache --tag "$IMAGE_NAME" --target vllm-test \
             --build-arg USE_SCCACHE=1 --build-arg SCCACHE_LOCAL_ONLY=1 --build-arg max_jobs=16 \
             -f docker/Dockerfile.cpu . 2>&1 | tee "$build_log"; then
         break
