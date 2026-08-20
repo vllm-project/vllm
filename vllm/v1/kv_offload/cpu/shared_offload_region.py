@@ -9,6 +9,7 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
+from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
@@ -66,15 +67,16 @@ def _get_populate_write_fn(
 class SharedOffloadRegion:
     """
     Single mmap-backed memory region shared across all workers for a
-    vLLM instance.  Workers coordinate via the filesystem: the first worker
-    to open the file with O_EXCL becomes the creator and calls ftruncate;
-    the rest open the existing file and wait until it reaches the expected
-    size.  Each worker then mmap()s the full file.
+    vLLM instance. Workers coordinate via the filesystem: the first worker
+    to open the file with O_EXCL initializes it with ftruncate; the rest open
+    the existing file and wait until it reaches the expected size. Each worker
+    then mmap()s the full file. The O_EXCL winner removes the path only when
+    initialization fails.
 
     File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
-    given, the path is unlinked once every worker has mapped the file, so
-    the kernel reclaims the memory when the last worker exits, no matter
-    how it exits; mappings taken before the unlink stay valid.
+    given, the ranked node-local rank-0 worker unlinks the path once every
+    worker has mapped the file. Otherwise, that worker unlinks the path during
+    cleanup. Mappings taken before the unlink stay valid.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -95,14 +97,15 @@ class SharedOffloadRegion:
         self._row_stride = kv_bytes_per_block
         self.total_size_bytes = self.num_blocks * self._row_stride
 
-        self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-        self._creator = False  # set True only if this worker creates the file
         self.rank = rank
+        self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        self._is_singleton_owner = rank is not None and is_local_first_rank()
         if rank is not None:
             # byte offset to this worker's first slot within each block row
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
+        created_path = False
         try:
             try:
                 self.fd: int | None = os.open(
@@ -119,10 +122,8 @@ class SharedOffloadRegion:
                     raise
                 logger.info("Opened existing mmap file %s", self.mmap_path)
             else:
-                # Creator path. We won O_EXCL, so we own the file: any
-                # failure here must clean up so concurrent joiners don't
-                # land on a 0-byte stub and spin in _wait_for_file_size
-                # for the full 30 s timeout.
+                # Roll back the newly created path if initialization fails so
+                # concurrent joiners do not wait on an incomplete file.
                 try:
                     check_shm_free_space(self.total_size_bytes)
                     os.ftruncate(self.fd, self.total_size_bytes)
@@ -130,7 +131,7 @@ class SharedOffloadRegion:
                     os.unlink(self.mmap_path)
                     os.close(self.fd)
                     raise
-                self._creator = True
+                created_path = True
                 logger.info(
                     "Created mmap file %s (%.2f GB)",
                     self.mmap_path,
@@ -144,9 +145,8 @@ class SharedOffloadRegion:
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
         except Exception:
-            if self._creator:
+            if created_path:
                 os.unlink(self.mmap_path)
-                self._creator = False
             # Peers block inside the barrier until the collective times out if
             # we die before reaching it.  Arrive anyway so every worker calls
             # barrier() exactly once and they fail on their own errors instead
@@ -168,15 +168,15 @@ class SharedOffloadRegion:
             try:
                 barrier()
             except Exception:
-                if self._creator:
+                if self._is_singleton_owner:
                     os.unlink(self.mmap_path)
-                    self._creator = False
+                    self._is_singleton_owner = False
                 self.mmap_obj.close()
                 os.close(self.fd)
                 raise
-            if self._creator:
+            if self._is_singleton_owner:
                 os.unlink(self.mmap_path)
-                self._creator = False
+                self._is_singleton_owner = False
                 logger.info("Unlinked mmap file %s", self.mmap_path)
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
@@ -338,7 +338,7 @@ class SharedOffloadRegion:
             except Exception:
                 logger.warning("Failed to close fd %s", self.fd, exc_info=True)
             self.fd = None
-        if self._creator and getattr(self, "mmap_path", None):
+        if self._is_singleton_owner and getattr(self, "mmap_path", None):
             try:
                 os.unlink(self.mmap_path)
                 logger.info("Removed mmap file %s", self.mmap_path)
@@ -346,4 +346,3 @@ class SharedOffloadRegion:
                 logger.warning(
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
                 )
-            self._creator = False
