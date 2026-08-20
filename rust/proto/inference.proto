@@ -164,7 +164,6 @@ message RoutedExperts {
   bytes data = 1;
   repeated uint32 shape = 2;
   string dtype = 3;
-  uint32 start = 4;
 }
 
 // Prompt info, returned in the first response

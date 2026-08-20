@@ -408,7 +408,6 @@ pub fn to_sequence_output(
                     })
                     .collect(),
                 dtype: routed.dtype.clone(),
-                start: opts.routed_experts_prompt_start.unwrap_or(0),
             }
         }),
     }
@@ -571,7 +570,6 @@ pub struct ResponseOpts {
     pub output_text: bool,
     pub output_token_ids: bool,
     pub output_logprobs: bool,
-    pub routed_experts_prompt_start: Option<u32>,
 }
 
 impl ResponseOpts {
@@ -583,7 +581,6 @@ impl ResponseOpts {
                 output_text: r.output_text.unwrap_or(true),
                 output_token_ids: r.output_token_ids,
                 output_logprobs: r.output_logprobs,
-                routed_experts_prompt_start: r.routed_experts_prompt_start,
             },
             None => Self {
                 output_text: true,
@@ -792,23 +789,22 @@ mod tests {
     }
 
     #[test]
-    fn terminal_sequence_output_carries_compact_routed_experts() {
+    fn terminal_sequence_output_carries_native_routed_experts_tensor() {
         let mut fin = finished(FinishReason::Length);
         fin.routed_experts = Some(RoutedExperts {
             dtype: "uint8".to_string(),
             shape: vec![2, 1, 2],
             data: vec![1, 2, 3, 4],
         });
-        let opts = ResponseOpts {
-            routed_experts_prompt_start: Some(7),
-            ..Default::default()
-        };
-
-        let out = to_sequence_output("", &[10], None, Some(&fin), &opts);
+        let out = to_sequence_output("", &[10], None, Some(&fin), &ResponseOpts::default());
         let routed = out.routed_experts.expect("routed experts");
-        assert_eq!(routed.dtype, "uint8");
-        assert_eq!(routed.shape, [2, 1, 2]);
-        assert_eq!(routed.data, [1, 2, 3, 4]);
-        assert_eq!(routed.start, 7);
+        assert_eq!(
+            routed,
+            pb::RoutedExperts {
+                data: vec![1, 2, 3, 4],
+                shape: vec![2, 1, 2],
+                dtype: "uint8".to_string(),
+            }
+        );
     }
 }

@@ -715,7 +715,6 @@ async fn unary_generate_round_trips_routed_experts() {
     assert_eq!(routed.dtype, "uint8");
     assert_eq!(routed.shape, [3, 1, 2]);
     assert_eq!(routed.data, [1, 2, 3, 4, 5, 6]);
-    assert_eq!(routed.start, 2);
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
