@@ -17,58 +17,59 @@ def moe_fused_mul_sum_kernel(
     has_topk_ids: tl.constexpr,
     has_expert_map: tl.constexpr,
     top_k: tl.constexpr,
-    size: tl.constexpr,
+    hidden_size: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    # One CTA owns one token's output row. `inputs` is (num_tokens, top_k, size)
-    # but only the ~1 slot per token that a local expert wrote is live; looping
-    # top_k with a per-slot uniform branch reads just those slots (the branch is
-    # block-uniform, so padding slots are skipped, not masked-and-loaded).
+    # One CTA owns one token's output row. Resolve which slots to sum once per
+    # row (the decision is invariant over hidden tiles); the `if take` branch is
+    # block-uniform, so padding slots are skipped rather than masked-and-loaded.
     pid_m = tl.program_id(0)
+    w_row = topk_weights_ptr + pid_m * top_k
 
+    takes: tuple = ()
+    weights: tuple = ()
     if has_topk_ids:
-        # All-padding rows (every id < 0) are skipped, leaving their output
-        # untouched -- the CUDA-graph decode contract for rows past num_recv.
         any_valid = 0
         for n in tl.static_range(top_k):
-            idn = tl.load(top_ids_ptr + pid_m * top_k + n)
-            any_valid += (idn >= 0).to(tl.int32)
+            id_val = tl.load(top_ids_ptr + pid_m * top_k + n)
+            valid = id_val >= 0
+            any_valid += valid.to(tl.int32)
+            take = valid
+            if has_expert_map:
+                local_id = tl.load(expert_map_ptr + tl.where(valid, id_val, 0))
+                take = valid & (local_id >= 0)
+            takes += (take,)
+            weights += (tl.load(w_row + n).to(tl.float32),)
+        # All-padding rows early-return untouched (decode contract past num_recv).
         if any_valid == 0:
             return
+    else:
+        for n in tl.static_range(top_k):
+            takes += (True,)
+            weights += (tl.load(w_row + n).to(tl.float32),)
 
-    n_tiles: tl.constexpr = (size + BLOCK_K - 1) // BLOCK_K
+    n_tiles: tl.constexpr = (hidden_size + BLOCK_K - 1) // BLOCK_K
     a_row = inputs_ptr + pid_m * stride_m
-    w_row = topk_weights_ptr + pid_m * top_k
-    out_row = outputs_ptr + pid_m * size
+    out_row = outputs_ptr + pid_m * hidden_size
 
-    # Static trip count (n_tiles is constexpr) so the loop pipelines.
     for t in tl.range(0, n_tiles):
         offs_k = t * BLOCK_K + tl.arange(0, BLOCK_K)
-        kmask = offs_k < size
+        kmask = offs_k < hidden_size
         acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
         for n in tl.static_range(top_k):
-            take = True
-            if has_topk_ids:
-                id_val = tl.load(top_ids_ptr + pid_m * top_k + n)
-                take = id_val >= 0
-                if has_expert_map:
-                    # -1 slots must not index the map; clamp to 0 first.
-                    local_id = tl.load(expert_map_ptr + tl.where(take, id_val, 0))
-                    take = take & (local_id >= 0)
-            if take:
-                w = tl.load(w_row + n).to(tl.float32)
-                a = tl.load(a_row + n * size + offs_k, mask=kmask, other=0.0)
-                acc += a.to(tl.float32) * w
+            if takes[n]:
+                a = tl.load(a_row + n * hidden_size + offs_k, mask=kmask, other=0.0)
+                acc += a.to(tl.float32) * weights[n]
         tl.store(out_row + offs_k, acc.to(outputs_ptr.dtype.element_ty), mask=kmask)
 
 
 def _heuristic_config(
-    size: int,
+    hidden_size: int,
     element_size: int,
 ):
     is_fp32 = element_size > 2
     max_block_k = 256 if is_fp32 else 512
-    BLOCK_K = max(128, min(triton.next_power_of_2(size), max_block_k))
+    BLOCK_K = max(128, min(triton.next_power_of_2(hidden_size), max_block_k))
     num_warps = 4 if is_fp32 else 2
     num_stages = 3
     return BLOCK_K, num_warps, num_stages
@@ -114,8 +115,8 @@ def moe_fused_mul_sum(
     assert inputs.dtype in (torch.float32, torch.float16, torch.bfloat16)
     assert topk_weights.dtype in (torch.float32, torch.float16, torch.bfloat16)
 
-    num_tokens, top_k, size = inputs.shape
-    output_shape = (num_tokens, size)
+    num_tokens, top_k, hidden_size = inputs.shape
+    output_shape = (num_tokens, hidden_size)
     if outputs is None:
         outputs = torch.empty(output_shape, dtype=inputs.dtype, device=inputs.device)
 
@@ -131,7 +132,7 @@ def moe_fused_mul_sum(
 
     if not isinstance(inputs, FakeTensor):
         BLOCK_K, num_warps, num_stages = _heuristic_config(
-            size,
+            hidden_size,
             inputs.element_size(),
         )
         grid = (num_tokens,)
@@ -141,11 +142,11 @@ def moe_fused_mul_sum(
             outputs,
             topk_ids,
             expert_map,
-            top_k * size,
+            top_k * hidden_size,
             topk_ids is not None,
             expert_map is not None,
             top_k,
-            size,
+            hidden_size,
             BLOCK_K,
             num_warps=num_warps,
             num_stages=num_stages,
