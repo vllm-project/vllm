@@ -43,16 +43,6 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "FP8 Marlin requires compute capability 7.5 or higher"
         if envs.VLLM_BATCH_INVARIANT:
             return False, "FP8 Marlin not supported for batch invariant execution."
-        if (
-            compute_capability is not None
-            and compute_capability >= 89
-            and not envs.VLLM_TEST_FORCE_FP8_MARLIN
-        ):
-            return (
-                False,
-                "To apply FP8 Marlin on high-capability GPUs, please set "
-                "VLLM_TEST_FORCE_FP8_MARLIN=1",
-            )
         return True, None
 
     @classmethod
@@ -67,14 +57,21 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         self.block_quant = self.config.weight_quant_key in {kFp8Static128BlockSym}
         self.size_k_first = not self.block_quant
 
+    @staticmethod
+    def _block_scale_name(layer: torch.nn.Module) -> str:
+        if getattr(layer, "weight_scale_inv", None) is not None:
+            return "weight_scale_inv"
+        return "weight_scale"
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.block_quant:
-            weight, weight_scale_inv = process_fp8_weight_block_strategy(
-                layer.weight, layer.weight_scale_inv
+            scale_name = self._block_scale_name(layer)
+            weight, weight_scale = process_fp8_weight_block_strategy(
+                layer.weight, getattr(layer, scale_name)
             )
             # Update layer with new values
             replace_parameter(layer, "weight", weight.data)
-            replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
+            replace_parameter(layer, scale_name, weight_scale.data)
         # Non-block: callers must pass weight in (K, N) layout.
 
         layer.input_scale = None
@@ -90,7 +87,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.block_quant:
-            weight_scale = layer.weight_scale_inv
+            weight_scale = getattr(layer, self._block_scale_name(layer))
         else:
             weight_scale = layer.weight_scale
         return apply_fp8_marlin_linear(
