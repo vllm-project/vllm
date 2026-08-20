@@ -103,8 +103,10 @@ fi
 cleanup_instances() {
   echo ""
   echo "Cleaning up..."
+  # shellcheck disable=SC2046  # word splitting is intentional for multiple PIDs
   kill $(jobs -pr) 2>/dev/null || true
   sleep 1
+  # shellcheck disable=SC2046
   kill -9 $(jobs -pr) 2>/dev/null || true
   pkill -9 -f "vllm serve.*${MODEL_NAME}" 2>/dev/null || true
   pkill -9 -f "toy_proxy_server.*8192" 2>/dev/null || true
@@ -122,7 +124,7 @@ wait_for_server() {
   local deadline=${5:-600}
   local elapsed=0
   echo "Waiting for ${server_name} on port ${port}..."
-  while [ $elapsed -lt $deadline ]; do
+  while [ "$elapsed" -lt "$deadline" ]; do
     if ! ps -p "$server_pid" > /dev/null 2>&1; then
       local status=0
       wait "$server_pid" || status=$?
@@ -186,7 +188,7 @@ else
   else
     num=1
   fi
-  for (( g=0; g<num; g++ )); do ALL_GPUS+=($g); done
+  for (( g=0; g<num; g++ )); do ALL_GPUS+=("$g"); done
 fi
 
 TOTAL_GPUS_NEEDED=$(( (NUM_PREFILL_INSTANCES * PREFILLER_TP_SIZE) + (NUM_DECODE_INSTANCES * DECODER_TP_SIZE) ))
@@ -246,22 +248,22 @@ run_test_for_device() {
 
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
     env \
-    ${GPU_DEVICE_VAR}=$GPU_ID \
+    ${GPU_DEVICE_VAR}="$GPU_ID" \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     ${VLLM_SSM_CONV_STATE_LAYOUT:+VLLM_SSM_CONV_STATE_LAYOUT=$VLLM_SSM_CONV_STATE_LAYOUT} \
-    VLLM_NIXL_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
+    VLLM_NIXL_SIDE_CHANNEL_HOST="$NIXL_SIDE_CHANNEL_HOST" \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
-    vllm serve $MODEL_NAME \
+    vllm serve "$MODEL_NAME" \
       --port $PORT \
       --enforce-eager \
-      --max-model-len $MAX_MODEL_LEN \
-      --block-size ${BLOCK_SIZE} \
+      --max-model-len "$MAX_MODEL_LEN" \
+      --block-size "${BLOCK_SIZE}" \
       "${KV_CACHE_ARGS[@]}" \
-      --tensor-parallel-size $PREFILLER_TP_SIZE \
+      --tensor-parallel-size "$PREFILLER_TP_SIZE" \
       --kv-transfer-config "$kv_config_p" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
-      --attention-backend $ATTENTION_BACKEND \
+      --attention-backend "$ATTENTION_BACKEND" \
       ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
     local SERVER_PID=$!
 
@@ -285,22 +287,22 @@ run_test_for_device() {
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
     env \
-    ${GPU_DEVICE_VAR}=$GPU_ID \
+    ${GPU_DEVICE_VAR}="$GPU_ID" \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     ${VLLM_SSM_CONV_STATE_LAYOUT:+VLLM_SSM_CONV_STATE_LAYOUT=$VLLM_SSM_CONV_STATE_LAYOUT} \
-    VLLM_NIXL_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
+    VLLM_NIXL_SIDE_CHANNEL_HOST="$NIXL_SIDE_CHANNEL_HOST" \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
-    vllm serve $MODEL_NAME \
+    vllm serve "$MODEL_NAME" \
       --port $PORT \
       --enforce-eager \
-      --max-model-len $MAX_MODEL_LEN \
-      --block-size ${BLOCK_SIZE} \
+      --max-model-len "$MAX_MODEL_LEN" \
+      --block-size "${BLOCK_SIZE}" \
       "${KV_CACHE_ARGS[@]}" \
-      --tensor-parallel-size $DECODER_TP_SIZE \
+      --tensor-parallel-size "$DECODER_TP_SIZE" \
       --kv-transfer-config "$kv_config_d" \
       --speculative-config "$DECODE_SPEC_CONFIG" \
-      --attention-backend $ATTENTION_BACKEND \
+      --attention-backend "$ATTENTION_BACKEND" \
       ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
     local SERVER_PID=$!
 
@@ -315,10 +317,10 @@ run_test_for_device() {
   echo "Starting proxy server on port $PROXY_PORT..."
   python3 "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py" \
     --port $PROXY_PORT \
-    --prefiller-hosts ${PREFILL_HOSTS[*]} \
-    --prefiller-ports ${PREFILL_PORTS[*]} \
-    --decoder-hosts ${DECODE_HOSTS[*]} \
-    --decoder-ports ${DECODE_PORTS[*]} &
+    --prefiller-hosts "${PREFILL_HOSTS[@]}" \
+    --prefiller-ports "${PREFILL_PORTS[@]}" \
+    --decoder-hosts "${DECODE_HOSTS[@]}" \
+    --decoder-ports "${DECODE_PORTS[@]}" &
   local PROXY_PID=$!
 
   wait_for_server "$PROXY_PORT" "$PROXY_PID" "proxy" "/healthcheck" 60

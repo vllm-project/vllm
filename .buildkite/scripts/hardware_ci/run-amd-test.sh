@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# shellcheck disable=SC2329  # Every function in this file is only ever reached
+# transitively through handle_amd_runner_exit, the EXIT trap handler - shellcheck's
+# unused-function check doesn't do full reachability analysis from an indirectly
+# invoked entry point, so it flags the whole diagnostic-collection call chain as
+# dead code even though it runs live on every nonzero exit.
+
 # This script runs ROCm tests either directly in a native CI pod or inside the
 # corresponding Docker container. Multi-node tests continue to use Docker.
 #
@@ -1523,13 +1529,15 @@ fi
 clear_ci_orchestration_env
 if is_multi_node "$commands"; then
   echo "--- Multi-node job detected"
-  export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+  DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+  export DCKR_VER
 
   # Parse the bracket syntax:  prefix ; [node0_cmds] && [node1_cmds]
   #   BASH_REMATCH[1] = prefix (everything before first bracket)
   #   BASH_REMATCH[2] = comma-separated node0 commands
   #   BASH_REMATCH[3] = comma-separated node1 commands
   if [[ "$commands" =~ ^(.*)\[(.*)"] && ["(.*)\]$ ]]; then
+    # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
     prefix=$(echo "${BASH_REMATCH[1]}" | sed 's/;//g')
     echo "PREFIX: ${prefix}"
 
@@ -1545,7 +1553,9 @@ if is_multi_node "$commands"; then
     fi
 
     for i in "${!node0[@]}"; do
+      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
       command_node_0=$(echo "${node0[i]}" | sed 's/\"//g')
+      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
       command_node_1=$(echo "${node1[i]}" | sed 's/\"//g')
 
       step_cmd="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
@@ -1581,14 +1591,15 @@ else
     ulimit_core_hard="-1"
   fi
    # Disable core dumps in the ROCm test container unless the ROCm debug agent is enabled
-  coredump_flags="--ulimit core=0:$ulimit_core_hard"
+  coredump_flags=(--ulimit "core=0:$ulimit_core_hard")
   if [[ "$commands" == *"ROCm debug agent enabled"* ]]; then
     # Works around https://github.com/rocm/rocm-systems/issues/6206
-    coredump_flags='-e HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"'
+    coredump_flags=(-e 'HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"')
   else
     echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
   fi
 
+  # shellcheck disable=SC2086  # word splitting is intentional: both hold multiple docker flags
   docker run \
     "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
@@ -1597,7 +1608,7 @@ else
     --shm-size=16gb \
     --group-add "$render_gid" \
     --rm \
-    $coredump_flags \
+    "${coredump_flags[@]}" \
     -e HF_TOKEN \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
     -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
