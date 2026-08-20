@@ -460,13 +460,15 @@ def _detect_developer_role_support(chat_template: str) -> bool:
 
 def _convert_developer_to_system(
     conversation: list[ConversationMessage],
+    keep_tools: bool = False,
 ) -> list[ConversationMessage]:
     converted: list[ConversationMessage] = []
     for msg in conversation:
         if msg["role"] == "developer":
             new_msg = dict(msg)
             new_msg["role"] = "system"
-            new_msg.pop("tools", None)
+            if not keep_tools:
+                new_msg.pop("tools", None)
             converted.append(new_msg)  # type: ignore[arg-type]
         else:
             converted.append(msg)
