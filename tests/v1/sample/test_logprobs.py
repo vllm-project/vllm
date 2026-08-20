@@ -1293,6 +1293,23 @@ def test_prompt_logprobs_with_chunking_and_preemption():
         print(f"Test passed with {preemptions} preemptions")
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_token_logprobs_apply_virtual_temperature(dtype: torch.dtype):
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    logits = torch.randn(3, 257, device="cuda", dtype=dtype)
+    token_ids = torch.tensor([[1, 7], [9, 3], [5, 11]], device="cuda")
+    temperatures = torch.tensor([0.6, 1.5, 0.0], device="cuda")
+    effective = torch.where(temperatures == 0.0, 1.0, temperatures)
+
+    actual = compute_token_logprobs(logits, token_ids, temperatures)
+    expected = torch.log_softmax(logits.float() / effective[:, None], dim=-1).gather(
+        -1, token_ids
+    )
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+
 @large_gpu_mark(min_gb=24)
 def test_token_logprobs_large_batch_int64_row_offset():
     """Regression: logprob kernel row offset (row * vocab_size) must use int64.
