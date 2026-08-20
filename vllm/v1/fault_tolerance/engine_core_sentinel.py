@@ -6,7 +6,7 @@ import json
 import threading
 from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 from torch.distributed import TCPStore
@@ -40,13 +40,12 @@ FT_UTILITY_METHOD = "handle_fault_tolerance"
 class EngineCoreSentinel:
     """Manages fault tolerance state for a single engine core."""
 
-    def __init__(self, engine: "DPEngineCoreProc", parallel_config):
+    def __init__(self, engine: "EngineCoreProc", parallel_config):
         self.engine = engine
         self.engine_index = engine.engine_index
         self.parallel_config = parallel_config
         ft_config = parallel_config.fault_tolerance_config
         self.engine_recovery_timeout_sec = ft_config.engine_recovery_timeout_sec
-        self.auto_recovery = ft_config.auto_recovery
 
         self.resumed = threading.Event()
         self.resumed.set()
@@ -55,23 +54,14 @@ class EngineCoreSentinel:
         self._dp_reinit_epoch = 0
         self._initial_dp_size = parallel_config.data_parallel_size
         self._dead_dp_ranks: set[int] = set()
-        # Guards against concurrent recovery: auto-recovery runs on the
-        # busy-loop thread, external commands on the input-sockets thread.
-        self._recovery_lock = threading.Lock()
 
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
         """Dispatch an FT command by instruction name."""
         ft_request = FaultToleranceRequest(**ft_args)
-        reject_reason: str | None = None
-        acquired = False
         if self.status_type != EngineStatusType.UNHEALTHY:
-            reject_reason = f"status is {self.status_type.name}"
-        elif not (acquired := self._recovery_lock.acquire(blocking=False)):
-            reject_reason = "recovery already in progress"
-        if reject_reason is not None:
             reason = (
                 f"[FT] Rejecting {ft_request.instruction} on engine "
-                f"{self.engine_index}: {reject_reason}"
+                f"{self.engine_index}: status is {self.status_type.name}"
             )
             logger.warning(reason)
             result = FaultToleranceResult(
@@ -87,9 +77,6 @@ class EngineCoreSentinel:
                 result = FaultToleranceResult(
                     request_id=ft_request.request_id, success=False, reason=str(e)
                 )
-            finally:
-                if acquired:
-                    self._recovery_lock.release()
 
         uo = UtilityOutput(call_id)
         uo.result = UtilityResult(msgspec.structs.asdict(result))
@@ -114,7 +101,15 @@ class EngineCoreSentinel:
             and engine.model_executor.is_failed
         ):
             self.status_type = EngineStatusType.DEAD
+            mask = None
         else:
+            # Query while still HEALTHY so that incoming commands are
+            # rejected and cannot race this collective_rpc.
+            try:
+                mask = self._query_mask()
+            except Exception:
+                logger.warning("[FT] Failed to query mask for status push")
+                mask = None
             self.status_type = EngineStatusType.UNHEALTHY
         self.fault_info = f"{type(exc).__name__}"
         logger.info(
@@ -123,24 +118,15 @@ class EngineCoreSentinel:
             self.status_type.name,
             exc_info=exc,
         )
+        self._push_status(mask)
 
-        with self._recovery_lock:
-            self._push_status()
-            if self.auto_recovery and self.status_type == EngineStatusType.UNHEALTHY:
-                try:
-                    self.auto_recover()
-                except Exception:
-                    logger.exception("[FT] Auto-recovery failed")
-
-    def _push_status(self):
+    def _push_status(self, mask: list[int] | None = None):
         """Push current health to the client so it can refresh its cache."""
         payload = {"id": self.engine_index, "status": self.status_type.name.lower()}
         if self.status_type == EngineStatusType.UNHEALTHY:
             payload["fault_info"] = self.fault_info
-            try:
-                payload["mask"] = self._query_mask()
-            except Exception:
-                logger.warning("[FT] Failed to query mask for status push")
+            if mask is not None:
+                payload["mask"] = mask
         outputs = EngineCoreOutputs(
             utility_output=UtilityOutput(
                 call_id=FT_STATUS_CALL_ID,
@@ -161,89 +147,15 @@ class EngineCoreSentinel:
         )
         return [max(bits) for bits in zip(*(r["mask"] for r in results))]
 
-    def _dead_dp_ranks_from_mask(self, mask: list[int]) -> set[int]:
-        """Dead DP ranks (original coordinates) from an EP all2all mask."""
-        tp_size = self.parallel_config.tensor_parallel_size
-        return {r // tp_size for r, v in enumerate(mask) if v}
-
-    def _exchange_masks(self, my_mask: list[int]) -> list[int] | None:
-        """The lowest alive rank unions all engines' masks via dp_store and
-        publishes it back.
-
-        Returns None on store timeout so the caller fails closed.
-        """
-        parallel_config = self.engine.vllm_config.parallel_config
-        dp_rank = parallel_config.data_parallel_rank
-        tp_size = parallel_config.tensor_parallel_size
-        store = self.engine.dp_store
-        epoch = self._dp_reinit_epoch
-        final_key = f"ft_final_mask_{epoch}"
-
-        store.set(f"ft_mask_{epoch}_{dp_rank}", json.dumps(my_mask).encode())
-        alive = sorted(set(range(self._initial_dp_size)) - self._dead_dp_ranks)
-        if dp_rank != alive[0]:
-            try:
-                return json.loads(store.get(final_key).decode())
-            except RuntimeError:
-                return None
-
-        union_mask = list(my_mask)
-        for rank in range(self._initial_dp_size):
-            if rank == dp_rank or rank in self._dead_dp_ranks:
-                continue
-            ep_range = range(rank * tp_size, (rank + 1) * tp_size)
-            if all(union_mask[i] for i in ep_range):
-                continue  # presumed dead: it will never write its mask
-            try:
-                other = json.loads(store.get(f"ft_mask_{epoch}_{rank}").decode())
-            except RuntimeError:
-                return None
-            union_mask = [max(a, b) for a, b in zip(union_mask, other)]
-        store.set(final_key, json.dumps(union_mask).encode())
-        return union_mask
-
-    def auto_recover(self):
-        """Auto-recover based on the cluster-wide all2all mask."""
-        mask = self._exchange_masks(self._query_mask())
-        if mask is None:
-            logger.warning(
-                "[FT] Auto-recovery aborted: mask exchange failed; "
-                "waiting for external command"
-            )
-            return
-
-        dead_dp_ranks = self._dead_dp_ranks_from_mask(mask) | self._dead_dp_ranks
-        if not dead_dp_ranks - self._dead_dp_ranks:
-            logger.info("[FT] Auto-recovery: no newly dead ranks, retrying")
-            ft_request = FaultToleranceRequest(instruction="retry", params={})
-            self.retry(ft_request)
-            return
-
-        if self.parallel_config.data_parallel_rank in dead_dp_ranks:
-            logger.warning(
-                "[FT] Auto-recovery aborted: this rank is masked as dead "
-                "by the cluster; waiting for external command"
-            )
-            return
-
-        dead = sorted(dead_dp_ranks)
-        logger.info("[FT] Auto-recovery: scale_down, dead_dp_ranks=%s", dead)
-        ft_request = FaultToleranceRequest(
-            instruction="scale_down",
-            params={"removed_dp_ranks": dead},
-        )
-        self.scale_down(ft_request)
-
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         # Workers replay masks for the cumulative dead set.
         ft_request.params["dead_dp_ranks"] = sorted(self._dead_dp_ranks)
-        return self._reinit_dp_and_dispatch_command(ft_request)
+        self._reinit_groups(ft_request)
+        return self._dispatch_command(ft_request)
 
     def scale_down(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
-        parallel_config = self.engine.vllm_config.parallel_config
-
         removed_set = set(ft_request.params["removed_dp_ranks"])
-        my_rank = parallel_config.data_parallel_rank
+        my_rank = self.parallel_config.data_parallel_rank
         newly_dead = removed_set - self._dead_dp_ranks
         if (
             not removed_set
@@ -262,7 +174,7 @@ class EngineCoreSentinel:
         ft_request.params["dead_dp_ranks"] = sorted(new_dead)
         new_alive = sorted(set(range(self._initial_dp_size)) - new_dead)
 
-        master_ip = parallel_config.data_parallel_master_ip
+        master_ip = self.parallel_config.data_parallel_master_ip
         # Rank 0 hosts the TCPStore master; rebuild if it was just removed.
         if 0 in newly_dead:
             dp_store_port = ft_request.params.get("dp_store_port")
@@ -279,9 +191,8 @@ class EngineCoreSentinel:
                 num_clients=len(new_alive),
             )
 
-        result = self._reinit_dp_and_dispatch_command(
-            ft_request, master_ip=master_ip, dead_ranks=new_dead
-        )
+        self._reinit_groups(ft_request, master_ip=master_ip, dead_ranks=new_dead)
+        result = self._dispatch_command(ft_request)
         # Commit the dead set only after the reinit succeeded.
         self._dead_dp_ranks = new_dead
         logger.info(
@@ -304,7 +215,8 @@ class EngineCoreSentinel:
         timeout = get_cpu_distributed_timeout_or_none()
         if timeout is None:
             timeout = timedelta(seconds=self.engine_recovery_timeout_sec)
-        self.engine.dp_store = TCPStore(
+        engine = cast("DPEngineCoreProc", self.engine)
+        engine.dp_store = TCPStore(
             host,
             port,
             num_clients,
@@ -312,36 +224,52 @@ class EngineCoreSentinel:
             timeout=timeout,
         )
 
-    def _reinit_dp_and_dispatch_command(
+    def _reinit_groups(
         self,
         ft_request: FaultToleranceRequest,
         master_ip: str | None = None,
         dead_ranks: set[int] | None = None,
-    ) -> FaultToleranceResult:
-        """Reinit the DP group, commit the master IP, dispatch to workers."""
+    ) -> None:
+        """Fill worker params and reinit the engine DP group (dp>1 only)."""
         engine = self.engine
-        parallel_config = engine.vllm_config.parallel_config
         params = ft_request.params
         if master_ip is None:
-            master_ip = parallel_config.data_parallel_master_ip
+            master_ip = self.parallel_config.data_parallel_master_ip
         dead = self._dead_dp_ranks if dead_ranks is None else dead_ranks
         # The rebuilt gloo group contains only alive members; its internal
         # rank/size are dense over sorted(alive), while parallel_config keeps
         # the frozen original values.
         alive = sorted(set(range(self._initial_dp_size)) - dead)
-        dense_rank = alive.index(parallel_config.data_parallel_rank)
-        recovery_round = ft_request.request_id or str(self._dp_reinit_epoch)
+        params["dp_master_ip"] = master_ip
+        params["dp_group_rank"] = alive.index(self.parallel_config.data_parallel_rank)
+        params["dp_group_size"] = len(alive)
+        if self.parallel_config.tensor_parallel_size > 1:
+            # The TP group is engine-local; no store coordination needed.
+            params["new_tp_group_port"] = get_open_port()
 
+        if self._initial_dp_size == 1:
+            # dp=1 has no dp_store/dp_group; nothing else to reinit.
+            return
+
+        recovery_round = ft_request.request_id or str(self._dp_reinit_epoch)
         with set_current_vllm_config(engine.vllm_config):
             params.update(
                 self._reinit_engine_groups(
-                    master_ip, dense_rank, len(alive), recovery_round
+                    master_ip,
+                    params["dp_group_rank"],
+                    len(alive),
+                    recovery_round,
                 )
             )
         # Commit the master IP only after the group reinit succeeded, so a
         # failed recovery leaves a consistent state that can be retried.
-        parallel_config.data_parallel_master_ip = master_ip
+        self.parallel_config.data_parallel_master_ip = master_ip
 
+    def _dispatch_command(
+        self, ft_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        """Dispatch the command to workers, then mark the engine healthy."""
+        engine = self.engine
         if hasattr(engine, "step_counter"):
             engine.step_counter = 0
 
@@ -358,31 +286,23 @@ class EngineCoreSentinel:
     ) -> dict:
         """Reinit the engine DP group and coordinate fresh ports for the
         worker DP/EP/EPLB groups. Returns worker params."""
-        engine = self.engine
-        parallel_config = engine.vllm_config.parallel_config
+        engine = cast("DPEngineCoreProc", self.engine)
         self._dp_reinit_epoch += 1
 
         worker_params: dict[str, Any] = {
-            "dp_master_ip": master_ip,
-            "dp_group_rank": dense_rank,
-            "dp_group_size": dense_size,
+            "new_stateless_dp_group_ports": self._coordinate_ports(
+                "ft_worker_dp_ports",
+                dense_rank,
+                recovery_round,
+                count=self.parallel_config.world_size,
+            ),
+            "new_ep_group_port": self._coordinate_ports(
+                "ft_worker_ep_port", dense_rank, recovery_round
+            )[0],
+            "new_eplb_group_port": self._coordinate_ports(
+                "ft_worker_eplb_port", dense_rank, recovery_round
+            )[0],
         }
-
-        worker_params["new_stateless_dp_group_ports"] = self._coordinate_ports(
-            "ft_worker_dp_ports",
-            dense_rank,
-            recovery_round,
-            count=parallel_config.world_size,
-        )
-        worker_params["new_ep_group_port"] = self._coordinate_ports(
-            "ft_worker_ep_port", dense_rank, recovery_round
-        )[0]
-        worker_params["new_eplb_group_port"] = self._coordinate_ports(
-            "ft_worker_eplb_port", dense_rank, recovery_round
-        )[0]
-        if parallel_config.tensor_parallel_size > 1:
-            # The TP group is engine-local; no store coordination needed.
-            worker_params["new_tp_group_port"] = get_open_port()
 
         engine_port = self._coordinate_ports(
             "ft_engine_dp_port", dense_rank, recovery_round
@@ -410,7 +330,7 @@ class EngineCoreSentinel:
         """Dense rank 0 picks fresh ports and publishes them via dp_store;
         other ranks block-read them."""
         key = f"{key_prefix}_{recovery_round}"
-        store = self.engine.dp_store
+        store = cast("DPEngineCoreProc", self.engine).dp_store
         if dense_rank == 0:
             ports = [get_open_port() for _ in range(count)]
             store.set(key, json.dumps(ports).encode())
