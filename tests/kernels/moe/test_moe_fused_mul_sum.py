@@ -287,3 +287,60 @@ def test_no_topk_ids_sums_all_slots(dtype: torch.dtype):
     ref = (inputs.float() * topk_weights.float().unsqueeze(-1)).sum(dim=1)
     atol, rtol = (1e-2, 1e-2) if dtype == torch.bfloat16 else (1e-4, 1e-4)
     torch.testing.assert_close(out.float(), ref, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("hidden_size", [512, 7168])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_expert_map_is_required_for_nonlocal_ids(hidden_size: int, dtype: torch.dtype):
+    """expert_map is load-bearing, not redundant: dropping it leaks non-local ids.
+
+    A positive id whose expert is non-local marks a slot the GEMM never wrote, so
+    its `inputs` row is stale. `topk_ids >= 0` alone cannot tell it apart from a
+    real slot -- only expert_map can. This pins the contract the humming path
+    relies on (globalized ids are still routed through expert_map as a safety
+    net): with the map the stale slot is masked; without it, it corrupts the sum.
+    Regression guard against re-dropping expert_map as an optimization.
+    """
+    set_random_seed(0)
+    device = "cuda"
+    num_tokens, top_k = 8, 8
+    local = NUM_EXPERTS // 2
+    expert_map = _local_expert_map(device)
+
+    inputs = torch.randn(num_tokens, top_k, hidden_size, dtype=dtype, device=device)
+    topk_weights = torch.rand(num_tokens, top_k, dtype=dtype, device=device)
+    # Each row keeps at least one local slot (so the mapped output is finite) and
+    # at least one non-local slot whose stale row is poisoned with NaN.
+    half = top_k // 2
+    topk_ids = torch.empty(num_tokens, top_k, dtype=torch.int32, device=device)
+    topk_ids[:, :half] = torch.randint(
+        0, local, (num_tokens, half), dtype=torch.int32, device=device
+    )
+    topk_ids[:, half:] = torch.randint(
+        local, NUM_EXPERTS, (num_tokens, top_k - half), dtype=torch.int32, device=device
+    )
+    inputs[:, half:] = float("nan")
+
+    atol, rtol = (1e-2, 1e-2) if dtype == torch.bfloat16 else (1e-4, 1e-4)
+
+    mapped = moe_fused_mul_sum(
+        inputs=inputs,
+        topk_weights=topk_weights,
+        outputs=torch.zeros(num_tokens, hidden_size, dtype=dtype, device=device),
+        topk_ids=topk_ids,
+        expert_map=expert_map,
+    )
+    assert not mapped.isnan().any(), "expert_map failed to mask stale non-local slot"
+    ref = _reference(inputs.nan_to_num(), topk_weights, topk_ids, expert_map)
+    torch.testing.assert_close(mapped.float(), ref, atol=atol, rtol=rtol)
+
+    # Same call without the map: the non-local slot is summed and the NaN leaks.
+    unmapped = moe_fused_mul_sum(
+        inputs=inputs,
+        topk_weights=topk_weights,
+        outputs=torch.zeros(num_tokens, hidden_size, dtype=dtype, device=device),
+        topk_ids=topk_ids,
+        expert_map=None,
+    )
+    assert unmapped.isnan().any(), "expert_map is not redundant: dropping it must leak"
