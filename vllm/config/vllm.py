@@ -1170,6 +1170,16 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
+        # "dummy" reads no weights at all, and the sharded formats read a vLLM
+        # state dict, which stores tied word embeddings under the lm_head only.
+        # Neither can tell us what the original checkpoint contained.
+        if self.model_config is not None and self.load_config.load_format not in (
+            "dummy",
+            "sharded_state",
+            "runai_streamer_sharded",
+        ):
+            self.model_config.maybe_untie_word_embeddings()
+
         if (
             self.quant_config is not None
             and self.model_config is not None
