@@ -350,6 +350,7 @@ class Sm100GemmRsArBF16:
             # Keep epilogue in warps 0-3 and communication in warps 4-7.
             # Swapping the warpgroups can hang due to warp scheduling.
             tid_ = tid % 128
+
             # Offset in the [M, N] GEMM result.
             rank_start = self.rank * local_M
             rank_end = min(rank_start + local_M, M)
@@ -414,6 +415,7 @@ class Sm100GemmRsArBF16:
                     reduced_vecs = []
                     for vec_iter in cutlass.range_constexpr(vecs_per_tile // 128):
                         vec_idx = tid_ + vec_iter * 128
+
                         local_row = local_row_start + vec_idx // vec_cols
                         global_row = rank_start + local_row
                         col = bid_n * vec_cols + vec_idx % vec_cols
@@ -428,6 +430,7 @@ class Sm100GemmRsArBF16:
 
                     for vec_iter in cutlass.range_constexpr(vecs_per_tile // 128):
                         vec_idx = tid_ + vec_iter * 128
+
                         local_row = local_row_start + vec_idx // vec_cols
                         global_row = rank_start + local_row
                         col = bid_n * vec_cols + vec_idx % vec_cols
@@ -830,9 +833,9 @@ class GemmRsAr:
             num_ctas,
         )
         if self.all_reduce:
-            # The output may outlive the next launch as an AttnRes prefix, hence output
-            # clone is required here. A future kernel could overlap the copy-out using
-            # an extra warp or the communication warp.
+            # AttnRes may retain output past the next workspace reuse.
+            # A future kernel could overlap this copy using an extra warp or
+            # the communication warp.
             return self.partial[:M].clone()
         assert output is not None
         return output
