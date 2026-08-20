@@ -9,6 +9,7 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
+from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
@@ -92,7 +93,7 @@ class SharedOffloadRegion:
         self.total_size_bytes = self.num_blocks * self._row_stride
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-        self._creator = False  # set True only if this worker creates the file
+        self._is_singleton_owner = is_local_first_rank()
         self.rank = rank
         if rank is not None:
             # byte offset to this worker's first slot within each block row
@@ -125,7 +126,6 @@ class SharedOffloadRegion:
                 os.unlink(self.mmap_path)
                 os.close(self.fd)
                 raise
-            self._creator = True
             logger.info(
                 "Created mmap file %s (%.2f GB)",
                 self.mmap_path,
@@ -298,7 +298,7 @@ class SharedOffloadRegion:
             except Exception:
                 logger.warning("Failed to close fd %s", self.fd, exc_info=True)
             self.fd = None
-        if self._creator and getattr(self, "mmap_path", None):
+        if self._is_singleton_owner and getattr(self, "mmap_path", None):
             try:
                 os.unlink(self.mmap_path)
                 logger.info("Removed mmap file %s", self.mmap_path)
@@ -306,4 +306,3 @@ class SharedOffloadRegion:
                 logger.warning(
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
                 )
-            self._creator = False
