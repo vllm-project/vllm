@@ -43,7 +43,7 @@ class SharedExperts(torch.nn.Module):
         moe_config: FusedMoEConfig,
         enable_dbo: bool,
         mk_can_overlap_shared_experts: Callable[[], bool],
-        routed_input_is_quantized: Callable[[], bool],
+        is_multistream_safe: Callable[[], bool],
     ):
         super().__init__()
 
@@ -58,14 +58,9 @@ class SharedExperts(torch.nn.Module):
 
         self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
 
-        # Returns True when the routed experts quantize their activation input
-        # into a fresh buffer before running. When they do NOT (unquantized
-        # activations, e.g. Qwen3.5 MoE), the routed kernel consumes the raw
-        # hidden_states in place, which aliases the shared expert input, so the
-        # aux-stream shared expert reads a buffer the routed path mutates. The
-        # quant dtype is an architectural property (stable across cudagraph
-        # capture/replay), so reading it per forward is capture-safe.
-        self._routed_input_is_quantized = routed_input_is_quantized
+        # Might not be safe to run multi-stream mode if routed and shared experts
+        # alias the same inputs
+        self._is_multistream_safe = is_multistream_safe
 
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
@@ -129,12 +124,7 @@ class SharedExperts(torch.nn.Module):
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
             and overlap_is_beneficial
-            # Unsafe with unquantized routed activations (e.g. Qwen3.5 MoE): the
-            # routed kernel consumes hidden_states in place, which aliases the
-            # shared expert input the aux stream is reading. Quantized routed
-            # experts copy the input into a fresh buffer first, breaking the
-            # alias (e.g. DeepSeek-V3 fp8), so overlap is safe there.
-            and self._routed_input_is_quantized()
+            and self._is_multistream_safe()
         )
 
         if should_run_shared_in_aux_stream:
