@@ -6,8 +6,12 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops.triton_attention_helpers import (
+    compute_tile_loop_bounds,
+)
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import KVQuantMode
 
@@ -30,6 +34,51 @@ NUM_BLOCKS = [32768, 2048]
 # 0: use 2D kernel for decode
 # 8: use 3D kernel for decode
 SEQ_THRESHOLD_3D_VALUES = [0, 8]
+
+
+@triton.jit
+def _compute_clamped_mm_tile_bounds(output_ptr, mm_prefix_range_ptr):
+    loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
+        0,  # context_len
+        4096,  # seq_len
+        4096,  # cur_batch_query_len
+        140,  # q_block_local_idx: query positions [1120, 1127]
+        0,  # segm_idx_or_0
+        0,  # tiles_per_segment_or_0
+        32,  # TILE_SIZE
+        16,  # BLOCK_M
+        8,  # BLOCK_Q
+        2,  # num_queries_per_kv
+        1024,  # SLIDING_WINDOW
+        True,  # USE_MM_PREFIX
+        False,  # IS_3D
+        True,  # USE_CAUSAL
+        False,  # USE_PER_SEQ_CAUSAL
+        -1,  # CHUNK_LOOKBACK
+        -1,  # CHUNK_SIZE
+        False,  # USE_R_SWA
+        True,  # MM_PREFIX_CLAMP_SW
+        2,  # MAX_MM_RANGES
+        mm_prefix_range_ptr,
+        0,  # seq_idx
+    )
+    tl.store(output_ptr, loop_lo)
+    tl.store(output_ptr + 1, loop_hi)
+    tl.store(output_ptr + 2, max_seq_prefix_len)
+
+
+def test_clamped_mm_prefix_prunes_sliding_window_tiles() -> None:
+    """Retain an intersecting image range without scanning the full sequence."""
+    mm_prefix_ranges = torch.tensor(
+        [[[1024, 2303], [0, 0]]], dtype=torch.int32, device=DEVICE_TYPE
+    )
+    bounds = torch.empty(3, dtype=torch.int32, device=DEVICE_TYPE)
+
+    _compute_clamped_mm_tile_bounds[(1,)](bounds, mm_prefix_ranges)
+
+    # The range is wider than the sliding window, so the upper bound must use
+    # its inclusive endpoint rather than query_pos + sliding_window.
+    assert bounds.tolist() == [3, 72, 4096]
 
 
 def ref_paged_attn(
