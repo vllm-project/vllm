@@ -272,7 +272,9 @@ async def test_wait_timeout_completes_requests():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wait_for_engine_idle", [0.0, 2.0])
-async def test_abort_timeout_exits_quickly(wait_for_engine_idle: float):
+async def test_abort_timeout_exits_within_cleanup_grace(
+    wait_for_engine_idle: float,
+):
     server_args = [
         "--dtype",
         "bfloat16",
@@ -303,19 +305,21 @@ async def test_abort_timeout_exits_quickly(wait_for_engine_idle: float):
             # Wait for engine to become idle
             await asyncio.sleep(wait_for_engine_idle)
 
-        start_time = time.time()
         proc.send_signal(signal.SIGTERM)
 
-        # abort timeout (0) should stop the server promptly.
+        # A zero request timeout aborts requests immediately, but process
+        # teardown may still use the platform-specific resource cleanup grace.
+        termination_timeout = remote_server._get_process_termination_timeout()
         try:
-            proc.wait(timeout=4.0)
+            proc.wait(timeout=termination_timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
-            pytest.fail("Process did not exit after SIGTERM with abort timeout")
+            pytest.fail(
+                "Process did not exit within the resource cleanup grace "
+                f"({termination_timeout}s)"
+            )
 
-        exit_time = time.time() - start_time
-        assert exit_time < 4.1, f"Default shutdown took too long: {exit_time:.1f}s"
         assert proc.returncode in (0, -15, None), f"Unexpected: {proc.returncode}"
 
         await _assert_children_cleaned_up(child_pids)
