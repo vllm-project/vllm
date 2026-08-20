@@ -222,7 +222,7 @@ def warmup_kernels(
     # Upper bound on the decode steps built in `decode_steps` below.
     num_decode_steps = 1
     if not model_runner.is_pooling_model:
-        num_decode_steps = 5 if num_spec_steps > 0 else 3
+        num_decode_steps = 6 if num_spec_steps > 0 else 3
     # Size the block allocation for the worst case: every request advancing
     # decode_query_len tokens on every decode step.
     decode_len = prompt_len + num_decode_steps * decode_query_len
@@ -408,6 +408,23 @@ def warmup_kernels(
 
         for step_indices, step_spec_flags in decode_steps:
             _run_decode_step(step_indices, step_spec_flags)
+
+        if use_spec_decode:
+            # Finish with temperature-only requests to compile the rejection
+            # sampler's fused-temperature variants.
+            if (
+                model_runner.is_last_pp_rank
+                and getattr(model_runner, "rejection_sampler", None) is not None
+            ):
+                assert model_runner.sampler is not None
+                temperature_only_params = SamplingParams(temperature=0.9)
+                for req_id in req_ids:
+                    req_idx = model_runner.req_states.req_id_to_index[req_id]
+                    model_runner.sampler.add_request(
+                        req_idx, prompt_len, temperature_only_params
+                    )
+                model_runner.sampler.apply_staged_writes()
+            _run_decode_step(all_indices, [True] * num_reqs)
 
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()
