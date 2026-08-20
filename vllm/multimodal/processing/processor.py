@@ -1729,6 +1729,22 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenizer = self.info.get_tokenizer()
         return apply_token_matches(prompt, mm_prompt_updates, tokenizer)
 
+    def _apply_token_matches_with_placeholders(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[
+        list[int],
+        MultiModalPromptUpdatesApplyResult,
+        Mapping[str, list[PlaceholderFeaturesInfo]],
+    ]:
+        tokenizer = self.info.get_tokenizer()
+        return _apply_token_matches_with_placeholders(
+            token_ids,
+            mm_prompt_updates,
+            tokenizer,
+        )
+
     def _apply_text_matches(
         self,
         prompt: str,
@@ -1764,10 +1780,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         if uses_base_token_matching:
             new_token_ids, match_result, placeholders = (
-                _apply_token_matches_with_placeholders(
+                self._apply_token_matches_with_placeholders(
                     token_ids,
                     mm_prompt_updates,
-                    tokenizer,
                 )
             )
 
