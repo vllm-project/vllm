@@ -4,8 +4,9 @@ import copy
 import hashlib
 import importlib
 from collections.abc import Callable
+from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import torch
@@ -46,6 +47,7 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -2126,6 +2128,33 @@ def _glm5_like_kv_cache_spec(
     return kv_cache_spec, mamba_layers
 
 
+def _glm5_like_kv_cache_spec_with_tail(
+    mamba_spec_factory=new_mamba_spec,
+) -> dict[str, KVCacheSpec]:
+    """Production kpool=4 proportions: (mamba*3, MLA + indexer + tail) * 11.
+
+    The tail's logical page (2 * kpool * 2*indexer_head_dim * bf16) must fit
+    inside the indexer page it parasitizes (block_size//kpool * 132 B), which
+    is why the fixture drops the compress_ratio=16 shape used above.
+    """
+    kv_cache_spec, _ = _glm5_like_kv_cache_spec(mamba_spec_factory)
+    for i in range(3, 45, 4):
+        kpool = 4
+        kv_cache_spec[f"layers.{i}.indexer"] = replace(
+            cast(MLAAttentionSpec, kv_cache_spec[f"layers.{i}.indexer"]),
+            compress_ratio=kpool,
+        )
+        kv_cache_spec[f"layers.{i}.tail"] = KpoolTailSpec(
+            block_size=kpool,
+            num_kv_heads=1,
+            head_size=256,
+            head_size_v=0,
+            dtype=torch.bfloat16,
+            sliding_window=kpool,
+        )
+    return kv_cache_spec
+
+
 def test_get_kv_cache_config_balanced_mamba_hybrid():
     """Hybrid slot sharing: mamba layers co-own the MLA slot tensors."""
     model_config = ModelConfig(max_model_len=8192)
@@ -2205,6 +2234,118 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
     assert get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
     ) == pytest.approx(100 / blocks_per_request)
+
+
+def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
+    """The kpool tail parasitizes the indexer tensors instead of getting its
+    own: sibling idx/tail tensors paired by layer order, zero standalone tail
+    bytes, one shared block per request, and no prefix-caching leakage from
+    the kpool-sized scratch group."""
+    model_config = ModelConfig(max_model_len=8192)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_spec = _glm5_like_kv_cache_spec_with_tail()
+    mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
+    idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
+    tail_logical_page = kv_cache_spec["layers.3.tail"].page_size_bytes
+    assert tail_logical_page < idx_page
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    tail_group = next(
+        group
+        for group in groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        and all(
+            isinstance(spec, KpoolTailSpec)
+            for spec in group.kv_cache_spec.kv_cache_specs.values()
+        )
+    )
+    # The tail never prefix-caches; its page is padded up to the indexer page
+    # so the runner's strided view rides the indexer storage.
+    assert not tail_group.kv_cache_spec.participates_in_prefix_caching
+    tail_inner = cast(
+        KpoolTailSpec, tail_group.kv_cache_spec.kv_cache_specs["layers.3.tail"]
+    )
+    assert tail_inner.page_size_padded == idx_page
+
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(vllm_config, groups)
+    assert bytes_per_block == 11 * mla_page + 11 * idx_page
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, bytes_per_block * 100 + 1
+    )
+    assert kv_cache_config.num_blocks == 100
+    # 11 MLA slot tensors + 11 indexer tensors co-owned by their sibling tail
+    # layer: the tail adds no standalone tensors and no extra bytes.
+    assert len(kv_cache_config.kv_cache_tensors) == 22
+    idx_tensors = [
+        t for t in kv_cache_config.kv_cache_tensors if t.size == idx_page * 100
+    ]
+    assert len(idx_tensors) == 11
+    for i, tensor in enumerate(idx_tensors):
+        assert tensor.shared_by == [
+            f"layers.{4 * i + 3}.indexer",
+            f"layers.{4 * i + 3}.tail",
+        ]
+    assert sum(t.size for t in kv_cache_config.kv_cache_tensors) == (
+        bytes_per_block * 100
+    )
+
+    # The layout detector surfaces the sibling names in layer order for the
+    # accounting and connector paths.
+    layout = kv_cache_utils._glm5_next_tensor_layout(kv_cache_config.kv_cache_groups)
+    assert layout is not None
+    assert layout[3] == [f"layers.{4 * i + 3}.indexer" for i in range(11)]
+    assert layout[6] == [f"layers.{4 * i + 3}.tail" for i in range(11)]
+
+    # Accounting charges exactly one extra shared block per request for the
+    # tail, not a per-sequence allocation.
+    attn_group = next(
+        group
+        for group in groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        and group is not tail_group
+    )
+    attn_blocks = attn_group.kv_cache_spec.max_memory_usage_pages(vllm_config)
+    mamba_blocks_per_group = 1 + new_mamba_spec().num_speculative_blocks
+    blocks_per_request = attn_blocks + 4 * mamba_blocks_per_group + 1
+    assert (
+        kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, groups)
+        == blocks_per_request * bytes_per_block
+    )
+
+
+def test_glm5_kpool_tail_does_not_drag_hash_block_size():
+    """The tail's kpool-sized scratch block (4 tokens) must not constrain the
+    prefix-cache hash granularity: participating groups alone decide it."""
+    model_config = ModelConfig(max_model_len=8192)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    def align_mamba():
+        return new_mamba_spec(mamba_cache_mode="align")
+
+    groups = kv_cache_utils.get_kv_cache_groups(
+        vllm_config, _glm5_like_kv_cache_spec_with_tail(align_mamba)
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    hash_vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=16,
+            enable_prefix_caching=True,
+            prefix_match_unit=None,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=object(),
+    )
+    # gcd(attn 1024, mamba 16) with the tail's 4 excluded; scheduler size is
+    # the lcm including the tail (1024 % 4 == 0, so it coincides).
+    assert kv_cache_utils.resolve_kv_cache_block_sizes(
+        kv_cache_config, hash_vllm_config
+    ) == (1024, 16)
 
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible():
