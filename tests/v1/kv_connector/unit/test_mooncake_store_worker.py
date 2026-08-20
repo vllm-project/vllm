@@ -639,6 +639,7 @@ def _make_partial_tail_send_thread(
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        store_mask=lambda *_args, **_kwargs: (None, [False]),
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
@@ -682,7 +683,7 @@ def test_partial_tail_offload_skips_null_source_blocks():
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
     thread = _make_partial_tail_send_thread(store)
 
-    assert thread._maybe_offload_boundary_states(_make_partial_tail_req([0, 2, 3]))
+    _run_store_req(thread, _make_partial_tail_req([0, 2, 3]))
 
     keys, addrs, _sizes, _replicate_config = (
         store.batch_put_from_multi_buffers.call_args.args
@@ -761,7 +762,7 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
         # The scheduler accepted group 1 and omitted group 2 at boundary 12.
         boundary_state_offloads=[(1, 7, 12)],
     )
-    assert thread._maybe_offload_boundary_states(req)
+    _run_store_req(thread, req)
 
     keys, addrs, _sizes, _replicate_config = (
         store.batch_put_from_multi_buffers.call_args.args
@@ -784,7 +785,7 @@ def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
         supports_group_ids=True,
     )
 
-    assert thread._maybe_offload_boundary_states(_make_partial_tail_req([1, 2, 3]))
+    _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
 
     keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert keys == [
@@ -826,6 +827,62 @@ def test_partial_tail_put_failure_activates_pressure_gate():
 
     _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
     assert store.batch_put_from_multi_buffers.call_count == 1
+
+
+def test_boundary_and_normal_save_share_one_batch():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    thread = _make_partial_tail_send_thread(store)
+    current_event = MagicMock()
+
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=16,
+            block_ids=([1, 2, 3, 4], [5]),
+            block_hashes=[b"a0", b"a1", b"a2", b"a3"],
+            can_save=True,
+            current_event=current_event,
+            boundary_state_offloads=[(1, 7, 16)],
+        ),
+    )
+
+    store.batch_is_exist.assert_called_once()
+    store.batch_put_from_multi_buffers.assert_called_once()
+    assert (
+        store.batch_put_from_multi_buffers.call_args.args[0]
+        == (store.batch_is_exist.call_args.args[0])
+    )
+    current_event.synchronize.assert_called_once()
+
+
+def test_normal_put_addresses_are_materialized_after_dedup():
+    store = MagicMock()
+    # The boundary is missing; all four normal chunks already exist.
+    store.batch_is_exist.return_value = [0, 1, 1, 1, 1]
+    store.batch_put_from_multi_buffers.return_value = [256]
+    thread = _make_partial_tail_send_thread(store)
+    normal_db = thread.token_databases[0]
+    prepare_values = MagicMock(wraps=normal_db.prepare_values)
+    normal_db.prepare_values = prepare_values
+
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=16,
+            block_ids=([1, 2, 3, 4], [5]),
+            block_hashes=[b"a0", b"a1", b"a2", b"a3"],
+            can_save=True,
+            boundary_state_offloads=[(1, 7, 16)],
+        ),
+    )
+
+    prepare_values.assert_not_called()
+    store.batch_put_from_multi_buffers.assert_called_once()
+    assert len(store.batch_put_from_multi_buffers.call_args.args[0]) == 1
 
 
 def test_normal_save_excludes_mamba_group_and_null_blocks():
@@ -907,7 +964,7 @@ def test_block_aligned_snapshot_offload_uses_provided_block():
         can_save=True,
         boundary_state_offloads=[(1, 7, 32)],
     )
-    assert thread._maybe_offload_boundary_states(req)
+    _run_store_req(thread, req)
 
     keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     # boundary 32 is block-aligned for the mamba group (block 16): one key,
@@ -935,7 +992,7 @@ def test_mixed_snapshot_and_sub_block_offloads():
         can_save=True,
         boundary_state_offloads=[(1, 9, 32), (1, 7, 44)],
     )
-    assert thread._maybe_offload_boundary_states(req)
+    _run_store_req(thread, req)
 
     keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     db_full, db_mamba = thread.token_databases
@@ -965,7 +1022,8 @@ def test_snapshot_offload_skips_null_handoff_block():
     thread = _make_partial_tail_send_thread(store)
 
     hs = [bytes([i + 1]) * 4 for i in range(8)]
-    assert thread._maybe_offload_boundary_states(
+    _run_store_req(
+        thread,
         ReqMeta(
             req_id="req-a",
             token_len_chunk=0,
@@ -973,7 +1031,7 @@ def test_snapshot_offload_skips_null_handoff_block():
             block_hashes=hs,
             can_save=True,
             boundary_state_offloads=[(1, NULL_BLOCK_ID, 32)],
-        )
+        ),
     )
     store.batch_is_exist.assert_not_called()
     store.batch_put_from_multi_buffers.assert_not_called()

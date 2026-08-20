@@ -106,6 +106,23 @@ def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
     return f"vllm-mooncake-store:{prefix}{metadata.model_name}@{chunk_hash}"
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedStorePut:
+    key: str
+    addrs: list[int]
+    sizes: list[int]
+    metadata: KeyMetadata
+
+
+@dataclass(frozen=True, slots=True)
+class _NormalStorePut:
+    key: str
+    start: int
+    end: int
+    block_hash: BlockHash
+    group_idx: int
+
+
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
 DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES = 1280 * 1024 * 1024
 
@@ -610,7 +627,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def _boundary_snapshot_puts(
         self, req_meta: ReqMeta, entries: list[tuple[int, int, int]]
-    ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
+    ) -> list[_PreparedStorePut]:
         """Puts for committed mamba "align" boundary-state snapshots.
 
         These are block-aligned boundaries, i.e. exactly what the normal save
@@ -630,7 +647,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         resolved positionally.
         """
         hash_block_size = self.coord.hash_block_size
-        puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
+        puts: list[_PreparedStorePut] = []
         for group_id, block_id, boundary in entries:
             if boundary == 0 or block_id == NULL_BLOCK_ID:
                 continue
@@ -645,13 +662,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 continue
             addr, size = db.prepare_value_for_block(block_id)
             puts.append(
-                (db.key_for(req_meta.block_hashes[hash_idx]), addr, size, db.metadata)
+                _PreparedStorePut(
+                    db.key_for(req_meta.block_hashes[hash_idx]),
+                    addr,
+                    size,
+                    db.metadata,
+                )
             )
         return puts
 
     def _sub_block_tail_puts(
         self, req_meta: ReqMeta, entries: list[tuple[int, int, int]]
-    ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
+    ) -> list[_PreparedStorePut]:
         """Puts for the request's sub-block partial tail (its last prompt hash
         boundary), so a later request can hit the sub-block prefix.
 
@@ -677,7 +699,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         mamba_offloads = {group_id: block_id for group_id, block_id, _ in entries}
         saved = self._saved_offset.get(req_meta.req_id, 0)
-        puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
+        puts: list[_PreparedStorePut] = []
         for g_idx, db in enumerate(self.token_databases):
             group_blocks = req_meta.block_ids[g_idx]
             # Distribute across ranks by the same rule as normal chunks.
@@ -717,12 +739,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     continue
                 addr, size = db.prepare_value_for_block(block_id)
-                puts.append((db.key_for(key_hash), addr, size, db.metadata))
+                puts.append(
+                    _PreparedStorePut(db.key_for(key_hash), addr, size, db.metadata)
+                )
         return puts
 
-    def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
-        """Persist connector-pinned mamba "align" boundary states handed off
-        for this request, deduped against the store.
+    def _prepare_boundary_state_puts(
+        self, req_meta: ReqMeta
+    ) -> list[_PreparedStorePut]:
+        """Prepare connector-pinned mamba "align" boundary-state puts.
 
         This is every mamba key the connector writes — ``store_mask`` excludes
         mamba groups from the positional normal save, aligned boundaries
@@ -736,12 +761,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
         - not block-aligned: the sub-block CoW partial tail, which also has to
           cover the other groups' blocks in the normal save's lcm gap.
 
-        Returns:
-            True when no put is needed or every put succeeds, False otherwise.
+        The caller batches these entries with the normal positional save so a
+        hybrid request issues one existence check, event fence, and put.
         """
         offloads = req_meta.boundary_state_offloads
         if not offloads or not req_meta.block_hashes:
-            return True
+            return []
 
         snapshots: list[tuple[int, int, int]] = []
         sub_block: list[tuple[int, int, int]] = []
@@ -755,103 +780,76 @@ class KVCacheStoreSendingThread(KVTransferThread):
         puts = self._boundary_snapshot_puts(req_meta, snapshots)
         if sub_block and self.coord.enable_partial_hash_hits:
             puts.extend(self._sub_block_tail_puts(req_meta, sub_block))
+        return puts
 
-        if not puts:
-            return True
-        keys = [key for key, _, _, _ in puts]
-        addrs = [addr for _, addr, _, _ in puts]
-        sizes = [size for _, _, size, _ in puts]
-        group_ids: list[str] | None = (
-            [
-                _make_mooncake_group_id(metadata, key.rsplit("@", 1)[-1])
-                for key, _, _, metadata in puts
-            ]
-            if self.enable_group_semantics and self.supports_group_ids
-            else None
+    def _prepare_normal_store_puts(
+        self, req_meta: ReqMeta, token_len: int
+    ) -> list[_NormalStorePut]:
+        """Collect normal positional puts without materializing addresses."""
+        if not token_len:
+            return []
+
+        save_start = self._saved_offset.get(req_meta.req_id, 0)
+        store_masks = self.coord.store_mask(
+            token_len,
+            save_start,
+            num_prompt_tokens=req_meta.num_prompt_tokens,
         )
-        exists_start = time.perf_counter()
-        try:
-            exists = self.store.batch_is_exist(keys)
-        except Exception as e:
-            self._record_operation(
-                "save_exists",
-                exists_start,
-                len(keys),
-                status="error",
-                num_failed_keys=len(keys),
-            )
-            logger.error(
-                "Failed to check boundary-state keys for request %s: %s",
-                req_meta.req_id,
-                e,
-            )
-            return False
-        self._record_operation("save_exists", exists_start, len(keys))
-        missing = [i for i, e in enumerate(exists) if e != 1]
-        if not missing:
-            return True
-        keys = [keys[i] for i in missing]
-        addrs = [addrs[i] for i in missing]
-        sizes = [sizes[i] for i in missing]
-        if group_ids is not None:
-            group_ids = [group_ids[i] for i in missing]
-        if req_meta.current_event is not None:
-            # Fence the CoW block copy enqueued earlier this step.
-            req_meta.current_event.synchronize()
-        if group_ids is not None:
-            assert len(group_ids) == len(keys)
-            self.replicate_config.group_ids = group_ids
-        batch_bytes = _sum_batch_bytes(sizes)
-        put_start = time.perf_counter()
-        try:
-            res = self.store.batch_put_from_multi_buffers(
-                keys, addrs, sizes, self.replicate_config
-            )
-        except Exception as e:
-            self._record_operation(
-                "save_put",
-                put_start,
-                len(keys),
-                num_bytes=batch_bytes,
-                status="error",
-                num_failed_keys=len(keys),
-            )
-            logger.error(
-                "Failed to put boundary-state keys for request %s: %s",
-                req_meta.req_id,
-                e,
-            )
-            return False
 
-        failed = [i for i, value in enumerate(res) if value < 0]
-        self._record_operation(
-            "save_put",
-            put_start,
-            len(keys),
-            num_bytes=batch_bytes,
-            status="partial_failure" if failed else "ok",
-            num_failed_keys=len(failed),
-        )
-        if failed:
-            failed_codes = {res[i] for i in failed}
-            logger.warning(
-                "Boundary-state put failed for request %s: %d/%d keys failed "
-                "(codes=%s)",
-                req_meta.req_id,
-                len(failed),
-                len(keys),
-                failed_codes,
-            )
-            if MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes:
-                self._mark_request_skipped_for_pressure(req_meta)
-            return False
+        puts: list[_NormalStorePut] = []
+        for group_idx, db in enumerate(self.token_databases):
+            put_step = self.group_put_steps[group_idx]
+            put_step_rank = (self.tp_rank + group_idx) % put_step
+            group_blocks = req_meta.block_ids[group_idx]
+            for start, end, block_hash in db.process_tokens(
+                token_len,
+                req_meta.block_hashes,
+                mask_num=save_start,
+                chunk_mask=store_masks[group_idx],
+                put_step=put_step,
+                put_step_rank=put_step_rank,
+            ):
+                block_idx = start // db.block_size
+                if (
+                    block_idx >= len(group_blocks)
+                    or group_blocks[block_idx] == NULL_BLOCK_ID
+                ):
+                    continue
+                puts.append(
+                    _NormalStorePut(
+                        db.key_for(block_hash),
+                        start,
+                        end,
+                        block_hash,
+                        group_idx,
+                    )
+                )
+        return puts
 
-        if self._clear_store_pressure():
-            logger.info(
-                "Mooncake CPU/disk offloading pressure cleared after a "
-                "successful boundary-state batch"
+    def _materialize_normal_store_puts(
+        self,
+        normal_puts: list[_NormalStorePut],
+        block_ids_per_group: tuple[list[int], ...],
+    ) -> list[_PreparedStorePut]:
+        """Resolve addresses only for normal puts missing from the store."""
+        puts_by_group: list[list[_NormalStorePut]] = [[] for _ in self.token_databases]
+        for put in normal_puts:
+            puts_by_group[put.group_idx].append(put)
+
+        prepared_puts: list[_PreparedStorePut] = []
+        for group_idx, group_puts in enumerate(puts_by_group):
+            if not group_puts:
+                continue
+            db = self.token_databases[group_idx]
+            addrs, sizes, _ = db.prepare_values(
+                [(put.start, put.end) for put in group_puts],
+                block_ids_per_group[group_idx],
             )
-        return True
+            prepared_puts.extend(
+                _PreparedStorePut(put.key, addr, size, db.metadata)
+                for put, addr, size in zip(group_puts, addrs, sizes, strict=True)
+            )
+        return prepared_puts
 
     def _handle_request(self, req_meta: ReqMeta):
         # The single `finally` is the only way out, so the scheduler releases
@@ -876,70 +874,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
                 return
 
-            # Offload the handed-off mamba boundary states (independent of the
-            # normal positional save, which may be skipped this step).
-            if req_meta.boundary_state_offloads is not None and not (
-                self._maybe_offload_boundary_states(req_meta)
-            ):
-                return
-
-            if token_len == 0:
-                return
-
-            # Resume from where this rank left off; only the new suffix is saved.
-            save_start = self._saved_offset.get(req_id, 0)
-
-            # Within each lcm region only per-spec relevant chunks are loaded
-            # (e.g., SWA or linear attn), so mask out irrelevant chunks
-            store_masks = self.coord.store_mask(
-                token_len,
-                save_start,
-                num_prompt_tokens=req_meta.num_prompt_tokens,
-            )
-
-            starts: list[int] = []
-            ends: list[int] = []
-            keys: list[str] = []
-            kv_event_block_hashes: list[BlockHash] = []
-            group_indices: list[int] = []
-            for g_idx, db in enumerate(self.token_databases):
-                # Rotate the stride phase per group to balance load across ranks.
-                put_step = self.group_put_steps[g_idx]
-                put_step_rank = (self.tp_rank + g_idx) % put_step
-                group_blocks = block_ids_per_group[g_idx]
-                for start, end, block_hash in db.process_tokens(
-                    token_len,
-                    req_meta.block_hashes,
-                    mask_num=save_start,
-                    chunk_mask=store_masks[g_idx],
-                    put_step=put_step,
-                    put_step_rank=put_step_rank,
-                ):
-                    # A chunk backed by a null (or missing) block holds no
-                    # committed KV for this group; persisting it would poison
-                    # the key with reserved-block bytes.
-                    block_idx = start // db.block_size
-                    if (
-                        block_idx >= len(group_blocks)
-                        or group_blocks[block_idx] == NULL_BLOCK_ID
-                    ):
-                        continue
-                    starts.append(start)
-                    ends.append(end)
-                    keys.append(db.key_for(block_hash))
-                    if self.enable_kv_event:
-                        kv_event_block_hashes.append(block_hash)
-                    group_indices.append(g_idx)
+            boundary_puts = self._prepare_boundary_state_puts(req_meta)
+            normal_puts = self._prepare_normal_store_puts(req_meta, token_len)
+            boundary_count = len(boundary_puts)
+            keys = [put.key for put in boundary_puts]
+            keys.extend(put.key for put in normal_puts)
 
             if not keys:
-                self._record_saved(req_meta, token_len)
+                if token_len:
+                    self._record_saved(req_meta, token_len)
                 return
 
-            # Check which blocks already exist (dedup)
+            # Boundary and positional entries share one deduplication RPC.
             save_exists_start = time.perf_counter()
             try:
                 exists_states = self.store.batch_is_exist(keys)
-            except Exception:
+            except Exception as exc:
                 self._record_operation(
                     "save_exists",
                     save_exists_start,
@@ -947,37 +897,53 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     status="error",
                     num_failed_keys=len(keys),
                 )
+                if not normal_puts:
+                    logger.error(
+                        "Failed to check boundary-state keys for request %s: %s",
+                        req_id,
+                        exc,
+                    )
+                    return
                 raise
             self._record_operation(
                 "save_exists",
                 save_exists_start,
                 len(keys),
             )
-            missing_indices = [
-                i for i, exists in enumerate(exists_states) if exists != 1
+            boundary_puts = [
+                put
+                for put, exists in zip(
+                    boundary_puts,
+                    exists_states[:boundary_count],
+                    strict=True,
+                )
+                if exists != 1
             ]
-
-            if not missing_indices:
-                self._record_saved(req_meta, token_len)
+            normal_puts = [
+                put
+                for put, exists in zip(
+                    normal_puts,
+                    exists_states[boundary_count:],
+                    strict=True,
+                )
+                if exists != 1
+            ]
+            if not boundary_puts and not normal_puts:
+                if token_len:
+                    self._record_saved(req_meta, token_len)
                 return
 
-            if len(missing_indices) != len(keys):
-                starts = [starts[i] for i in missing_indices]
-                ends = [ends[i] for i in missing_indices]
-                keys = [keys[i] for i in missing_indices]
-                if self.enable_kv_event:
-                    kv_event_block_hashes = [
-                        kv_event_block_hashes[i] for i in missing_indices
-                    ]
-                group_indices = [group_indices[i] for i in missing_indices]
+            prepared_puts = boundary_puts + self._materialize_normal_store_puts(
+                normal_puts, block_ids_per_group
+            )
+            keys = [put.key for put in prepared_puts]
+            addrs = [put.addrs for put in prepared_puts]
+            sizes = [put.sizes for put in prepared_puts]
 
             group_ids = (
                 [
-                    _make_mooncake_group_id(
-                        self.token_databases[g_idx].metadata,
-                        key.rsplit("@", 1)[-1],
-                    )
-                    for key, g_idx in zip(keys, group_indices, strict=True)
+                    _make_mooncake_group_id(put.metadata, put.key.rsplit("@", 1)[-1])
+                    for put in prepared_puts
                 ]
                 if self.enable_group_semantics and self.supports_group_ids
                 else None
@@ -986,57 +952,35 @@ class KVCacheStoreSendingThread(KVTransferThread):
             logger.debug(
                 "Storing KV cache for %d blocks (groups=%s) for request %s",
                 len(keys),
-                set(group_indices),
+                {put.group_idx for put in normal_puts},
                 req_id,
             )
 
-            addrs: list[list[int]] = []
-            sizes: list[list[int]] = []
             stored_events: list[BlockStored] = []
-            chunks_per_group: list[list[tuple[int, int]]] = [
-                [] for _ in self.token_databases
-            ]
-            for start, end, g_idx in zip(starts, ends, group_indices, strict=True):
-                chunks_per_group[g_idx].append((start, end))
-            for g_idx, chunks in enumerate(chunks_per_group):
-                if not chunks:
-                    continue
-                db = self.token_databases[g_idx]
-                group_addrs, group_sizes, _ = db.prepare_values(
-                    chunks, block_ids_per_group[g_idx]
-                )
-                addrs.extend(group_addrs)
-                sizes.extend(group_sizes)
-
             # parent_block_hash chains live within a group, not across.
             if self.enable_kv_event:
                 prev_key_per_group: dict[int, Any] = {}
-                new_block_hashes = [
-                    maybe_convert_block_hash(bh) for bh in kv_event_block_hashes
-                ]
-
-            for idx, (s, e, g_idx) in enumerate(
-                zip(starts, ends, group_indices, strict=True)
-            ):
-                db = self.token_databases[g_idx]
-                if self.enable_kv_event:
+                for put in normal_puts:
+                    group_idx = put.group_idx
+                    db = self.token_databases[group_idx]
+                    block_hash = maybe_convert_block_hash(put.block_hash)
                     token_ids = (
-                        req_meta.token_ids[s:e]
+                        req_meta.token_ids[put.start : put.end]
                         if req_meta.token_ids is not None
                         else None
                     )
                     stored_event = BlockStored(
-                        block_hashes=[new_block_hashes[idx]],
-                        parent_block_hash=prev_key_per_group.get(g_idx),
+                        block_hashes=[block_hash],
+                        parent_block_hash=prev_key_per_group.get(group_idx),
                         token_ids=token_ids,
                         block_size=db.block_size,
                         lora_id=None,
                         medium="cpu",
                         lora_name=None,
-                        group_idx=g_idx,
+                        group_idx=group_idx,
                     )
                     stored_events.append(stored_event)
-                    prev_key_per_group[g_idx] = new_block_hashes[idx]
+                    prev_key_per_group[group_idx] = block_hash
 
             if current_event is not None:
                 current_event.synchronize()
@@ -1088,7 +1032,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             req_id,
                         )
                 else:
-                    self._record_saved(req_meta, token_len)
+                    if token_len:
+                        self._record_saved(req_meta, token_len)
                     if self._clear_store_pressure():
                         logger.info(
                             "Mooncake CPU/disk offloading pressure cleared "
