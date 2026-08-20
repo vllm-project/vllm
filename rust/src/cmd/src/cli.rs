@@ -23,12 +23,14 @@ use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_chat::ReasoningParserFactory;
+use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RendererSelection, TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RenderConfig, RendererSelection,
+    TlsConfig,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -79,13 +81,86 @@ impl Cli {
 }
 
 /// Supported top-level CLI commands.
-#[derive(Debug, Subcommand, PartialEq, Eq)]
+#[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the Rust OpenAI frontend as a Python-supervised worker.
     Frontend(FrontendArgs),
     /// Launch a managed Python headless engine, then run the Rust OpenAI
     /// frontend.
     Serve(ServeArgs),
+    /// Run vLLM benchmarks.
+    #[command(subcommand)]
+    Bench(BenchCommand),
+    /// Run engine-free request rendering and preprocessing.
+    Render(RenderArgs),
+}
+
+/// Supported benchmark commands.
+#[derive(Debug, Subcommand)]
+pub enum BenchCommand {
+    /// Benchmark online serving throughput.
+    Serve(vllm_bench::BenchServeArgs),
+}
+
+/// Arguments for the engine-free text renderer.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct RenderArgs {
+    /// Model identifier or local model directory containing tokenizer files.
+    model: String,
+    /// HTTP bind host.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// HTTP bind port.
+    #[arg(long, default_value_t = 8000)]
+    port: u16,
+    /// Public model names accepted by the API.
+    #[arg(long, num_args = 0..)]
+    served_model_name: Vec<String>,
+    /// Select the tool-call parser. Use `auto` to infer from the model or
+    /// `none` to disable parsing.
+    #[arg(long, default_value_t)]
+    tool_call_parser: ParserSelection,
+    /// Select the reasoning parser. Use `auto` to infer from the model or
+    /// `none` to disable parsing.
+    #[arg(long, default_value_t)]
+    reasoning_parser: ParserSelection,
+    /// Select the native chat renderer implementation.
+    #[arg(long = "tokenizer-mode", default_value_t)]
+    renderer: RendererSelection,
+    /// Override the model chat template with a file path or inline template.
+    #[arg(long)]
+    chat_template: Option<String>,
+    /// Default JSON keyword arguments merged into every chat-template render.
+    #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
+    default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// How message content is exposed to the chat template.
+    #[arg(long, default_value_t)]
+    chat_template_content_format: ChatTemplateContentFormatOption,
+    /// Maximum model context length used for request validation.
+    #[arg(long)]
+    max_model_len: u32,
+    /// Maximum accepted logprobs count; -1 disables the cap.
+    #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
+    max_logprobs: Option<i32>,
+}
+
+impl RenderArgs {
+    pub(super) fn into_config(self) -> RenderConfig {
+        RenderConfig {
+            model: self.model,
+            served_model_name: self.served_model_name,
+            host: self.host,
+            port: self.port,
+            tool_call_parser: self.tool_call_parser,
+            reasoning_parser: self.reasoning_parser,
+            renderer: self.renderer,
+            chat_template: self.chat_template,
+            default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
+            chat_template_content_format: self.chat_template_content_format,
+            max_model_len: self.max_model_len,
+            max_logprobs: self.max_logprobs,
+        }
+    }
 }
 
 /// A JSON-encoded list of strings, matching Python's `json.loads` CLI type for
@@ -138,17 +213,12 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub language_model_only: bool,
-    /// Override the maximum model context length. When set, the frontend uses
-    /// this value instead of the model's `max_position_embeddings` from
-    /// `config.json`.
-    #[arg(long)]
-    pub max_model_len: Option<u32>,
     /// Maximum number of log probabilities to return when `logprobs` is
     /// specified in sampling parameters. `-1` means no cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     #[serde(default)]
     pub max_logprobs: Option<i32>,
-    /// TCP port for the gRPC Generate service. When not set, no gRPC server is
+    /// TCP port for the gRPC Inference service. When not set, no gRPC server is
     /// started.
     #[arg(long)]
     #[serde(default)]
@@ -180,6 +250,17 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+
+    /// The maximum number of input items allowed per prompt for each
+    /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`).
+    ///
+    /// Also accepts the engine's configurable form
+    /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); the extra
+    /// profiling options are forwarded to the engine untouched.
+    /// Unspecified modalities are unlimited.
+    #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub limit_mm_per_prompt: MmLimitPerPrompt,
 
     /// The format to render message content within a chat template.
     ///
@@ -343,6 +424,18 @@ impl SharedRuntimeArgs {
             .expect("profiler config serialization should not fail")
     }
 
+    /// Return the per-modality limits as JSON for managed Python engine
+    /// forwarding, or `None` when nothing is configured.
+    ///
+    /// Round-tripping the parsed map rather than the raw argument keeps the
+    /// engine's own profiling options (`num_frames`, `width`, ...) intact.
+    pub fn limit_mm_per_prompt_json(&self) -> Option<String> {
+        (!self.limit_mm_per_prompt.is_empty()).then(|| {
+            serde_json::to_string(&self.limit_mm_per_prompt)
+                .expect("limit-mm-per-prompt serialization should not fail")
+        })
+    }
+
     /// Apply fallback logic for API key configuration from env variables.
     fn apply_env_api_key_fallback(&mut self) {
         if self.api_key.is_empty()
@@ -394,6 +487,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -446,6 +540,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -654,7 +749,6 @@ impl ServeArgs {
 
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
-            self.runtime.max_model_len,
             self.runtime.max_logprobs,
             profiler_config,
             reasoning_parser.as_deref(),
@@ -662,6 +756,7 @@ impl ServeArgs {
             self.runtime.disable_log_stats,
             self.runtime.shutdown_timeout,
             handshake_port,
+            self.runtime.limit_mm_per_prompt_json(),
         )
     }
 }

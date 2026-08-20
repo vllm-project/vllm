@@ -37,6 +37,11 @@ class Cosmos3ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             ".to_out.": ".o_proj.",
             ".norm_q.": ".q_norm.",
             ".norm_k.": ".k_norm.",
+            # ModelOpt-native dialect (diffusers/transformers read these; vLLM reads
+            # weight_scale/input_scale instead), drop so AutoWeightsLoader passes
+            ".input_quantizer.": None,
+            ".weight_quantizer.": None,
+            ".output_quantizer.": None,
         },
         orig_to_new_prefix={
             "proj_in.": None,

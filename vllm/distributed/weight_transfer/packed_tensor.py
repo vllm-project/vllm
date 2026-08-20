@@ -10,8 +10,7 @@ from typing import Any
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
-# Default values for packed tensor configuration.
-# These are imported by NCCLWeightTransferUpdateInfo and trainer_send_weights.
+# Default values for packed tensor transfer.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
 
@@ -178,6 +177,10 @@ def packed_nccl_broadcast_producer(
             # Move to the next buffer
             buffer_idx = (buffer_idx + 1) % num_buffers
 
+    # Drain every slot before returning.
+    for stream in streams:
+        stream.synchronize()
+
 
 def packed_nccl_broadcast_consumer(
     iterator: Iterator[tuple[str, tuple[list[int], torch.dtype]]],
@@ -279,6 +282,10 @@ def packed_nccl_broadcast_consumer(
                         )
                     )
                 break
+
+    # Drain every slot before returning.
+    for stream in streams:
+        stream.synchronize()
 
 
 # ── IPC packed transfer ────────────────────────────────────────────────

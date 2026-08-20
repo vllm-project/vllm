@@ -41,7 +41,7 @@ steps:
   commands:
     - set -x
     - export VLLM_USE_V2_MODEL_RUNNER=1
-    - pip install tensorizer # for tensorizer test
+    - pip install --no-deps tensorizer # for tensorizer test
     - python3 basic/offline_inference/chat.py # for basic
     - python3 basic/offline_inference/generate.py --model facebook/opt-125m
     #- python3 basic/offline_inference/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10  # TODO
@@ -96,25 +96,30 @@ steps:
   commands:
     - set -x
     - export VLLM_USE_V2_MODEL_RUNNER=1
-    - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
+    - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray"
     - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
     - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
 - label: Model Runner V2 Spec Decode
   device: h200_35gb
   key: model-runner-v2-spec-decode
-  timeout_in_minutes: 30
+  timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
   - tests/v1/spec_decode/test_max_len.py
   - tests/v1/spec_decode/test_rejection_sampler_utils.py
-  - tests/v1/e2e/spec_decode/test_spec_decode.py
+  - tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
+  - tests/v1/e2e/spec_decode/
   commands:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
   - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
   - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
-  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
+  - pytest -v -s v1/e2e/spec_decode/eagle/
+  - pytest -v -s v1/e2e/spec_decode/speculators/
+  - >-
+    pytest -v -s
+    'v1/e2e/spec_decode/mtp/test_mtp.py::test_mtp_correctness[qwen3_5-hybrid]'

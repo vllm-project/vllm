@@ -3,7 +3,6 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
-import json
 import time
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -11,10 +10,15 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import Field, PrivateAttr, model_serializer, model_validator
+from pydantic import (
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    model_serializer,
+    model_validator,
+)
 
 from vllm.config import ModelConfig
-from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -24,13 +28,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
-    LegacyStructuralTagResponseFormat,
     OpenAIBaseModel,
     PerRequestTimingMetrics,
     StreamOptions,
-    StructuralTagResponseFormat,
     ToolCall,
     UsageInfo,
+    structured_outputs_from_response_format,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -94,7 +97,12 @@ class ChatCompletionLogProbs(OpenAIBaseModel):
 
 class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
-    message: ChatMessage
+    # ``SerializeAsAny`` lets pydantic honor subclasses of ``ChatMessage``
+    # (e.g. ``vllm.entrypoints.cohere.cohere_chat_message.CohereChatMessage``)
+    # so that added fields like ``citations`` survive JSON serialization
+    # instead of being stripped down to the base schema. Plain
+    # ``ChatMessage`` instances serialize identically to before.
+    message: SerializeAsAny[ChatMessage]
     logprobs: ChatCompletionLogProbs | None = None
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
@@ -142,7 +150,11 @@ class ChatCompletionResponse(OpenAIBaseModel):
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
-    delta: DeltaMessage
+    # ``SerializeAsAny`` lets pydantic honor subclasses of ``DeltaMessage``
+    # (e.g. ``vllm.entrypoints.cohere.cohere_chat_message.CohereDeltaMessage``)
+    # so streaming ``citations`` survive JSON serialization. Plain
+    # ``DeltaMessage`` instances serialize identically to before.
+    delta: SerializeAsAny[DeltaMessage]
     logprobs: ChatCompletionLogProbs | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
@@ -182,6 +194,7 @@ class ChatCompletionToolsParam(OpenAIBaseModel):
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
+        data = {k: v for k, v in data.items() if k in type(self).model_fields}
         if self.defer_loading is None:
             data.pop("defer_loading", None)
         return data
@@ -381,6 +394,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
+        ),
+    )
 
     return_tokens_as_token_ids: bool | None = Field(
         default=None,
@@ -439,6 +460,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -477,6 +499,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "token patterns, stopping only when they hit the maximum output length "
         "(e.g. 'abcdabcdabcd...' or '\\emoji \\emoji \\emoji ...'). This feature "
         "can detect such behavior and terminate early, saving time and tokens.",
+    )
+
+    stream_interval: Annotated[int, Field(ge=1)] | None = Field(
+        default=None,
+        description=(
+            "Number of tokens to batch into each streamed chunk. Raises the "
+            "server's `--stream-interval` for this request. Values below the "
+            "server setting are clamped up to it. The first and last chunks "
+            "are always sent immediately. Ignored for non-streaming requests."
+        ),
     )
 
     # --8<-- [end:chat-completion-extra-params]
@@ -526,8 +558,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 msg["tool_calls"] = list(tool_calls)
         return self
 
-    _grammar_from_tool_parser: bool = PrivateAttr(default=False)
-    """CAUTION: Should only be set by ``ToolParser.adjust_request``."""
+    _grammar_from_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
 
     def build_chat_params(
         self,
@@ -558,6 +590,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
             return_assistant_tokens_mask=bool(self.return_assistant_tokens_mask),
+            # No-tools requests default to tool_choice="none" at the API
+            # layer. Collapse that default before rendering, so K3 emits a
+            # model-visible tool-choice instruction only for requests with a
+            # tools block.
+            tool_choice=self.tool_choice if self.tools else None,
+            response_format=self.response_format,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -607,6 +645,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
 
+    def extract_structured_outputs(self) -> StructuredOutputsParams | None:
+        """Normalize request constraints into ``StructuredOutputsParams``."""
+        return structured_outputs_from_response_format(
+            self.structured_outputs,
+            self.response_format,
+        )
+
     def to_sampling_params(
         self,
         max_tokens: int,
@@ -651,38 +696,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        response_format = self.response_format
-        if response_format is not None:
-            structured_outputs_kwargs = dict[str, Any]()
-
-            # Set structured output params for response format
-            if response_format.type == "json_object":
-                structured_outputs_kwargs["json_object"] = True
-            elif response_format.type == "json_schema":
-                json_schema = response_format.json_schema
-                assert json_schema is not None
-                structured_outputs_kwargs["json"] = json_schema.json_schema
-            elif response_format.type == "structural_tag":
-                structural_tag = response_format
-                assert structural_tag is not None and isinstance(
-                    structural_tag,
-                    (
-                        LegacyStructuralTagResponseFormat,
-                        StructuralTagResponseFormat,
-                    ),
-                )
-                s_tag_obj = structural_tag.model_dump(by_alias=True)
-                structured_outputs_kwargs["structural_tag"] = json.dumps(s_tag_obj)
-
-            # If structured outputs wasn't already enabled,
-            # we must enable it for these features to work
-            if len(structured_outputs_kwargs) > 0:
-                self.structured_outputs = (
-                    StructuredOutputsParams(**structured_outputs_kwargs)
-                    if self.structured_outputs is None
-                    else replace(self.structured_outputs, **structured_outputs_kwargs)
-                )
-
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
@@ -715,10 +728,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            output_kind=RequestOutputKind.DELTA
-            if self.stream
-            else RequestOutputKind.FINAL_ONLY,
-            structured_outputs=self.structured_outputs,
+            output_kind=(
+                RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
+            ),
+            stream_interval=self.stream_interval,
+            structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             thinking_token_budget=self.thinking_token_budget,
@@ -785,6 +799,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 parameter="logprob_token_ids",
             )
 
+        # These fields are integers, but `mode="before"` runs on the raw
+        # request data, so a non-numeric value (e.g. a JSON string) would
+        # reach the comparisons below and raise TypeError -> HTTP 500. Reject
+        # it here so the client gets a clean 400 instead.
+        for field_name in ("prompt_logprobs", "top_logprobs"):
+            field_value = data.get(field_name)
+            if field_value is not None and not isinstance(field_value, (int, float)):
+                raise VLLMValidationError(
+                    f"`{field_name}` must be an integer.",
+                    parameter=field_name,
+                    value=field_value,
+                )
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
             if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
                 raise VLLMValidationError(
@@ -865,9 +891,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # Reject empty tools array, matching OpenAI API behavior
         if data.get("tools") == []:
-            raise ValueError(
+            raise VLLMValidationError(
                 "`tools` must not be an empty array. "
-                "Either provide at least one tool or omit the field entirely."
+                "Either provide at least one tool or omit the field entirely.",
+                parameter="tools",
             )
 
         # if "tool_choice" is not specified but tools are provided,
@@ -947,18 +974,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
                 "`add_generation_prompt` to True.",
-            )
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None and (
-            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
-        ):
-            raise VLLMValidationError(
-                "Parameter 'cache_salt' must be a non-empty string if provided.",
-                parameter="cache_salt",
             )
         return data
 
@@ -1091,13 +1106,15 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
         if isinstance(data, BatchChatCompletionRequest):
             data = data.model_dump(exclude_unset=True)
         if data.get("use_beam_search"):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Batch chat completions do not support beam search. "
-                "Please set `use_beam_search` to False."
+                "Please set `use_beam_search` to False.",
+                parameter="use_beam_search",
             )
         if data.get("logprob_token_ids") and not data.get("logprobs"):
-            raise ValueError(
-                "when using `logprob_token_ids`, `logprobs` must be set to true."
+            raise VLLMValidationError(
+                "when using `logprob_token_ids`, `logprobs` must be set to true.",
+                parameter="logprob_token_ids",
             )
         response_format = data.get("response_format")
         rf_type = (
@@ -1111,8 +1128,10 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             validate_structured_outputs_structural_tag(structured_outputs)
         n = data.get("n", 1)
         if n is not None and n != 1:
-            raise ValueError(
-                "Batch chat completions do not support `n > 1`. Please set `n` to 1."
+            raise VLLMValidationError(
+                "Batch chat completions do not support `n > 1`. Please set `n` to 1.",
+                parameter="n",
+                value=n,
             )
         return data
 

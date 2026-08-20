@@ -20,6 +20,7 @@ from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
     VideoLoader,
+    _pynvvc_frames_to_nhwc,
 )
 
 from ..utils import cosine_similarity, create_video_from_image, normalize_image
@@ -404,6 +405,23 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert result["backend"] == "pynvvideocodec"
 
+    def test_strips_request_level_hw_decoders_when_not_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"video_backend": "pynvvideocodec"},
+            runtime_kwargs={"hw_decoders": 4},
+        )
+        assert "hw_decoders" not in result
+
+    def test_prevents_request_level_hw_decoders_override(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={
+                "video_backend": "pynvvideocodec",
+                "hw_decoders": 2,
+            },
+            runtime_kwargs={"hw_decoders": 4},
+        )
+        assert result["hw_decoders"] == 2
+
     @pytest.mark.parametrize("backend", ["opencv", "pyav", "torchcodec"])
     def test_software_video_backend_passes_through(self, backend: str):
         result = VideoMediaIO.merge_kwargs(
@@ -453,3 +471,50 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert result.get("backend") != "pynvvideocodec"
         assert result["video_backend"] == "pynvvideocodec"
+
+    def test_deepstream_requires_gpu(self):
+        assert VIDEO_LOADER_REGISTRY.backend_requires_gpu("deepstream")
+
+    def test_strips_backend_deepstream_when_not_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={"backend": "deepstream"},
+        )
+        assert result.get("backend") != "deepstream"
+
+    def test_preserves_backend_deepstream_when_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "deepstream"},
+            runtime_kwargs={"backend": "deepstream", "num_frames": 8},
+        )
+        assert result["backend"] == "deepstream"
+        assert result["num_frames"] == 8
+
+    def test_strips_pool_size_from_runtime(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "deepstream"},
+            runtime_kwargs={"backend": "deepstream", "pool_size": 4},
+        )
+        assert "pool_size" not in result
+
+    def test_unknown_backend_not_treated_as_gpu(self):
+        assert not VIDEO_LOADER_REGISTRY.backend_requires_gpu("totally_unknown")
+
+
+@pytest.mark.parametrize("layout", ["nhwc", "nchw"])
+def test_pynvvc_frames_normalized_to_nhwc(layout: str):
+    """PyNvVideoCodec frame batches are normalized to NHWC regardless of the
+    per-frame layout the decoder emits (it has varied across versions), so the
+    HF video processors (which materialize a PIL image per frame) receive the
+    same NHWC shape as every other video backend."""
+    torch = pytest.importorskip("torch")
+
+    n, h, w, c = 4, 5, 6, 3
+    nhwc = torch.arange(n * h * w * c, dtype=torch.uint8).reshape(n, h, w, c)
+    frames = nhwc if layout == "nhwc" else nhwc.permute(0, 3, 1, 2).contiguous()
+
+    out = _pynvvc_frames_to_nhwc(frames)
+
+    assert out.shape == (n, h, w, c)
+    assert out.is_contiguous()
+    assert torch.equal(out, nhwc)  # content preserved / correctly transposed

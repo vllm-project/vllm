@@ -217,6 +217,7 @@ def evaluate_gsm8k(
     seed: int | None = 42,
     request_timeout_seconds: float = 600,
     gen_prefix: str = "",
+    max_concurrency: int | None = None,
 ) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
@@ -261,7 +262,14 @@ def evaluate_gsm8k(
             return answer, tokens
 
         timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        connector = (
+            aiohttp.TCPConnector(limit=max_concurrency)
+            if max_concurrency is not None
+            else None
+        )
+        async with aiohttp.ClientSession(
+            timeout=timeout, connector=connector
+        ) as session:
             tasks = [get_answer(session, i) for i in range(num_questions)]
             await tqdm.gather(*tasks, desc="Evaluating")
 
@@ -284,6 +292,7 @@ def evaluate_gsm8k_offline(
     temperature: float = 0.0,
     gen_prefix: str = "",
     use_chat_completions: bool = False,
+    chat_template_kwargs: dict[str, object] | None = None,
 ) -> dict[str, float | int]:
     """Evaluate GSM8K accuracy using an offline vllm.LLM object.
 
@@ -292,6 +301,7 @@ def evaluate_gsm8k_offline(
 
     When ``use_chat_completions=True``, prompts go through the chat template via
     ``llm.chat()`` instead of raw completion (for instruction-tuned models).
+    ``chat_template_kwargs`` are forwarded to ``llm.chat()`` when provided.
     """
     from vllm import SamplingParams
 
@@ -310,7 +320,11 @@ def evaluate_gsm8k_offline(
     tic = time.perf_counter()
     if use_chat_completions:
         conversations = [[{"role": "user", "content": p}] for p in prompts]
-        outputs = llm.chat(conversations, sampling_params)
+        outputs = llm.chat(
+            conversations,
+            sampling_params,
+            chat_template_kwargs=chat_template_kwargs,
+        )
     else:
         outputs = llm.generate(prompts, sampling_params)
     latency = time.perf_counter() - tic
@@ -343,6 +357,11 @@ def main() -> None:
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility"
     )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        help="Maximum number of concurrent requests",
+    )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
 
     args = parser.parse_args()
@@ -355,6 +374,7 @@ def main() -> None:
         port=args.port,
         temperature=args.temperature,
         seed=args.seed,
+        max_concurrency=args.max_concurrency,
     )
 
     # Print results to terminal

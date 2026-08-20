@@ -201,6 +201,7 @@ def test_run_vllm_dp_server_uses_rust_frontend_when_enabled(monkeypatch):
     monkeypatch.setattr(dp_sup.os, "setpgrp", lambda: None)
     monkeypatch.setattr(dp_sup, "set_process_title", lambda *_args: None)
     monkeypatch.setattr(dp_sup, "decorate_logs", lambda *_args: None)
+    monkeypatch.setattr(dp_sup.envs, "VLLM_USE_RUST_FRONTEND", True, raising=False)
     monkeypatch.setattr(
         dp_sup.envs,
         "VLLM_RUST_FRONTEND_PATH",
@@ -311,7 +312,7 @@ async def test_shutdown_if_supervisor_server_error_on_startup(
         await self._shutdown_event.wait()
 
     monkeypatch.setattr(dp_sup.asyncio, "get_running_loop", lambda: FakeLoop())
-    monkeypatch.setattr(dp_sup.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(dp_sup, "NoSignalServer", FakeServer)
     monkeypatch.setattr(DPSupervisor, "_shutdown_children", fake_shutdown_children)
     monkeypatch.setattr(DPSupervisor, "_start_children", fake_start_children)
     monkeypatch.setattr(DPSupervisor, "_monitor_children", fake_monitor_children)
