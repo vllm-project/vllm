@@ -219,6 +219,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
             weight_layout=WeightLayout.BlockMajorK,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
         # FlashInfer's BF16 routed wrapper does not expose an output= argument.
         output.copy_(result[0] if isinstance(result, list) else result)
