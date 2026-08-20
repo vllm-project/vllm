@@ -262,6 +262,10 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
+
+    # Record the scheduling time point
+    scheduled_at: float = 0.0
+
     # EC Cache Manager metadata
     ec_manager_metadata: EncoderCacheManagerMetadata | None = None
     # Block IDs freshly allocated from the pool during this scheduling step.
