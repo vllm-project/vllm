@@ -5,6 +5,7 @@
 
 pub use granite4::Granite4ToolParser;
 pub use hermes::HermesToolParser;
+pub use hunyuan_a13b::HunyuanA13BToolParser;
 pub use internlm2::Internlm2ToolParser;
 pub use llama::Llama3JsonToolParser;
 pub use mistral::MistralToolParser;
@@ -13,6 +14,7 @@ pub use qwen::Qwen3XmlToolParser;
 
 mod granite4;
 mod hermes;
+mod hunyuan_a13b;
 mod internlm2;
 mod llama;
 mod mistral;
@@ -32,6 +34,12 @@ use super::utils::{
 use super::{Result, ToolCallDelta, ToolParserOutput};
 
 pub(crate) type JsonToolInput<'i> = Partial<&'i str>;
+
+#[derive(Debug, Clone, Copy)]
+struct JsonToolCallContainer {
+    start_marker: &'static str,
+    end_marker: &'static str,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct JsonToolCallConfig {
@@ -74,6 +82,9 @@ pub(crate) enum JsonToolCallEvent {
 #[derive(Debug)]
 struct JsonToolCallParser {
     config: JsonToolCallConfig,
+    container: Option<JsonToolCallContainer>,
+    discard_after_end: bool,
+    tool_block_finished: bool,
     buffer: String,
     mode: JsonToolCallMode,
     active_tool_index: Option<usize>,
@@ -85,6 +96,9 @@ impl JsonToolCallParser {
     fn new(config: JsonToolCallConfig) -> Self {
         Self {
             config,
+            container: None,
+            discard_after_end: false,
+            tool_block_finished: false,
             buffer: String::new(),
             mode: JsonToolCallMode::Text,
             active_tool_index: None,
@@ -92,15 +106,45 @@ impl JsonToolCallParser {
         }
     }
 
+    /// Configure delimiters around the sequence of JSON tool-call objects.
+    fn with_container(mut self, start_marker: &'static str, end_marker: &'static str) -> Self {
+        self.container = Some(JsonToolCallContainer {
+            start_marker,
+            end_marker,
+        });
+        self
+    }
+
+    /// Discard text after a complete marker-wrapped tool-call block.
+    fn discard_after_end(mut self) -> Self {
+        self.discard_after_end = true;
+        self
+    }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+        if self.tool_block_finished {
+            return Ok(());
+        }
+
         self.buffer.push_str(chunk);
         let config = self.config;
+        let container = self.container;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_json_tool_call_event(input, &mut self.mode, config)
+            parse_next_json_tool_call_event(
+                input,
+                &mut self.mode,
+                config,
+                container,
+                self.emitted_tool_count == 0,
+            )
         })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
+            if self.tool_block_finished {
+                self.buffer.clear();
+                break;
+            }
         }
 
         Ok(())
@@ -165,6 +209,7 @@ impl JsonToolCallParser {
             JsonToolCallEvent::ToolCallEnd => {
                 self.active_tool_index = None;
                 self.mode = JsonToolCallMode::Text;
+                self.tool_block_finished = self.discard_after_end;
             }
         }
         Ok(())
@@ -174,6 +219,7 @@ impl JsonToolCallParser {
         self.mode = JsonToolCallMode::Text;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
+        self.tool_block_finished = false;
         std::mem::take(&mut self.buffer)
     }
 }
@@ -183,13 +229,35 @@ fn parse_next_json_tool_call_event(
     input: &mut JsonToolInput<'_>,
     mode: &mut JsonToolCallMode,
     config: JsonToolCallConfig,
+    container: Option<JsonToolCallContainer>,
+    allow_empty_container: bool,
 ) -> ModalResult<JsonToolCallEvent> {
     match mode {
-        JsonToolCallMode::Text => parse_text_event(input, config),
-        JsonToolCallMode::Header => tool_call_header_event(input, config),
-        JsonToolCallMode::Arguments { json_scan } => {
-            parse_arguments_event(input, json_scan, config)
+        JsonToolCallMode::Text => parse_text_event(input, config, container),
+        JsonToolCallMode::Header => {
+            parse_header_event(input, config, container, allow_empty_container)
         }
+        JsonToolCallMode::Arguments { json_scan } => {
+            parse_arguments_event(input, json_scan, config, container)
+        }
+    }
+}
+
+/// Parse either the next JSON tool-call header or an empty container end.
+fn parse_header_event(
+    input: &mut JsonToolInput<'_>,
+    config: JsonToolCallConfig,
+    container: Option<JsonToolCallContainer>,
+    allow_empty_container: bool,
+) -> ModalResult<JsonToolCallEvent> {
+    if container.is_some() && allow_empty_container {
+        alt((
+            |input: &mut JsonToolInput<'_>| tool_call_end_event(input, config, container),
+            |input: &mut JsonToolInput<'_>| tool_call_header_event(input, config),
+        ))
+        .parse_next(input)
+    } else {
+        tool_call_header_event(input, config)
     }
 }
 
@@ -197,9 +265,10 @@ fn parse_next_json_tool_call_event(
 fn parse_text_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
+    container: Option<JsonToolCallContainer>,
 ) -> ModalResult<JsonToolCallEvent> {
     alt((
-        |input: &mut JsonToolInput<'_>| tool_call_start_event(input, config),
+        |input: &mut JsonToolInput<'_>| tool_call_start_event(input, config, container),
         |input: &mut JsonToolInput<'_>| safe_text_event(input, config),
     ))
     .parse_next(input)
@@ -209,10 +278,12 @@ fn parse_text_event(
 fn tool_call_start_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
+    container: Option<JsonToolCallContainer>,
 ) -> ModalResult<JsonToolCallEvent> {
     seq!(
         _: literal(config.start_marker),
         _: |input: &mut JsonToolInput<'_>| marker_whitespace(input, config),
+        _: |input: &mut JsonToolInput<'_>| container_start(input, container, config),
     )
     .value(JsonToolCallEvent::ToolCallStart)
     .parse_next(input)
@@ -296,9 +367,10 @@ fn parse_arguments_event(
     input: &mut JsonToolInput<'_>,
     json_scan: &mut JsonObjectScanState,
     config: JsonToolCallConfig,
+    container: Option<JsonToolCallContainer>,
 ) -> ModalResult<JsonToolCallEvent> {
     if json_scan.complete() {
-        tool_call_close_event(input, config)
+        tool_call_close_event(input, config, container)
     } else {
         argument_delta_event(input, json_scan)
     }
@@ -316,16 +388,17 @@ fn argument_delta_event(
 fn tool_call_close_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
+    container: Option<JsonToolCallContainer>,
 ) -> ModalResult<JsonToolCallEvent> {
     seq!(_: ws0, _: literal("}")).parse_next(input)?;
 
     match config.delimiter {
         Some(delimiter) => alt((
-            |input: &mut JsonToolInput<'_>| tool_call_end_event(input, config),
+            |input: &mut JsonToolInput<'_>| tool_call_end_event(input, config, container),
             |input: &mut JsonToolInput<'_>| tool_call_delimiter_event(input, delimiter),
         ))
         .parse_next(input),
-        None => tool_call_end_event(input, config),
+        None => tool_call_end_event(input, config, container),
     }
 }
 
@@ -333,13 +406,49 @@ fn tool_call_close_event(
 fn tool_call_end_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
+    container: Option<JsonToolCallContainer>,
 ) -> ModalResult<JsonToolCallEvent> {
     seq!(
         _: |input: &mut JsonToolInput<'_>| marker_whitespace(input, config),
+        _: |input: &mut JsonToolInput<'_>| container_end(input, container, config),
         _: literal(config.end_marker),
     )
     .value(JsonToolCallEvent::ToolCallEnd)
     .parse_next(input)
+}
+
+/// Parse the configured sequence opening delimiter, if any.
+fn container_start(
+    input: &mut JsonToolInput<'_>,
+    container: Option<JsonToolCallContainer>,
+    config: JsonToolCallConfig,
+) -> ModalResult<()> {
+    match container {
+        Some(container) => seq!(
+            _: literal(container.start_marker),
+            _: |input: &mut JsonToolInput<'_>| marker_whitespace(input, config),
+        )
+        .void()
+        .parse_next(input),
+        None => Ok(()),
+    }
+}
+
+/// Parse the configured sequence closing delimiter, if any.
+fn container_end(
+    input: &mut JsonToolInput<'_>,
+    container: Option<JsonToolCallContainer>,
+    config: JsonToolCallConfig,
+) -> ModalResult<()> {
+    match container {
+        Some(container) => seq!(
+            _: literal(container.end_marker),
+            _: |input: &mut JsonToolInput<'_>| marker_whitespace(input, config),
+        )
+        .void()
+        .parse_next(input),
+        None => Ok(()),
+    }
 }
 
 /// Parse a delimiter between JSON tool calls inside one marker block.
