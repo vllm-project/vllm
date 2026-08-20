@@ -4762,6 +4762,45 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+def test_stale_kv_xfer_completion_for_aborted_request():
+    scheduler = create_scheduler(use_kv_connector=True)
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    def xfer_finished() -> ModelRunnerOutput:
+        return ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            kv_connector_output=KVConnectorOutput(
+                finished_recving={request.request_id},
+            ),
+        )
+
+    # First completion lands normally, then the client disconnects and the
+    # request is aborted and freed.
+    scheduler.update_from_output(scheduler_output, xfer_finished())
+    scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in scheduler.requests
+
+    # A duplicate/late completion for the same transfer must be ignored
+    # instead of tripping the assert.
+    scheduler.update_from_output(scheduler_output, xfer_finished())
+    assert request.request_id not in scheduler.requests
+
+
 def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(
