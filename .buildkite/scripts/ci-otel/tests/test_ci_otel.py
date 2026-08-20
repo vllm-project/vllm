@@ -82,6 +82,120 @@ def test_spool_round_trip_is_local(monkeypatch, tmp_path):
     assert ci_otel.load_spans() == [span]
 
 
+def test_buildx_ref_supports_bake_metadata(tmp_path):
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text(
+        json.dumps({"test-ci": {"buildx.build.ref": "builder/node/record-id"}})
+    )
+
+    assert ci_otel.buildx_ref(str(metadata), "test-ci") == "builder/node/record-id"
+
+
+def test_buildkit_trace_groups_stages_and_includes_descendant_time(monkeypatch):
+    monkeypatch.setenv("BUILDKITE_BUILD_ID", "build-id")
+    payload = {
+        "data": [
+            {
+                "spans": [
+                    {
+                        "spanID": "01" * 8,
+                        "operationName": "[base 1/2] FROM alpine:3.21",
+                        "startTime": 100,
+                        "duration": 10,
+                        "tags": [{"key": "vertex", "value": "sha256:from"}],
+                    },
+                    {
+                        "spanID": "02" * 8,
+                        "operationName": "registry pull",
+                        "references": [{"refType": "CHILD_OF", "spanID": "01" * 8}],
+                        "startTime": 105,
+                        "duration": 95,
+                    },
+                    {
+                        "spanID": "03" * 8,
+                        "operationName": "[base 2/2] RUN uv pip install vllm",
+                        "startTime": 210,
+                        "duration": 40,
+                        "tags": [{"key": "vertex", "value": "sha256:run"}],
+                    },
+                    {
+                        "spanID": "04" * 8,
+                        "operationName": "[test 1/1] COPY --from=base /opt /opt",
+                        "startTime": 260,
+                        "duration": 20,
+                        "tags": [{"key": "vertex", "value": "sha256:copy"}],
+                    },
+                    {
+                        "spanID": "05" * 8,
+                        "operationName": "[internal] load build context",
+                        "startTime": 90,
+                        "duration": 30,
+                        "tags": [{"key": "vertex", "value": "sha256:context"}],
+                    },
+                    {
+                        "spanID": "06" * 8,
+                        "operationName": (
+                            "cache request: [base 2/2] RUN uv pip install vllm"
+                        ),
+                        "startTime": 205,
+                        "duration": 2,
+                        "tags": [{"key": "vertex", "value": "sha256:run"}],
+                    },
+                ]
+            }
+        ]
+    }
+
+    spans = ci_otel.buildkit_spans(payload)
+    stages = {
+        span.attributes.get("docker.stage"): span
+        for span in spans
+        if span.name == "docker.stage"
+    }
+    instructions = [span for span in spans if span.name == "docker.instruction"]
+
+    assert set(stages) == {"base", "test"}
+    assert stages["base"].start_ns == 100_000
+    assert stages["base"].end_ns == 250_000
+    assert len(instructions) == 3
+    assert len([span for span in spans if span.name == "docker.internal"]) == 1
+    from_span = next(
+        span for span in instructions if span.attributes["docker.instruction"] == "FROM"
+    )
+    assert from_span.end_ns == 200_000
+    assert from_span.parent_span_id == stages["base"].span_id
+    assert all(span.trace_id == stages["base"].trace_id for span in spans)
+
+
+def test_record_buildkit_trace_spools_normalized_spans(monkeypatch, tmp_path):
+    trace_file = tmp_path / "trace.json"
+    trace_file.write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "spans": [
+                            {
+                                "spanID": "01" * 8,
+                                "operationName": "[base 1/1] RUN true",
+                                "startTime": 100,
+                                "duration": 20,
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path / "spool"))
+
+    assert ci_otel.record_buildkit_trace(str(trace_file)) is True
+    assert {span.attributes["ci.span.kind"] for span in ci_otel.load_spans()} == {
+        "docker-stage",
+        "docker-instruction",
+    }
+
+
 def test_export_uses_buildkite_oidc_and_otlp(monkeypatch):
     for name, value in {
         "BUILDKITE": "true",

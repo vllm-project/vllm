@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import struct
 import sys
@@ -21,6 +22,7 @@ ENDPOINT = os.getenv("CI_INFRA_OTEL_ENDPOINT", "https://ci.vllm.ai/api/otel/v1/t
 AUDIENCE = os.getenv("CI_INFRA_OTEL_AUDIENCE", "https://ci.vllm.ai/api/otel")
 MAX_BATCH_SIZE = 2_000
 TEST_SPOOL_BATCH_SIZE = 100
+DOCKERFILE_STEP = re.compile(r"^\[(.+?)\s+(\d+)/(\d+)\]\s+(.+)$")
 
 
 @dataclass(frozen=True)
@@ -189,6 +191,235 @@ def _read_spool() -> tuple[list[Span], list[Path]]:
 
 def load_spans() -> list[Span]:
     return _read_spool()[0]
+
+
+def buildx_ref(metadata_path: str, target: str) -> str:
+    """Read the exact Buildx history reference emitted by bake."""
+    metadata = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+    target_metadata = metadata.get(target, metadata)
+    reference = target_metadata.get("buildx.build.ref")
+    if not isinstance(reference, str) or not reference:
+        raise ValueError(f"Buildx metadata has no history reference for {target}")
+    return reference
+
+
+def _buildkit_tags(span: dict) -> dict[str, str | int | bool]:
+    tags: dict[str, str | int | bool] = {}
+    for tag in span.get("tags", []):
+        key = tag.get("key")
+        value = tag.get("value")
+        if isinstance(key, str) and isinstance(value, (str, int, bool)):
+            tags[key] = value
+    return tags
+
+
+def _buildkit_parent_ids(span: dict) -> list[str]:
+    return [
+        reference["spanID"]
+        for reference in span.get("references", [])
+        if reference.get("refType") == "CHILD_OF"
+        and isinstance(reference.get("spanID"), str)
+    ]
+
+
+def _buildkit_span_id(trace_id: str, value: str) -> str:
+    return hashlib.sha256(f"{trace_id}:{value}".encode()).hexdigest()[:16]
+
+
+def buildkit_spans(payload: dict) -> list[Span]:
+    """Normalize Buildx's Jaeger JSON into dashboard-oriented OTLP spans."""
+    trace_id, _, _ = new_context()
+    traces = payload.get("data", [])
+    native_trace_id = (
+        traces[0].get("traceID", "buildkit")
+        if traces and isinstance(traces[0], dict)
+        else "buildkit"
+    )
+    span_scope = (
+        os.getenv("CI_INFRA_BUILDX_REF")
+        or os.getenv("BUILDKITE_JOB_ID")
+        or str(native_trace_id)
+    )
+    steps: list[tuple[str, int, int, str, dict, int, int, int]] = []
+
+    for trace in traces:
+        raw_spans = [
+            span
+            for span in trace.get("spans", [])
+            if isinstance(span, dict) and isinstance(span.get("spanID"), str)
+        ]
+        spans_by_id = {span["spanID"]: span for span in raw_spans}
+        children: dict[str, list[dict]] = {}
+        for span in raw_spans:
+            for parent_id in _buildkit_parent_ids(span):
+                if parent_id in spans_by_id:
+                    children.setdefault(parent_id, []).append(span)
+
+        def envelope(
+            span: dict, child_spans: dict[str, list[dict]] = children
+        ) -> tuple[int, int]:
+            start_us = int(span["startTime"])
+            end_us = start_us + int(span["duration"])
+            pending = list(child_spans.get(span["spanID"], []))
+            seen: set[str] = set()
+            while pending:
+                child = pending.pop()
+                child_id = child["spanID"]
+                if child_id in seen:
+                    continue
+                seen.add(child_id)
+                child_start = int(child["startTime"])
+                start_us = min(start_us, child_start)
+                end_us = max(end_us, child_start + int(child["duration"]))
+                pending.extend(child_spans.get(child_id, []))
+            return start_us * 1_000, end_us * 1_000
+
+        selected: dict[str, tuple[dict, int, int]] = {}
+        for span in raw_spans:
+            name = span.get("operationName")
+            if not isinstance(name, str) or name.startswith("cache request: "):
+                continue
+            match = DOCKERFILE_STEP.match(name)
+            is_internal = name.startswith("[internal] ")
+            is_export = name.startswith(("exporting to ", "export to "))
+            if not (match or is_internal or is_export):
+                continue
+            try:
+                start_ns, end_ns = envelope(span)
+            except (KeyError, TypeError, ValueError):
+                continue
+            vertex = _buildkit_tags(span).get("vertex")
+            key = str(vertex) if vertex else f"{name}:{span['spanID']}"
+            previous = selected.get(key)
+            if previous is None or end_ns - start_ns > previous[2] - previous[1]:
+                selected[key] = (span, start_ns, end_ns)
+
+        for span, start_ns, end_ns in selected.values():
+            name = span["operationName"]
+            match = DOCKERFILE_STEP.match(name)
+            tags = _buildkit_tags(span)
+            failed = (
+                tags.get("error") is True or tags.get("otel.status_code") == "ERROR"
+            )
+            if match:
+                stage, index, total, label = match.groups()
+                step_index, step_total = int(index), int(total)
+            else:
+                stage = "BuildKit internals"
+                label = name.removeprefix("[internal] ")
+                step_index = step_total = 0
+            steps.append(
+                (
+                    stage,
+                    step_index,
+                    step_total,
+                    label,
+                    tags,
+                    start_ns,
+                    end_ns,
+                    2 if failed else 1,
+                )
+            )
+
+    output: list[Span] = []
+    build_ref = os.getenv("CI_INFRA_BUILDX_REF", "")
+    for stage in dict.fromkeys(
+        step[0] for step in steps if step[0] != "BuildKit internals"
+    ):
+        stage_steps = sorted(
+            (step for step in steps if step[0] == stage), key=lambda step: step[5]
+        )
+        stage_id = _buildkit_span_id(trace_id, f"{span_scope}:stage:{stage}")
+        stage_start = min(step[5] for step in stage_steps)
+        stage_end = max(step[6] for step in stage_steps)
+        stage_failed = any(step[7] == 2 for step in stage_steps)
+        stage_attributes: dict[str, str | int | bool] = {
+            "ci.span.kind": "docker-stage",
+            "docker.stage": stage,
+            "docker.step.count": len(stage_steps),
+        }
+        if build_ref:
+            stage_attributes["docker.build.ref"] = build_ref
+        output.append(
+            Span(
+                trace_id=trace_id,
+                span_id=stage_id,
+                parent_span_id=None,
+                name="docker.stage",
+                start_ns=stage_start,
+                end_ns=stage_end,
+                attributes=stage_attributes,
+                status_code=2 if stage_failed else 1,
+            )
+        )
+        for (
+            stage_name,
+            index,
+            total,
+            label,
+            tags,
+            start_ns,
+            end_ns,
+            status,
+        ) in stage_steps:
+            vertex = str(tags.get("vertex", ""))
+            attributes: dict[str, str | int | bool] = {
+                "ci.span.kind": "docker-instruction",
+                "docker.stage": stage_name,
+                "docker.step.label": label,
+            }
+            if index:
+                attributes["docker.step.index"] = index
+                attributes["docker.step.total"] = total
+                attributes["docker.instruction"] = label.split(None, 1)[0]
+            if vertex:
+                attributes["docker.vertex"] = vertex
+            output.append(
+                Span(
+                    trace_id=trace_id,
+                    span_id=_buildkit_span_id(
+                        trace_id,
+                        f"{span_scope}:step:{stage_name}:{index}:{vertex}:{label}",
+                    ),
+                    parent_span_id=stage_id,
+                    name="docker.instruction",
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                    attributes=attributes,
+                    status_code=status,
+                )
+            )
+    for stage_name, index, total, label, tags, start_ns, end_ns, status in (
+        step for step in steps if step[0] == "BuildKit internals"
+    ):
+        vertex = str(tags.get("vertex", ""))
+        attributes: dict[str, str | int | bool] = {
+            "ci.span.kind": "docker-internal",
+            "docker.stage": stage_name,
+            "docker.step.label": label,
+        }
+        if vertex:
+            attributes["docker.vertex"] = vertex
+        output.append(
+            Span(
+                trace_id=trace_id,
+                span_id=_buildkit_span_id(
+                    trace_id, f"{span_scope}:internal:{vertex}:{label}"
+                ),
+                parent_span_id=None,
+                name="docker.internal",
+                start_ns=start_ns,
+                end_ns=end_ns,
+                attributes=attributes,
+                status_code=status,
+            )
+        )
+    return output
+
+
+def record_buildkit_trace(trace_path: str) -> bool:
+    payload = json.loads(Path(trace_path).read_text(encoding="utf-8"))
+    return record_spans(buildkit_spans(payload))
 
 
 def _remaining_seconds(deadline: float) -> float:
@@ -376,11 +607,18 @@ def main(arguments: list[str] | None = None) -> int:
             return 0
         if arguments == ["flush"]:
             return 0 if flush_spans() else 1
+        if len(arguments) == 3 and arguments[0] == "build-ref":
+            print(buildx_ref(arguments[1], arguments[2]))
+            return 0
+        if len(arguments) == 2 and arguments[0] == "record-buildkit":
+            return 0 if record_buildkit_trace(arguments[1]) else 1
         if len(arguments) == 8 and arguments[0] == "record-command":
             _record_command(arguments[1:])
             return 0
         print(
-            "usage: ci_otel.py {new-context|flush|record-command ...}", file=sys.stderr
+            "usage: ci_otel.py {new-context|flush|build-ref ...|"
+            "record-buildkit ...|record-command ...}",
+            file=sys.stderr,
         )
         return 2
     except Exception as error:
