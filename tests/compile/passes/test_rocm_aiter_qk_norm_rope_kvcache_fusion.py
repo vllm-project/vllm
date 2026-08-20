@@ -42,13 +42,13 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-pytestmark = [
-    pytest.mark.skip_global_cleanup,
-    pytest.mark.skipif(
-        not current_platform.is_rocm(),
-        reason="ROCm/AITER-only fusion test",
-    ),
-]
+pytestmark = pytest.mark.skip_global_cleanup
+
+if not is_aiter_found_and_supported():
+    pytest.skip(
+        "ROCm with supported AITER is required",
+        allow_module_level=True,
+    )
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -448,10 +448,6 @@ _FUSION_CONFIGS = [
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("rms_norm_eps", [1e-6])
 @pytest.mark.parametrize("custom_op", ["+rotary_embedding", "+rms_norm"])
-@pytest.mark.skipif(
-    not is_aiter_found_and_supported(),
-    reason="Only test on ROCm with AITER installed and supported",
-)
 # The fused_qk_norm_rope_cache kernel used by this test aborts on AITER < 0.1.20
 # (fused_qk_norm_rope_cache_quant.cu: "k_cache/v_cache must be contiguous within
 # a block")
