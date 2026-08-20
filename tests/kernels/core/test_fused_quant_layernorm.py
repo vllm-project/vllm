@@ -127,6 +127,10 @@ RMS_NORM_CONFIGS = [
         group_size,
         tma_alignment,
     )
+    and (
+        hidden_size not in SINGLE_READ_HIDDEN_SIZES
+        or (quant_dtype == current_platform.fp8_dtype() and group_size is None)
+    )
 ]
 
 ## Helpers
