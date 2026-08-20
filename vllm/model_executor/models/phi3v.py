@@ -495,12 +495,8 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             if len(token_ids) and token_ids[0] == tokenizer.bos_token_id:
                 token_ids = token_ids[1:]
             text = tokenizer.decode(token_ids)
-            for special_tokens in tokenizer.special_tokens_map.values():
-                if isinstance(special_tokens, str):
-                    text = text.replace(f"{special_tokens} ", special_tokens)
-                elif isinstance(special_tokens, list):
-                    for special_token in special_tokens:
-                        text = text.replace(f"{special_token} ", special_token)
+            for special_token in tokenizer.all_special_tokens:
+                text = text.replace(f"{special_token} ", special_token)
             # perform hf behavior
             # https://huggingface.co/microsoft/Phi-3.5-vision-instruct/blob/64f88b6/processing_phi3_v.py#L407
             pattern = r"<\|image_\d+\|>"
