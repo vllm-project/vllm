@@ -74,7 +74,6 @@ def test_dspark_mla_config_loads_from_local_json(tmp_path):
     }
     assert config.n_routed_experts == 0
     assert config.draft_vocab_size == config.vocab_size
-    assert config.block_size == 7
 
 
 @pytest.mark.parametrize(
@@ -132,6 +131,7 @@ def test_dspark_mla_speculative_config_preserves_architecture(tmp_path):
     speculative_config = SpeculativeConfig(
         model=str(draft_path),
         method="dspark",
+        num_speculative_tokens=7,
         target_model_config=target_config,
         target_parallel_config=ParallelConfig(),
     )
