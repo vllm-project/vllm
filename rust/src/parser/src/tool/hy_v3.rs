@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+mod structural_tag;
+
+use std::sync::Arc;
+
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
+use self::structural_tag::HyV3StructuralTagBuilder;
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
@@ -99,18 +104,21 @@ pub(crate) struct HyV3ToolParser {
     mode: HyV3Mode,
     emitted_tool_count: usize,
     tool_parameters: ToolSchemas,
-    markers: HyV3ToolMarkers,
+    markers: Arc<HyV3ToolMarkers>,
+    structural_tag_builder: HyV3StructuralTagBuilder,
 }
 
 impl HyV3ToolParser {
     /// Create a HY3 tool parser.
     pub(crate) fn new(tools: &[Tool], suffix: &str) -> Self {
+        let markers = Arc::new(HyV3ToolMarkers::new(suffix));
         Self {
             buffer: String::new(),
             mode: HyV3Mode::Text,
             emitted_tool_count: 0,
             tool_parameters: ToolSchemas::from_tools(tools),
-            markers: HyV3ToolMarkers::new(suffix),
+            markers: Arc::clone(&markers),
+            structural_tag_builder: HyV3StructuralTagBuilder::new(markers),
         }
     }
 
@@ -157,7 +165,7 @@ impl ToolParser for HyV3ToolParser {
     }
 
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
-        Some(xgrammar_structural_tag::Model::HyV3.builder())
+        Some(&self.structural_tag_builder)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {

@@ -103,6 +103,10 @@ mod tests {
 
     use serde_json::json;
     use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
+    use xgrammar_structural_tag::builders::StructuralTagOptions;
+    use xgrammar_structural_tag::{
+        FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
+    };
 
     use super::{HyV3UnifiedParser, UnifiedParser};
     use crate::tool::Tool;
@@ -173,5 +177,31 @@ mod tests {
                 }),
             ]
         );
+    }
+
+    #[test]
+    fn structural_tag_uses_tokenizer_detected_suffix() {
+        let parser = HyV3UnifiedParser::new(&tools(), Arc::new(tokenizer())).unwrap();
+        let structural_tools = [ToolParam::Function(FunctionToolParam::new(
+            FunctionDefinition::new("get_weather").with_parameters(json!({
+                "type": "object",
+                "properties": { "city": { "type": "string" } },
+                "required": ["city"]
+            })),
+        ))];
+
+        let tag = build_structural_tag(
+            parser.structural_tag_builder().unwrap(),
+            &structural_tools,
+            ToolChoice::required(),
+            StructuralTagOptions::default().with_reasoning(false),
+        )
+        .unwrap()
+        .to_json_string()
+        .unwrap();
+
+        assert!(tag.contains("<tool_calls:opensource>"));
+        assert!(tag.contains("<arg_value:opensource>"));
+        assert!(!tag.contains("glm_xml"));
     }
 }
