@@ -6,7 +6,7 @@
 """Data classes for MooncakeStoreConnector."""
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 import numpy as np
@@ -14,6 +14,7 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -361,11 +362,16 @@ class ReqMeta:
 
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
-    is_last_chunk: bool | None = None
     current_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
+    # Absolute request offset represented by token_ids[0].
+    token_ids_start: int = 0
     num_prompt_tokens: int | None = None
+    # Identifies this store job for the engine's lifetime. A request id cannot
+    # serve that purpose: it is reused once a preempted request resumes, so it
+    # would release the wrong job's blocks.
+    store_job_id: int | None = None
     # Core-provided per-mamba-group
     # (group_id, cow_block_id, boundary_tokens) for this request's partial tail.
     # Present only on the producer's CoW step; drives the connector's offload
@@ -379,14 +385,14 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
-        is_last_chunk: bool | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
 
-        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
+        token_ids_start = tracker.num_saved_tokens
+        chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
@@ -403,8 +409,10 @@ class ReqMeta:
             tracker.num_saved_tokens = num_tokens_to_save
 
         token_ids = None
-        if tracker.token_ids:
-            token_ids = tracker.token_ids
+        if tracker.token_ids and not skip_save:
+            # Scheduler tracking continues while this job is handled by an
+            # asynchronous worker, so metadata must own a stable snapshot.
+            token_ids = tracker.token_ids[token_ids_start:num_tokens_to_save]
 
         if load_spec is not None and load_spec.can_load:
             logger.debug(
@@ -428,10 +436,27 @@ class ReqMeta:
             can_save=not skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,
-            is_last_chunk=is_last_chunk,
             token_ids=token_ids,
+            token_ids_start=token_ids_start,
             num_prompt_tokens=tracker.prefill_end_tokens,
         )
+
+
+@dataclass
+class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
+    """Maps ``ReqMeta.store_job_id`` to the number of ranks done with that job."""
+
+    completed_saves: dict[int, int] = field(default_factory=dict)
+
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "MooncakeStoreWorkerMetadata":
+        assert isinstance(other, MooncakeStoreWorkerMetadata)
+        for store_job_id, count in other.completed_saves.items():
+            self.completed_saves[store_job_id] = (
+                self.completed_saves.get(store_job_id, 0) + count
+            )
+        return self
 
 
 class MooncakeStoreConnectorMetadata(KVConnectorMetadata):
