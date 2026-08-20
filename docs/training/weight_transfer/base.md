@@ -21,8 +21,7 @@ vice versa, so the registries stay independent.
 ### WeightSource
 
 **This is the adapter for whatever shape your trainer's weights are in.**
-`WeightSource` is the seam where a framework is adapted once, after which *every*
-weight transfer backend works against it unchanged.
+`WeightSource` defines how you extract your weights for your specific framework.
 
 What an engine gets is always the same: HF-format parameter names, and tensors
 already materialized to their full (unsharded) shape. Whatever gathering,
@@ -118,8 +117,8 @@ what the source above does, since its bridge gathers across all parallelism befo
 yielding. That is simple and always correct, but it means the gather cost is paid
 in full on every rank.
 
-Override `held_names()` when the ranks are split so each holds only part of the
-model, and you would rather *not* gather across that split. It returns the
+Optionally, you can override `held_names()` when the ranks are split so each holds only part of the
+model. It returns the
 parameter names this rank holds (or `None`, the default, for all of them):
 
 ```python
@@ -128,11 +127,11 @@ def held_names(self):
     return self._my_stage_names - self._foreign_expert_names
 ```
 
-One declaration covers every layout — pipeline stages (a rank holds some layers),
+This covers various trainer layouts — pipeline stages (a rank holds some layers),
 expert parallelism (a rank holds some experts), both at once, or a shape that fits
 neither. Backends that can route per parameter (see
 [sharded RDT](sharded_rdt.md)) then pull each name from a rank that actually
-holds it. Backends that broadcast ignore it.
+holds it.
 
 Three requirements come with overriding it:
 
@@ -146,6 +145,11 @@ Three requirements come with overriding it:
   appears, in metadata order, so the order check stays aligned across ranks — only
   the data is absent. Claiming a name and then yielding `None` for it is an error
   the engine reports by name.
+
+!!! warning "Partial ownership only works with sharded RDT"
+    Only a backend that routes per parameter honours `held_names()`.
+    Broadcast backends ignore it and send every name from every rank, so
+    declaring partial ownership there changes nothing.
 
 #### Gather groups
 
@@ -195,7 +199,7 @@ Two hooks follow from this, both with working defaults:
 Because `metadata()` order defines the partition, **all names sharing a layer
 index must be contiguous in it**. A source whose natural export order interleaves
 layers — bucketing all the MoE experts together, say — has to reorder before
-returning. Sharded RDT rejects a source that does not, at `trainer_init`.
+returning.
 
 ### VLLMWeightSyncClient
 
@@ -470,7 +474,7 @@ Subclasses must implement five methods:
 The base class provides:
 
 1. `__init__`, taking `config` (`WeightTransferConfig`), `vllm_config` (`VllmConfig`), `device` (`torch.device`), and `model` (`nn.Module`).
-2. `update_weights(update_info_dict)`, a thin wrapper for `receive_weights`: it parses the dict into the typed dataclass, calls `receive_weights`, and synchronizes the device.
+2. `update_weights(update_info_dict)`, a thin wrapper for `receive_weights`: it parses the dict into the typed dataclass, calls `receive_weights`, and synchronizes the device — unless the engine sets `defers_processing`, below.
 3. `parse_init_info` / `parse_update_info`, which convert API-level dicts into the typed dataclasses and raise `ValueError` on a bad payload.
 4. `set_weight_update_target` / `reset_weight_update_target`, used to retarget an update at the speculative draft model.
 
@@ -480,6 +484,25 @@ The base class provides:
     `init_transfer_engine`, then read from `self` in `receive_weights`. Per-round
     update info carries only per-round metadata. This is what makes a
     trainer/worker mismatch unrepresentable.
+
+!!! note "`defers_processing`: when a returned update means queued, not applied"
+    An engine that pipelines its GPU post-processing onto background threads
+    cannot let `update_weights` synchronize the device — that would block on
+    those threads and serialize the pipeline. Such an engine sets the class
+    attribute `defers_processing = True`, omits the per-update sync, and
+    guarantees completion in `finish_weight_update` instead.
+
+    Callers that go through `finish_weight_update` need do nothing; the engine
+    drains there. A caller that drives the tail itself — running its own
+    `finalize_layerwise_reload`, say — must check the flag and call
+    `drain_pending()` first, because with it set a returned `update_weights`
+    means *queued*, not *applied*. `drain_pending()` is idempotent, and a no-op
+    on an engine that processes synchronously, so it is always safe to call.
+
+    [Sharded RDT](sharded_rdt.md) is the built-in engine that sets it: it
+    scatters and quantizes on background threads with their own CUDA streams, so
+    its `drain_pending()` joins both queues and syncs both streams before
+    `finalize_layerwise_reload` runs.
 
 ### Request Classes
 

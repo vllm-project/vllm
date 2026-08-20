@@ -3,7 +3,7 @@
 """Op-chain recording for the sharded-RDT backend.
 
 The consumer asks the trainer for the exact slice a worker consumes, described as
-an op chain replayed on the trainer's live tensor. ``LazyRDTTensor`` builds the
+an op chain replayed on the trainer's live tensor. ``FakeRDTTensor`` builds the
 chain by intercepting the model's own weight loaders; ``copy_`` is its data sink,
 ``BakeSink`` — the dry run records how each slice would be fetched and where it
 lands.
@@ -32,8 +32,8 @@ def _freeze_kwargs(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     return tuple(sorted(kwargs.items()))
 
 
-class _UnsupportedLazyOp(NotImplementedError):
-    """Raised when a weight loader does something to a LazyRDTTensor that cannot
+class _UnsupportedFakeOp(NotImplementedError):
+    """Raised when a weight loader does something to a FakeRDTTensor that cannot
     be expressed as a slice request.
 
     Surfaced as NotImplementedError so callers can distinguish "this backend
@@ -53,7 +53,7 @@ class _Scatter:
     sync re-materializes fresh tensors.
 
     ``shape`` and ``dtype`` also size the slice ON THE WIRE, so ``dtype`` is the
-    PRODUCED dtype (the lazy's after its op chain), not the source name's:
+    PRODUCED dtype (the fake's after its op chain), not the source name's:
     ``view(dtype)`` is allowlisted, and taking the source's would size the slice
     with the wrong itemsize and carve the packed blob differently on the two
     sides.
@@ -68,7 +68,7 @@ class _Scatter:
     dtype: torch.dtype
 
 
-def _meta_copy_(dest: torch.Tensor, src: "LazyRDTTensor") -> torch.Tensor:
+def _meta_copy_(dest: torch.Tensor, src: "FakeRDTTensor") -> torch.Tensor:
     """Fire ``dest.copy_`` from a zero-storage meta source of ``src``'s geometry.
 
     Moves no data but still counts against the layer's loaded numel, which drives
@@ -109,7 +109,7 @@ class BakeSink:
     # here but unbaked fail the plan build.
     copied_names: "set[str]" = field(default_factory=set)
 
-    def accept_copy(self, dest: torch.Tensor, src: "LazyRDTTensor") -> torch.Tensor:
+    def accept_copy(self, dest: torch.Tensor, src: "FakeRDTTensor") -> torch.Tensor:
         self.copied_names.add(src._name)
         if self.current is not None:
             layer, param_name = self.current
@@ -117,11 +117,11 @@ class BakeSink:
                 # The packed layout sizes each slice from the DESTINATION shape,
                 # while the producer packs what the replayed chain produces. A
                 # broadcasting copy_ makes those two lengths differ, and neither
-                # side can notice: the consumer's arena view is exactly
+                # side can notice: the consumer's buffer view is exactly
                 # prod(dest.shape) elements, so it reshapes cleanly over bytes
                 # the producer laid out at different offsets. Refuse at bake.
-                raise _UnsupportedLazyOp(
-                    f"LazyRDTTensor: broadcasting copy_ into {param_name!r} of "
+                raise _UnsupportedFakeOp(
+                    f"FakeRDTTensor: broadcasting copy_ into {param_name!r} of "
                     f"{type(layer).__name__} ({src.numel()} elements from "
                     f"{src._name!r} into {dest.numel()}). The sharded RDT "
                     "backend sends exactly the slice the loader asks for, so "
@@ -141,13 +141,13 @@ class BakeSink:
         return _meta_copy_(dest, src)
 
 
-class LazyRDTTensor(torch.Tensor):
+class FakeRDTTensor(torch.Tensor):
     """Zero-storage tensor that records how to fetch a weight slice.
 
     ``_make_wrapper_subclass`` gives it shape/dtype/device without storage. Every
     op in ``SUPPORTED_OPS`` returns a child with the spec appended; ``copy_``
     delegates to the installed sink. Anything else reaches ``__torch_dispatch__``
-    and raises ``_UnsupportedLazyOp``, so failures are loud rather than silently
+    and raises ``_UnsupportedFakeOp``, so failures are loud rather than silently
     fetching the wrong bytes.
     """
 
@@ -156,7 +156,7 @@ class LazyRDTTensor(torch.Tensor):
     # returns a tensor it can't annotate as ``self``).
     _name: str
     _ops: OpChain
-    # Handles this lazy's copy_. ``None`` only on bare construction.
+    # Handles this fake's copy_. ``None`` only on bare construction.
     _sink: "BakeSink | None"
 
     @staticmethod
@@ -168,7 +168,7 @@ class LazyRDTTensor(torch.Tensor):
         device: torch.device,
         ops: OpChain = (),
         sink: "BakeSink | None" = None,
-    ) -> "LazyRDTTensor":
+    ) -> "FakeRDTTensor":
         t = torch.Tensor._make_wrapper_subclass(
             cls,
             shape,
@@ -189,13 +189,13 @@ class LazyRDTTensor(torch.Tensor):
         new_shape: torch.Size,
         new_dtype: torch.dtype,
         *new_ops: OpSpec,
-    ) -> "LazyRDTTensor":
+    ) -> "FakeRDTTensor":
         """Append one or more ops to the chain and return a fresh child.
 
         Variadic so multi-return ops (e.g. chunk) can append both the base
         op and an indexing op in a single call.
         """
-        return LazyRDTTensor(
+        return FakeRDTTensor(
             name=self._name,
             shape=new_shape,
             dtype=new_dtype,
@@ -205,7 +205,7 @@ class LazyRDTTensor(torch.Tensor):
         )
 
     def _meta(self) -> torch.Tensor:
-        """A zero-storage meta tensor of this lazy's shape/dtype, so PyTorch
+        """A zero-storage meta tensor of this fake's shape/dtype, so PyTorch
         itself computes post-op geometry rather than us reimplementing it."""
         return torch.empty(self.shape, dtype=self.dtype, device="meta")
 
@@ -242,7 +242,7 @@ class LazyRDTTensor(torch.Tensor):
     @classmethod
     def _intercept(
         cls,
-        self_: "LazyRDTTensor",
+        self_: "FakeRDTTensor",
         func: Callable,
         op_name: str,
         args: tuple,
@@ -275,8 +275,8 @@ class LazyRDTTensor(torch.Tensor):
             )
 
         # Non-tensor result (e.g. .item() snuck into the allowlist).
-        raise _UnsupportedLazyOp(
-            f"LazyRDTTensor: {op_name!r} returned a non-tensor "
+        raise _UnsupportedFakeOp(
+            f"FakeRDTTensor: {op_name!r} returned a non-tensor "
             f"({type(meta_result).__name__}); cannot defer."
         )
 
@@ -284,13 +284,13 @@ class LazyRDTTensor(torch.Tensor):
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
 
-        # A lazy at the aten level means an unsupported loader op. Name the op and
+        # A fake at the aten level means an unsupported loader op. Name the op and
         # the chain; materializing instead would mask a correctness bug.
         for arg in (*args, *kwargs.values()):
             if isinstance(arg, cls):
-                raise _UnsupportedLazyOp(
-                    f"LazyRDTTensor: unsupported op {func} reached "
-                    f"__torch_dispatch__ on lazy {arg._name!r} "
+                raise _UnsupportedFakeOp(
+                    f"FakeRDTTensor: unsupported op {func} reached "
+                    f"__torch_dispatch__ on fake {arg._name!r} "
                     f"(chain={arg._ops}). Supported ops are: "
                     f"{sorted(SUPPORTED_OPS.values())}, plus copy_. "
                     "Loaders that need .to(), .float(), .item(), arithmetic, "

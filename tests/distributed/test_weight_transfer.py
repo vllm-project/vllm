@@ -1456,6 +1456,23 @@ class TestWeightSourceGroupContract:
             ["model.layers.1.a"],
         ]
 
+    def test_groups_keeps_a_partially_held_group_whole(self):
+        """One held name selects the WHOLE group, unheld members included.
+
+        A group is the collective unit, so its membership has to be
+        rank-uniform: a rank that narrowed it to what it holds would disagree
+        with its peers about which names group *g* covers, and the gather would
+        desynchronize. Selection is per group, but only whole groups; the
+        per-name split is the backend's, via owner sets. This is the
+        foreign-expert shape under expert parallelism — a rank holds some
+        experts of a layer, not all of them.
+        """
+        names = ["model.layers.0.a", "model.layers.0.b", "model.layers.1.a"]
+        held = ["model.layers.0.a"]
+        assert self._source(names, held=held).groups() == [
+            ["model.layers.0.a", "model.layers.0.b"],
+        ]
+
     def test_groups_order_follows_metadata_not_the_declaration(self):
         """The declaration is a SET of names; the groups it selects still come
         out in metadata order, so each pairs with the right ``iter_groups()``

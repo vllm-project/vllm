@@ -74,7 +74,7 @@ def layerwise_groups(names: list[str]) -> list[list[str]]:
     an arbitrary export order by flattening this partition.
 
     Backends that gather and free per group (sharded RDT) also use it as the unit
-    of transfer, which bounds their arena sizes: without it a whole model becomes
+    of transfer, which bounds their buffer sizes: without it a whole model becomes
     one chunk.
     """
     pre: list[str] = []

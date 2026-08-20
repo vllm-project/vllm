@@ -4,10 +4,15 @@
 
 The consumer engine's planning core is pure — it turns the baked plan plus the
 driver's gather-group partition into a static `_CallPlan` with no pulls, no
-model and no Ray — so it is exercised here on CPU/meta tensors only. These tests
-pin the values the engine produces today (chunk boundaries, packed byte offsets,
-recorded op chains) so a refactor that changes them fails loudly instead of
-silently shipping different bytes.
+model and no Ray — so most of it is exercised here on CPU/meta tensors only.
+These tests pin the values the engine produces today (chunk boundaries, packed
+byte offsets, recorded op chains) so a refactor that changes them fails loudly
+instead of silently shipping different bytes.
+
+`TestBakeOnARealModel` at the end is the exception: it needs a GPU, because the
+bake only exists to be driven through a real `model.load_weights`, and the parts
+that matter there — that the monkeypatched loaders are put back, and that the
+recorded op chains reproduce what the loaders did — cannot be faked.
 
 `tests/distributed/test_sharded_rdt_trainer.py` covers the trainer (producer)
 side; `test_sharded_rdt_producer.py` covers its serve-actor protocol.
@@ -23,19 +28,19 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
     SUPPORTED_OPS,
     RdtRouter,
-    arena_alloc_bytes,
     assign_producer_indices,
+    buffer_alloc_bytes,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
     ShardedRDTWeightTransferInitInfo,
     _dtype_from_name,
 )
-from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
+from vllm.distributed.weight_transfer.sharded_rdt_fake import (
     BakeSink,
-    LazyRDTTensor,
+    FakeRDTTensor,
     _Scatter,
-    _UnsupportedLazyOp,
+    _UnsupportedFakeOp,
 )
 
 META = torch.device("meta")
@@ -149,22 +154,22 @@ def _one_module_per_layer(n_layers, *, dtype="bfloat16", numel=4):
 
 
 # ---------------------------------------------------------------------------
-# LazyRDTTensor: op-chain recording
+# FakeRDTTensor: op-chain recording
 # ---------------------------------------------------------------------------
 
 
-class TestLazyOpChains:
+class TestFakeOpChains:
     """Every allowlisted op must append itself to the chain and hand back a
     child whose shape/dtype PyTorch itself computed. The chain is the wire
     format the producer replays, so its exact contents are load-bearing."""
 
-    def _lazy(self, shape=(4, 6), dtype=torch.bfloat16, sink=None):
-        return LazyRDTTensor(
+    def _fake(self, shape=(4, 6), dtype=torch.bfloat16, sink=None):
+        return FakeRDTTensor(
             name="w", shape=torch.Size(shape), dtype=dtype, device=META, sink=sink
         )
 
-    def test_bare_lazy_has_metadata_but_no_chain(self):
-        t = self._lazy()
+    def test_bare_fake_has_metadata_but_no_chain(self):
+        t = self._fake()
         assert t.shape == (4, 6)
         assert t.dtype is torch.bfloat16
         assert t._key() == ("w", ())
@@ -185,18 +190,18 @@ class TestLazyOpChains:
         ],
     )
     def test_single_return_op_appends_one_spec(self, call, expect_op, expect_shape):
-        child = call(self._lazy())
-        assert isinstance(child, LazyRDTTensor)
+        child = call(self._fake())
+        assert isinstance(child, FakeRDTTensor)
         assert child._key() == ("w", (expect_op,))
         assert tuple(child.shape) == expect_shape
 
     def test_squeeze_records_its_argument(self):
-        child = self._lazy(shape=(1, 4)).squeeze(0)
+        child = self._fake(shape=(1, 4)).squeeze(0)
         assert child._key() == ("w", (("squeeze", (0,), ()),))
         assert tuple(child.shape) == (4,)
 
     def test_chains_compose_in_call_order(self):
-        child = self._lazy().t().narrow(0, 0, 3).flatten()
+        child = self._fake().t().narrow(0, 0, 3).flatten()
         assert child._key() == (
             "w",
             (
@@ -208,7 +213,7 @@ class TestLazyOpChains:
         assert tuple(child.shape) == (12,)
 
     def test_kwargs_are_frozen_sorted_for_hashability(self):
-        child = self._lazy().narrow(dim=0, start=1, length=2)
+        child = self._fake().narrow(dim=0, start=1, length=2)
         (op, args, kwargs) = child._key()[1][0]
         assert (op, args) == ("narrow", ())
         assert kwargs == (("dim", 0), ("length", 2), ("start", 1))
@@ -218,7 +223,7 @@ class TestLazyOpChains:
     def test_multi_return_op_emits_one_child_per_output(self, op, n):
         """chunk/unbind hand back a tuple; each child carries the base op plus a
         trailing __getitem__(i) so the producer can index the replayed result."""
-        parts = getattr(self._lazy(), op)(*((n,) if op == "chunk" else ()), 0)
+        parts = getattr(self._fake(), op)(*((n,) if op == "chunk" else ()), 0)
         assert isinstance(parts, tuple)
         assert len(parts) == n
         for i, part in enumerate(parts):
@@ -227,16 +232,16 @@ class TestLazyOpChains:
             assert index == ("__getitem__", (i,), ())
 
     def test_op_chain_is_hashable_as_a_fetch_key(self):
-        keys = {self._lazy().t()._key(), self._lazy().t()._key()}
+        keys = {self._fake().t()._key(), self._fake().t()._key()}
         assert len(keys) == 1, "equal chains must collapse — they dedup pull keys"
 
 
-class TestLazyUnsupportedOps:
+class TestFakeUnsupportedOps:
     """Anything that needs real data must fail loudly at bake time rather than
     silently transferring the wrong bytes."""
 
-    def _lazy(self):
-        return LazyRDTTensor(
+    def _fake(self):
+        return FakeRDTTensor(
             name="w",
             shape=torch.Size((4,)),
             dtype=torch.bfloat16,
@@ -256,43 +261,43 @@ class TestLazyUnsupportedOps:
         ids=["to", "float", "add", "mul", "sum"],
     )
     def test_data_dependent_ops_raise(self, call):
-        with pytest.raises(_UnsupportedLazyOp):
-            call(self._lazy())
+        with pytest.raises(_UnsupportedFakeOp):
+            call(self._fake())
 
     def test_error_names_the_weight_and_the_chain(self):
-        with pytest.raises(_UnsupportedLazyOp) as exc:
-            self._lazy().narrow(0, 0, 2).float()
+        with pytest.raises(_UnsupportedFakeOp) as exc:
+            self._fake().narrow(0, 0, 2).float()
         msg = str(exc.value)
         assert "'w'" in msg
         assert "narrow" in msg
 
     def test_unsupported_is_a_notimplementederror(self):
         """Callers distinguish "this backend can't handle the loader" from bugs."""
-        assert issubclass(_UnsupportedLazyOp, NotImplementedError)
+        assert issubclass(_UnsupportedFakeOp, NotImplementedError)
 
 
 class TestBakeRecording:
-    """During the dry run the lazy's ``copy_`` is the data sink: it records the
+    """During the dry run the fake's ``copy_`` is the data sink: it records the
     source chain plus the meta destination's strided region and moves nothing."""
 
-    def _recorder_and_lazy(self, shape=(4, 6)):
+    def _recorder_and_fake(self, shape=(4, 6)):
         rec = BakeSink()
-        lazy = LazyRDTTensor(
+        fake = FakeRDTTensor(
             name="w",
             shape=torch.Size(shape),
             dtype=torch.bfloat16,
             device=META,
             sink=rec,
         )
-        return rec, lazy
+        return rec, fake
 
     def test_copy_records_the_destination_region(self):
-        rec, lazy = self._recorder_and_lazy()
+        rec, fake = self._recorder_and_fake()
         layer = _FakeLayer("q_proj")
         param = torch.empty((8, 6), dtype=torch.bfloat16, device=META)
         dest = param.narrow(0, 4, 4)  # the second half of a fused param
         rec.current = (layer, "weight")
-        dest.copy_(lazy)
+        dest.copy_(fake)
 
         (recorded,) = rec.copies_by_layer[layer]
         assert recorded.src == ("w", ())
@@ -302,25 +307,25 @@ class TestBakeRecording:
         assert recorded.stride == (6, 1)
 
     def test_copy_marks_the_source_name_live(self):
-        rec, lazy = self._recorder_and_lazy()
+        rec, fake = self._recorder_and_fake()
         rec.current = (_FakeLayer("l"), "weight")
-        torch.empty((4, 6), dtype=torch.bfloat16, device=META).copy_(lazy)
+        torch.empty((4, 6), dtype=torch.bfloat16, device=META).copy_(fake)
         assert rec.copied_names == {"w"}
 
     def test_unattributed_copy_is_live_but_unrecorded(self):
         """A copy_ with no loader stamp cannot be attributed to a param, so its
         module must fall back to the plain load — but the name still moved data."""
-        rec, lazy = self._recorder_and_lazy()
+        rec, fake = self._recorder_and_fake()
         rec.current = None
-        torch.empty((4, 6), dtype=torch.bfloat16, device=META).copy_(lazy)
+        torch.empty((4, 6), dtype=torch.bfloat16, device=META).copy_(fake)
         assert rec.copied_names == {"w"}
         assert dict(rec.copies_by_layer) == {}
 
     def test_copies_are_grouped_by_module_in_call_order(self):
-        rec, _ = self._recorder_and_lazy()
+        rec, _ = self._recorder_and_fake()
         layer = _FakeLayer("gate_up")
         for i, name in enumerate(("gate", "up")):
-            lazy = LazyRDTTensor(
+            fake = FakeRDTTensor(
                 name=name,
                 shape=torch.Size((4,)),
                 dtype=torch.bfloat16,
@@ -329,17 +334,17 @@ class TestBakeRecording:
             )
             param = torch.empty((8,), dtype=torch.bfloat16, device=META)
             rec.current = (layer, "weight")
-            param.narrow(0, 4 * i, 4).copy_(lazy)
+            param.narrow(0, 4 * i, 4).copy_(fake)
         assert [c.src[0] for c in rec.copies_by_layer[layer]] == ["gate", "up"]
         assert [c.offset for c in rec.copies_by_layer[layer]] == [0, 4]
 
     def test_recording_a_sliced_source(self):
         """The chain on the source and the region on the dest are independent."""
-        rec, lazy = self._recorder_and_lazy(shape=(8, 6))
+        rec, fake = self._recorder_and_fake(shape=(8, 6))
         layer = _FakeLayer("k_proj")
         rec.current = (layer, "weight")
         param = torch.empty((4, 6), dtype=torch.bfloat16, device=META)
-        param.copy_(lazy.narrow(0, 2, 4))
+        param.copy_(fake.narrow(0, 2, 4))
         (recorded,) = rec.copies_by_layer[layer]
         assert recorded.src == ("w", (("narrow", (0, 2, 4), ()),))
         assert recorded.shape == (4, 6)
@@ -350,10 +355,10 @@ class TestBakeRecording:
         POST-chain dtype: taking it from the source name's metadata instead sizes
         the slice with the wrong itemsize and shifts every later slice in the
         chunk, carving the packed blob differently on the two sides."""
-        rec, lazy = self._recorder_and_lazy(shape=(4,))
+        rec, fake = self._recorder_and_fake(shape=(4,))
         layer = _FakeLayer("reinterpreted")
         rec.current = (layer, "weight")
-        viewed = lazy.view(torch.float32)  # 4 x bf16 -> 2 x f32
+        viewed = fake.view(torch.float32)  # 4 x bf16 -> 2 x f32
         param = torch.empty((2,), dtype=torch.float32, device=META)
         param.copy_(viewed)
 
@@ -367,14 +372,14 @@ class TestBakeRecording:
     def test_a_broadcasting_copy_is_refused_at_bake(self):
         """The packed layout sizes each slice from the DESTINATION shape while
         the producer packs what the chain yields, and nothing downstream can
-        catch a mismatch — the consumer's arena view is exactly prod(dest.shape)
+        catch a mismatch — the consumer's buffer view is exactly prod(dest.shape)
         elements, so it reshapes cleanly over bytes laid out at other offsets.
         So the bake refuses rather than recording a slice it cannot carve."""
-        rec, lazy = self._recorder_and_lazy(shape=(1, 6))
+        rec, fake = self._recorder_and_fake(shape=(1, 6))
         rec.current = (_FakeLayer("broadcast"), "weight")
         param = torch.empty((4, 6), dtype=torch.bfloat16, device=META)
-        with pytest.raises(_UnsupportedLazyOp, match="broadcasting"):
-            param.copy_(lazy)
+        with pytest.raises(_UnsupportedFakeOp, match="broadcasting"):
+            param.copy_(fake)
 
 
 # ---------------------------------------------------------------------------
@@ -731,7 +736,7 @@ class TestChunkModuleScatters:
         ]
 
     def test_scatters_carry_their_own_dtype(self):
-        """dtype rides the record from the bake, where it is the lazy's dtype
+        """dtype rides the record from the bake, where it is the fake's dtype
         AFTER its op chain — not a plan-time lookup of the source name, which
         would be wrong for any chain that reinterprets dtype."""
         layer = _FakeLayer("l")
@@ -1097,20 +1102,20 @@ class TestSignalCompleteness:
 # ---------------------------------------------------------------------------
 
 
-class TestArenaAllocBytes:
+class TestBufferAllocBytes:
     def test_rounds_up_to_a_coarse_256mb_boundary(self):
-        assert arena_alloc_bytes(1) == 256 << 20
-        assert arena_alloc_bytes(256 << 20) == 256 << 20
-        assert arena_alloc_bytes((256 << 20) + 1) == 512 << 20
+        assert buffer_alloc_bytes(1) == 256 << 20
+        assert buffer_alloc_bytes(256 << 20) == 256 << 20
+        assert buffer_alloc_bytes((256 << 20) + 1) == 512 << 20
 
     def test_presize_is_a_floor_not_a_cap(self):
-        assert arena_alloc_bytes(1, presize=3 << 30) == 3 << 30
+        assert buffer_alloc_bytes(1, presize=3 << 30) == 3 << 30
         big = 4 << 30
-        assert arena_alloc_bytes(big, presize=1 << 30) == big
+        assert buffer_alloc_bytes(big, presize=1 << 30) == big
 
     def test_never_returns_less_than_requested(self):
         for nbytes in (1, 1 << 20, (700 << 20) + 3):
-            assert arena_alloc_bytes(nbytes) >= nbytes
+            assert buffer_alloc_bytes(nbytes) >= nbytes
 
 
 class TestLayerwiseGroups:
@@ -1312,12 +1317,325 @@ class TestOpAllowlistAgreement:
     def test_transpose_via_t_is_serveable(self):
         """The specific regression: a chain recorded from ``.t()`` must pass the
         producer's guard."""
-        lazy = LazyRDTTensor(
+        fake = FakeRDTTensor(
             name="w",
             shape=torch.Size((4, 6)),
             dtype=torch.bfloat16,
             device=META,
             sink=None,
         )
-        (op, _args, _kwargs) = lazy.t()._key()[1][0]
+        (op, _args, _kwargs) = fake.t()._key()[1][0]
         assert op in ALLOWED_OPS
+
+
+# ---------------------------------------------------------------------------
+# Bake against a real model (GPU)
+# ---------------------------------------------------------------------------
+
+TINY_QWEN = "Qwen/Qwen3-0.6B"
+
+# One small model per attention/FFN shape the bake has to survive. The point is
+# the checkpoint->module mapping, which differs structurally between them: GQA
+# fuses Q/K/V of unequal head counts into one param, MLA replaces them with the
+# compressed kv_a/kv_b pair, and MoE turns per-expert checkpoint entries into
+# stacked expert params. All are chosen for size -- the largest is 4.4B, and no
+# weights are downloaded (see `_bake_probe`).
+BAKE_MODELS = [
+    pytest.param(TINY_QWEN, id="gqa-dense"),
+    pytest.param("TitanML/tiny-mixtral", id="moe"),
+    # MLA (kv_lora_rank set, so `ModelConfig.use_mla`) plus routed experts. The
+    # smallest OFFICIAL DeepSeek, and it has to be official: the MLA prefill
+    # backends accept only (qk_nope=128, qk_rope=64, v=128), so the tiny random
+    # DeepSeek builds fail engine init outright. bf16 rather than one of the fp8
+    # checkpoints, because `process_weights_after_loading` swaps the vLLM
+    # parameter subclasses out on those and the plain second `load_weights` this
+    # test compares against then cannot run. It is 15.7B, but `load_format=
+    # "dummy"` and the header-only metadata mean nothing is downloaded.
+    pytest.param("deepseek-ai/DeepSeek-V2-Lite", id="mla-moe"),
+]
+
+
+class TestRequiresTheRayExecutor:
+    """The engine's data plane is Ray's, so a non-Ray executor cannot work. The
+    check is at construction because the alternative is an opaque failure during
+    the first handshake, long after the misconfiguration."""
+
+    def _construct(self, backend):
+        cfg = SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend=backend)
+        )
+        eng = object.__new__(ShardedRDTWeightTransferEngine)
+        # Only the guard is under test, so stand in for the base __init__.
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(
+                ShardedRDTWeightTransferEngine.__bases__[0],
+                "__init__",
+                lambda self, *a, **k: None,
+            )
+            ShardedRDTWeightTransferEngine.__init__(eng, None, cfg, META, None)
+        return eng
+
+    @pytest.mark.parametrize("backend", ["uni", "mp", "external_launcher"])
+    def test_a_non_ray_executor_is_refused(self, backend):
+        with pytest.raises(ValueError, match="requires distributed_executor"):
+            self._construct(backend)
+
+    def test_ray_is_accepted(self):
+        self._construct("ray")
+
+    def test_a_custom_executor_class_is_left_alone(self):
+        """A `type[Executor]` override is deliberate and unjudgeable here, so it
+        must not be rejected for merely not being the string "ray"."""
+
+        class _CustomExecutor:
+            pass
+
+        self._construct(_CustomExecutor)
+
+
+def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
+    """Drive `_bake` against the worker's real model and check the three
+    properties. Returns a small summary; every assertion fires here, in the
+    worker, so a failure surfaces as the RPC's exception.
+
+    Self-contained on purpose: this is pickled to the worker, so it imports what
+    it needs rather than closing over this module's globals.
+    """
+    import torch
+    from huggingface_hub import get_safetensors_metadata
+
+    from vllm.distributed.weight_transfer.sharded_rdt_common import ALLOWED_OPS
+    from vllm.distributed.weight_transfer.sharded_rdt_engine import (
+        ShardedRDTWeightTransferEngine,
+        ShardedRDTWeightTransferInitInfo,
+    )
+    from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
+
+    model = self.model_runner.model
+    device = next(model.parameters()).device
+
+    # ---- the checkpoint, exactly as a trainer would describe and serve it ----
+    # Only the safetensors HEADERS are fetched (a few KB); the values are
+    # synthesized. Nothing here depends on real weights -- both the reference
+    # load and the replay read this same dict, so the comparison is unaffected,
+    # and it keeps a multi-GB download out of CI.
+    st_dtype = {
+        "F64": torch.float64,
+        "F32": torch.float32,
+        "F16": torch.float16,
+        "BF16": torch.bfloat16,
+        "F8_E4M3": torch.float8_e4m3fn,
+        "F8_E5M2": torch.float8_e5m2,
+        "I64": torch.int64,
+        "I32": torch.int32,
+        "I8": torch.int8,
+        "U8": torch.uint8,
+        "BOOL": torch.bool,
+    }
+    meta = get_safetensors_metadata(model_name)
+    specs = {}
+    for file_meta in meta.files_metadata.values():
+        for name, t in file_meta.tensors.items():
+            specs[name] = (st_dtype[t.dtype], tuple(t.shape))
+
+    gen = torch.Generator(device="cpu").manual_seed(0)
+    ckpt: dict[str, torch.Tensor] = {}
+    for name, (dt, shape) in specs.items():
+        if dt.is_floating_point:
+            # Small magnitudes so any narrowing cast stays finite.
+            v = torch.randn(shape, generator=gen, dtype=torch.float32) * 0.1
+            ckpt[name] = v.to(dtype=dt)
+        else:
+            ckpt[name] = torch.zeros(shape, dtype=dt)
+    names = sorted(ckpt)
+    dtype_names = [str(ckpt[n].dtype).split(".")[-1] for n in names]
+    shapes = [list(ckpt[n].shape) for n in names]
+
+    def _feed():
+        return iter([(n, ckpt[n]) for n in names])
+
+    # ---- reference: what the model's OWN loader produces from that checkpoint --
+    # Poison first, so "which params did load_weights actually write?" is
+    # answerable. Some params have no checkpoint source at all -- derived ones,
+    # or ones process_weights_after_loading builds -- and those keep their NaNs
+    # and are legitimately outside the plan. That set is what the plan must
+    # cover, not every parameter of the model.
+    def _poison():
+        with torch.no_grad():
+            for prm in model.parameters():
+                if prm.is_floating_point():
+                    prm.fill_(float("nan"))
+                else:
+                    prm.zero_()
+
+    _poison()
+    model.load_weights(_feed())
+    loaded = {
+        n
+        for n, prm in model.named_parameters()
+        if not (prm.is_floating_point() and torch.isnan(prm).any())
+    }
+    # On the host: the weights themselves already fill the GPU.
+    reference = {
+        n: prm.detach().to("cpu", copy=True)
+        for n, prm in model.named_parameters()
+        if n in loaded
+    }
+
+    # ---- pre-bake state, for the restoration check --------------------------
+    param_name_of = {}
+    for mod_name, mod in model.named_modules():
+        for pname in get_layer_tensors(mod):
+            param_name_of[(id(mod), pname)] = f"{mod_name}.{pname}".lstrip(".")
+    loaders_before = {}
+    for mod in model.modules():
+        for pname, tensor in get_layer_tensors(mod).items():
+            loaders_before[(id(mod), pname)] = getattr(tensor, "weight_loader", None)
+
+    # ---- bake ---------------------------------------------------------------
+    eng = object.__new__(ShardedRDTWeightTransferEngine)
+    eng.model = model
+    eng.device = device
+    eng._name_to_plan = {}
+    eng._name_meta = {}
+    eng._live_names = set()
+    eng._bake(
+        ShardedRDTWeightTransferInitInfo(
+            names=names, dtype_names=dtype_names, shapes=shapes
+        )
+    )
+
+    # (1) the bake ran and produced a plan
+    assert eng._name_to_plan, "bake produced no plan"
+    assert eng._live_names, "bake recorded no live names"
+    n_modules = len({id(v) for v in eng._name_to_plan.values()})
+
+    # (2) every intermediate change to model state was undone
+    for mod in model.modules():
+        for pname, tensor in get_layer_tensors(mod).items():
+            key = (id(mod), pname)
+            loader = getattr(tensor, "weight_loader", None)
+            assert not hasattr(loader, "_rdt_stamp_inner"), (
+                f"recording stamp left on {param_name_of.get(key, key)}"
+            )
+            assert loader is loaders_before[key], (
+                f"weight_loader not restored on {param_name_of.get(key, key)}"
+            )
+            assert not tensor.is_meta, (
+                f"{param_name_of.get(key, key)} left on meta after the dry run"
+            )
+    for pname, p in model.named_parameters():
+        assert torch.equal(p.detach().cpu(), reference[pname]), f"bake mutated {pname}"
+
+    # (3) replaying the recorded op chains reproduces that same load
+    scatters = {id(v): v for v in eng._name_to_plan.values()}
+
+    # No deferred-attention layer may be a plan target. The engine's quant
+    # thread calls `info.reset()` on every module it processes, which makes
+    # finalize_layerwise_reload SKIP that module -- and finalize is the only
+    # thing that calls the LAYER's process_weights_after_loading, which is where
+    # MLA derives W_UK_T/W_UV from kv_b_proj. An attention layer in the plan
+    # would therefore leave those derived weights stale after a sync, silently.
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+
+    attn_in_plan = sorted(
+        {
+            type(c.layer).__name__
+            for plan in scatters.values()
+            for c in plan
+            if is_deferred_attention_layer(c.layer)
+        }
+    )
+    assert not attn_in_plan, (
+        f"plan targets deferred-attention layer(s) {attn_in_plan}; the quant "
+        f"thread would reset them and finalize would skip their "
+        f"process_weights_after_loading, staling any derived weights"
+    )
+
+    touched = set()
+    _poison()
+    with torch.no_grad():
+        for plan in scatters.values():
+            for c in plan:
+                src_name, chain = c.src
+                t = ckpt[src_name]
+                for op, args, kw in chain:
+                    assert op in ALLOWED_OPS, f"disallowed op {op!r}"
+                    t = getattr(t, op)(*args, **dict(kw))
+                dest = getattr(c.layer, c.param_name)
+                dest.as_strided(c.shape, c.stride, c.offset).copy_(t)
+                touched.add(param_name_of[(id(c.layer), c.param_name)])
+
+    assert loaded, "the reference load wrote nothing"
+    # The plan owns everything with a checkpoint source. Anything else the model
+    # ends up holding is DERIVED -- under MLA, `process_weights_after_loading`
+    # splits kv_b_proj into W_UK_T/W_UV via `replace_parameter` -- and belongs to
+    # finalize_layerwise_reload, which `finish_weight_update` runs after the
+    # replay. So the uncovered set must contain only params owned by a module
+    # that post-processes; a plain loadable weight going missing still fails.
+    post_processed = {
+        id(mod)
+        for mod in model.modules()
+        if hasattr(mod, "process_weights_after_loading")
+    }
+    modules_by_name = dict(model.named_modules())
+    uncovered = sorted(loaded - touched)
+    derived: list[str] = []
+    unexplained: list[str] = []
+    for n in uncovered:
+        mod_name = n.rsplit(".", 1)[0]
+        mod = modules_by_name.get(mod_name)
+        is_derived = mod is not None and id(mod) in post_processed
+        (derived if is_derived else unexplained).append(n)
+    assert not unexplained, (
+        f"the plan misses {len(unexplained)} param(s) load_weights wrote that "
+        f"nothing derives: {unexplained[:5]}"
+    )
+    mismatched = [
+        n
+        for n, prm in model.named_parameters()
+        if n in loaded and not torch.equal(prm.detach().cpu(), reference[n])
+    ]
+    assert not mismatched, f"replay differs from load_weights for: {mismatched[:5]}"
+
+    return {
+        "names": len(names),
+        "baked": len(eng._name_to_plan),
+        "live": len(eng._live_names),
+        "modules": n_modules,
+        "loaded_params": len(loaded),
+        "derived_not_in_plan": len(derived),
+        "replayed_params": len(touched),
+        "total_params": sum(1 for _ in model.named_parameters()),
+    }
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="the bake drives a real model on GPU"
+)
+class TestBakeOnARealModel:
+    """`_bake` against a real vLLM model, which the CPU tests above cannot reach:
+    they drive the planner with hand-built scatters, so nothing there exercises
+    the dry run through a real `load_weights` — the part that monkeypatches the
+    model and has to put it back.
+    """
+
+    @pytest.mark.parametrize("model", BAKE_MODELS)
+    def test_bake_records_a_replayable_plan_and_restores_the_model(
+        self, vllm_runner, monkeypatch, model
+    ):
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        with vllm_runner(
+            model, load_format="dummy", enforce_eager=True, max_model_len=1024
+        ) as llm:
+            (summary,) = llm.llm.collective_rpc(_bake_probe, args=(model,))
+        print(f"bake summary [{model}]: {summary}")
+        # Non-vacuity: the checks above are only worth something if the plan
+        # covers the model. Fusion means far fewer leaf modules than names --
+        # QKV and gate/up for GQA, the stacked experts for MoE.
+        assert summary["baked"] >= 0.95 * summary["names"], summary
+        assert summary["live"] >= 0.95 * summary["names"], summary
+        assert 0 < summary["modules"] < summary["baked"], summary
+        # The probe already asserts the plan covers every param load_weights
+        # wrote; this just keeps that from being vacuously few.
+        assert summary["loaded_params"] > 0.5 * summary["total_params"], summary

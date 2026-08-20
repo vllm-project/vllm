@@ -20,7 +20,7 @@ Requirements:
 
 ### Slices are tracked through vLLM's own weight loaders
 
-A weight loader normally receives a full HF-format tensor and slices out the part this worker needs. Instead of sending it one, the engine hands it a `LazyRDTTensor`: a zero-storage tensor that answers `.shape` / `.dtype` / `.size()` but holds no data. Every view or slice op the loader calls returns a new lazy with that op appended to a recorded chain, and `copy_` is the sink that ends it.
+A weight loader normally receives a full HF-format tensor and slices out the part this worker needs. Instead of sending it one, the engine hands it a `FakeRDTTensor`: a zero-storage tensor that answers `.shape` / `.dtype` / `.size()` but holds no data. Every view or slice op the loader calls returns a new fake with that op appended to a recorded chain, and `copy_` is the sink that ends it.
 
 That chain is the wire format. `("model.layers.0.w", (("narrow", (0, 512, 512), ()), ("t", (), ())))` tells the trainer: take this tensor, `narrow` it, transpose it, send the result. The trainer replays it with `getattr(tensor, op)(*args, **kwargs)`.
 
@@ -75,8 +75,8 @@ vllm serve my-model \
 
 Everything else — which producers exist, how the model splits into layer groups, the ownership table — arrives from the trainer at the init handshake.
 
-!!! warning "Size the receive arenas before choosing `gpu_memory_utilization`"
-    Each worker holds `num_rdt_buffers` receive arenas, each large enough for the biggest single slice batch it pulls. Like NCCL and NIXL internals, they do **not** count against `gpu_memory_utilization`, so a fraction that leaves no headroom OOMs at the first sync even though the engine came up healthy. The arena size is driven by the largest atomic slice — for an untied vocab matrix on a worker that holds it unsliced, that is the whole embedding.
+!!! warning "Size the receive buffers before choosing `gpu_memory_utilization`"
+    Each worker holds `num_rdt_buffers` receive buffers, each large enough for the biggest single slice batch it pulls. Like NCCL and NIXL internals, they do **not** count against `gpu_memory_utilization`, so a fraction that leaves no headroom OOMs at the first sync even though the engine came up healthy. The buffer size is driven by the largest atomic slice — for an untied vocab matrix on a worker that holds it unsliced, that is the whole embedding.
 
 ## Trainer Side
 
@@ -115,13 +115,12 @@ To adapt a trainer that is not a plain `nn.Module` — a Megatron export, a raw 
 | `num_consumers` | — | Inference workers across the whole fleet (TP × DP) |
 | `trainer_actor_namespace` | `None` | Ray namespace for the serve actors; the workers resolve them by name here |
 | `num_rdt_buffers` | 2 | Ring depth on both sides |
-| `arena_presize_gb` | 0.0 | Pre-size each arena slot, in GiB. Set it to cover the largest atomic slice |
+| `buffer_presize_gb` | 0.0 | Pre-size each buffer slot, in GiB. Set it to cover the largest atomic slice |
 | `gather_lookahead` | 1 | Gathered-but-unfreed layers the gather loop runs ahead by |
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a consumer that dies mid-sync, not a latency target |
 
 ## Examples
 
-Both need two 8-GPU nodes (one trainer fleet, one inference fleet).
+- [Small MoE on 4 GPUs](../../../examples/rl/rlhf_sharded_rdt_small_ep.py) — 2 FSDP2 trainer ranks → 2 vLLM DP ranks with expert parallelism, one node. It pairs a trainer fleet with a separate inference fleet, the only arrangement this backend supports, and asserts that the sync moved the weights and that a second sync leaves generation unchanged — so it runs unattended in CI
 
-- [FSDP2 trainer → vLLM DP+EP over HTTP](../../../examples/rl/rlhf_sharded_rdt_fsdp_ep.py) — **start here.** 8-rank FSDP2 trainer, `ModuleSource`, `vllm serve` with expert parallelism
-- [Kimi K2 from a raw sharded checkpoint](../../../examples/rl/rlhf_sharded_rdt_kimi.py) — a 1T FP8 MoE served through a custom `WeightSource` that never materializes the model as HF bf16
+It keeps the trainer deliberately small — just enough FSDP2 to make the weights real — so the file stays about the weight sync rather than about the trainer. For a full RL trainer, SkyRL integrates this backend with Megatron (PP-local gathering and expert-stack fusion for MoE) alongside FSDP: [NovaSky-AI/SkyRL#1753](https://github.com/NovaSky-AI/SkyRL/pull/1753).

@@ -550,7 +550,7 @@ def _serve_ring_server(src_name, src):
 
     srv = _RDTProducerServer(
         num_rdt_buffers=2,
-        arena_presize_gb=0.0,
+        buffer_presize_gb=0.0,
         gather_lookahead=2,
     )
     srv._cache[src_name] = src

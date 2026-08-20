@@ -14,7 +14,7 @@ These tests drive the real server. Everything here is CPU-clean: the IPC rebuild
 is stubbed (`rebuild_cuda_tensor`) and the serve path is only entered as far as
 the routing guard, which fires before any CUDA work.
 
-`rdt_produce_weights_batched`'s pack/copy half needs a real GPU arena; it stays
+`rdt_produce_weights_batched`'s pack/copy half needs a real GPU buffer; it stays
 covered by the GPU tests in `test_sharded_rdt_trainer.py`.
 """
 
@@ -66,7 +66,7 @@ def server_factory(monkeypatch):
 
     def _make(**kwargs):
         kwargs.setdefault("num_rdt_buffers", 2)
-        kwargs.setdefault("arena_presize_gb", 0.0)
+        kwargs.setdefault("buffer_presize_gb", 0.0)
         kwargs.setdefault("gather_lookahead", 2)
         server = _RDTProducerServer(**kwargs)
         built.append(server)

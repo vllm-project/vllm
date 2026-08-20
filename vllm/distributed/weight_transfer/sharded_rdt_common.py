@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared pieces of the sharded-RDT backend: the op-chain allowlist, arena
+"""Shared pieces of the sharded-RDT backend: the op-chain allowlist, buffer
 sizing and the minimum Ray version, plus ``RdtRouter`` — consumer-only, since
 routing is a consumer decision.
 
@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 
-# The op-chain contract, with two enforcers. The consumer's ``LazyRDTTensor``
+# The op-chain contract, with two enforcers. The consumer's ``FakeRDTTensor``
 # intercepts exactly these methods during the bake and records the string name;
 # anything else reaches ``__torch_dispatch__`` and raises, so a loader needing
 # real data fails at init rather than transferring wrong bytes. The producer
@@ -118,6 +118,31 @@ class RdtRouter:
         names: list[str] | None = None,
         group_lens: list[int] | None = None,
     ) -> None:
+        """Build the routing tables from the wire data both engines receive.
+
+        The four table arguments travel together and default together: with all
+        of them empty the router degrades to "every producer holds everything".
+
+        Args:
+            num_producers: Trainer ranks. Owner indices are positions in this
+                range, and ``validate`` rejects any that fall outside it.
+            num_consumers: Inference workers across the whole fleet. Used only
+                to carve a name's owner list into per-consumer blocks, so
+                consumers spread their pulls over the owners instead of every
+                one of them choosing the same producer.
+            owner_sets: The distinct producer sets that occur, one row per
+                owner class; each row is deduplicated and sorted here. Empty
+                means a single class owning every producer.
+            name_owner_class: Parallel to ``names`` — ``name_owner_class[i]``
+                indexes ``owner_sets`` for ``names[i]``. A name with no entry
+                falls back to class 0.
+            names: Every parameter name, in group-major order: concatenating
+                the gather groups reproduces this list exactly. The other two
+                tables are keyed by this order.
+            group_lens: Length of each gather group, consecutive over
+                ``names``, so they sum to ``len(names)``. Fixes name -> group
+                and the per-group owner union the free barrier fans out to.
+        """
         self.num_producers = max(1, num_producers)
         self.num_consumers = max(1, num_consumers)
         self._owner_sets = (
@@ -239,21 +264,21 @@ class RdtRouter:
             for p in self.group_owners(group_idx)
         ]
 
-    def reserve_serve_arenas(self, bytes_by_producer: list[int]) -> list:
+    def reserve_serve_buffers(self, bytes_by_producer: list[int]) -> list:
         """Ask each producer to pre-register a serve ring sized to the most this
         consumer will pull from it."""
         self._bound()
         return [
-            self._actors[p].reserve_serve_arena.remote(self.consumer_id, nb)
+            self._actors[p].reserve_serve_buffer.remote(self.consumer_id, nb)
             for p, nb in enumerate(bytes_by_producer)
             if nb > 0
         ]
 
 
-def arena_alloc_bytes(nbytes: int, presize: int = 0) -> int:
-    """Size a NIXL arena / ring slot for ``nbytes``: the max of the request, an
+def buffer_alloc_bytes(nbytes: int, presize: int = 0) -> int:
+    """Size a NIXL buffer / ring slot for ``nbytes``: the max of the request, an
     optional ``presize`` floor, and a coarse 256MB round-up, so the buffer is
     allocated ONCE and never regrows. Regrowth is a correctness hazard, not just a
-    perf one -- see ``arena_presize_gb``. Shared by the consumer's receive arenas
+    perf one -- see ``buffer_presize_gb``. Shared by the consumer's receive buffers
     and the producer's serve rings."""
     return max(nbytes, presize, -(-nbytes // (256 << 20)) * (256 << 20))

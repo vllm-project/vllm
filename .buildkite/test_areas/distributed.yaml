@@ -17,6 +17,21 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
 
+- label: Sharded RDT Weight Transfer
+  key: sharded-rdt-weight-transfer
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/distributed/weight_transfer/
+  - tests/distributed/test_sharded_rdt_plan.py
+  - tests/distributed/test_sharded_rdt_producer.py
+  - tests/distributed/test_sharded_rdt_trainer.py
+  commands:
+  - pytest -v -s distributed/test_sharded_rdt_plan.py
+  - pytest -v -s distributed/test_sharded_rdt_producer.py
+  - pytest -v -s distributed/test_sharded_rdt_trainer.py
+
 - label: Distributed DP Tests (2 GPUs)
   key: distributed-dp-tests-2-gpus
   timeout_in_minutes: 35
@@ -106,7 +121,7 @@ steps:
 
 - label: Distributed Torchrun + Examples (4 GPUs)
   key: distributed-torchrun-examples-4-gpus
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace"
   num_devices: 4
   source_file_dependencies:
@@ -136,6 +151,12 @@ steps:
   # rlhf examples (each launches its own `vllm serve` and tears it down)
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
+  # sharded RDT: 2 FSDP2 trainer ranks -> 2 vLLM DP ranks with EP. Its data
+  # plane is NIXL, which ships only in the kv-connector set, and the script
+  # also drops the nixl-cu wheel variant that does not match this image. Kept
+  # last so the commands above run in an unmodified environment.
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - python3 examples/rl/rlhf_sharded_rdt_small_ep.py
 
 - label: Distributed DP Tests (4 GPUs)
   key: distributed-dp-tests-4-gpus

@@ -6,12 +6,12 @@ Pulls only the slice each vLLM worker consumes under tensor/expert parallelism,
 not the full HF-format tensor.
 
 Two phases. BAKE, once at ``init_transfer_engine``: drive ``model.load_weights``
-against ``LazyRDTTensor`` placeholders and record, per leaf module, how each
+against ``FakeRDTTensor`` placeholders and record, per leaf module, how each
 destination slice is fetched (an op chain) and where it lands (an ``as_strided``
-descriptor). REPLAY, every sync: no ``load_weights``, no lazy dispatch, no
-discovery — pull the recorded slices in packed chunks over a ring of receive
-arenas, scatter them into freshly materialized params, then quant and
-kernel-copy. A live name with no recorded plan fails the plan build: there
+descriptor). REPLAY, every sync: no ``load_weights``, no ``FakeRDTTensor``
+dispatch, no discovery — pull the recorded slices in packed chunks over a ring
+of receive buffers, scatter them into freshly materialized params, then quant
+and kernel-copy. A live name with no recorded plan fails the plan build: there
 is no fallback load.
 
 Weights arrive in checkpoint format: the engine drives layerwise reload itself,
@@ -24,8 +24,8 @@ One thing at four resolutions, over three lifetimes. ``FetchKey`` --
 everything else is bookkeeping around it.
 
     BAKE      once at init, kept for the engine's life
-      LazyRDTTensor intercepts the model's loaders; each copy_ records a
-      _Scatter (sharded_rdt_lazy): src FetchKey, owning layer, the destination
+      FakeRDTTensor intercepts the model's loaders; each copy_ records a
+      _Scatter (sharded_rdt_fake): src FetchKey, owning layer, the destination
       as_strided region, and the produced dtype/nbytes.
         -> _name_to_plan: name -> that module's scatter list
 
@@ -36,13 +36,13 @@ everything else is bookkeeping around it.
       _CallPlan all chunks + pre_free.
 
     RUN       per chunk, per sync, _run_chunk_pipeline
-      _Chunk -> _PendingPull   issued, not yet landed: Ray ref, arena views,
+      _Chunk -> _PendingPull   issued, not yet landed: Ray ref, buffer views,
                                ring slot.               [RPC thread]
              -> _ProcItem      chunk + results + slot.  [hand-off to the
                                background scatter thread]
 
 The RUN pair stays split on purpose: it is the thread boundary, and only
-``targets`` should outlive the get -- carrying the Ray ref and the whole-arena
+``targets`` should outlive the get -- carrying the Ray ref and the whole-buffer
 blob into the queue would keep both alive for the scatter's lifetime.
 
 See docs/training/weight_transfer/sharded_rdt.md for the design and the measured
@@ -64,13 +64,13 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
-    arena_alloc_bytes,
+    buffer_alloc_bytes,
     check_ray_rdt_version,
 )
-from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
+from vllm.distributed.weight_transfer.sharded_rdt_fake import (
     BakeSink,
+    FakeRDTTensor,
     FetchKey,
-    LazyRDTTensor,
     _Scatter,
 )
 from vllm.logger import init_logger
@@ -137,7 +137,7 @@ class _PendingPull:
 class _ProcItem:
     """A landed pull handed to the background scatter thread (see Data flow).
 
-    ``results`` alias the ring arena ``slot``, held as strong refs so they
+    ``results`` alias the ring buffer ``slot``, held as strong refs so they
     outlive the RPC-thread frame until the scatter consumes them.
     """
 
@@ -162,7 +162,7 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
 
     produce_method_name: str = "rdt_produce_weights_batched"
     """Name of the trainer-side producer method. It and the rest of the serve
-    surface (``free_group``, ``reserve_serve_arena``) are documented where they
+    surface (``free_group``, ``reserve_serve_buffer``) are documented where they
     are implemented, on ``_RDTProducerServer`` in ``sharded_rdt_trainer.py``."""
 
     names: list[str] = field(default_factory=list)
@@ -206,18 +206,18 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     worker's distinct index comes from ``_global_worker_index``."""
 
     num_rdt_buffers: int = 2
-    """Depth of the consumer receive-arena ring. Must match the
+    """Depth of the consumer receive-buffer ring. Must match the
     producer's — ``_run_chunk_pipeline``'s slot-safety argument rests on it. 2 =
     double buffer: chunk i+1's serve overlaps chunk i's RDMA, and scatter(i-1)
     overlaps RDMA(i) in the other slot. Keep depth x chunk_bytes under the
     fabric's address-translation reach (~2-3 GB/flow on the reference 8xB200 RoCE
     cluster, where K=3 measurably hurt)."""
 
-    arena_presize_gb: float = 0.0
-    """Pre-size each packed receive-arena slot to this many GiB
+    buffer_presize_gb: float = 0.0
+    """Pre-size each packed receive-buffer slot to this many GiB
     (0 = size to the first chunk + coarse 256MB round-up). Set it to cover the
-    model's largest atomic chunk (e.g. an untied lm_head). Sizing arenas ONCE
-    matters beyond perf -- see the doc's "Sizing arenas once matters beyond
+    model's largest atomic chunk (e.g. an untied lm_head). Sizing buffers ONCE
+    matters beyond perf -- see the doc's "Sizing buffers once matters beyond
     throughput"."""
 
     replica_rank: int = 0
@@ -228,11 +228,7 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     ``_global_worker_index`` restarts at 0 and would collide across engines. The
     driver gives each engine a distinct ``replica_rank`` (with identical
     ``num_replicas``) so the engine offsets its consumers into a globally distinct
-    range for the M:N block assignment.
-
-    The trainer ships one payload for the whole fleet, so these two are the
-    driver's to set: take ``get_worker_init_payload()`` and override them per
-    engine before calling ``init_weight_transfer_engine``. Default 0/1 (single
+    range for the M:N block assignment.Default 0/1 (single
     engine) needs no override."""
 
     num_replicas: int = 1
@@ -297,6 +293,23 @@ class ShardedRDTWeightTransferEngine(
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
+        # This engine's data plane is Ray's: the consumer resolves each trainer's
+        # serve actor with ``ray.get_actor`` and pulls over NIXL through the
+        # workers' tensor transport, neither of which exists unless the workers
+        # ARE Ray actors. Caught here, at construction, because the alternative
+        # is an opaque failure during the first handshake. A single-worker
+        # deployment defaults to "uni", so "ray" has to be asked for explicitly.
+        backend = vllm_config.parallel_config.distributed_executor_backend
+        # A custom Executor subclass is a deliberate override we cannot judge;
+        # only reject the named backends that are definitely not Ray.
+        if isinstance(backend, str) and backend != "ray":
+            raise ValueError(
+                f"The 'sharded_rdt' weight transfer backend requires "
+                f"distributed_executor_backend='ray', got {backend!r}. Pass "
+                f"--distributed-executor-backend ray (and keep "
+                f"VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1, the default, so the "
+                f"workers are RayExecutorV2 actors with tensor transport)."
+            )
         # Ownership table, routing rules, and (once bound) every producer's
         # handle — pulls go to one owner per chunk, but free_group fans out to
         # every owner of the group, so all handles are bound.
@@ -315,39 +328,39 @@ class ShardedRDTWeightTransferEngine(
         # move data (e.g. non-local EP experts), so receive_weights skips them.
         self._live_names: set[str] = set()
 
-        # ---- Consumer-side pre-registered receive arenas -----------------------
-        # One persistent 1-D arena per dtype per ring slot, STORAGE-registered with
+        # ---- Consumer-side pre-registered receive buffers ----------------------
+        # One persistent 1-D buffer per dtype per ring slot, STORAGE-registered with
         # NIXL once, so every per-slice view hits Ray's registration cache and the
         # recv path does zero registration in steady state. See the doc's "Sizing
-        # arenas once matters beyond throughput" for why they rarely grow.
+        # buffers once matters beyond throughput" for why they rarely grow.
         #
         # Ring depth is both the slot count and the in-flight pull count, one
         # quantity from ``num_rdt_buffers``. Decoupling them with a spare slot
-        # measurably slows the sync; see the doc before trying it.
+        # measurably slows the sync.
         self._ring_depth = 1
-        self._dest_arenas: list[dict[torch.dtype, torch.Tensor]] = [{}]
+        self._dest_buffers: list[dict[torch.dtype, torch.Tensor]] = [{}]
         self._slot_read_done: list[Any] = []  # one torch.cuda.Event per slot
         # Generation counters guarding the events (see _ensure_proc_worker).
         self._slot_queued: list[int] = []
         self._slot_done: list[int] = []
         self._slot_cv: Any = None
         self._pull_slot = 0
-        # (id(chunk), slot) -> (arena data_ptr, per-key views).
+        # (id(chunk), slot) -> (buffer data_ptr, per-key views).
         # Lives on the engine, not on the _Chunk: the plan is static and shared
         # across syncs, so a per-slot runtime cache has no business inside it.
         self._targets_cache: dict[tuple[int, int], tuple[int, list[torch.Tensor]]] = {}
-        self._arena_presize = 0  # bytes; set from init_info
+        self._buffer_presize = 0  # bytes; set from init_info
         self._pending_frees: list[Any] = []  # free_group signal refs, drained per sync
         # The STATIC plan: built once — at init from init_info.group_lens, else
         # lazily on the first update_weights — and reused. Non-None means
         # update_weights ignores its per-sync names.
         self._cached_plan: _CallPlan | None = None
         # Completed syncs. The chunk pipeline runs SERIAL during sync 0, when both
-        # sides still register arenas, and pipelines from sync 1. See the doc.
+        # sides still register buffers, and pipelines from sync 1. See the doc.
         self._completed_syncs = 0
 
         # ---- Background post-processing thread (pull/process pipelining) -------
-        # The RPC thread hands pulled arena views to this worker, which runs
+        # The RPC thread hands pulled buffer views to this worker, which runs
         # materialize/scatter/quant/kernel_copy on its own stream while the next
         # pull proceeds. drain_pending() joins it before finalize.
         self._proc_queue: Any | None = None
@@ -404,19 +417,19 @@ class ShardedRDTWeightTransferEngine(
         """Ring depth K.
 
         Must run before ``_ensure_proc_worker`` creates the per-slot events and
-        counters, and before any arena is grown (both happen on the first pull).
+        counters, and before any buffer is grown (both happen on the first pull).
         """
         self._num_consumers_override = int(init_info.num_consumers or 0)
         k = max(1, int(init_info.num_rdt_buffers))
         self._ring_depth = k
-        self._dest_arenas = [{} for _ in range(k)]
+        self._dest_buffers = [{} for _ in range(k)]
         self._targets_cache = {}
-        self._arena_presize = int(float(init_info.arena_presize_gb) * (1 << 30))
+        self._buffer_presize = int(float(init_info.buffer_presize_gb) * (1 << 30))
         logger.info(
             "[RDT-RING] active_pulls=%d slots=%d presize=%.2fGiB",
             k,
             k,
-            self._arena_presize / (1 << 30),
+            self._buffer_presize / (1 << 30),
         )
 
     def _resolve_producers(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
@@ -480,10 +493,6 @@ class ShardedRDTWeightTransferEngine(
                     f"{chosen_name!r} (namespace="
                     f"{init_info.trainer_actor_namespace!r})."
                 ) from e
-            # Ray 2.51.1: handles from ray.get_actor lose
-            # _ray_enable_tensor_transport, so the NIXL dispatch guard rejects the
-            # call even when the trainer enabled it. Force it back on.
-            actor._ray_enable_tensor_transport = True
             actors.append(actor)
             methods.append(getattr(actor, init_info.produce_method_name))
         router.bind(actors, methods, consumer_id)
@@ -535,7 +544,7 @@ class ShardedRDTWeightTransferEngine(
         """Register every NIXL buffer this worker will use at init, before any
         transfer runs, so nothing registers during the sync-0 RDMA churn.
 
-        Both sides are sized from the static plan: receive arenas are
+        Both sides are sized from the static plan: receive buffers are
         ``ring_depth`` slots at the largest chunk's ``pack_bytes``, and each bound
         producer is asked to pre-register a serve ring at the max bytes this
         consumer will pull from it. A no-op when this worker has no chunks."""
@@ -544,15 +553,15 @@ class ShardedRDTWeightTransferEngine(
             return
         from ray.experimental import register_nixl_memory
 
-        # (a) consumer receive arenas — one per ring slot, at the largest chunk.
+        # (a) consumer receive buffers — one per ring slot, at the largest chunk.
         max_pack = max(c.pack_bytes for c in plan.chunks)
-        alloc = arena_alloc_bytes(max_pack, self._arena_presize)
+        alloc = buffer_alloc_bytes(max_pack, self._buffer_presize)
         for slot in range(self._ring_depth):
-            arena = self._dest_arenas[slot].get(torch.uint8)
-            if arena is None or arena.numel() < alloc:
-                arena = torch.empty(alloc, dtype=torch.uint8, device=self.device)
-                register_nixl_memory(arena)
-                self._dest_arenas[slot][torch.uint8] = arena
+            buffer = self._dest_buffers[slot].get(torch.uint8)
+            if buffer is None or buffer.numel() < alloc:
+                buffer = torch.empty(alloc, dtype=torch.uint8, device=self.device)
+                register_nixl_memory(buffer)
+                self._dest_buffers[slot][torch.uint8] = buffer
 
         # (b) producer serve rings — max bytes this consumer pulls from each
         # bound producer.
@@ -562,7 +571,7 @@ class ShardedRDTWeightTransferEngine(
             serve_bytes[c.owner] = max(serve_bytes[c.owner], c.pack_bytes)
         import ray
 
-        refs = self._router.reserve_serve_arenas(serve_bytes)
+        refs = self._router.reserve_serve_buffers(serve_bytes)
         if refs:
             ray.get(refs)  # block until every serve ring is registered
         logger.info(
@@ -653,7 +662,7 @@ class ShardedRDTWeightTransferEngine(
             )
         self._run_chunk_pipeline(self._cached_plan)
 
-    def _build_lazy_weights(
+    def _build_fake_weights(
         self,
         names: list[str],
         sink: "BakeSink",
@@ -664,7 +673,7 @@ class ShardedRDTWeightTransferEngine(
         return [
             (
                 name,
-                LazyRDTTensor(
+                FakeRDTTensor(
                     name=name,
                     shape=torch.Size(self._name_meta[name][1]),
                     dtype=_dtype_from_name(self._name_meta[name][0]),
@@ -676,8 +685,8 @@ class ShardedRDTWeightTransferEngine(
         ]
 
     def _issue_pull(self, chunk: "_Chunk", slot: int) -> "_PendingPull":
-        """Reserve ``slot``, lay the targets out in its arena, dispatch the
-        produce RPC and point the transfer at the arena — WITHOUT the blocking
+        """Reserve ``slot``, lay the targets out in its buffer, dispatch the
+        produce RPC and point the transfer at the buffer — WITHOUT the blocking
         ``ray.get`` (that is ``_complete_pull``). The chunked pipeline issues
         chunk i+1 before completing chunk i, so the producer serves the next
         chunk while the in-flight RDMA streams.
@@ -698,27 +707,27 @@ class ShardedRDTWeightTransferEngine(
                     self._slot_cv.wait(timeout=1.0)
             self._slot_read_done[slot].synchronize()
 
-        # Every slice is byte-packed into ONE uint8 arena, 16B-aligned in
+        # Every slice is byte-packed into ONE uint8 buffer, 16B-aligned in
         # keys order, under one NIXL descriptor. ``chunk.pack_layout`` mirrors the
         # producer's rule byte-exactly; ``targets`` carves the dtype views back out.
         keys = chunk.keys
         cur = chunk.pack_bytes
-        arenas = self._dest_arenas[slot]
-        arena = arenas.get(torch.uint8)
-        if arena is None or arena.numel() < cur:
+        buffers = self._dest_buffers[slot]
+        buffer = buffers.get(torch.uint8)
+        if buffer is None or buffer.numel() < cur:
             # Size ONCE with headroom: Ray's desc cache is keyed by data_ptr and
             # outlives its tensor, so a regrowth can false-hit a recycled pointer
             # and skip registering the new extent -> NIXL_ERR_NOT_FOUND.
-            alloc = arena_alloc_bytes(cur, self._arena_presize)
-            arena = torch.empty(alloc, dtype=torch.uint8, device=self.device)
-            register_nixl_memory(arena)
-            arenas[torch.uint8] = arena
-        targets = self._pull_targets(chunk, slot, arena)
+            alloc = buffer_alloc_bytes(cur, self._buffer_presize)
+            buffer = torch.empty(alloc, dtype=torch.uint8, device=self.device)
+            register_nixl_memory(buffer)
+            buffers[torch.uint8] = buffer
+        targets = self._pull_targets(chunk, slot, buffer)
         # One produce RPC serves the whole packed chunk, since the group's owner
-        # holds every slice. The arena view must stay strongly referenced through
+        # holds every slice. The buffer view must stay strongly referenced through
         # the get: set_target_for_ref stores WEAKREFS, and a dropped target
         # reroutes the transfer into a fallback buffer.
-        blob = arena[:cur]
+        blob = buffer[:cur]
         assert self._router is not None
         ref = self._router.pull(chunk.owner, keys)
         set_target_for_ref(ref, [blob])
@@ -731,23 +740,23 @@ class ShardedRDTWeightTransferEngine(
         )
 
     def _pull_targets(
-        self, chunk: "_Chunk", slot: int, arena: torch.Tensor
+        self, chunk: "_Chunk", slot: int, buffer: torch.Tensor
     ) -> "list[torch.Tensor]":
-        """Per-key dtype views into ``slot``'s arena.
+        """Per-key dtype views into ``slot``'s buffer.
 
         The packed layout is static, so the views are built once per (chunk, slot)
         rather than once per pull -- rebuilding them cost ~1150 Python ops per pull
-        at 235B. Keyed on the arena pointer as well, so a regrow invalidates
+        at 235B. Keyed on the buffer pointer as well, so a regrow invalidates
         instead of handing back views into a freed buffer.
         """
         cached = self._targets_cache.get((id(chunk), slot))
-        if cached is not None and cached[0] == arena.data_ptr():
+        if cached is not None and cached[0] == buffer.data_ptr():
             return cached[1]
         targets = [
-            arena[off : off + n * dt.itemsize].view(dt).reshape(shape)
+            buffer[off : off + n * dt.itemsize].view(dt).reshape(shape)
             for off, dt, n, shape in chunk.pack_layout
         ]
-        self._targets_cache[(id(chunk), slot)] = (arena.data_ptr(), targets)
+        self._targets_cache[(id(chunk), slot)] = (buffer.data_ptr(), targets)
         return targets
 
     def _complete_pull(self, pending: "_PendingPull") -> "dict[FetchKey, torch.Tensor]":
@@ -765,7 +774,7 @@ class ShardedRDTWeightTransferEngine(
         Puts the params on meta, then drives ``model.load_weights`` over
         ``init_info.names`` through the model's ORIGINAL loaders (the stamps
         bypass ``online_process_loader``, so ``_layerwise_process`` is never in
-        the path). Nothing materializes or pulls; the lazy's ``copy_`` records
+        the path). Nothing materializes or pulls; the fake's ``copy_`` records
         the source op chain and the meta destination's geometry. Afterwards one
         scatter list per fully-loaded leaf module (copied numel == loadable
         size) is indexed by source name; a partial or unrecordable module fails
@@ -800,9 +809,9 @@ class ShardedRDTWeightTransferEngine(
             initialize_layerwise_reload(model)
             # Stamp the *original* loaders (bypassing online_process_loader), so
             # the single load pass runs the loaders on meta and records via the
-            # lazy's copy_ — with no inline _layerwise_process, no deferral.
+            # fake's copy_ — with no inline _layerwise_process, no deferral.
             self._install_recording_stamps(model, recorder)
-            model.load_weights(self._build_lazy_weights(names, recorder, self.device))
+            model.load_weights(self._build_fake_weights(names, recorder, self.device))
             # Keep only fully-loaded modules (copied numel >= loadable size, the
             # test online_process_loader uses): a partial module leaves unwritten
             # regions that finalize would init, so baking it scatters garbage.
@@ -841,7 +850,7 @@ class ShardedRDTWeightTransferEngine(
     ) -> None:
         """Wrap each loadable param's ``weight_loader`` to stamp
         ``recorder.current = (leaf_module, param_name)`` before delegating to the
-        original loader, so the lazy's ``copy_`` can attribute each recorded copy.
+        original loader, so the fake's ``copy_`` can attribute each recorded copy.
         ``functools.wraps`` keeps the loader's real signature (so vLLM's
         ``_layerwise_process`` ``param`` redirect still works if a stamp leaks),
         and ``_rdt_stamp_inner`` tags it so ``_restore_after_dry_run`` can unwrap it.
@@ -1029,7 +1038,7 @@ class ShardedRDTWeightTransferEngine(
                 ray.get(self._pending_frees)
             finally:
                 self._pending_frees.clear()
-        # One sync iteration fully drained; arenas/registrations are at (or
+        # One sync iteration fully drained; buffers/registrations are at (or
         # nearer) high-water — the chunk pipeline may issue ahead from now on.
         self._completed_syncs += 1
 
@@ -1229,7 +1238,7 @@ class ShardedRDTWeightTransferEngine(
             # Drain BEFORE issue once the ring is full: frees this chunk's slot
             # (generation-wise) and guarantees the producer-slot invariant above.
             # Sync 0 runs SERIAL (max 1 in flight): both sides still grow and
-            # register arenas, and a producer registration mid-flight churns its
+            # register buffers, and a producer registration mid-flight churns its
             # agent-metadata version under an in-flight pull (see __init__).
             depth = 1 if self._completed_syncs == 0 else self._ring_depth
             if len(inflight) >= depth:
@@ -1264,9 +1273,9 @@ class ShardedRDTWeightTransferEngine(
             # PASS 1 — slot readers: materialize the modules whose FIRST scatter
             # is in this chunk (empty HF params, once per module by construction)
             # then scatter this chunk's copies. The scatter copies are the ONLY
-            # reads of the receive arena; quant and kernel-copy operate on the
+            # reads of the receive buffer; quant and kernel-copy operate on the
             # scattered params. Releasing the slot right after the scatters lets
-            # the NEXT chunk's RDMA overwrite the arena while quant still runs.
+            # the NEXT chunk's RDMA overwrite the buffer while quant still runs.
             try:
                 for layer in chunk.materialize:
                     info = LAYERWISE_INFO.get(layer)
@@ -1287,7 +1296,7 @@ class ShardedRDTWeightTransferEngine(
                     dst = param.data.as_strided(sc.shape, sc.stride, sc.offset)
                     with torch._C.DisableTorchFunctionSubclass():
                         dst.copy_(results[sc.src])
-                # All reads of this slot's arena are now enqueued on the process
+                # All reads of this slot's buffer are now enqueued on the process
                 # stream; record + publish so the RPC thread can reuse the slot.
                 self._slot_read_done[item.slot].record(self._proc_stream)
             finally:
@@ -1393,9 +1402,9 @@ class ShardedRDTWeightTransferEngine(
         self._live_names.clear()
         # Drop the cached plan (holds _Scatter refs to the baked layers).
         self._cached_plan = None
-        # Release the receive arenas (their NIXL registration is pinned for the
+        # Release the receive buffers (their NIXL registration is pinned for the
         # process lifetime; freeing the tensors just drops our strong refs).
-        self._dest_arenas = [{} for _ in range(self._ring_depth)]
+        self._dest_buffers = [{} for _ in range(self._ring_depth)]
 
 
 def _dtype_from_name(name: str) -> torch.dtype:
