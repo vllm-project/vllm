@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, NamedTuple, Protocol, TypeVar
 
 import numpy as np
 import torch
@@ -47,6 +47,24 @@ class AttentionType(str, Enum):
     """Encoder attention between previous layer Q/K/V."""
     ENCODER_DECODER = "encoder_decoder"
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
+
+
+class PrequantizedQKV(NamedTuple):
+    """Prequantized Q/K/V tensors and their dequantization scales.
+
+    The tensors have the same logical token/head layout as the corresponding
+    floating-point Q/K/V inputs. Scale layout is backend-specific because some
+    kernels use one scale per tensor while others use per-sequence/per-head
+    scales. Backends must explicitly opt into this contract via
+    ``supports_prequantized_qkv_input``.
+    """
+
+    query: torch.Tensor
+    key: torch.Tensor
+    value: torch.Tensor
+    query_descale: torch.Tensor
+    key_descale: torch.Tensor
+    value_descale: torch.Tensor
 
 
 class MultipleOf:
@@ -825,6 +843,14 @@ class AttentionImplBase(ABC, Generic[T]):
     # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
 
+    # Whether this implementation can consume model-provided quantized Q/K/V
+    # tensors in addition to the floating-point tensors used for decode and KV
+    # cache updates. This is intentionally separate from
+    # ``supports_quant_query_input``: prequantized QKV may carry dynamic,
+    # per-sequence/per-head scales that cannot be represented by Attention's
+    # generic query quantizer.
+    supports_prequantized_qkv_input: bool = False
+
     dcp_world_size: int
     dcp_rank: int
 
@@ -906,6 +932,29 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    def forward_with_prequantized_qkv(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: T,
+        output: torch.Tensor,
+        prequantized_qkv: PrequantizedQKV,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward using model-provided quantized Q/K/V for supported phases.
+
+        Floating-point ``query``, ``key``, and ``value`` remain available so a
+        backend can use them for decode and explicit KV-cache updates while
+        consuming ``prequantized_qkv`` for prefill/extend attention.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support prequantized QKV input"
+        )
 
     def fused_output_quant_supported(self, quant_key: "QuantKey") -> bool:
         """

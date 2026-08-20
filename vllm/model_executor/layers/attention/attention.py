@@ -36,6 +36,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
     AttentionType,
+    PrequantizedQKV,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
@@ -50,6 +51,39 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
 
 logger = init_logger(__name__)
+
+
+def _make_prequantized_qkv(
+    query: torch.Tensor | None,
+    key: torch.Tensor | None,
+    value: torch.Tensor | None,
+    query_descale: torch.Tensor | None,
+    key_descale: torch.Tensor | None,
+    value_descale: torch.Tensor | None,
+) -> PrequantizedQKV | None:
+    """Build a prequantized-QKV bundle while enforcing all-or-none inputs."""
+    optional_tensors = (
+        query,
+        key,
+        value,
+        query_descale,
+        key_descale,
+        value_descale,
+    )
+    if all(tensor is None for tensor in optional_tensors):
+        return None
+    if any(tensor is None for tensor in optional_tensors):
+        raise ValueError(
+            "Prequantized QKV requires query, key, value, and all three descale tensors"
+        )
+    return PrequantizedQKV(
+        query=cast(torch.Tensor, query),
+        key=cast(torch.Tensor, key),
+        value=cast(torch.Tensor, value),
+        query_descale=cast(torch.Tensor, query_descale),
+        key_descale=cast(torch.Tensor, key_descale),
+        value_descale=cast(torch.Tensor, value_descale),
+    )
 
 
 def validate_kv_sharing_target(
@@ -485,6 +519,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
         output_dtype: torch.dtype | None = None,
+        prequantized_qkv: PrequantizedQKV | None = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -497,7 +532,15 @@ class Attention(nn.Module, AttentionLayerBase):
         """
         if output_dtype is None:
             output_dtype = query.dtype
-        if self.query_quant is not None:
+        if (
+            prequantized_qkv is not None
+            and not self.impl.supports_prequantized_qkv_input
+        ):
+            raise ValueError(
+                f"{self.impl.__class__.__name__} does not support "
+                "prequantized QKV input"
+            )
+        if self.query_quant is not None and prequantized_qkv is None:
             # quantizing with a simple torch operation enables
             # torch.compile to fuse this into previous ops
             # which reduces overheads during decoding.
@@ -527,6 +570,35 @@ class Attention(nn.Module, AttentionLayerBase):
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
+        if prequantized_qkv is not None:
+            prequantized_qkv = PrequantizedQKV(
+                query=prequantized_qkv.query.view(-1, self.num_heads, self.head_size),
+                key=prequantized_qkv.key.view(-1, self.num_kv_heads, self.head_size),
+                value=prequantized_qkv.value.view(
+                    -1, self.num_kv_heads, self.head_size_v
+                ),
+                query_descale=prequantized_qkv.query_descale,
+                key_descale=prequantized_qkv.key_descale,
+                value_descale=prequantized_qkv.value_descale,
+            )
+        prequantized_query = (
+            prequantized_qkv.query if prequantized_qkv is not None else None
+        )
+        prequantized_key = (
+            prequantized_qkv.key if prequantized_qkv is not None else None
+        )
+        prequantized_value = (
+            prequantized_qkv.value if prequantized_qkv is not None else None
+        )
+        prequantized_query_descale = (
+            prequantized_qkv.query_descale if prequantized_qkv is not None else None
+        )
+        prequantized_key_descale = (
+            prequantized_qkv.key_descale if prequantized_qkv is not None else None
+        )
+        prequantized_value_descale = (
+            prequantized_qkv.value_descale if prequantized_qkv is not None else None
+        )
         kv_cache_dummy_dep = None
         if self.use_direct_call:
             # Skip this if sharing KV cache with an earlier attention layer.
@@ -545,6 +617,12 @@ class Attention(nn.Module, AttentionLayerBase):
                 value,
                 output,
                 self.layer_name,
+                prequantized_query=prequantized_query,
+                prequantized_key=prequantized_key,
+                prequantized_value=prequantized_value,
+                prequantized_query_descale=prequantized_query_descale,
+                prequantized_key_descale=prequantized_key_descale,
+                prequantized_value_descale=prequantized_value_descale,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         else:
@@ -565,6 +643,12 @@ class Attention(nn.Module, AttentionLayerBase):
                 value,
                 output,
                 encoded,
+                prequantized_query=prequantized_query,
+                prequantized_key=prequantized_key,
+                prequantized_value=prequantized_value,
+                prequantized_query_descale=prequantized_query_descale,
+                prequantized_key_descale=prequantized_key_descale,
+                prequantized_value_descale=prequantized_value_descale,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         return output.view(-1, hidden_size)
@@ -593,6 +677,10 @@ class Attention(nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
+
+    @property
+    def supports_prequantized_qkv_input(self) -> bool:
+        return self.impl.supports_prequantized_qkv_input
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
@@ -750,6 +838,12 @@ def unified_attention_with_output(
     layer_name: LayerNameType,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    prequantized_query: torch.Tensor | None = None,
+    prequantized_key: torch.Tensor | None = None,
+    prequantized_value: torch.Tensor | None = None,
+    prequantized_query_descale: torch.Tensor | None = None,
+    prequantized_key_descale: torch.Tensor | None = None,
+    prequantized_value_descale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
@@ -759,17 +853,44 @@ def unified_attention_with_output(
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
 
-    self.impl.forward(
-        self,
-        query,
-        key,
-        value,
-        kv_cache,
-        attn_metadata,
-        output=output,
-        output_scale=output_scale,
-        output_block_scale=output_block_scale,
+    prequantized_qkv = _make_prequantized_qkv(
+        prequantized_query,
+        prequantized_key,
+        prequantized_value,
+        prequantized_query_descale,
+        prequantized_key_descale,
+        prequantized_value_descale,
     )
+    if prequantized_qkv is None:
+        self.impl.forward(
+            self,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
+    else:
+        if not self.impl.supports_prequantized_qkv_input:
+            raise ValueError(
+                f"{self.impl.__class__.__name__} does not support "
+                "prequantized QKV input"
+            )
+        self.impl.forward_with_prequantized_qkv(
+            self,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            prequantized_qkv=prequantized_qkv,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
 
 
 def unified_attention_with_output_fake(
@@ -780,6 +901,12 @@ def unified_attention_with_output_fake(
     layer_name: LayerNameType,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    prequantized_query: torch.Tensor | None = None,
+    prequantized_key: torch.Tensor | None = None,
+    prequantized_value: torch.Tensor | None = None,
+    prequantized_query_descale: torch.Tensor | None = None,
+    prequantized_key_descale: torch.Tensor | None = None,
+    prequantized_value_descale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
     return
