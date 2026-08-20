@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from http import HTTPStatus
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -39,6 +39,8 @@ async def _async_serving_models_init() -> OpenAIServingModels:
     mock_engine_client.model_config = mock_model_config
     mock_engine_client.input_processor = MagicMock()
     mock_engine_client.renderer = MagicMock()
+    mock_engine_client.add_lora = AsyncMock(return_value=True)
+    mock_engine_client.remove_lora = AsyncMock(return_value=True)
 
     serving_models = OpenAIServingModels(
         engine_client=mock_engine_client,
@@ -108,12 +110,36 @@ async def test_unload_lora_adapter_success():
         lora_name="adapter1", lora_path="/path/to/adapter1"
     )
     response = await serving_models.load_lora_adapter(request)
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
     assert len(serving_models.lora_requests) == 1
 
+    lora_int_id = serving_models.lora_requests["adapter1"].lora_int_id
     request = UnloadLoRAAdapterRequest(lora_name="adapter1")
     response = await serving_models.unload_lora_adapter(request)
     assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
     assert len(serving_models.lora_requests) == 0
+    serving_models.engine_client.remove_lora.assert_awaited_once_with(lora_int_id)
+
+
+@pytest.mark.asyncio
+async def test_unload_lora_adapter_engine_remove_failed():
+    serving_models = await _async_serving_models_init()
+    request = LoadLoRAAdapterRequest(
+        lora_name="adapter1", lora_path="/path/to/adapter1"
+    )
+    response = await serving_models.load_lora_adapter(request)
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
+    assert len(serving_models.lora_requests) == 1
+
+    lora_int_id = serving_models.lora_requests["adapter1"].lora_int_id
+    serving_models.engine_client.remove_lora.return_value = False
+    request = UnloadLoRAAdapterRequest(lora_name="adapter1")
+    response = await serving_models.unload_lora_adapter(request)
+    assert isinstance(response, ErrorResponse)
+    assert response.error.type == "InternalServerError"
+    assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert len(serving_models.lora_requests) == 1
+    serving_models.engine_client.remove_lora.assert_awaited_once_with(lora_int_id)
 
 
 @pytest.mark.asyncio
