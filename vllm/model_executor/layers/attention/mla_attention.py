@@ -2584,6 +2584,12 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_head_dim
+        self._use_fused_mla_kv_concat = (
+            current_platform.is_cuda_alike()
+            and hasattr(torch.ops._C, "fused_kimi_k3_mla_kv_concat")
+            and qk_nope_head_dim == 128
+            and qk_rope_head_dim == 64
+        )
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
 
@@ -2612,6 +2618,15 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
         if self._use_flashinfer_concat_mla_k:
             torch.ops.vllm.flashinfer_concat_mla_k(k, k_nope, k_pe)
+        elif (
+            self._use_fused_mla_kv_concat
+            and k_nope.dim() == 3
+            and k_nope.dtype in (torch.bfloat16, torch.float16)
+            and k_pe.dtype == k_nope.dtype
+        ):
+            torch.ops._C.fused_kimi_k3_mla_kv_concat(
+                k_nope, k_pe.reshape(k_pe.shape[0], k_pe.shape[-1]), k
+            )
         else:
             # Fallback: Direct copies with efficient broadcasting
             k[..., : k_nope.shape[-1]] = k_nope
