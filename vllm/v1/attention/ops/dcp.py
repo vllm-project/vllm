@@ -1317,7 +1317,10 @@ class MLADCPManager:
         )
         if direct_workspace is not None:
             logger.info_once("Using direct symmetric-memory DCP query gather for MLA.")
-            return direct_workspace.gather
+            return functools.partial(
+                self._direct_workspace_query_gather,
+                direct_workspace,
+            )
         return self._gather_query
 
     def _gather_query(self, query: torch.Tensor) -> torch.Tensor:
@@ -1325,6 +1328,18 @@ class MLADCPManager:
         if self.padded_num_heads is not None:
             query = reserve_query_head_storage(query, self.padded_num_heads)
         return query
+
+    def _direct_workspace_query_gather(
+        self,
+        direct_workspace: DirectDCPQGatherWorkspace,
+        query: torch.Tensor,
+    ) -> torch.Tensor:
+        # Forced MQA path can be taken for long sparse MLA prefills, whose batch size
+        # may exceed the direct symmetric-memory workspace. Fall back to allgather
+        # for those cases.
+        if query.shape[0] <= direct_workspace.max_num_tokens:
+            return direct_workspace.gather(query)
+        return self._gather_query(query)
 
     def init_kv_gather(
         self,
