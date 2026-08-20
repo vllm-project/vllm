@@ -29,9 +29,10 @@ from typing import NoReturn
 import regex as re
 
 from vllm.snapshot.manifest import (
-    SnapshotCompatibilityError,
     SnapshotManifest,
     SnapshotRuntimeIdentity,
+    _fsync_directory,
+    _write_json_atomic,
     validate_artifact_root,
     write_manifest_atomic,
 )
@@ -82,21 +83,6 @@ class _TcpSocketRecord:
     inode: int
 
 
-def _format_tcp_endpoint(family: str, raw: str) -> str:
-    address_hex, port_hex = raw.rsplit(":", 1)
-    packed = bytes.fromhex(address_hex)
-    if family == "AF_INET":
-        address = socket.inet_ntop(socket.AF_INET, packed[::-1])
-        return f"{address}:{int(port_hex, 16)}"
-    if family == "AF_INET6":
-        packed = b"".join(
-            packed[offset : offset + 4][::-1] for offset in range(0, 16, 4)
-        )
-        address = socket.inet_ntop(socket.AF_INET6, packed)
-        return f"[{address}]:{int(port_hex, 16)}"
-    raise SnapshotCreateError(f"unsupported TCP address family: {family}")
-
-
 def _validate_tcp_connections(
     records: tuple[_TcpSocketRecord, ...], owned_inodes: set[int]
 ) -> None:
@@ -104,19 +90,12 @@ def _validate_tcp_connections(
     endpoints = {
         (record.family, record.local_raw, record.remote_raw) for record in owned
     }
-    external = tuple(
-        record
+    if any(
+        (record.family, record.remote_raw, record.local_raw) not in endpoints
         for record in owned
-        if (record.family, record.remote_raw, record.local_raw) not in endpoints
-    )
-    if external:
-        details = ", ".join(
-            f"{_format_tcp_endpoint(record.family, record.local_raw)} to "
-            f"{_format_tcp_endpoint(record.family, record.remote_raw)}"
-            for record in external
-        )
+    ):
         raise SnapshotCreateError(
-            f"snapshot tree has an external established TCP connection: {details}"
+            "snapshot tree has an external established TCP connection"
         )
 
 
@@ -177,8 +156,6 @@ class LocalSnapshotTools:
         self,
         workdir: Path,
         engine_argv: tuple[str, ...],
-        *,
-        include_model_state: bool,
     ) -> int:
         log_file = (workdir / "child.log").open("wb")
         command = [
@@ -191,7 +168,6 @@ class LocalSnapshotTools:
             str(workdir / "release.json"),
             "--release-timeout-s",
             str(self.timeout_s),
-            *(["--include-model-state"] if include_model_state else []),
             "--",
             *engine_argv,
         ]
@@ -587,49 +563,6 @@ class LocalSnapshotTools:
             for path in sorted(self.plugin_dir.glob("*.so"))
         )
 
-    def _source_revision(self) -> str:
-        vllm_spec = importlib.util.find_spec("vllm")
-        if vllm_spec is None or vllm_spec.origin is None:
-            return self._binary_revision()
-        source_path = Path(vllm_spec.origin).resolve()
-        source_root = source_path.parents[1]
-        try:
-            self._run(
-                [
-                    "git",
-                    "-C",
-                    str(source_root),
-                    "ls-files",
-                    "--error-unmatch",
-                    "--",
-                    str(source_path.relative_to(source_root)),
-                ],
-                timeout=10,
-            )
-            dirty = self._run(
-                [
-                    "git",
-                    "-C",
-                    str(source_root),
-                    "status",
-                    "--porcelain",
-                    "--untracked-files=all",
-                ],
-                timeout=10,
-            ).stdout.strip()
-            if dirty:
-                raise SnapshotCompatibilityError(
-                    "snapshot source is an editable dirty checkout"
-                )
-            return self._run(
-                ["git", "-C", str(source_root), "rev-parse", "HEAD"], timeout=10
-            ).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            return self._binary_revision()
-
-    def _binary_revision(self) -> str:
-        return importlib.metadata.version("vllm")
-
     def _torch_identity(self) -> tuple[str, str]:
         torch_version = importlib.metadata.version("torch")
         torch_spec = importlib.util.find_spec("torch")
@@ -699,11 +632,7 @@ class LocalSnapshotTools:
         )
         return SnapshotManifest(
             schema_version=1,
-            boundary=(
-                "post-engine-init-pre-http-bind"
-                if getattr(args, "include_model_state", False)
-                else "post-engine-init-reloadable-state-released"
-            ),
+            boundary="post-engine-init-reloadable-state-released",
             created_at=datetime.now(timezone.utc).isoformat(),
             artifact_bytes=self._artifact_bytes(workdir),
             **identity.model_dump(),
@@ -721,20 +650,14 @@ class LocalSnapshotTools:
 
     def publish(self, workdir: Path, manifest: SnapshotManifest) -> None:
         write_manifest_atomic(workdir, manifest)
-        parent_fd = os.open(workdir.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
+        _fsync_directory(workdir.parent)
 
     def current_identity(self, gpu_uuid: str) -> SnapshotRuntimeIdentity:
         gpu_name, gpu_uuid, driver_version = self._gpu_identity(gpu_uuid)
         torch_version, cuda_runtime = self._torch_identity()
         host_id = Path("/etc/machine-id").read_text().strip()
-        source_revision = self._source_revision()
         return SnapshotRuntimeIdentity(
-            source_revision=source_revision,
-            binary_revision=self._binary_revision(),
+            vllm_version=importlib.metadata.version("vllm"),
             python_version=platform.python_version(),
             torch_version=torch_version,
             cuda_runtime=cuda_runtime,
@@ -899,30 +822,6 @@ class LocalSnapshotTools:
             ) from error
         self._restored_processes[root_pid] = tuple(handles)
 
-    def _write_release_marker(self, artifact: Path, payload: dict[str, object]) -> None:
-        path = artifact / "release.json"
-        temporary = artifact / "release.json.tmp"
-        temporary.unlink(missing_ok=True)
-        contents = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-        try:
-            descriptor = os.open(
-                temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-            )
-            with os.fdopen(descriptor, "wb") as output:
-                output.write(contents)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, path)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
-
     def _abort_failed_restore(
         self,
         artifact: Path,
@@ -931,7 +830,9 @@ class LocalSnapshotTools:
     ) -> NoReturn:
         secondary: list[str] = []
         try:
-            self._write_release_marker(artifact, {"release": False})
+            _write_json_atomic(
+                artifact / "release.json", {"release": False}, overwrite=True
+            )
         except BaseException as error:
             secondary.append(f"abort marker failed: {_error_detail(error)}")
         try:
@@ -1007,8 +908,10 @@ class LocalSnapshotTools:
                     f"snapshot restore address is already in use: {address}"
                 ) from error
 
-        self._write_release_marker(
-            artifact, {"release": True, "host": host, "port": port}
+        _write_json_atomic(
+            artifact / "release.json",
+            {"release": True, "host": host, "port": port},
+            overwrite=True,
         )
 
     def _connect_host(self, host: str | None) -> str:
@@ -1060,12 +963,8 @@ class LocalSnapshotTools:
             body = json.load(response)
         choice = body["choices"][0]
         try:
-            token_ids = tuple(choice["token_ids"])
-            token_logprobs = choice["logprobs"]["token_logprobs"]
-            if len(token_logprobs) != 1:
-                raise ValueError("canary must return exactly one logprob position")
-            oracle = Oracle(
-                token_ids=token_ids,
+            return Oracle(
+                token_ids=tuple(choice["token_ids"]),
                 text=choice["text"],
                 sampled_token_logprob=choice["logprobs"]["token_logprobs"][0],
             )
@@ -1077,7 +976,6 @@ class LocalSnapshotTools:
             raise SnapshotRestoreError(
                 "snapshot HTTP canary response is missing sampled token logprob"
             ) from error
-        return oracle
 
     def cleanup(self, root_pid: int) -> None:
         handles = self._restored_processes.get(root_pid)

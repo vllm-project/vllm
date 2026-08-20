@@ -16,19 +16,14 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic_core import PydanticCustomError
 from typing_extensions import Self
 
 
-class SnapshotError(RuntimeError):
-    """Base error for snapshot operations."""
-
-
-class SnapshotCompatibilityError(SnapshotError):
+class SnapshotCompatibilityError(RuntimeError):
     """The snapshot identity does not match the requested runtime."""
 
 
-class SnapshotSecurityError(SnapshotError):
+class SnapshotSecurityError(RuntimeError):
     """The snapshot artifact does not meet the private-path contract."""
 
 
@@ -40,8 +35,7 @@ _OracleTokenId = Annotated[int, Field(ge=0)]
 class SnapshotRuntimeIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    source_revision: str
-    binary_revision: str
+    vllm_version: str
     python_version: str
     torch_version: str
     cuda_runtime: str
@@ -57,10 +51,7 @@ class SnapshotRuntimeIdentity(BaseModel):
 
 class SnapshotManifest(SnapshotRuntimeIdentity):
     schema_version: Literal[1]
-    boundary: Literal[
-        "post-engine-init-pre-http-bind",
-        "post-engine-init-reloadable-state-released",
-    ]
+    boundary: Literal["post-engine-init-reloadable-state-released"]
     created_at: str
     artifact_bytes: Annotated[int, Field(ge=0)]
     model: str
@@ -93,18 +84,11 @@ class SnapshotManifest(SnapshotRuntimeIdentity):
     @model_validator(mode="after")
     def _validate_process_relationships(self) -> Self:
         if len(set(self.process_tree)) != len(self.process_tree):
-            raise PydanticCustomError(
-                "snapshot_process_tree", "process_tree contains duplicate PIDs"
-            )
+            raise ValueError("process_tree contains duplicate PIDs")
         if len(set(self.cuda_holders)) != len(self.cuda_holders):
-            raise PydanticCustomError(
-                "snapshot_cuda_holders", "cuda_holders contains duplicate PIDs"
-            )
+            raise ValueError("cuda_holders contains duplicate PIDs")
         if not set(self.cuda_holders).issubset(self.process_tree):
-            raise PydanticCustomError(
-                "snapshot_cuda_holders",
-                "cuda_holders must be a subset of process_tree",
-            )
+            raise ValueError("cuda_holders must be a subset of process_tree")
         return self
 
 
@@ -191,36 +175,39 @@ def _fsync_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
+def _write_json_atomic(path: Path, payload: object, *, overwrite: bool = False) -> None:
+    temporary = path.with_name(f"{path.name}.tmp")
+    if overwrite:
+        temporary.unlink(missing_ok=True)
+    elif path.exists() or path.is_symlink():
+        raise FileExistsError(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            )
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def write_manifest_atomic(path: Path, manifest: SnapshotManifest) -> None:
     """Write a new private manifest and make its directory entry durable."""
     path = Path(path)
     validate_artifact_root(path, creating=False)
     destination = path / "manifest.json"
-    temporary = path / "manifest.json.tmp"
-    if destination.exists() or destination.is_symlink():
-        raise SnapshotSecurityError(f"manifest already exists: {destination}")
-
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        file_descriptor = os.open(temporary, flags, 0o600)
+        _write_json_atomic(destination, manifest.model_dump(mode="json"))
     except FileExistsError as error:
         raise SnapshotSecurityError(
-            f"manifest temporary file already exists: {temporary}"
+            f"manifest already exists: {destination}"
         ) from error
-
-    try:
-        payload = json.dumps(
-            manifest.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-        ).encode()
-        with os.fdopen(file_descriptor, "wb", closefd=True) as manifest_file:
-            manifest_file.write(payload)
-            manifest_file.flush()
-            os.fsync(manifest_file.fileno())
-        os.replace(temporary, destination)
-        _fsync_directory(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
 
 
 def read_manifest(path: Path) -> SnapshotManifest:
@@ -251,7 +238,4 @@ def read_manifest(path: Path) -> SnapshotManifest:
 
 
 def inspect_snapshot(path: Path) -> dict[str, object]:
-    inspected: dict[str, object] = read_manifest(path).model_dump(mode="json")
-    inspected["support_boundary"] = "same-host Linux x86_64 TP1"
-    inspected["private_artifact_path_validated"] = True
-    return inspected
+    return read_manifest(path).model_dump(mode="json")
