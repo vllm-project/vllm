@@ -13,6 +13,7 @@ from vllm.renderers.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.renderers.hf import _convert_developer_to_system
 from vllm.tokenizers.hf import HfTokenizer, ThreadSafeHFTokenizerMixin
 from vllm.utils.async_utils import make_async
 
@@ -212,7 +213,9 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        rendered_conversation = _normalize_k3_tool_messages(conversation)
+        rendered_conversation = _normalize_k3_tool_messages(
+            _convert_developer_to_system(conversation, keep_tools=True)
+        )
         prompt = parse_dec_only_prompt(
             self._apply_chat_template(rendered_conversation, params)
         )
@@ -236,7 +239,9 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        rendered_conversation = _normalize_k3_tool_messages(conversation)
+        rendered_conversation = _normalize_k3_tool_messages(
+            _convert_developer_to_system(conversation, keep_tools=True)
+        )
         token_ids = await self._apply_chat_template_async(rendered_conversation, params)
         prompt = parse_dec_only_prompt(token_ids)
         if mm_data is not None:
