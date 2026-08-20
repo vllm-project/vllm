@@ -51,7 +51,6 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
@@ -128,6 +127,15 @@ class InputProcessor:
                     "not configured. Please set --reasoning-parser "
                     "and/or --reasoning-config to use thinking_token_budget."
                 )
+            if (
+                params.trace_decode_token_ids
+                and not self.model_config.enable_trace_replay
+            ):
+                raise VLLMValidationError(
+                    "trace_decode_token_ids is set but trace replay is not "
+                    "enabled. Start the engine with --enable-trace-replay "
+                    "to use it."
+                )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
@@ -155,6 +163,30 @@ class InputProcessor:
                 f"params must be either SamplingParams or PoolingParams, "
                 f"but got {type(params).__name__}"
             )
+
+    def _normalize_trace_replay_params(
+        self, sampling_params: SamplingParams, prompt_len: int
+    ) -> None:
+        """Apply trace replay's generation semantics to request-local params."""
+        trace_token_ids = sampling_params.trace_decode_token_ids
+        assert trace_token_ids
+        assert sampling_params.max_tokens is not None
+
+        max_trace_len = max(self.model_config.max_model_len - prompt_len, 1)
+        trace_token_ids = trace_token_ids[:max_trace_len]
+        sampling_params.trace_decode_token_ids = trace_token_ids
+
+        # Apply this after the generation config so its EOS token cannot stop
+        # replay before the trace is exhausted.
+        sampling_params.max_tokens = min(
+            len(trace_token_ids), sampling_params.max_tokens
+        )
+        sampling_params.min_tokens = 0
+        sampling_params.ignore_eos = True
+        sampling_params._eos_token_id = None
+        sampling_params.stop = []
+        sampling_params.stop_token_ids = []
+        sampling_params._all_stop_token_ids = set()
 
     def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:
@@ -340,6 +372,13 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+            if sampling_params.trace_decode_token_ids:
+                self._normalize_trace_replay_params(
+                    sampling_params,
+                    length_from_prompt_token_ids_or_embeds(
+                        prompt_token_ids, prompt_embeds
+                    ),
+                )
         else:
             pooling_params = params.clone()
 

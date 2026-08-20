@@ -1091,6 +1091,13 @@ class VllmConfig:
                 "are normalized over the same nucleus as the sampling mask"
             )
 
+    def _verify_trace_replay_config(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.enable_trace_replay:
+            return
+        if not self.use_v2_model_runner:
+            raise ValueError("trace replay requires Model Runner V2")
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1141,6 +1148,7 @@ class VllmConfig:
                 )
 
         self._verify_sampling_replay_config()
+        self._verify_trace_replay_config()
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
