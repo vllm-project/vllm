@@ -161,6 +161,26 @@ def test_topk_impl_equivalence():
     assert torch.allclose(result1, result2)
 
 
+@pytest.mark.parametrize("vocab_size", [8192, 129280])
+@pytest.mark.parametrize("top_p", [0.9, 0.99])
+def test_pytorch_top_p_bfloat16_matches_float32(vocab_size: int, top_p: float):
+    """Top-p must accumulate in FP32 regardless of the logits dtype.
+
+    Accumulating the nucleus in the logits dtype loses the small tail
+    increments, so the running sum crosses ``1 - top_p`` too late and extra
+    low-probability tokens stay in the nucleus. The error grows with the
+    vocabulary: with BF16 accumulation this input keeps 2 extra tokens at
+    vocab_size=8192 and 23 at vocab_size=129280.
+    """
+    logits = torch.linspace(-4, 4, vocab_size).to(torch.bfloat16).unsqueeze(0)
+    p = torch.tensor([top_p], dtype=torch.float32)
+
+    actual = apply_top_k_top_p_pytorch(logits.clone(), k=None, p=p)
+    expected = apply_top_k_top_p_pytorch(logits.float(), k=None, p=p)
+
+    assert torch.equal(torch.isfinite(actual), torch.isfinite(expected))
+
+
 @pytest.mark.skip(
     reason="FlashInfer top-k/top-p renorm comparison fails; "
     "needs investigation of tolerance threshold or "
