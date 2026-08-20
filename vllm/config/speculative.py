@@ -916,8 +916,9 @@ class SpeculativeConfig:
                 ExtractHiddenStatesConfig,
             )
 
-            # ExtractHiddenStatesModel is instantiated manually in load_model()
-            # We just need to store the target model config for KV cache shape info
+            # This extraction-only mode does not perform speculation. It reuses the
+            # proposer path and target geometry to export hidden states for speculator
+            # training.
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
 
