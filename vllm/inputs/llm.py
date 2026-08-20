@@ -95,6 +95,13 @@ class _PromptOptions(TypedDict):
     Optional cache salt to be used for prefix caching.
     """
 
+    generation_prefix_len: NotRequired[int]
+    """
+    Number of trailing tokens that are a forced generation/decode prefix
+    (e.g. an XTML channel-open stub). Included in ``prompt_token_ids`` for the
+    engine, but subtracted from OpenAI ``usage.prompt_tokens``.
+    """
+
 
 class TextPrompt(_PromptOptions):
     """Schema for a text prompt."""

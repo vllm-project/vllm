@@ -15,7 +15,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponseChoice,
     ChatMessage,
 )
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.chat_completion.serving import (
+    OpenAIServingChat,
+    _usage_prompt_tokens,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
@@ -242,9 +245,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 )
 
             assert final_res.prompt_token_ids is not None
-            num_prompt_tokens = len(final_res.prompt_token_ids)
-            if final_res.encoder_prompt_token_ids is not None:
-                num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
+            num_prompt_tokens = _usage_prompt_tokens(
+                final_res.prompt_token_ids,
+                generation_prefix_len=final_res.generation_prefix_len,
+                encoder_prompt_token_ids=final_res.encoder_prompt_token_ids,
+            )
             total_prompt_tokens += num_prompt_tokens
             total_completion_tokens += sum(
                 len(output.token_ids) for output in final_res.outputs

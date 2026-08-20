@@ -794,6 +794,8 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
+        if (generation_prefix_len := prompt.get("generation_prefix_len")) is not None:
+            engine_input["generation_prefix_len"] = generation_prefix_len
         # Narrow the union — `prompt_token_offsets` is only on TokensInput.
         if engine_input["type"] == "token" and (
             (offsets := prompt.get("prompt_token_offsets")) is not None
@@ -857,6 +859,8 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
+        if (generation_prefix_len := prompt.get("generation_prefix_len")) is not None:
+            engine_input["generation_prefix_len"] = generation_prefix_len
         # Narrow the union — `prompt_token_offsets` is only on TokensInput.
         if engine_input["type"] == "token" and (
             (offsets := prompt.get("prompt_token_offsets")) is not None

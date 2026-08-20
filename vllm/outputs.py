@@ -120,6 +120,9 @@ class RequestOutput:
         num_cached_tokens: The number of tokens with prefix cache hit.
         num_cache_creation_tokens: Prompt tokens currently counted as local
             prefix-cache writes for this request.
+        generation_prefix_len: Trailing forced generation-prefix length included
+            in ``prompt_token_ids`` but excluded from OpenAI
+            ``usage.prompt_tokens`` when set.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
     """
@@ -138,6 +141,7 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
+        generation_prefix_len: int | None = None,
         *,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
@@ -161,6 +165,7 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.num_cache_creation_tokens = num_cache_creation_tokens
+        self.generation_prefix_len = generation_prefix_len
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
 

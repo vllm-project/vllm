@@ -151,6 +151,7 @@ class RequestState:
         n: int | None = None,
         temperature: float | None = None,
         stream_input: bool = False,
+        generation_prefix_len: int | None = None,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -175,6 +176,7 @@ class RequestState:
         self.queue = queue
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
+        self.generation_prefix_len = generation_prefix_len
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -274,6 +276,7 @@ class RequestState:
             log_stats=log_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
+            generation_prefix_len=request.generation_prefix_len,
         )
 
     def make_request_output(
@@ -385,6 +388,7 @@ class RequestState:
             ec_transfer_params=ec_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
+            generation_prefix_len=self.generation_prefix_len,
             metrics=self.stats,
         )
 
