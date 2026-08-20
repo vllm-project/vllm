@@ -691,10 +691,6 @@ class Worker(WorkerBase):
             self.model_runner._init_kv_zero_meta()
 
     def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
-        from vllm.distributed.kv_transfer.kv_connector.utils import (
-            get_kv_transfer_group,
-            has_kv_transfer_group,
-        )
         from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
             _find_simple_cpu_offload_connector,
         )
