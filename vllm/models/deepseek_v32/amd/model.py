@@ -147,7 +147,8 @@ class DeepseekV32Model(torch.nn.Module):
             dtype=torch.int32,
             device=self.device,
         )
-        if rocm_aiter_ops.is_mla_qk_norm_rope_enabled():
+        use_aiter_qk_norm_rope = rocm_aiter_ops.is_mla_qk_norm_rope_enabled()
+        if use_aiter_qk_norm_rope:
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             num_local_heads = (
                 config.num_attention_heads // get_tensor_model_parallel_world_size()
@@ -215,6 +216,22 @@ class DeepseekV32Model(torch.nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
+
+        if use_aiter_qk_norm_rope:
+            # Split once off the layers' own rope: get_rope memoises, so every
+            # layer shares it. The MLA op derives the cos/sin row offset from
+            # rot_dim rather than a stride, so the chunk views will not do; the
+            # indexer op does take a stride but is kept contiguous to match.
+            attn = self.layers[self.start_layer].self_attn
+            cos, sin = attn.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
+            rope_cos, rope_sin = cos.contiguous(), sin.contiguous()
+            if attn.indexer_rope_emb is attn.rotary_emb:
+                index_cos, index_sin = rope_cos, rope_sin
+            else:
+                cos, sin = attn.indexer_rope_emb.cos_sin_cache.chunk(2, dim=-1)
+                index_cos, index_sin = cos.contiguous(), sin.contiguous()
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                layer.self_attn.set_aiter_rope(rope_cos, rope_sin, index_cos, index_sin)
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
