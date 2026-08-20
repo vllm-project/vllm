@@ -13,7 +13,6 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.attention.pcp import maybe_gather_indexer_k
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -35,6 +34,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -299,7 +299,7 @@ def sparse_attn_indexer(
     kv_cache: torch.Tensor,
     q_quant: torch.Tensor,
     q_scale: torch.Tensor | None,
-    k: torch.Tensor,
+    k: torch.Tensor | None,
     weights: torch.Tensor,
     quant_block_size: int,
     scale_fmt: str | None,
@@ -695,7 +695,7 @@ def sparse_attn_indexer_fake(
     kv_cache: torch.Tensor,
     q_quant: torch.Tensor,
     q_scale: torch.Tensor | None,
-    k: torch.Tensor,
+    k: torch.Tensor | None,
     weights: torch.Tensor,
     quant_block_size: int,
     scale_fmt: str | None,
@@ -781,7 +781,7 @@ class SparseAttnIndexer(CustomOp):
         self,
         hidden_states: torch.Tensor,
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
+        k: torch.Tensor | None,
         weights: torch.Tensor,
     ):
         if current_platform.is_cuda() or current_platform.is_xpu():
@@ -798,7 +798,7 @@ class SparseAttnIndexer(CustomOp):
         self,
         hidden_states: torch.Tensor,
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
+        k: torch.Tensor | None,
         weights: torch.Tensor,
     ):
         # FP8 path: single tensor (per-token scale is folded into `weights`).
@@ -835,7 +835,7 @@ class SparseAttnIndexer(CustomOp):
         self,
         hidden_states: torch.Tensor,
         q_fp8: torch.Tensor,
-        k: torch.Tensor,
+        k: torch.Tensor | None,
         weights: torch.Tensor,
     ):
         return self.forward_cuda(hidden_states, q_fp8, k, weights)
@@ -844,7 +844,7 @@ class SparseAttnIndexer(CustomOp):
         self,
         hidden_states: torch.Tensor,
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
+        k: torch.Tensor | None,
         weights: torch.Tensor,
     ):
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"

@@ -1856,7 +1856,7 @@ class ModelConfig:
         # actually contain any non-attention layers.
         layer_types = getattr(self.hf_config, "layer_types", None)
         return layer_types is None or not all(
-            layer == "attention" for layer in layer_types
+            layer in ("attention", "full_attention") for layer in layer_types
         )
 
     @property
@@ -1883,6 +1883,12 @@ class ModelConfig:
             # kv_lora_rank indicates that a Transformers model implementation uses MLA
             return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         # Manually maintained list of model types for vLLM model implementations
+
+        # Bidirectional DeepSeek variants (is_causal=False, used by some
+        # embedding models) must use the non-MLA attention path, since the
+        # MLA kernels only support causal attention.
+        if not getattr(self.hf_text_config, "is_causal", True):
+            return False
         return self.is_deepseek_mla
 
     @property
