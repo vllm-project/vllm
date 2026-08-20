@@ -143,10 +143,12 @@ def _lora_shrink_kernel_fp8(
     pid_m = first_pid_m + ((pid_m_n % num_pid_in_group) % group_size_m)
     pid_n = (pid_m_n % num_pid_in_group) // group_size_m
 
-    slice_id = tl.program_id(axis=1)
+    # slice_id, lora_id and ram index into pointer arithmetic; keep them int64
+    # so products with strides cannot overflow int32 for large token counts.
+    slice_id = tl.program_id(axis=1).to(tl.int64)
     lora_idx = tl.program_id(axis=2)
 
-    lora_id = tl.load(lora_ids + lora_idx)
+    lora_id = tl.load(lora_ids + lora_idx).to(tl.int64)
     if lora_id == -1:
         # Early exit for the no-lora case.
         return
@@ -169,7 +171,7 @@ def _lora_shrink_kernel_fp8(
 
     # Load all relevant row indices.
     offset_m = tl.arange(0, BLOCK_M) % cta_m_len
-    ram = tl.load(cta_lora_seq_indices + offset_m)
+    ram = tl.load(cta_lora_seq_indices + offset_m).to(tl.int64)
 
     do_shrink_kernel_fp8(
         pid_n,

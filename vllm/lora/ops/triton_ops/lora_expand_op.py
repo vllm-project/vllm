@@ -60,10 +60,12 @@ def _lora_expand_kernel(
     pid_m = pid_mn % cta_m_num
     pid_n = (pid_mn // cta_m_num) % cta_n_num
 
-    slice_id = tl.program_id(axis=1)
+    # slice_id, lora_id and ram index into pointer arithmetic; keep them int64
+    # so products with strides cannot overflow int32 for large token counts.
+    slice_id = tl.program_id(axis=1).to(tl.int64)
     lora_idx = tl.program_id(axis=2)
 
-    lora_id = tl.load(lora_ids + lora_idx)
+    lora_id = tl.load(lora_ids + lora_idx).to(tl.int64)
     if lora_id == -1:
         # Early exit for the no-lora case.
         return
@@ -94,7 +96,7 @@ def _lora_expand_kernel(
 
     # Load all relevant row indices.
     offset_m = tl.arange(0, BLOCK_M) % cta_m_len
-    ram = tl.load(cta_lora_seq_indices + offset_m)
+    ram = tl.load(cta_lora_seq_indices + offset_m).to(tl.int64)
 
     do_expand_kernel(
         pid_n,

@@ -646,3 +646,84 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+@pytest.mark.parametrize("op_type", ["shrink", "expand"])
+@pytest.mark.parametrize("device", DEVICES)
+def test_kernels_large_token_count(op_type: str, device: str):
+    """
+    Guards against int32 overflow in the LoRA kernels' pointer arithmetic:
+    once a token index times the row stride reaches 2**31 elements, the
+    offset used to wrap, causing illegal memory accesses in lora_expand and
+    silently wrong results in lora_shrink.
+    See https://github.com/vllm-project/vllm/issues/53028.
+    """
+    if current_platform.get_device_total_memory() < 12 * 1024**3:
+        pytest.skip("needs ~12 GiB of device memory")
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(0)
+
+    # Smallest shapes past the overflow boundary:
+    # (num_tokens - 1) * hidden_size * nslices >= 2**31.
+    num_tokens = 174764
+    hidden_size = 6144
+    nslices = 2
+    rank = 16
+    dtype = torch.bfloat16
+
+    token_lora_mapping = torch.zeros(num_tokens, dtype=torch.int32, device=device)
+    lora_meta = LoRAKernelMeta.make(
+        max_loras=1, max_num_tokens=num_tokens, device=device
+    )
+    lora_meta.prepare_tensors(token_lora_mapping)
+    meta_args = lora_meta.meta_args(token_nums=num_tokens, specialize_active_lora=False)
+
+    # Verifying every row would need another multi-GiB reference tensor, so
+    # check a sample of rows including the last one (the largest offsets).
+    check_rows = torch.tensor(
+        [0, num_tokens // 2, num_tokens - 1], dtype=torch.long, device=device
+    )
+
+    if op_type == "expand":
+        inputs = torch.rand((nslices, num_tokens, rank), dtype=dtype) / rank
+        lora_weights = [
+            torch.rand((1, hidden_size, rank), dtype=dtype) / rank
+            for _ in range(nslices)
+        ]
+        out = torch.zeros((num_tokens, hidden_size * nslices), dtype=dtype)
+        with _dict_lock:
+            _LORA_B_PTR_DICT.clear()
+            triton_ops.lora_expand(
+                inputs,
+                lora_weights,
+                out,
+                *meta_args,
+                offset_start=0,
+                add_inputs=False,
+            )
+        ref = torch.cat(
+            [inputs[s, check_rows] @ lora_weights[s][0].T for s in range(nslices)],
+            dim=1,
+        )
+        assert_close(out[check_rows], ref)
+    else:
+        inputs = (
+            torch.rand((num_tokens, hidden_size * nslices), dtype=dtype) / hidden_size
+        )
+        lora_weights = [
+            torch.rand((1, rank, hidden_size * nslices), dtype=dtype)
+            for _ in range(nslices)
+        ]
+        out = torch.zeros((nslices, num_tokens, rank), dtype=torch.float32)
+        with _dict_lock:
+            _LORA_A_PTR_DICT.clear()
+            triton_ops.lora_shrink(inputs, lora_weights, out, *meta_args, scaling=1.0)
+        ref = torch.stack(
+            [
+                inputs[check_rows].float() @ lora_weights[s][0].float().T
+                for s in range(nslices)
+            ]
+        )
+        assert_close(out[:, check_rows], ref)
