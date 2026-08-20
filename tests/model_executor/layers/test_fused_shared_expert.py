@@ -409,6 +409,33 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
     assert reason is None
 
 
+def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> None:
+    from vllm.models.deepseek_v4.amd.model import (
+        _prepare_native_fp8_shared_expert,
+        _use_heterogeneous_fhmoe,
+    )
+
+    hidden_size = 7168
+    intermediate_size = 384
+    w13 = torch.empty((2 * intermediate_size, hidden_size), dtype=torch.float8_e4m3fn)
+    w2 = torch.empty((hidden_size, intermediate_size), dtype=torch.float8_e4m3fn)
+    w13_scale = torch.full((6, 56), 0x7F, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+    w2_scale = torch.full((56, 3), 0x7F, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+
+    prepared = _prepare_native_fp8_shared_expert(
+        w13, w2, w13_scale, w2_scale, intermediate_size
+    )
+
+    assert prepared[0].shape == (1, 768, 7168)
+    assert prepared[1].shape == (1, 7168, 384)
+    assert prepared[2].shape == (768, 224)
+    assert prepared[3].shape == (7168, 16)
+    assert torch.all(prepared[3].view(torch.uint8)[:, 12:] == 0x7F)
+    assert not _use_heterogeneous_fhmoe(1)
+    assert all(_use_heterogeneous_fhmoe(tokens) for tokens in range(2, 9))
+    assert not _use_heterogeneous_fhmoe(9)
+
+
 def test_is_model_fused_shared_expert_compatible() -> None:
     class MoE(nn.Module):
         def __init__(self, enabled: bool) -> None:
