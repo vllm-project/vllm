@@ -15,6 +15,7 @@ use crate::error::ApiError;
 pub struct ResolvedRequestContext {
     pub request_id: String,
     pub data_parallel_rank: Option<u32>,
+    pub priority: Option<i32>,
     pub session_id: Option<String>,
 }
 
@@ -111,7 +112,8 @@ pub fn convert_logit_bias(
 }
 
 /// Extract common request metadata from HTTP headers: the external request ID,
-/// session ID, and the optional data-parallel rank used for engine routing.
+/// session ID, priority, and the optional data-parallel rank used for engine
+/// routing.
 pub fn resolve_request_context(
     headers: &HeaderMap,
     request_id: Option<&str>,
@@ -121,6 +123,10 @@ pub fn resolve_request_context(
         .get("X-data-parallel-rank")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse().ok());
+    let priority = headers
+        .get("X-Vllm-Priority")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok());
 
     // Extract request id from header.
     let request_id_header = headers.get("X-Request-Id").and_then(|value| value.to_str().ok());
@@ -134,6 +140,7 @@ pub fn resolve_request_context(
     ResolvedRequestContext {
         request_id,
         data_parallel_rank,
+        priority,
         session_id,
     }
 }

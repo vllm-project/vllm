@@ -243,6 +243,40 @@ def test_handles_shutdown_event():
 
 
 @pytest.mark.asyncio
+async def test_shutdown_children_uses_engine_process_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    supervisor = DPSupervisor(_make_unit_args(shutdown_timeout=0.0))
+    supervisor._processes = [
+        SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)
+    ]
+    calls = []
+    timeout_calls = []
+
+    def get_process_timeout(request_timeout, manager_timeout):
+        timeout_calls.append((request_timeout, manager_timeout))
+        return 15.0
+
+    monkeypatch.setattr(
+        dp_sup,
+        "get_engine_process_shutdown_timeout",
+        get_process_timeout,
+    )
+    monkeypatch.setattr(
+        dp_sup,
+        "_join_processes_with_timeout",
+        lambda processes, timeout: calls.append((processes, timeout)),
+    )
+
+    await supervisor._shutdown_children()
+
+    assert timeout_calls == [(0.0, 0.0)]
+    assert calls == [
+        (supervisor._processes, 15.0 + CHILD_EXIT_GRACE_S),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handles_child_exit(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -312,7 +346,7 @@ async def test_shutdown_if_supervisor_server_error_on_startup(
         await self._shutdown_event.wait()
 
     monkeypatch.setattr(dp_sup.asyncio, "get_running_loop", lambda: FakeLoop())
-    monkeypatch.setattr(dp_sup.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(dp_sup, "NoSignalServer", FakeServer)
     monkeypatch.setattr(DPSupervisor, "_shutdown_children", fake_shutdown_children)
     monkeypatch.setattr(DPSupervisor, "_start_children", fake_start_children)
     monkeypatch.setattr(DPSupervisor, "_monitor_children", fake_monitor_children)
@@ -483,20 +517,32 @@ async def _await_supervisor_health(
 
 
 async def _poll_until_api_server_running(
-    port: int, retries: int = 10, use_ssl: bool = False
+    port: int, timeout_s: float = 30.0, use_ssl: bool = False
 ) -> None:
+    """Return once the child accepts a request; it reports 503 until healthy."""
     scheme = "https" if use_ssl else "http"
     url = f"{scheme}://127.0.0.1:{port}/health"
+    deadline = time.monotonic() + timeout_s
+    last_exc: Exception | None = None
     async with aiohttp.ClientSession() as session:
-        for _ in range(retries):
+        while (remaining_s := deadline - time.monotonic()) > 0:
             try:
-                async with session.get(url, ssl=False if use_ssl else None) as resp:
-                    if resp.status != 200:
-                        return
-                await asyncio.sleep(1.0)
-            except aiohttp.ClientError:
+                request_timeout = aiohttp.ClientTimeout(total=min(2.0, remaining_s))
+                async with session.get(
+                    url,
+                    ssl=False if use_ssl else None,
+                    timeout=request_timeout,
+                ):
+                    return
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                last_exc = exc
                 print("Test detected not started yet, sleeping for 1s")
-                await asyncio.sleep(1.0)
+                remaining_s = deadline - time.monotonic()
+                if remaining_s > 0:
+                    await asyncio.sleep(min(1.0, remaining_s))
+    raise TimeoutError(
+        f"API server on port {port} did not start within {timeout_s}s"
+    ) from last_exc
 
 
 async def _set_healthy(port: int, use_ssl: bool = False) -> None:
@@ -528,8 +574,8 @@ async def _kill_server(port: int, use_ssl: bool = False) -> None:
             session.get(url, ssl=False if use_ssl else None) as resp,
         ):
             assert resp.status != 200
-    except Exception as e:
-        assert isinstance(e, aiohttp.ClientConnectorError)
+    except aiohttp.ClientConnectionError:
+        return
 
 
 @contextlib.asynccontextmanager
