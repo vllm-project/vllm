@@ -6,7 +6,6 @@ import hashlib
 import importlib.metadata
 import os
 import sqlite3
-import sys
 import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -15,6 +14,7 @@ from typing import TYPE_CHECKING, TypeVar
 import regex as re
 import torch
 from cachetools import LRUCache
+from transformers import MistralCommonBackend
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -323,21 +323,19 @@ def maybe_wrap_mistral_common_tokenizer(tokenizer: TokenizerLike) -> TokenizerLi
 
     Any other tokenizer is returned unchanged.
 
-    The Mistral imports are deferred: pulling them in at module scope costs about
-    a second on `import vllm.v1.worker.gpu_model_runner`, which imports this
-    module, and every worker would pay it whether or not a Mistral model is
-    served. A live `MistralCommonBackend` can only exist once transformers has
-    imported the module that defines it, so a `sys.modules` lookup is enough to
-    rule it out without importing anything.
+    `MistralTokenizer` is imported lazily because `vllm.tokenizers.mistral` pulls
+    in a large dependency tree, and this module is imported by
+    `vllm.v1.worker.gpu_model_runner`.
     """
-    mistral_common_module = sys.modules.get("transformers.tokenization_mistral_common")
-    if mistral_common_module is None or not isinstance(
-        tokenizer, mistral_common_module.MistralCommonBackend
-    ):
+    if not isinstance(tokenizer, MistralCommonBackend):
         return tokenizer
 
     from vllm.tokenizers.mistral import MistralTokenizer
 
+    logger.debug_once(
+        "Wrapping %s in MistralTokenizer for structured output.",
+        type(tokenizer).__name__,
+    )
     return MistralTokenizer(tokenizer)
 
 

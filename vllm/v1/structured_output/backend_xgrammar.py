@@ -23,7 +23,6 @@ from vllm.v1.structured_output.utils import (
     compile_regex_with_timeout,
     convert_lark_to_ebnf,
     grammar_is_likely_lark,
-    maybe_wrap_mistral_common_tokenizer,
 )
 
 if TYPE_CHECKING:
@@ -41,24 +40,19 @@ class XgrammarBackend(StructuredOutputBackend):
             self.vllm_config.structured_outputs_config.disable_any_whitespace
         )
 
-        # Without this, a `MistralCommonBackend` would fall through to
-        # `TokenizerInfo.from_huggingface()`, which cannot classify it and
-        # raises `ValueError: Unsupported tokenizer type`.
-        tokenizer = maybe_wrap_mistral_common_tokenizer(self.tokenizer)
-
-        if is_mistral_tokenizer(tokenizer):
+        if is_mistral_tokenizer(self.tokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
-            stop_token_ids = [tokenizer.eos_token_id]
+            stop_token_ids = [self.tokenizer.eos_token_id]
 
-            # not tokenizer.vocab_size as tokenizer.vocab
+            # not self.tokenizer.vocab_size as self.tokenizer.vocab
             # collapses all decoded errors into a single token.
-            self.vocab_size = len(tokenizer.vocab)
+            self.vocab_size = len(self.tokenizer.vocab)
             tokenizer_info = xgr.TokenizerInfo(  # type: ignore
-                encoded_vocab=tokenizer.vocab,
+                encoded_vocab=self.tokenizer.vocab,
                 # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
                 vocab_type=xgr.VocabType.RAW
-                if tokenizer.is_tekken
+                if self.tokenizer.is_tekken
                 else xgr.VocabType.BYTE_FALLBACK,
                 vocab_size=self.vocab_size,
                 stop_token_ids=stop_token_ids,

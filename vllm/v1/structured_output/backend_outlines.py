@@ -27,7 +27,6 @@ from vllm.v1.structured_output.utils import (
     compile_regex_with_timeout,
     get_outlines_cache,
     get_outlines_vocabulary,
-    maybe_wrap_mistral_common_tokenizer,
 )
 
 if TYPE_CHECKING:
@@ -54,10 +53,7 @@ else:
 @dataclass
 class OutlinesBackend(StructuredOutputBackend):
     def __post_init__(self):
-        # A `MistralCommonBackend` does not implement
-        # `convert_tokens_to_string()`, which `_reduced_vocabulary()` needs.
-        tokenizer = maybe_wrap_mistral_common_tokenizer(self.tokenizer)
-        self.vocabulary = get_outlines_vocabulary(tokenizer)
+        self.vocabulary = get_outlines_vocabulary(self.tokenizer)
         self.cache = get_outlines_cache()
 
     def _compile_index(
