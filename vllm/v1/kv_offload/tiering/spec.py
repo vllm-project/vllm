@@ -346,8 +346,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 tiering_manager = TieringOffloadingManager(
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
-                    hit_pending_timeout_s=self.extra_config.get(
-                        "hit_pending_timeout_s", DEFAULT_HIT_PENDING_TIMEOUT_S
+                    hit_pending_timeout_s=float(
+                        self.extra_config.get(
+                            "hit_pending_timeout_s", DEFAULT_HIT_PENDING_TIMEOUT_S
+                        )
                     ),
                 )
                 self._manager = tiering_manager

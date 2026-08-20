@@ -11,6 +11,7 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import logging
 from collections.abc import Iterable
 from unittest.mock import MagicMock
 
@@ -225,10 +226,11 @@ def test_tiering_manager_aggregates_secondary_stats():
 
 @pytest.mark.parametrize("timeout", [0.0, -1.0, float("inf"), float("nan")])
 def test_tiering_manager_rejects_invalid_hit_pending_timeout(timeout):
-    with pytest.raises(ValueError, match="must be a positive number"):
+    with pytest.raises(ValueError, match="must be a positive number") as exc_info:
         TieringOffloadingManager(
             primary_tier=MagicMock(), hit_pending_timeout_s=timeout
         )
+    assert repr(timeout) in str(exc_info.value)
 
 
 class TestExampleSecondaryTierManager:
@@ -304,9 +306,7 @@ class TestTieringOffloadingManager:
     @staticmethod
     def _install_clock(monkeypatch) -> list[float]:
         now = [100.0]
-        clock = MagicMock()
-        clock.monotonic.side_effect = lambda: now[0]
-        monkeypatch.setattr(tiering_manager_module, "time", clock)
+        monkeypatch.setattr(tiering_manager_module.time, "monotonic", lambda: now[0])
         return now
 
     def test_failed_promotion_finalizes_primary_with_failure(self, manager_setup):
@@ -513,12 +513,39 @@ class TestTieringOffloadingManager:
         assert (
             stats.data["data"][TieringOffloadingMetrics.HIT_PENDING_TIMEOUTS][()] == 1
         )
+        assert TieringOffloadingMetrics.BLOCK_QUERIES not in stats.data["data"]
 
         self.primary_tier.lookup.return_value = LookupResult.HIT
         assert self.manager.lookup(block, ctx) is LookupResult.MISS
 
         self.manager.on_request_finished(ctx)
         assert ctx.req_id not in self.manager._primary_pending_lookups
+
+    def test_primary_hit_pending_timeout_warning_is_rate_limited(
+        self, manager_setup, monkeypatch, caplog
+    ):
+        now = self._install_clock(monkeypatch)
+
+        ctx = ReqContext(req_id="warning-rate-limit")
+        self._start_request(ctx)
+        first_block, second_block = to_keys([10, 11])
+        self.primary_tier.lookup = MagicMock(return_value=LookupResult.HIT_PENDING)
+
+        assert self.manager.lookup(first_block, ctx) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(second_block, ctx) is LookupResult.HIT_PENDING
+
+        with caplog.at_level(logging.WARNING, logger=tiering_manager_module.__name__):
+            now[0] += 5.0
+            assert self.manager.lookup(first_block, ctx) is LookupResult.MISS
+            assert self.manager.lookup(second_block, ctx) is LookupResult.MISS
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if "HIT_PENDING timeout" in record.getMessage()
+        ]
+        assert len(messages) == 1
+        assert repr(first_block) in messages[0]
 
     def test_primary_hit_pending_deadline_is_per_request(
         self, manager_setup, monkeypatch
@@ -587,6 +614,32 @@ class TestTieringOffloadingManager:
 
         assert self.manager.lookup(block, ctx) is LookupResult.HIT_PENDING
         now[0] += 5.0
+        assert self.manager.lookup(block, ctx) is LookupResult.MISS
+
+    def test_failed_promotions_do_not_reset_hit_pending_deadline(
+        self, manager_setup, monkeypatch
+    ):
+        """Repeated failed promotions share one total deferral budget."""
+        now = self._install_clock(monkeypatch)
+
+        ctx = ReqContext(req_id="repeated-promotion-failures")
+        self._start_request(ctx)
+        block = to_keys([10])[0]
+        self.secondary_tier1.blocks[block] = True
+
+        def fail_promotion(job: TransferJob) -> None:
+            self.secondary_tier1.completed_jobs.append(
+                JobResult(job_id=job.job_id, success=False)
+            )
+
+        self.secondary_tier1.submit_load = fail_promotion
+
+        for _ in range(2):
+            assert self.manager.lookup(block, ctx) is LookupResult.HIT_PENDING
+            self._simulate_on_schedule_end()
+            now[0] += 3.0
+            self._simulate_on_schedule_end()
+
         assert self.manager.lookup(block, ctx) is LookupResult.MISS
 
     def test_promotion_from_secondary(self, manager_setup):

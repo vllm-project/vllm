@@ -60,6 +60,7 @@ from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 logger = init_logger(__name__)
 
 DEFAULT_HIT_PENDING_TIMEOUT_S = 5.0
+HIT_PENDING_WARNING_INTERVAL_S = 60.0
 
 
 @dataclass
@@ -77,6 +78,12 @@ class RequestState:
     pending_primary_stores: int = 0
     is_finished: bool = False
     request_level_tiers: set[int] | None = None
+
+
+@dataclass(slots=True)
+class PrimaryPendingLookupState:
+    deadlines: dict[OffloadKey, float] = field(default_factory=dict)
+    downgraded_keys: set[OffloadKey] = field(default_factory=set)
 
 
 class JobMetadata(NamedTuple):
@@ -198,17 +205,16 @@ class TieringOffloadingManager(OffloadingManager):
             hit_pending_timeout_s: Maximum time a request waits for a primary
                 write before treating that key as a miss.
         """
-        if (
-            isinstance(hit_pending_timeout_s, bool)
-            or not isinstance(hit_pending_timeout_s, (int, float))
-            or not math.isfinite(hit_pending_timeout_s)
-            or hit_pending_timeout_s <= 0
-        ):
-            raise ValueError("hit_pending_timeout_s must be a positive number")
+        if not math.isfinite(hit_pending_timeout_s) or hit_pending_timeout_s <= 0:
+            raise ValueError(
+                "hit_pending_timeout_s must be a positive number, "
+                f"got {hit_pending_timeout_s!r}"
+            )
 
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
-        self._hit_pending_timeout_s = float(hit_pending_timeout_s)
+        self._hit_pending_timeout_s = hit_pending_timeout_s
+        self._next_hit_pending_warning_at: float = 0.0
 
         self._job_id_counter: int = 0
         # Job tracking: maps job_id to metadata for all in-flight transfers.
@@ -239,10 +245,8 @@ class TieringOffloadingManager(OffloadingManager):
         # complete_store(), since complete_store() can still submit cascades.
         self._req_state: dict[str, RequestState] = {}
 
-        # Per-request deadlines for primary-tier writes observed in flight.
-        # A None deadline marks a key that timed out and must remain a miss for
-        # the rest of that request.
-        self._primary_pending_lookups: dict[str, dict[OffloadKey, float | None]] = {}
+        # Per-request primary-tier writes observed in flight.
+        self._primary_pending_lookups: dict[str, PrimaryPendingLookupState] = {}
 
         # Cached ParentManager wrappers for each secondary tier.
         self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
@@ -257,18 +261,19 @@ class TieringOffloadingManager(OffloadingManager):
     def _primary_lookup_timed_out(
         self, key: OffloadKey, req_context: ReqContext
     ) -> bool:
-        pending = self._primary_pending_lookups.get(req_context.req_id)
-        return pending is not None and key in pending and pending[key] is None
+        state = self._primary_pending_lookups.get(req_context.req_id)
+        return state is not None and key in state.downgraded_keys
 
     def _clear_primary_pending_lookup(
         self, key: OffloadKey, req_context: ReqContext
     ) -> None:
         req_id = req_context.req_id
-        pending = self._primary_pending_lookups.get(req_id)
-        if pending is None:
+        state = self._primary_pending_lookups.get(req_id)
+        if state is None:
             return
-        pending.pop(key, None)
-        if not pending:
+        state.deadlines.pop(key, None)
+        state.downgraded_keys.discard(key)
+        if not state.deadlines and not state.downgraded_keys:
             del self._primary_pending_lookups[req_id]
 
     def _track_primary_pending_lookup(
@@ -277,19 +282,31 @@ class TieringOffloadingManager(OffloadingManager):
         req_context: ReqContext,
         now: float,
     ) -> LookupResult:
-        pending = self._primary_pending_lookups.setdefault(req_context.req_id, {})
-        if key not in pending:
-            pending[key] = now + self._hit_pending_timeout_s
-            return LookupResult.HIT_PENDING
-
-        deadline = pending[key]
-        if deadline is None:
+        state = self._primary_pending_lookups.setdefault(
+            req_context.req_id, PrimaryPendingLookupState()
+        )
+        if key in state.downgraded_keys:
             return LookupResult.MISS
+
+        deadline = state.deadlines.get(key)
+        if deadline is None:
+            state.deadlines[key] = now + self._hit_pending_timeout_s
+            return LookupResult.HIT_PENDING
         if now < deadline:
             return LookupResult.HIT_PENDING
 
-        pending[key] = None
+        del state.deadlines[key]
+        state.downgraded_keys.add(key)
         self._metrics.on_hit_pending_timeout()
+        if now >= self._next_hit_pending_warning_at:
+            logger.warning(
+                "Primary-tier write for key %r exceeded the %.1f-second "
+                "HIT_PENDING timeout; treating it as a miss for request %s",
+                key,
+                self._hit_pending_timeout_s,
+                req_context.req_id,
+            )
+            self._next_hit_pending_warning_at = now + HIT_PENDING_WARNING_INTERVAL_S
         return LookupResult.MISS
 
     def _next_job_id(self) -> JobId:
@@ -432,21 +449,22 @@ class TieringOffloadingManager(OffloadingManager):
             return LookupResult.MISS
 
         start_time = time.monotonic()
-        primary_hit = self.primary_tier.lookup(key, req_context)
+        observed_primary_hit = self.primary_tier.lookup(key, req_context)
         lookup_end = time.monotonic()
         lookup_duration = lookup_end - start_time
-        primary_was_pending = primary_hit is LookupResult.HIT_PENDING
+        primary_hit = observed_primary_hit
+        primary_was_pending = observed_primary_hit is LookupResult.HIT_PENDING
         if primary_was_pending:
             primary_hit = self._track_primary_pending_lookup(
                 key, req_context, lookup_end
             )
-        else:
+        elif observed_primary_hit is LookupResult.HIT:
             self._clear_primary_pending_lookup(key, req_context)
         self._metrics.on_lookup(
             req_context,
             key,
             self._metrics.primary_tier_label,
-            primary_hit,
+            observed_primary_hit,
             lookup_duration,
         )
         if primary_was_pending or primary_hit is LookupResult.HIT:
