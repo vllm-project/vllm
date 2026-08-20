@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from flashinfer.moe_ep import MoEEpMegaLayer
 
     from vllm.config import VllmConfig
+    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MLP
 
 _MOE_SKIP_PADDING: bool | None = None
 
@@ -220,7 +221,9 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
             return_success,
         )
 
-    def finalize_weights(self) -> None:
+    def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
+        # The FlashInfer megakernel has no shared-expert fusion; the caller's
+        # serial shared MLP path handles shared_experts.
         if self._mega_layer is not None:
             return
         if self.w13_weight is None:
