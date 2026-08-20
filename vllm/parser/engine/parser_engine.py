@@ -55,6 +55,7 @@ class ToolCallSlot:
         "string_keys",
         "streamed_json",
         "active_string_param",
+        "in_open_string",
     )
 
     def __init__(self) -> None:
@@ -66,6 +67,7 @@ class ToolCallSlot:
         self.string_keys: set[str] | None = None
         self.streamed_json: str = ""
         self.active_string_param: str | None = None
+        self.in_open_string: bool = False
 
     @property
     def args(self) -> str:
