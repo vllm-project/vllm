@@ -8,7 +8,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
-from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
+from vllm.model_executor.hw_agnostic.custom_op import (
+    HwAgnosticPluggableLayer as PluggableLayer,
+)
 from vllm.model_executor.hw_agnostic.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,

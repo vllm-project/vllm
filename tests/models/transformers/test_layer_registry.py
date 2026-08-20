@@ -292,6 +292,9 @@ def test_hw_agnostic_matches_vllm_with_tied_lm_head(
 _HW_AGNOSTIC_LAYERS = (
     ("layernorm", "RMSNorm"),
     ("activation", "SiluAndMul"),
+    ("logits_processor", "LogitsProcessor"),
+    ("vocab_parallel_embedding", "VocabParallelEmbedding"),
+    ("vocab_parallel_embedding", "ParallelLMHead"),
 )
 
 
