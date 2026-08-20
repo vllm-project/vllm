@@ -9,7 +9,6 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import (
-    _heuristic_config,
     moe_fused_mul_sum,
 )
 from vllm.utils.torch_utils import set_random_seed
@@ -181,22 +180,18 @@ def test_padding_row_left_untouched(use_expert_map: bool):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_nonlocal_and_padding_share_tile():
-    """A non-local real row and an all -1 padding row in the same BLOCK_M tile.
+def test_nonlocal_and_padding_adjacent():
+    """A non-local real row next to an all -1 padding row.
 
-    The real row keeps the tile alive (no early-return), so the non-local row is
-    zeroed while the padding row beside it is left untouched. Guards against a
-    future change that skips the whole tile and corrupts the real row.
+    Each CTA owns one token row: the non-local row must be zeroed (its slots are
+    all masked by expert_map) while the padding row beside it is left untouched.
+    Guards against a change that lets one row's fate leak into its neighbour.
     """
     set_random_seed(0)
     device = "cuda"
     num_tokens, top_k = 17, 8
     local = NUM_EXPERTS // 2
     expert_map = _local_expert_map(device)
-
-    block_m = _heuristic_config(num_tokens, top_k, HIDDEN_SIZE, 2)[0]
-    if block_m < 2:
-        pytest.skip(f"BLOCK_M={block_m} < 2: rows cannot share a tile")
 
     inputs = torch.full(
         (num_tokens, top_k, HIDDEN_SIZE),
@@ -205,8 +200,7 @@ def test_nonlocal_and_padding_share_tile():
         device=device,
     )
     topk_weights = torch.rand(num_tokens, top_k, dtype=torch.bfloat16, device=device)
-    # All rows are non-local real rows except row 1, an all -1 padding row that
-    # shares tile 0 (rows [0, BLOCK_M)) with the non-local row 0.
+    # All rows are non-local real rows except row 1, an all -1 padding row.
     topk_ids = torch.randint(
         local, NUM_EXPERTS, (num_tokens, top_k), dtype=torch.int32, device=device
     )
@@ -225,7 +219,7 @@ def test_nonlocal_and_padding_share_tile():
 
     padding = torch.zeros(num_tokens, dtype=torch.bool, device=device)
     padding[1] = True
-    assert torch.all(out[1] == SENTINEL), "padding row in shared tile was modified"
+    assert torch.all(out[1] == SENTINEL), "padding row beside a real row was modified"
     written = out[~padding].float()
     assert not written.isnan().any(), "non-local row leaked NaN into the output"
     torch.testing.assert_close(written, torch.zeros_like(written))
