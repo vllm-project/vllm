@@ -42,7 +42,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .pixtral import PixtralHFVisionModel
+from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -170,6 +170,27 @@ class Mistral3MultiModalProjector(nn.Module):
         return hidden_states
 
 
+class Mistral3HFEncoderInfo(PixtralHFEncoderInfo):
+    """Patch grid for Mistral3.
+
+    `PixtralHFEncoderInfo` ratio-scales against `vision_config.image_size`.
+    Mistral3's HF image processor can use a different `longest_edge`, so the
+    grid must be counted from the processed image dimensions instead.
+    """
+
+    def get_patch_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        # `image_width`/`image_height` are already-processed dims
+        # (e.g. pixel_values.shape[-2:]), which are multiples of the
+        # effective patch stride (`patch_size * spatial_merge_size`).
+        patch_size = self.get_patch_size()
+        return image_width // patch_size, image_height // patch_size
+
+
 class Mistral3ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> Mistral3Config:
         return self.ctx.get_hf_config(Mistral3Config)
@@ -286,20 +307,20 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
         image_end_id = vocab[processor.image_end_token]
 
         assert isinstance(hf_config.vision_config, PixtralVisionConfig)
-        # Effective grid stride matches the Mistral3PatchMerger's post-merge
-        # token layout: one placeholder token per (patch_size * spatial_merge_size)
-        # region. Reading pixel_values.shape directly keeps ncols/nrows in
-        # lock-step with the HF image processor even when the caller overrides
-        # `size={"longest_edge": ...}` via mm_processor_kwargs.
-        patch_size = hf_config.vision_config.patch_size * hf_config.spatial_merge_size
+        encoder_info = self.info.get_vision_encoder_info()
+        assert isinstance(encoder_info, Mistral3HFEncoderInfo)
 
         def get_replacement(item_idx: int):
+            # Count placeholders from processed pixel_values so the grid
+            # matches the HF image processor, including longest_edge overrides.
             out_item = out_mm_kwargs["image"][item_idx]
             pixel_values = out_item["pixel_values"].data
             assert isinstance(pixel_values, torch.Tensor)
             image_height, image_width = pixel_values.shape[-2:]
-            ncols = image_width // patch_size
-            nrows = image_height // patch_size
+            ncols, nrows = encoder_info.get_patch_grid_size(
+                image_width=image_width,
+                image_height=image_height,
+            )
 
             tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
             tokens[-1] = image_end_id
