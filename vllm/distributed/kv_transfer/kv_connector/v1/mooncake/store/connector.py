@@ -48,7 +48,7 @@ from vllm.v1.request import Request
 from .data import MooncakeStoreConnectorMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
-from .worker import MooncakeStoreWorker
+from .worker import MooncakeStoreWorker, resolve_store_tp_size
 
 logger = init_logger(__name__)
 
@@ -94,10 +94,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is None:
             return None
-        store_tp_size = kv_transfer_config.kv_connector_extra_config.get(
-            "store_tp_size"
-        )
-        if type(store_tp_size) is not int:
+        if resolve_store_tp_size(kv_transfer_config.kv_connector_extra_config) is None:
             return None
         logger.info_once(
             "MooncakeStoreConnector setting KV cache layout to HND for "

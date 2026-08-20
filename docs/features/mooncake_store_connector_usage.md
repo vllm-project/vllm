@@ -153,6 +153,36 @@ Store and also covers deployments where prompt KV is delivered directly by
 }
 ```
 
+#### Sharing one Store across multiple Prefill TP sizes
+
+Heterogeneous-TP sharing normally uses a fixed `store_tp_size`. When several
+prefillers use different TP sizes, opt in to a common Store TP derived from
+their least common multiple:
+
+```json
+{
+    "kv_connector_extra_config": {
+        "enable_store_tp_lcm": true,
+        "prefill_tp_sizes": [4, 2]
+    }
+}
+```
+
+Every prefiller and decoder that shares these entries must use the same list.
+The example selects Store TP 4: a TP4 endpoint maps each rank to one Store
+shard, while TP2 endpoints map each rank to two Store shards. Runtime TP sizes
+remain unchanged. A decoder configured with `"save_decode_cache": true` writes
+new decode KV back using the same Store TP without tracking which prefiller
+created the prefix.
+
+The list may contain any positive integer TP sizes. Sharing is enabled on an
+endpoint only when the selected Store TP is at least its local TP, is divisible
+by the local TP, and satisfies the existing topology and KV-head constraints.
+Malformed lists and unsupported endpoints fall back to an isolated rank-local
+key layout, so they cannot read incompatible shared entries. When
+`enable_store_tp_lcm` is absent or false, `prefill_tp_sizes` has no effect and
+the existing `store_tp_size` behavior is unchanged.
+
 **Proxy:**
 
 A disaggregation proxy is required to route requests between prefiller and decoder nodes. The proxy assigns `do_remote_prefill=True` / `do_remote_decode=True` to coordinate P2P transfer via `MooncakeConnector`. Refer to the [MooncakeConnector usage guide](mooncake_connector_usage.md) for proxy setup details.

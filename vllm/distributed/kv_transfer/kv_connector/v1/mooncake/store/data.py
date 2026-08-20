@@ -23,6 +23,8 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
 )
 
+from .tp_layout import TPSharedStagingBuffer, TPSharedTensorLayout
+
 logger = init_logger(__name__)
 
 
@@ -333,6 +335,8 @@ class TPSharedChunkedTokenDatabase(ChunkedTokenDatabase):
         self._shard_segment_templates: tuple[
             tuple[np.ndarray, np.ndarray, list[int]], ...
         ] = ()
+        self._tensor_layouts: tuple[TPSharedTensorLayout, ...] = ()
+        self._staging_device: torch.device | None = None
 
     def key_for_shard(self, store_shard_id: int, chunk_hash: BlockHash) -> str:
         local_shard = store_shard_id - self.store_shard_ids[0]
@@ -343,8 +347,11 @@ class TPSharedChunkedTokenDatabase(ChunkedTokenDatabase):
     def set_kv_cache_tensors(
         self, kv_caches: Sequence[torch.Tensor], num_blocks: int
     ) -> None:
-        """Record packed KV tensor strides for direct scatter/gather."""
-        layouts = []
+        """Record KV tensor geometry for direct transfer or staging conversion."""
+        layouts: list[TPSharedTensorLayout] = []
+        devices = {cache.device for cache in kv_caches}
+        if len(devices) != 1:
+            raise ValueError("TP-shared KV caches must use one device")
         for cache in kv_caches:
             if cache.ndim != 4 or tuple(cache.shape[:3]) != (
                 num_blocks,
@@ -380,45 +387,46 @@ class TPSharedChunkedTokenDatabase(ChunkedTokenDatabase):
                     "TP-shared Mooncake store supports only packed NHD or HND KV layout"
                 )
             layouts.append(
-                (
-                    cache.data_ptr(),
-                    block_stride,
-                    head_stride,
-                    token_stride,
-                    content_bytes,
-                    is_nhd,
+                TPSharedTensorLayout(
+                    base_addr=cache.data_ptr(),
+                    block_stride=block_stride,
+                    head_stride=head_stride,
+                    token_stride=token_stride,
+                    content_bytes=content_bytes,
+                    is_nhd=is_nhd,
                 )
             )
+        self._tensor_layouts = tuple(layouts)
+        self._staging_device = next(iter(devices))
+        self._shard_segment_templates = ()
+        if self.needs_staging:
+            return
+
         templates = []
         for local_shard in range(self.shards_per_rank):
             head_start = local_shard * self.heads_per_store_shard
             addr_bases: list[int] = []
             block_strides: list[int] = []
             sizes: list[int] = []
-            for (
-                base_addr,
-                block_stride,
-                head_stride,
-                token_stride,
-                content_bytes,
-                is_nhd,
-            ) in layouts:
-                if is_nhd:
-                    # Canonical objects use HND order, so NHD contributes one
-                    # segment per head/token content cell.
+            for layout in layouts:
+                if layout.is_nhd:
+                    # Direct CPU fallback converts NHD to canonical HND with
+                    # one segment per head/token content cell.
                     for head_idx in range(self.heads_per_store_shard):
                         for token_idx in range(self.block_size):
                             addr_bases.append(
-                                base_addr
-                                + token_idx * token_stride
-                                + (head_start + head_idx) * head_stride
+                                layout.base_addr
+                                + token_idx * layout.token_stride
+                                + (head_start + head_idx) * layout.head_stride
                             )
-                            block_strides.append(block_stride)
-                            sizes.append(content_bytes)
+                            block_strides.append(layout.block_stride)
+                            sizes.append(layout.content_bytes)
                 else:
-                    addr_bases.append(base_addr + head_start * head_stride)
-                    block_strides.append(block_stride)
-                    sizes.append(self.heads_per_store_shard * head_stride)
+                    addr_bases.append(
+                        layout.base_addr + head_start * layout.head_stride
+                    )
+                    block_strides.append(layout.block_stride)
+                    sizes.append(self.heads_per_store_shard * layout.head_stride)
             templates.append(
                 (
                     np.asarray(addr_bases, dtype=np.uint64),
@@ -427,6 +435,43 @@ class TPSharedChunkedTokenDatabase(ChunkedTokenDatabase):
                 )
             )
         self._shard_segment_templates = tuple(templates)
+
+    @property
+    def needs_staging(self) -> bool:
+        return bool(
+            self._staging_device is not None
+            and self._staging_device.type == "cuda"
+            and any(layout.is_nhd for layout in self._tensor_layouts)
+        )
+
+    def create_staging_buffer(
+        self, target_bytes: int = 64 * 1024 * 1024
+    ) -> TPSharedStagingBuffer | None:
+        if not self.needs_staging:
+            return None
+        assert self._staging_device is not None
+        return TPSharedStagingBuffer(
+            self._tensor_layouts,
+            self.block_size,
+            self.heads_per_store_shard,
+            self.store_shard_ids[0],
+            self._staging_device,
+            target_bytes,
+        )
+
+    def staging_metadata(
+        self,
+        chunks: Sequence[tuple[int, int]],
+        block_ids: list[int],
+        store_shard_ids: Sequence[int],
+    ) -> tuple[list[int], list[int]]:
+        """Return physical blocks and store shards aligned with object keys."""
+        object_block_ids: list[int] = []
+        for start, end in chunks:
+            if end - start != self.block_size:
+                raise ValueError("TP-shared Mooncake store requires full KV blocks")
+            object_block_ids.append(block_ids[start // self.block_size])
+        return object_block_ids, list(store_shard_ids)
 
     def prepare_values_for_shards(
         self,

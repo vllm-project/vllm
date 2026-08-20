@@ -5,6 +5,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -42,27 +44,28 @@ def _make_vllm_config():
     )
 
 
-def test_store_tp_defaults_to_hnd_layout():
+@pytest.mark.parametrize(
+    ("extra_config", "expected_layout"),
+    [
+        ({"store_tp_size": 4}, "HND"),
+        ({"enable_store_tp_lcm": True, "prefill_tp_sizes": [6, 4]}, "HND"),
+        ({"prefill_tp_sizes": [4, 2]}, None),
+        ({"enable_store_tp_lcm": True, "prefill_tp_sizes": [4, 0]}, None),
+        (None, None),
+    ],
+)
+def test_store_tp_required_kv_cache_layout(extra_config, expected_layout):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeStoreConnector",
         kv_role="kv_both",
-        kv_connector_extra_config={"store_tp_size": 4},
+        kv_connector_extra_config=extra_config,
     )
 
     assert (
         mooncake_store_connector.MooncakeStoreConnector.get_required_kvcache_layout(
             vllm_config
         )
-        == "HND"
-    )
-
-
-def test_rank_local_store_keeps_default_layout():
-    assert (
-        mooncake_store_connector.MooncakeStoreConnector.get_required_kvcache_layout(
-            _make_vllm_config()
-        )
-        is None
+        == expected_layout
     )
 
 
