@@ -39,9 +39,6 @@ def _selector_walk_kernel(
     for step in range(num_steps):
         flat = row * num_steps + step
         score_base = (flat * top_k + previous) * top_k
-        # Load at the width the argmax will reduce in. Loading fp32 and letting
-        # the noise promote to fp64 gives the two arms of that branch different
-        # types, which Triton rejects on ROCm.
         scores = tl.load(
             scores_ptr + score_base + offsets,
             mask=mask & valid,
@@ -54,8 +51,7 @@ def _selector_walk_kernel(
             other=0,
         )
 
-        # The candidate token ids key the noise, so a token drawn at this slot
-        # gets the same noise the target's own sampling would give it.
+        # Candidate ids key the noise, matching the target's own sampling.
         position = tl.load(sample_pos_ptr + flat) - 1
         _, index = gumbel_noised_argmax(
             scores,
@@ -132,18 +128,12 @@ class DFlash2Speculator(DFlashSpeculator):
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
         if self.draft_logits is not None:
-            # Restated rather than trusted: a construction path that skips the
-            # base allocation would otherwise hand the walk uninitialized memory
-            # where it needs every unwritten column to be impossible.
             self.draft_logits.fill_(-float("inf"))
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
-        # fp32, not the head dtype. Rounding real selector scores to bf16 moves
-        # the argmax of a candidate row 0.81% of the time and reverses the order
-        # of 0.68% of candidate pairs, so the walk and the rejection that checks
-        # it would no longer read the same distribution. The fill is -inf because
-        # the cache kernel writes only the K candidates, and every column it
-        # never touches has to read as impossible.
+        # fp32 so the walk and the rejection that checks it read the same
+        # distribution; -inf because the cache kernel writes only the K
+        # candidates.
         return torch.float32, -float("inf")
 
     def _sample_path(

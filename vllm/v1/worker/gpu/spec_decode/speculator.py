@@ -298,12 +298,9 @@ class DraftModelSpeculator(BaseSpeculator):
         return attn_metadata
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
-        """Dtype and initial value for the cached proposal distribution.
+        """Dtype and fill for the cached proposal distribution.
 
-        A speculator that writes every column each step wants the head's dtype
-        and can start from zero. One that writes a subset -- DFlash2 caches only
-        its K candidates -- overrides this, since the columns it never touches
-        have to read as impossible.
+        Speculators that write only a subset of columns each step override this.
         """
         return vllm_config.model_config.head_dtype, 0.0
 

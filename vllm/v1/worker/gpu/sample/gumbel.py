@@ -114,13 +114,7 @@ def gumbel_noised_argmax(
             gumbel_noise = -tl.log(-tl.log(u))
         else:
             u = tl_rand32(gumbel_seed, keys, includes_zero=False)
-            # Draw the large-noise tail (which decides the argmax winner) from
-            # u -> 0, where fp32 has fine resolution, instead of u -> 1, where
-            # fp32 spacing is ~2**-24. The naive `-log(-log(u))` puts the winning
-            # tail at u -> 1, hard-capping the noise at ~16.6 and coarsely
-            # quantizing it; `log1p(-u)` == `log(1 - u)` keeps the tail in the
-            # well-resolved region. `1 - u` would lose precision for small u, so
-            # log1p is required.
+            # log1p keeps the winning tail at u -> 0, where fp32 resolves it.
             gumbel_noise = -tl.log(-tldevice.log1p(-u))
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
 
