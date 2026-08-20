@@ -376,6 +376,9 @@ processes.
 ### Configuration
 
 You can adjust the size of the cache by setting the value of `mm_processor_cache_gb` (default 4 GiB).
+A processed item larger than this budget is served uncached (with a warning)
+instead of failing engine startup; raise `mm_processor_cache_gb` if you want
+those items cached.
 
 If you do not benefit much from the cache, you can disable both IPC
 and processor caching completely via `mm_processor_cache_gb=0`.
