@@ -64,6 +64,7 @@ class MockConnector(KVConnectorBase_V1):
         # Override just build_kv_connector_stats
         mock.build_kv_connector_stats = cls.build_kv_connector_stats
         mock.get_kv_connector_stats.return_value = None
+        mock.get_mem_pool_context.return_value = None
         return mock
 
     @classmethod
@@ -183,7 +184,7 @@ def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
 
 def test_multi_connector_forwards_mem_pool_context(mc: MultiConnector):
     context = MagicMock()
-    provider = MagicMock()
+    provider = MagicMock(spec_set=KVConnectorBase_V1)
     provider.get_mem_pool_context.return_value = context
     mc._connectors = [mc._connectors[0], provider]
 
@@ -192,7 +193,10 @@ def test_multi_connector_forwards_mem_pool_context(mc: MultiConnector):
 
 
 def test_multi_connector_rejects_multiple_mem_pool_contexts(mc: MultiConnector):
-    providers = [MagicMock(), MagicMock()]
+    providers = [
+        MagicMock(spec_set=KVConnectorBase_V1),
+        MagicMock(spec_set=KVConnectorBase_V1),
+    ]
     for provider in providers:
         provider.get_mem_pool_context.return_value = MagicMock()
     mc._connectors = providers

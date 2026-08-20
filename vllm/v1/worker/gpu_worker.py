@@ -730,12 +730,11 @@ class Worker(WorkerBase):
         # If the connector provides a custom memory pool (e.g. Mooncake
         # NVLink/BAREX), use it for KV cache allocation; otherwise fall
         # back to the standard CuMem pool.
-        mem_pool_context = None
-        if has_kv_transfer_group():
-            connector = get_kv_transfer_group()
-            get_ctx = getattr(connector, "get_mem_pool_context", None)
-            if get_ctx is not None:
-                mem_pool_context = get_ctx()
+        mem_pool_context = (
+            get_kv_transfer_group().get_mem_pool_context()
+            if has_kv_transfer_group()
+            else None
+        )
         if mem_pool_context is None:
             mem_pool_context = self._maybe_get_memory_pool_context(tag="kv_cache")
 
