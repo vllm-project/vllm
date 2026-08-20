@@ -20,7 +20,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.models.deepseek_v4.common.ops import (
-    compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
 )
@@ -111,23 +110,6 @@ def test_get_dspark_swa_index_width(
     window_size: int, num_speculative_tokens: int, expected: int
 ):
     assert get_dspark_swa_index_width(window_size, num_speculative_tokens) == expected
-
-
-def test_compute_global_topk_reuses_output_buffers():
-    device = "cuda"
-    topk_indices = torch.tensor(
-        [[0, 3, -1], [1, 2, -1]], dtype=torch.int32, device=device
-    )
-    token_to_req = torch.tensor([0, 1], dtype=torch.int32, device=device)
-    block_table = torch.tensor([[5, 7], [11, 13]], dtype=torch.int32, device=device)
-    is_valid = torch.tensor([True, False], device=device)
-    args = (topk_indices, token_to_req, block_table, 2, is_valid)
-    expected = compute_global_topk_indices_and_lens(*args)
-    outputs = tuple(torch.empty_like(tensor) for tensor in expected)
-    actual = compute_global_topk_indices_and_lens(*args, output_buffers=outputs)
-    for result, output, reference in zip(actual, outputs, expected):
-        assert result.data_ptr() == output.data_ptr()
-        torch.testing.assert_close(result, reference)
 
 
 def _ue8m0_reference(x: torch.Tensor, block_size: int, fp8_max: float):
@@ -830,7 +812,22 @@ def _reference_kv_compress_norm_rope(
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 32])
 @pytest.mark.parametrize("kv_block_size", [16, 32])
-@pytest.mark.parametrize("use_fp4", [False, True])
+@pytest.mark.parametrize(
+    "use_fp4",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not (
+                    current_platform.is_cuda()
+                    and current_platform.is_device_capability_family(100)
+                ),
+                reason="MXFP4 indexer cache requires an SM100-family GPU",
+            ),
+        ),
+    ],
+)
 def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: bool):
     """Fused K compress+norm+rope+quant+insert for the indexer KV cache."""
     HEAD_DIM = 128

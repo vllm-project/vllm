@@ -1276,6 +1276,7 @@ class EngineCoreProc(EngineCore):
 
         engine_core: EngineCoreProc | None = None
         signal_callback: SignalCallback | None = None
+        clean_shutdown = False
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -1338,8 +1339,15 @@ class EngineCoreProc(EngineCore):
 
             engine_core.run_busy_loop()
 
-        except SystemExit:
+        except SystemExit as e:
             logger.info_once("[shutdown] EngineCore: exiting busy loop")
+            clean_shutdown = (
+                e.code in (None, 0)
+                and engine_core is not None
+                and engine_core.shutdown_state == EngineShutdownState.SHUTTING_DOWN
+                and not engine_core.has_work()
+                and engine_core.vllm_config.shutdown_timeout == 0
+            )
             raise
         except Exception as e:
             if engine_core is None:
@@ -1355,6 +1363,14 @@ class EngineCoreProc(EngineCore):
                 signal_callback.stop()
             if engine_core is not None:
                 engine_core.shutdown()
+            if clean_shutdown:
+                from vllm.platforms import current_platform
+
+                if current_platform.is_rocm():
+                    # Cleanup above already unfreezes and collects the heap.
+                    # Freeze the surviving graph to skip another slow cyclic-GC
+                    # scan during finalization; process exit reclaims it.
+                    gc.freeze()
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
@@ -1620,6 +1636,7 @@ class EngineCoreProc(EngineCore):
             max_model_len=self.vllm_config.model_config.max_model_len,
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
             block_size=self.vllm_config.cache_config.block_size,
+            mamba_block_size=self.vllm_config.cache_config.mamba_block_size,
             dp_stats_address=self.frontend_stats_publish_address,
             dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
             vllm_version=VLLM_VERSION,

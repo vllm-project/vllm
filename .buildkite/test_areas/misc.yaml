@@ -317,6 +317,14 @@ steps:
   - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
+  mirror:
+    amd:
+      label: ":amd: (MI355) Async Engine, Inputs, Utils, Worker"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
 
 - label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config"
   key: async-engine-inputs-utils-worker-config-cpu
@@ -350,7 +358,6 @@ steps:
   - vllm/utils/
   - vllm/v1/
   - tests/test_envs.py
-  - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
@@ -368,7 +375,6 @@ steps:
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_envs.py
-  - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
