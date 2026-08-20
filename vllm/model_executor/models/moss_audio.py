@@ -49,6 +49,7 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -102,6 +103,34 @@ MOSS_AUDIO_PROCESSOR_CONFIG_KEYS = {
     "enable_time_marker",
     "mel_config",
 }
+MOSS_AUDIO_PLACEHOLDER_TOKENS = (
+    MOSS_AUDIO_BOS_TOKEN,
+    MOSS_AUDIO_TOKEN,
+    MOSS_AUDIO_EOS_TOKEN,
+)
+
+
+def _ensure_moss_audio_placeholder_tokens(tokenizer: object) -> None:
+    """Register the audio placeholder tokens if the tokenizer lacks them.
+
+    The MOSS-Audio hub tokenizer does not define the audio placeholder
+    tokens (the reference HF processor patches them in at runtime). Left
+    as plain text, they merge with adjacent tokens under BPE, so prompts
+    no longer contain a stable token sequence for prompt updates to match.
+    """
+    convert_tokens_to_ids = getattr(tokenizer, "convert_tokens_to_ids", None)
+    add_tokens = getattr(tokenizer, "add_tokens", None)
+    if convert_tokens_to_ids is None or add_tokens is None:
+        return
+
+    unk_token_id = getattr(tokenizer, "unk_token_id", None)
+    missing_tokens = [
+        token
+        for token in MOSS_AUDIO_PLACEHOLDER_TOKENS
+        if convert_tokens_to_ids(token) in (None, unk_token_id)
+    ]
+    if missing_tokens:
+        add_tokens(missing_tokens, special_tokens=True)
 
 
 class MossAudioAudioInputs(TensorSchema):
@@ -1157,6 +1186,11 @@ class MossAudioProcessor:
 
 
 class MossAudioProcessingInfo(BaseProcessingInfo):
+    def __init__(self, ctx: InputProcessingContext) -> None:
+        super().__init__(ctx)
+        if ctx.tokenizer is not None:
+            _ensure_moss_audio_placeholder_tokens(ctx.tokenizer)
+
     def get_hf_config(self) -> MossAudioConfig:
         config = self.ctx.get_hf_config()
         if isinstance(config, MossAudioConfig):
