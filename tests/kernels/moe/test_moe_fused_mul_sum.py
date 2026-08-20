@@ -141,19 +141,21 @@ def test_nonlocal_row_is_zeroed():
     torch.testing.assert_close(out.float(), torch.zeros_like(out.float()))
 
 
+@pytest.mark.parametrize("use_expert_map", [True, False])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_padding_row_left_untouched():
+def test_padding_row_left_untouched(use_expert_map: bool):
     """An all -1 padding row is skipped: its output row is left untouched.
 
     This is the CUDA-graph decode contract -- padding rows past num_recv are
     never read downstream, so the kernel elides them (whole-padding blocks
-    early-return) rather than zeroing. The behavior relies on expert_map being
-    present (has_expert_map); we pin it so a regression is visible.
+    early-return) rather than zeroing. The skip is gated on topk_ids alone, so
+    it must hold whether or not expert_map is passed (the humming path passes
+    None); we pin both.
     """
     set_random_seed(0)
     device = "cuda"
     num_tokens, top_k = 17, 8
-    expert_map = _local_expert_map(device)
+    expert_map = _local_expert_map(device) if use_expert_map else None
 
     inputs = torch.full(
         (num_tokens, top_k, HIDDEN_SIZE),
