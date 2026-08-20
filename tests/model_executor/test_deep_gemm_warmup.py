@@ -78,13 +78,7 @@ def test_fp8_linear_returns_false_when_deep_gemm_unavailable_mock_fp8():
         module = _make_mock_fp8_linear()
         result = _fp8_linear_may_use_deep_gemm(module)
         assert result is False
-        (
-            mock_align.assert_not_called(),
-            (
-                "get_mk_alignment_for_contiguous_layout should not be called "
-                "when is_deep_gemm_supported() is False"
-            ),
-        )
+        mock_align.assert_not_called()
 
 
 def test_deep_gemm_warmup_noop_when_unavailable():
@@ -111,13 +105,7 @@ def test_deep_gemm_warmup_noop_when_unavailable():
         from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 
         deep_gemm_warmup(model, max_tokens=512)
-        (
-            mock_align.assert_not_called(),
-            (
-                "No deep_gemm calls expected for a bf16 model "
-                "when deep_gemm is unavailable"
-            ),
-        )
+        mock_align.assert_not_called()
 
 
 def _make_mock_moe_runner():
@@ -159,10 +147,4 @@ def test_fused_moe_returns_false_when_deep_gemm_unavailable():
         module = _make_mock_moe_runner()
         result = _fused_moe_grouped_gemm_may_use_deep_gemm(module)
         assert result is False
-        (
-            mock_align.assert_not_called(),
-            (
-                "get_mk_alignment_for_contiguous_layout should not be called "
-                "when is_deep_gemm_supported() is False"
-            ),
-        )
+        mock_align.assert_not_called()
