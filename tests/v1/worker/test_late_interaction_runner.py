@@ -339,9 +339,7 @@ def test_mrv2_pooling_runner_zerocopy_scores_match_reference():
     head.project_batch = _counting_project_batch
 
     # Step 1: cache one query (normal pooler path, nothing to score).
-    q_params = [
-        _make_pooling_params(build_late_interaction_query_params("q0", 4))
-    ]
+    q_params = [_make_pooling_params(build_late_interaction_query_params("q0", 4))]
     ib, rs, hs = _make_mrv2_step([32], hidden_dim, seed=7)
     _register_step(runner, ib, q_params)
     runner.pool(hs, ib, rs)
@@ -351,8 +349,7 @@ def test_mrv2_pooling_runner_zerocopy_scores_match_reference():
     # Step 2: score three docs against the cached query via zero-copy.
     doc_lens = [50, 3, 77]
     d_params = [
-        _make_pooling_params(build_late_interaction_doc_params("q0"))
-        for _ in doc_lens
+        _make_pooling_params(build_late_interaction_doc_params("q0")) for _ in doc_lens
     ]
     ib, rs, hs = _make_mrv2_step(doc_lens, hidden_dim, seed=8)
     _register_step(runner, ib, d_params)
@@ -367,12 +364,8 @@ def test_mrv2_pooling_runner_zerocopy_scores_match_reference():
     for i, ld in enumerate(doc_lens):
         doc = projected[start : start + ld]
         start += ld
-        ref = (
-            (query_emb.double() @ doc.double().T).max(dim=1).values.sum().float()
-        )
-        torch.testing.assert_close(
-            out[i].to(torch.float32), ref, atol=5e-2, rtol=1e-3
-        )
+        ref = (query_emb.double() @ doc.double().T).max(dim=1).values.sum().float()
+        torch.testing.assert_close(out[i].to(torch.float32), ref, atol=5e-2, rtol=1e-3)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -401,9 +394,7 @@ def test_mrv2_pooling_runner_no_projection_without_docs_in_batch():
     assert runner.late_interaction_runner.has_pending_docs
 
     # This step carries only a query request.
-    q_params = [
-        _make_pooling_params(build_late_interaction_query_params("q1", 1))
-    ]
+    q_params = [_make_pooling_params(build_late_interaction_query_params("q1", 1))]
     ib, rs, hs = _make_mrv2_step([16], hidden_dim, seed=9)
     _register_step(runner, ib, q_params)
     runner.pool(hs, ib, rs)
