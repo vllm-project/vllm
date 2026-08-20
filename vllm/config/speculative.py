@@ -714,12 +714,7 @@ class SpeculativeConfig:
         hf_config: PretrainedConfig,
     ) -> PretrainedConfig:
         if hf_config.model_type == "deepseek_v4":
-            updates: dict[str, Any] = {"architectures": ["DSparkDraftModel"]}
-            if (
-                block_size := getattr(hf_config, "dspark_block_size", None)
-            ) is not None:
-                updates["n_predict"] = block_size
-            hf_config.update(updates)
+            hf_config.update({"architectures": ["DSparkDraftModel"]})
         return hf_config
 
     @staticmethod
@@ -1075,14 +1070,6 @@ class SpeculativeConfig:
                     hf_config = self.draft_model_config.hf_config
                     hf_config.model_type = "deepseek_v4"
                     hf_config.architectures = ["DSparkDraftModel"]
-                    if (
-                        getattr(hf_config, "n_predict", None) is None
-                        and (
-                            block_size := getattr(hf_config, "dspark_block_size", None)
-                        )
-                        is not None
-                    ):
-                        hf_config.n_predict = block_size
                     self.draft_model_config.quantization = (
                         self.target_model_config.quantization
                     )
@@ -1099,11 +1086,6 @@ class SpeculativeConfig:
                         and getattr(hf, "target_layer_ids", None) is not None
                     ):
                         hf.dspark_target_layer_ids = hf.target_layer_ids
-                    if (
-                        getattr(hf, "n_predict", None) is None
-                        and getattr(hf, "block_size", None) is not None
-                    ):
-                        hf.n_predict = hf.block_size
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True

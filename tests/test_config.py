@@ -2244,6 +2244,7 @@ def deepseek_v4_dspark_config():
         model_type="deepseek_v4",
         num_nextn_predict_layers=1,
         dspark_block_size=5,
+        sample_from_anchor=False,
         dspark_noise_token_id=128799,
         dspark_target_layer_ids=[58, 59, 60],
         dspark_markov_rank=512,
@@ -2255,7 +2256,7 @@ def deepseek_v4_dspark_config():
     [
         ("draft_model", ("deepseek_v4", "DeepseekV4ForCausalLM", None)),
         ("mtp", ("deepseek_mtp", "DeepSeekV4MTPModel", 1)),
-        ("dspark", ("deepseek_v4", "DSparkDraftModel", 5)),
+        ("dspark", ("deepseek_v4", "DSparkDraftModel", None)),
     ],
 )
 def test_explicit_method_selects_deepseek_v4_loader(
@@ -2272,6 +2273,10 @@ def test_explicit_method_selects_deepseek_v4_loader(
         hf_config.architectures[0],
         getattr(hf_config, "n_predict", None),
     ) == expected
+    if method == "dspark":
+        block_tokens = SpeculativeConfig._block_drafter_tokens(method, hf_config)
+        assert block_tokens is not None
+        assert block_tokens[0] == 4
 
 
 @pytest.mark.parametrize(
