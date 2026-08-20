@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from vllm.config.cache import CacheConfig
-from vllm.config.kv_cache_dtype import (
+from vllm.config.cache import (
     KV_CACHE_DTYPES,
+    CacheConfig,
     get_kv_cache_dtype_handler,
     is_known_kv_cache_dtype,
     register_kv_cache_dtype,

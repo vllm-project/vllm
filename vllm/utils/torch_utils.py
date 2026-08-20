@@ -80,7 +80,7 @@ PIN_MEMORY = is_pin_memory_available()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    from vllm.config.kv_cache_dtype import get_kv_cache_dtype_handler
+    from vllm.config.cache import get_kv_cache_dtype_handler
 
     handler = get_kv_cache_dtype_handler(kv_cache_dtype)
     if handler is not None:
@@ -94,7 +94,7 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
 
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token-head scales."""
-    from vllm.config.kv_cache_dtype import get_kv_cache_dtype_handler
+    from vllm.config.cache import get_kv_cache_dtype_handler
 
     handler = get_kv_cache_dtype_handler(kv_cache_dtype)
     if handler is not None:
