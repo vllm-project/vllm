@@ -3,8 +3,6 @@
 """Microbatching (DBO) helpers for the V2 GPU model runner."""
 
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any, NamedTuple
 
@@ -17,7 +15,6 @@ from vllm.forward_context import (
     ForwardContext,
     create_forward_context,
     override_forward_context,
-    set_forward_context,
 )
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
@@ -43,7 +40,6 @@ class UBatchState(NamedTuple):
 
     slices: UBatchSlices
     forward_contexts: list[ForwardContext]
-    num_tokens_after_padding: int
 
 
 def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSlices:
@@ -371,28 +367,7 @@ class UBatchRunner:
             forward_contexts=self._make_forward_contexts(
                 ubatch_slices, attn_metadata, slot_mappings_by_layer, is_padding
             ),
-            num_tokens_after_padding=input_batch.num_tokens_after_padding,
         )
-
-    @contextmanager
-    def forward_context(
-        self, ubatch_state: UBatchState, num_tokens_across_dp: torch.Tensor | None
-    ) -> Iterator[None]:
-        """Forward context wrapping a microbatched step.
-
-        The microbatch threads install their own contexts inside `run`; this
-        outer one covers the KV connector and anything else that reads the
-        context around the forward.
-        """
-        with set_forward_context(
-            None,
-            self.vllm_config,
-            num_tokens=ubatch_state.num_tokens_after_padding,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            num_tokens_across_dp=num_tokens_across_dp,
-            ubatch_slices=ubatch_state.slices,
-        ):
-            yield
 
     def _make_forward_contexts(
         self,
