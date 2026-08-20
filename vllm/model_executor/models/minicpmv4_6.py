@@ -958,6 +958,7 @@ class MiniCPMV4_6ForConditionalGeneration(
             "model.merger.": "merger.",
             "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
+            "mtp.": None,
         }
     )
 
@@ -1281,7 +1282,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["mtp."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
