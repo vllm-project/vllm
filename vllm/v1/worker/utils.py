@@ -169,10 +169,14 @@ class KVBlockZeroer:
                 block_stride_bytes = kv.stride(block_dim) * el
                 assert block_stride_bytes % 4 == 0
                 assert kv.shape[block_dim] % ratio == 0
+                # A dim that strides further than one block encloses the block
+                # axis, so it is iterated rather than zeroed as part of a page.
+                # Enclosing dims need not precede the block dim: a K/V-separated
+                # layout can sit K/V after it and still span the whole cache.
                 outer_dims = [
                     d
-                    for d in range(block_dim)
-                    if kv.stride(d) * el > block_stride_bytes
+                    for d in range(kv.ndim)
+                    if d != block_dim and kv.stride(d) * el > block_stride_bytes
                 ]
                 outer_strides = [kv.stride(d) * el for d in outer_dims]
                 inner_dims = [
