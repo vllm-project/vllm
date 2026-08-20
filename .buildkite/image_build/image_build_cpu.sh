@@ -85,6 +85,14 @@ else
   docker buildx inspect --bootstrap
 
   # build and push
+  # RELEASE-ONLY (torch 2.14.0): --no-cache is required because the RC is
+  # republished to the PyTorch test channel under an unchanging version string.
+  # torch is installed in the `base-common` stage, upstream of the source COPY,
+  # so its layer key depends only on the base image and requirements/cpu.txt --
+  # neither of which changes on a respin or a rebase. Without this, the ECR
+  # registry cache below restores the layer and torch is never re-resolved
+  # (build 84705: 28 CACHED layers, zero torch downloads). Revert once 2.14.0 is
+  # final and published to PyPI.
   docker buildx build --file docker/Dockerfile.cpu \
     --build-arg max_jobs=16 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
@@ -92,6 +100,7 @@ else
     --build-arg USE_SCCACHE=1 \
     --tag "$IMAGE" \
     --target vllm-test \
+    --no-cache \
     "${CACHE_FROM_ARGS[@]}" \
     --cache-to "type=registry,ref=${CACHE_TO},mode=max" \
     --push \
