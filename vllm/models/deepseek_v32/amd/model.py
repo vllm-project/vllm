@@ -7,8 +7,9 @@ from itertools import islice
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -35,6 +36,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .rocm import DeepseekV32MLAAttention
@@ -47,6 +49,11 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         prefix: str,
         config=None,
         topk_indices_buffer: torch.Tensor | None = None,
+        q_c_norm_buffer: torch.Tensor | None = None,
+        kv_c_norm_buffer: torch.Tensor | None = None,
+        mqa_q_buffer: torch.Tensor | None = None,
+        q_index_buffer: torch.Tensor | None = None,
+        index_weights_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -66,6 +73,11 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             config=config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            q_c_norm_buffer=q_c_norm_buffer,
+            kv_c_norm_buffer=kv_c_norm_buffer,
+            mqa_q_buffer=mqa_q_buffer,
+            q_index_buffer=q_index_buffer,
+            index_weights_buffer=index_weights_buffer,
         )
 
         if (
@@ -125,8 +137,6 @@ class DeepseekV32Model(torch.nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        from vllm.platforms import current_platform
-
         self.device = current_platform.device_type
 
         self.vocab_size = config.vocab_size
@@ -137,6 +147,49 @@ class DeepseekV32Model(torch.nn.Module):
             dtype=torch.int32,
             device=self.device,
         )
+        if rocm_aiter_ops.is_mla_qk_norm_rope_enabled():
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            num_local_heads = (
+                config.num_attention_heads // get_tensor_model_parallel_world_size()
+            )
+            mqa_q_buffer = torch.empty(
+                max_tokens,
+                num_local_heads,
+                config.kv_lora_rank + config.qk_rope_head_dim,
+                dtype=torch.float8_e4m3fn,
+                device=self.device,
+            )
+            q_index_buffer = torch.empty(
+                max_tokens,
+                config.index_n_heads,
+                config.index_head_dim,
+                dtype=torch.float8_e4m3fn,
+                device=self.device,
+            )
+            index_weights_buffer = torch.empty(
+                max_tokens,
+                config.index_n_heads,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            q_c_norm_buffer = torch.empty(
+                max_tokens,
+                config.q_lora_rank,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+            kv_c_norm_buffer = torch.empty(
+                max_tokens,
+                config.kv_lora_rank,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+        else:
+            q_c_norm_buffer = None
+            kv_c_norm_buffer = None
+            mqa_q_buffer = None
+            q_index_buffer = None
+            index_weights_buffer = None
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -154,6 +207,11 @@ class DeepseekV32Model(torch.nn.Module):
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                q_c_norm_buffer=q_c_norm_buffer,
+                kv_c_norm_buffer=kv_c_norm_buffer,
+                mqa_q_buffer=mqa_q_buffer,
+                q_index_buffer=q_index_buffer,
+                index_weights_buffer=index_weights_buffer,
             ),
             prefix=f"{prefix}.layers",
         )

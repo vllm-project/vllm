@@ -8,8 +8,12 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -61,6 +65,49 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             dtype=torch.int32,
             device=current_platform.device_type,
         )
+        if rocm_aiter_ops.is_mla_qk_norm_rope_enabled():
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            num_local_heads = (
+                config.num_attention_heads // get_tensor_model_parallel_world_size()
+            )
+            mqa_q_buffer = torch.empty(
+                max_tokens,
+                num_local_heads,
+                config.kv_lora_rank + config.qk_rope_head_dim,
+                dtype=torch.float8_e4m3fn,
+                device=current_platform.device_type,
+            )
+            q_index_buffer = torch.empty(
+                max_tokens,
+                config.index_n_heads,
+                config.index_head_dim,
+                dtype=torch.float8_e4m3fn,
+                device=current_platform.device_type,
+            )
+            index_weights_buffer = torch.empty(
+                max_tokens,
+                config.index_n_heads,
+                dtype=torch.float32,
+                device=current_platform.device_type,
+            )
+            q_c_norm_buffer = torch.empty(
+                max_tokens,
+                config.q_lora_rank,
+                dtype=vllm_config.model_config.dtype,
+                device=current_platform.device_type,
+            )
+            kv_c_norm_buffer = torch.empty(
+                max_tokens,
+                config.kv_lora_rank,
+                dtype=vllm_config.model_config.dtype,
+                device=current_platform.device_type,
+            )
+        else:
+            q_c_norm_buffer = None
+            kv_c_norm_buffer = None
+            mqa_q_buffer = None
+            q_index_buffer = None
+            index_weights_buffer = None
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
@@ -69,6 +116,11 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             prefix,
             config=config,
             topk_indices_buffer=topk_indices_buffer,
+            q_c_norm_buffer=q_c_norm_buffer,
+            kv_c_norm_buffer=kv_c_norm_buffer,
+            mqa_q_buffer=mqa_q_buffer,
+            q_index_buffer=q_index_buffer,
+            index_weights_buffer=index_weights_buffer,
         )
 
     def forward(

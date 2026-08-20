@@ -68,7 +68,18 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
 
     indexer_cls = DeepseekV32ROCmIndexer
 
-    def __init__(self, vllm_config, config, prefix, topk_indices_buffer=None):
+    def __init__(
+        self,
+        vllm_config,
+        config,
+        prefix,
+        topk_indices_buffer=None,
+        q_c_norm_buffer=None,
+        kv_c_norm_buffer=None,
+        mqa_q_buffer=None,
+        q_index_buffer=None,
+        index_weights_buffer=None,
+    ):
         """Wire the ROCm sparse backend, indexer op and fusion toggles."""
         super().__init__(
             vllm_config,
@@ -93,7 +104,26 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             )
         self._fp8_kv = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_kv_needs_view = self._fp8_kv and self.kv_cache_dtype != "fp8_ds_mla"
-        self._use_aiter_qk_norm_rope = rocm_aiter_ops.is_mla_qk_norm_rope_enabled()
+        # Buffers are non-None only when the model enabled the aiter path; those
+        # ops also need the packed fp8 q_out and cannot address fp8_ds_mla.
+        self._use_aiter_qk_norm_rope = (
+            q_c_norm_buffer is not None
+            and kv_c_norm_buffer is not None
+            and mqa_q_buffer is not None
+            and q_index_buffer is not None
+            and index_weights_buffer is not None
+            and self._fp8_kv_needs_view
+        )
+        self._q_c_norm_buffer = q_c_norm_buffer
+        self._kv_c_norm_buffer = kv_c_norm_buffer
+        self._mqa_q_buffer = mqa_q_buffer
+        self._q_index_buffer = q_index_buffer
+        self._index_weights_buffer = index_weights_buffer
+        cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
+        self._rope_cos, self._rope_sin = cos.contiguous(), sin.contiguous()
+        if self.indexer_rope_emb is not None:
+            cos, sin = self.indexer_rope_emb.cos_sin_cache.chunk(2, dim=-1)
+            self._index_cos, self._index_sin = cos.contiguous(), sin.contiguous()
 
     @property
     def _active_indexer(self) -> DeepseekV32Indexer | None:
@@ -193,29 +223,29 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             index_rope_interleave=self._index_rope_interleave,
         )
 
-    def _project_index_q(self, q_c: torch.Tensor) -> torch.Tensor | None:
+    def _project_q_index(self, q_c: torch.Tensor) -> torch.Tensor | None:
         """Indexer query projection [T, q_lora] -> [T, n_head, head_dim], or None."""
         active_indexer = self._active_indexer
         if active_indexer is None:
             return None
-        index_q = active_indexer.wq_b(q_c)[0]  # [T, q_lora] -> [T, n_head*head_dim]
-        return index_q.view(-1, active_indexer.n_head, active_indexer.head_dim)
+        q_index = active_indexer.wq_b(q_c)[0]  # [T, q_lora] -> [T, n_head*head_dim]
+        return q_index.view(-1, active_indexer.n_head, active_indexer.head_dim)
 
     def _rope_and_pack_queries(
         self,
         positions: torch.Tensor,
         q_pe: torch.Tensor,
         ql_nope: torch.Tensor,
-        index_q: torch.Tensor | None,
+        q_index: torch.Tensor | None,
         index_weights: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """RoPE q_pe/index_q, quant index_q, pack [ql_nope; q_pe] into mqa_q."""
+        """RoPE q_pe/q_index, quant q_index, pack [ql_nope; q_pe] into mqa_q."""
         active_indexer = self._active_indexer
         return fused_q(
             positions,
             q_pe,
             self.rotary_emb.cos_sin_cache,
-            index_q,
+            q_index,
             self.indexer_rope_emb.cos_sin_cache if active_indexer is not None else None,
             ql_nope,
             self._q_scale,
@@ -252,12 +282,12 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
     def _run_indexer(
         self,
         q_c: torch.Tensor,
-        index_q_fp8: torch.Tensor | None,
+        q_index_fp8: torch.Tensor | None,
         index_weights_out: torch.Tensor | None,
     ) -> None:
         """Run the ROCm sparse indexer (forward_hip) if this layer has an indexer."""
         if self.indexer_op is not None:
-            self.indexer_op.forward_hip(q_c, index_q_fp8, None, index_weights_out)
+            self.indexer_op.forward_hip(q_c, q_index_fp8, None, index_weights_out)
 
     def _select_q_for_forward_mqa(
         self,
@@ -318,11 +348,11 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             positions, q_c, kv_c, k_pe, index_k, mla_slot, attn_metadata
         )
         ql_nope, q_pe = self._compute_w_uk_absorbed_ql_nope_and_q_pe(q_c)
-        index_q = self._project_index_q(q_c)
-        index_q_fp8, index_weights_out, mqa_q = self._rope_and_pack_queries(
-            positions, q_pe, ql_nope, index_q, index_weights
+        q_index = self._project_q_index(q_c)
+        q_index_fp8, index_weights_out, mqa_q = self._rope_and_pack_queries(
+            positions, q_pe, ql_nope, q_index, index_weights
         )
-        return q_c, ql_nope, mqa_q, index_q_fp8, index_weights_out
+        return q_c, ql_nope, mqa_q, q_index_fp8, index_weights_out
 
     def _prepare_attn_inputs_for_aiter(
         self,
@@ -336,10 +366,78 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         attn_metadata,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """AITER path: dual RMSNorm, indexer QK RoPE/quant, fused QK RoPE + cache."""
-        raise NotImplementedError(
-            "VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE is set but the aiter QK "
-            "norm/RoPE path is not implemented yet"
+        active_indexer = self._active_indexer
+        has_caches = attn_metadata is not None
+
+        num_tokens = q_c.shape[0]
+        q_c_normed = self._q_c_norm_buffer[:num_tokens]
+        kv_c_normed = self._kv_c_norm_buffer[:num_tokens]
+        rocm_aiter_ops.get_fused_mla_dual_rms_norm_out_op()(
+            q_c_normed,
+            kv_c_normed,
+            q_c,
+            self.q_a_layernorm.weight,
+            kv_c,
+            self.kv_a_layernorm.weight,
+            self.q_a_layernorm.variance_epsilon,
+            self.kv_a_layernorm.variance_epsilon,
         )
+        q_c, kv_c = q_c_normed, kv_c_normed
+        ql_nope, q_pe = self._compute_w_uk_absorbed_ql_nope_and_q_pe(q_c)
+        q_index = self._project_q_index(q_c)
+
+        # Unread placeholders: _run_indexer is guarded on the indexer being active.
+        q_index_fp8 = self._q_index_buffer[:0]
+        index_weights_out = self._index_weights_buffer[:0]
+        if active_indexer is not None:
+            assert q_index is not None and index_weights is not None
+            assert self.topk_indices_buffer is not None
+            # fused_norm_rope seeds -1 only on indexer layers; shared layers
+            # deliberately reuse the previous indexer layer's top-k.
+            self.topk_indices_buffer[: positions.shape[0]].fill_(-1)
+            q_index_fp8 = self._q_index_buffer[:num_tokens]
+            index_weights_out = self._index_weights_buffer[:num_tokens]
+            if has_caches:
+                rocm_aiter_ops.get_indexer_qk_rope_quant_and_cache_op()(
+                    q_index,
+                    q_index_fp8,
+                    index_weights,
+                    index_weights_out,
+                    index_k,
+                    active_indexer.k_cache.kv_cache,
+                    mla_slot,
+                    active_indexer.k_norm.weight,
+                    active_indexer.k_norm.bias,
+                    positions,
+                    self._index_cos,
+                    self._index_sin,
+                    active_indexer.k_norm.eps,
+                    active_indexer.quant_block_size,
+                    active_indexer.scale_fmt,
+                    active_indexer.softmax_scale * active_indexer.n_head**-0.5,
+                    active_indexer.k_cache.uses_shuffled_layout,
+                    self.indexer_rope_emb.is_neox_style,
+                )
+
+        mqa_q = self._mqa_q_buffer[: ql_nope.shape[0]]
+        if has_caches:
+            rocm_aiter_ops.get_fused_qk_rope_concat_and_cache_mla_op()(
+                ql_nope,
+                q_pe,
+                kv_c,
+                k_pe,
+                self.kv_cache,
+                mqa_q,
+                mla_slot,
+                self._k_scale,
+                self._q_scale,
+                positions,
+                self._rope_cos,
+                self._rope_sin,
+                self.rotary_emb.is_neox_style,
+                True,  # MLA packs [ql_nope; q_pe] nope-first
+            )
+        return q_c, ql_nope, mqa_q, q_index_fp8, index_weights_out
 
     def _prepare_attn_inputs(
         self,
@@ -382,12 +480,12 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         """Eager region: caches, queries, sparse indexer, MQA attention, W_UV."""
         attn_metadata, mla_slot = self.get_layer_forward_context()
 
-        q_c, ql_nope, mqa_q, index_q_fp8, index_weights_out = self._prepare_attn_inputs(
+        q_c, ql_nope, mqa_q, q_index_fp8, index_weights_out = self._prepare_attn_inputs(
             positions, q_c, kv_c, k_pe, index_k, index_weights, mla_slot, attn_metadata
         )
 
         if self._active_indexer is not None:
-            self._run_indexer(q_c, index_q_fp8, index_weights_out)
+            self._run_indexer(q_c, q_index_fp8, index_weights_out)
 
         if attn_metadata is None:
             output.zero_()

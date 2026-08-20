@@ -1070,6 +1070,130 @@ def rocm_aiter_sparse_attn_indexer(
     return topk_indices_buffer
 
 
+def rocm_aiter_indexer_qk_rope_quant_and_cache_fake(
+    q: torch.Tensor,
+    q_out: torch.Tensor,
+    weights: torch.Tensor,
+    weights_out: torch.Tensor,
+    k: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: torch.Tensor,
+    positions: torch.Tensor,
+    cos_cache: torch.Tensor,
+    sin_cache: torch.Tensor,
+    epsilon: float,
+    quant_block_size: int,
+    scale_fmt: str,
+    weights_scale: float,
+    preshuffle: bool,
+    is_neox: bool,
+) -> None:
+    pass
+
+
+def rocm_aiter_indexer_qk_rope_quant_and_cache(
+    q: torch.Tensor,  # [T, n_head, head_dim] index_q, un-RoPE'd
+    q_out: torch.Tensor,  # [T, n_head, head_dim] fp8
+    weights: torch.Tensor,  # [T, n_head]
+    weights_out: torch.Tensor,  # [T, n_head] fp32
+    k: torch.Tensor,  # [T, head_dim] index_k, un-normed
+    kv_cache: torch.Tensor,  # indexer K cache [num_blocks, block_size, head_dim + 4]
+    slot_mapping: torch.Tensor,
+    norm_weight: torch.Tensor,  # indexer k_norm.weight
+    norm_bias: torch.Tensor,  # indexer k_norm.bias (LayerNorm, has bias)
+    positions: torch.Tensor,
+    cos_cache: torch.Tensor,  # [max_pos, rope // 2] must be contiguous
+    sin_cache: torch.Tensor,  # [max_pos, rope // 2] must be contiguous
+    epsilon: float,
+    quant_block_size: int,
+    scale_fmt: str,
+    weights_scale: float,  # softmax_scale * n_head ** -0.5
+    preshuffle: bool,  # indexer cache uses aiter's shuffled layout
+    is_neox: bool,
+) -> None:
+    """Indexer K LayerNorm/RoPE/fp8 cache write plus Q RoPE/fp8 and weight scaling."""
+    from aiter import indexer_qk_rope_quant_and_cache
+
+    indexer_qk_rope_quant_and_cache(
+        q,
+        q_out,
+        weights,
+        weights_out,
+        k,
+        kv_cache,
+        slot_mapping,
+        norm_weight,
+        norm_bias,
+        positions,
+        cos_cache,
+        sin_cache,
+        epsilon,
+        quant_block_size,
+        scale_fmt,
+        weights_scale,
+        preshuffle,
+        is_neox,
+    )
+
+
+def rocm_aiter_fused_qk_rope_concat_and_cache_mla_fake(
+    q_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    q_out: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    k_scale: torch.Tensor,
+    q_scale: torch.Tensor,
+    positions: torch.Tensor,
+    cos_cache: torch.Tensor,
+    sin_cache: torch.Tensor,
+    is_neox: bool,
+    is_nope_first: bool,
+) -> None:
+    pass
+
+
+def rocm_aiter_fused_qk_rope_concat_and_cache_mla(
+    q_nope: torch.Tensor,  # [T, N, kv_lora] W_UK-absorbed query
+    q_pe: torch.Tensor,  # [T, N, rope] un-RoPE'd
+    kv_c: torch.Tensor,  # [T, kv_lora] post kv_a_layernorm
+    k_pe: torch.Tensor,  # [T, rope] un-RoPE'd
+    kv_cache: torch.Tensor,  # [num_blocks, block_size, kv_lora + rope]
+    q_out: torch.Tensor,  # [T, N, kv_lora + rope] packed, nope-first
+    slot_mapping: torch.Tensor,
+    k_scale: torch.Tensor,
+    q_scale: torch.Tensor,
+    positions: torch.Tensor,
+    cos_cache: torch.Tensor,  # [max_pos, rope // 2] must be contiguous
+    sin_cache: torch.Tensor,  # [max_pos, rope // 2] must be contiguous
+    is_neox: bool,
+    is_nope_first: bool,
+) -> None:
+    """Fused Q/K RoPE, [kv_c; k_pe] cache write and Q pack, all into q_out."""
+    from aiter import fused_qk_rope_concat_and_cache_mla
+
+    fused_qk_rope_concat_and_cache_mla(
+        q_nope,
+        q_pe,
+        kv_c,
+        k_pe,
+        kv_cache,
+        q_out,
+        slot_mapping,
+        k_scale,
+        q_scale,
+        positions,
+        cos_cache,
+        sin_cache,
+        is_neox,
+        is_nope_first,
+    )
+
+
 def _decode_e8m0_scales(scale: torch.Tensor) -> torch.Tensor:
     if scale.dtype == torch.float8_e8m0fnu:
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (

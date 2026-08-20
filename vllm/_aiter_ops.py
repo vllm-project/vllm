@@ -14,6 +14,10 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_aiter_fused_qk_rope_concat_and_cache_mla,
+    rocm_aiter_fused_qk_rope_concat_and_cache_mla_fake,
+    rocm_aiter_indexer_qk_rope_quant_and_cache,
+    rocm_aiter_indexer_qk_rope_quant_and_cache_fake,
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
@@ -1365,6 +1369,31 @@ def _rocm_aiter_triton_add_rmsnorm_pad_fake(
     return out, residual_out
 
 
+def _aiter_qk_rmsnorm(
+    q_out: torch.Tensor | None,
+    k_out: torch.Tensor | None,
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    k: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_epsilon: float,
+    k_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """aiter dual RMSNorm; allocates only where an out buffer is None."""
+    from aiter.ops.fused_qk_norm_rope_cache_quant import _fused_qk_rmsnorm
+
+    return _fused_qk_rmsnorm(
+        q_out=q_out,
+        q=q,
+        q_weight=q_weight,
+        q_eps=q_epsilon,
+        k_out=k_out,
+        k=k,
+        k_weight=k_weight,
+        k_eps=k_epsilon,
+    )
+
+
 def _fused_mla_dual_rms_norm_impl(
     x1: torch.Tensor,
     x1_weight: torch.Tensor,
@@ -1373,17 +1402,8 @@ def _fused_mla_dual_rms_norm_impl(
     x1_epsilon: float,
     x2_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter.ops.fused_qk_norm_rope_cache_quant import _fused_qk_rmsnorm
-
-    return _fused_qk_rmsnorm(
-        q_out=None,
-        q=x1,
-        q_weight=x1_weight,
-        q_eps=x1_epsilon,
-        k_out=None,
-        k=x2,
-        k_weight=x2_weight,
-        k_eps=x2_epsilon,
+    return _aiter_qk_rmsnorm(
+        None, None, x1, x1_weight, x2, x2_weight, x1_epsilon, x2_epsilon
     )
 
 
@@ -1396,6 +1416,33 @@ def _fused_mla_dual_rms_norm_fake(
     x2_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return (torch.empty_like(x1), torch.empty_like(x2))
+
+
+def _fused_mla_dual_rms_norm_out_impl(
+    q_out: torch.Tensor,
+    k_out: torch.Tensor,
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    k: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_epsilon: float,
+    k_epsilon: float,
+) -> None:
+    """Out-variant of ``fused_mla_dual_rms_norm``: writes the caller's buffers."""
+    _aiter_qk_rmsnorm(q_out, k_out, q, q_weight, k, k_weight, q_epsilon, k_epsilon)
+
+
+def _fused_mla_dual_rms_norm_out_fake(
+    q_out: torch.Tensor,
+    k_out: torch.Tensor,
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    k: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_epsilon: float,
+    k_epsilon: float,
+) -> None:
+    pass
 
 
 def _fused_mla_dual_rms_norm_per_token_quant_impl(
@@ -2231,6 +2278,22 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_qk_rope_concat_and_cache_mla",
+                op_func=rocm_aiter_fused_qk_rope_concat_and_cache_mla,
+                mutates_args=["kv_cache", "q_out"],
+                fake_impl=rocm_aiter_fused_qk_rope_concat_and_cache_mla_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_indexer_qk_rope_quant_and_cache",
+                op_func=rocm_aiter_indexer_qk_rope_quant_and_cache,
+                mutates_args=["q_out", "weights_out", "kv_cache"],
+                fake_impl=rocm_aiter_indexer_qk_rope_quant_and_cache_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="aiter_fp8_attn_wrapper",
                 op_func=_rocm_aiter_fp8_attn_impl,
                 mutates_args=[],
@@ -2277,6 +2340,13 @@ class rocm_aiter_ops:
                 op_func=_fused_mla_dual_rms_norm_impl,
                 mutates_args=[],
                 fake_impl=_fused_mla_dual_rms_norm_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="fused_mla_dual_rms_norm_out",
+                op_func=_fused_mla_dual_rms_norm_out_impl,
+                mutates_args=["q_out", "k_out"],
+                fake_impl=_fused_mla_dual_rms_norm_out_fake,
             )
 
             direct_register_custom_op(
@@ -2344,6 +2414,18 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_mla_dual_rms_norm_op() -> OpOverload:
         return torch.ops.vllm.fused_mla_dual_rms_norm.default
+
+    @staticmethod
+    def get_fused_mla_dual_rms_norm_out_op() -> OpOverload:
+        return torch.ops.vllm.fused_mla_dual_rms_norm_out.default
+
+    @staticmethod
+    def get_fused_qk_rope_concat_and_cache_mla_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_qk_rope_concat_and_cache_mla.default
+
+    @staticmethod
+    def get_indexer_qk_rope_quant_and_cache_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_indexer_qk_rope_quant_and_cache.default
 
     @staticmethod
     def get_fused_mla_dual_rms_norm_per_token_quant_op() -> OpOverload:
