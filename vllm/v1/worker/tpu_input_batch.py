@@ -7,7 +7,15 @@ from typing import cast
 import numpy as np
 import torch
 
-from vllm.lora.request import LoRARequest
+from vllm.lora.layers import LoRARouteMapping
+from vllm.lora.request import LoRARequest, LoRARequestLike
+from vllm.lora.routing_utils import (
+    NO_LORA_ID,
+    add_lora_request,
+    has_routed_lora,
+    make_lora_route_mapping,
+    remove_lora_request,
+)
 from vllm.sampling_params import SamplingType
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.collection_utils import swap_dict_values
@@ -140,6 +148,7 @@ class InputBatch:
 
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int64)
+        self.request_lora_requests: dict[int, LoRARequestLike] = {}
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
@@ -276,18 +285,23 @@ class InputBatch:
         if sampling_params.bad_words_token_ids:
             self.bad_words_token_ids[req_index] = sampling_params.bad_words_token_ids
 
-        # Add request lora ID
-        if request.lora_request:
-            lora_id = request.lora_request.lora_int_id
-            if lora_id not in self.lora_id_to_request_ids:
-                self.lora_id_to_request_ids[lora_id] = set()
+        self._add_lora_request(req_index, request.req_id, request.lora_request)
 
-            self.request_lora_mapping[req_index] = lora_id
-            self.lora_id_to_request_ids[lora_id].add(request.req_id)
-            self.lora_id_to_lora_request[lora_id] = request.lora_request
-        else:
-            # No LoRA
-            self.request_lora_mapping[req_index] = 0
+    def _add_lora_request(
+        self,
+        req_index: int,
+        req_id: str,
+        lora_request: LoRARequestLike | None,
+    ) -> None:
+        add_lora_request(
+            self.request_lora_mapping,
+            self.request_lora_requests,
+            self.lora_id_to_request_ids,
+            self.lora_id_to_lora_request,
+            req_index,
+            req_id,
+            lora_request,
+        )
 
     def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense()."""
@@ -311,14 +325,7 @@ class InputBatch:
         self.num_logprobs.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
-        # LoRA
-        lora_id = self.request_lora_mapping[req_index]
-        if lora_id != 0:
-            self.lora_id_to_request_ids[lora_id].discard(req_id)
-            if len(self.lora_id_to_request_ids[lora_id]) == 0:
-                self.lora_id_to_request_ids.pop(lora_id)
-                self.lora_id_to_lora_request.pop(lora_id)
-            self.request_lora_mapping[req_index] = 0
+        self._remove_lora_request(req_index, req_id)
 
         self.logit_bias[req_index] = None
         self.has_allowed_token_ids.discard(req_id)
@@ -327,6 +334,16 @@ class InputBatch:
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
         return req_index
+
+    def _remove_lora_request(self, req_index: int, req_id: str) -> None:
+        remove_lora_request(
+            self.request_lora_mapping,
+            self.request_lora_requests,
+            self.lora_id_to_request_ids,
+            self.lora_id_to_lora_request,
+            req_index,
+            req_id,
+        )
 
     def swap_states(self, i1: int, i2: int) -> None:
         old_id_i1 = self._req_ids[i1]
@@ -390,6 +407,7 @@ class InputBatch:
             self.request_lora_mapping[i2],
             self.request_lora_mapping[i1],
         )
+        swap_dict_values(self.request_lora_requests, i1, i2)
         self.logit_bias[i1], self.logit_bias[i2] = (
             self.logit_bias[i2],
             self.logit_bias[i1],
@@ -477,6 +495,12 @@ class InputBatch:
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
                 last_req_index
             ]
+            if last_req_index in self.request_lora_requests:
+                self.request_lora_requests[empty_index] = (
+                    self.request_lora_requests.pop(last_req_index)
+                )
+            else:
+                self.request_lora_requests.pop(empty_index, None)
 
             self.logit_bias[empty_index] = self.logit_bias[last_req_index]
 
@@ -497,7 +521,12 @@ class InputBatch:
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
-    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        set[LoRARequest],
+        LoRARouteMapping | None,
+    ]:
         """
         Given the num_scheduled_tokens for each request in the batch, return
         datastructures used to activate the current LoRAs.
@@ -507,16 +536,39 @@ class InputBatch:
             2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
                where, token_lora_mapping[i] is the LoRA id to use for ith token.
             3. lora_requests: Set of relevant LoRA requests.
+            4. lora_route_mapping: Optional routed mapping for multi-adapter
+               LoRA execution.
         """
 
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]
-        prompt_lora_mapping = tuple(req_lora_mapping)
-        token_lora_mapping = tuple(req_lora_mapping.repeat(num_scheduled_tokens))
+        lora_requests = tuple(
+            self.request_lora_requests.get(req_index)
+            for req_index in range(self.num_reqs)
+        )
+        if has_routed_lora(lora_requests):
+            prompt_lora_mapping = tuple(NO_LORA_ID for _ in range(self.num_reqs))
+            token_lora_mapping = tuple(
+                NO_LORA_ID for _ in range(int(num_scheduled_tokens.sum()))
+            )
+            lora_route_mapping = make_lora_route_mapping(
+                lora_requests,
+                num_scheduled_tokens[: self.num_reqs],
+                prompt_lora_mapping,
+            )
+        else:
+            prompt_lora_mapping = tuple(req_lora_mapping)
+            token_lora_mapping = tuple(req_lora_mapping.repeat(num_scheduled_tokens))
+            lora_route_mapping = None
         active_lora_requests: set[LoRARequest] = set(
             self.lora_id_to_lora_request.values()
         )
 
-        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+        return (
+            prompt_lora_mapping,
+            token_lora_mapping,
+            active_lora_requests,
+            lora_route_mapping,
+        )
 
     @property
     def num_reqs(self) -> int:

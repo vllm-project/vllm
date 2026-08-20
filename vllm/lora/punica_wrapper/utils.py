@@ -9,7 +9,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 
 if TYPE_CHECKING:
     # avoid circuit import
-    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.layers import LoRAMapping, LoRARouteMapping
 
 
 def compute_meta(
@@ -57,7 +57,7 @@ def convert_mapping(
     max_loras: int,
     vocab_size: int,
     extra_vocab_size: int,
-    device: torch.device,
+    device: torch.device | str,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
     """Converts LoRAMapping to index tensors.
 
@@ -88,6 +88,7 @@ def convert_mapping(
                 (base_indices, sampler_indices, sampler_indices_padded,
                 embeddings_indices).
     """
+    device = torch.device(device)
     index_mapping_indices: list[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
@@ -120,10 +121,16 @@ def convert_mapping(
         embedding_indices,
     ]
 
-    indices = async_tensor_h2d(indices_list, dtype=torch.long, device=device)
-    prompt_mapping_tensor = async_tensor_h2d(
-        prompt_mapping, dtype=torch.long, device=device
-    )
+    if device.type == "cpu":
+        indices = torch.tensor(indices_list, dtype=torch.long, device=device)
+        prompt_mapping_tensor = torch.tensor(
+            prompt_mapping, dtype=torch.long, device=device
+        )
+    else:
+        indices = async_tensor_h2d(indices_list, dtype=torch.long, device=device)
+        prompt_mapping_tensor = async_tensor_h2d(
+            prompt_mapping, dtype=torch.long, device=device
+        )
     embeddings_indices = torch.stack(
         [
             indices[2] * extra_vocab_size,
@@ -158,3 +165,54 @@ def convert_mapping(
         embeddings_indices,
         indices_len,
     )
+
+
+def convert_route_mapping(
+    mapping: "LoRARouteMapping",
+    lora_index_to_id: list[int | None],
+    device: torch.device | str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Converts routed LoRA ids to GPU slot indices."""
+    device = torch.device(device)
+    lora_id_to_index = {
+        lora_id: index
+        for index, lora_id in enumerate(lora_index_to_id)
+        if lora_id is not None
+    }
+    missing_lora_ids = sorted(
+        {
+            lora_id
+            for token_lora_ids in mapping.token_lora_ids
+            for lora_id in token_lora_ids
+            if lora_id > 0 and lora_id not in lora_id_to_index
+        }
+    )
+    if missing_lora_ids:
+        raise ValueError(
+            f"Routed LoRA mapping references unloaded LoRA ids: {missing_lora_ids}"
+        )
+
+    token_lora_indices: list[list[int]] = []
+    for token_lora_ids in mapping.token_lora_ids:
+        token_lora_indices.append(
+            [
+                lora_id_to_index[lora_id] if lora_id > 0 else -1
+                for lora_id in token_lora_ids
+            ]
+        )
+
+    if device.type == "cpu":
+        token_lora_indices_tensor = torch.tensor(
+            token_lora_indices, dtype=torch.long, device=device
+        )
+        token_lora_weights_tensor = torch.tensor(
+            list(mapping.token_lora_weights), dtype=torch.float32, device=device
+        )
+    else:
+        token_lora_indices_tensor = async_tensor_h2d(
+            token_lora_indices, dtype=torch.long, device=device
+        )
+        token_lora_weights_tensor = async_tensor_h2d(
+            list(mapping.token_lora_weights), dtype=torch.float32, device=device
+        )
+    return token_lora_indices_tensor, token_lora_weights_tensor

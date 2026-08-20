@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Iterator
+
 import torch
 from transformers import PretrainedConfig
 
@@ -224,11 +226,20 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
-        )
-        if not current_platform.can_update_inplace():
-            output = lora_output
+        route_mapping = self.punica_wrapper.lora_route_mapping
+        if route_mapping is not None:
+            output = self._apply_routed_lora_to_output(x, output, route_mapping)
+        else:
+            lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
+                output,
+                x,
+                self.lora_a_stacked,
+                self.lora_b_stacked,
+                1.0,
+                self.output_slices,
+            )
+            if not current_platform.can_update_inplace():
+                output = lora_output
 
         # Reshape the flattened output back to its original shape,
         # as some MM encoders cannot handle flattened inputs.
@@ -236,6 +247,74 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.reshape(original_shape)
 
         return output
+
+    def _apply_routed_lora_to_output(
+        self,
+        x: torch.Tensor,
+        output: torch.Tensor,
+        route_mapping: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        token_lora_indices, token_lora_weights = self._validate_routed_lora_mapping(
+            x, route_mapping
+        )
+
+        offset = 0
+        for slice_idx, output_slice in enumerate(self.output_slices):
+            lora_a = self.lora_a_stacked[slice_idx]
+            lora_b = self.lora_b_stacked[slice_idx]
+            output_view = output[:, offset : offset + output_slice]
+
+            for lora_idx, token_mask, route_weights in self._iter_lora_route_groups(
+                token_lora_indices, token_lora_weights
+            ):
+                routed_x = x[token_mask].to(dtype=lora_a.dtype)
+                delta = routed_x @ lora_a[lora_idx, 0].T
+                delta = delta @ lora_b[lora_idx, 0].T
+                weights = route_weights.to(dtype=delta.dtype)
+                output_view[token_mask] += (
+                    delta.to(dtype=output_view.dtype) * weights[:, None]
+                )
+
+            offset += output_slice
+
+        return output
+
+    @staticmethod
+    def _validate_routed_lora_mapping(
+        x: torch.Tensor,
+        route_mapping: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        token_lora_indices, token_lora_weights = route_mapping
+        if token_lora_indices.ndim != 2 or token_lora_weights.ndim != 2:
+            raise ValueError("Routed LoRA indices and weights must be 2D tensors")
+        if token_lora_indices.shape != token_lora_weights.shape:
+            raise ValueError(
+                "Routed LoRA indices and weights must have matching shapes"
+            )
+        if token_lora_indices.shape[0] != x.shape[0]:
+            raise ValueError(
+                "Routed LoRA token count must match the linear input token count"
+            )
+        return token_lora_indices, token_lora_weights
+
+    @staticmethod
+    def _iter_lora_route_groups(
+        token_lora_indices: torch.Tensor,
+        token_lora_weights: torch.Tensor,
+    ) -> Iterator[tuple[int, torch.Tensor, torch.Tensor]]:
+        for route_idx in range(token_lora_indices.shape[1]):
+            route_lora_indices = token_lora_indices[:, route_idx]
+            route_lora_weights = token_lora_weights[:, route_idx]
+            for lora_idx in torch.unique(route_lora_indices):
+                lora_idx_int = int(lora_idx.item())
+                if lora_idx_int < 0:
+                    continue
+
+                token_mask = route_lora_indices == lora_idx_int
+                if not torch.any(token_mask):
+                    continue
+
+                yield lora_idx_int, token_mask, route_lora_weights[token_mask]
 
     def _apply_async_impl(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
