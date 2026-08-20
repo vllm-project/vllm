@@ -347,18 +347,25 @@ def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
 
 
 def apply_top_k_top_p(
-    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    temperatures: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if p is None and k is None:
         return logits
 
+    # Only the Triton kernel understands per-row temperatures; the PyTorch
+    # fallback would silently mask an unscaled distribution.
+    assert temperatures is None or HAS_TRITON
+
     if current_platform.is_cpu():
         if HAS_TRITON:
-            return apply_top_k_top_p_triton(logits, k, p)
+            return apply_top_k_top_p_triton(logits, k, p, temperatures)
         return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
 
-    if HAS_TRITON and logits.shape[0] >= 8:
-        return apply_top_k_top_p_triton(logits, k, p)
+    if HAS_TRITON and (temperatures is not None or logits.shape[0] >= 8):
+        return apply_top_k_top_p_triton(logits, k, p, temperatures)
 
     # Use pytorch sort implementation for small batch sizes.
     return apply_top_k_top_p_pytorch(logits, k, p)

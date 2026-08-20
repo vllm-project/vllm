@@ -9,6 +9,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p,
     apply_top_k_top_p_pytorch,
     random_sample,
 )
@@ -317,6 +318,41 @@ class TestTritonTopkTopp:
                     f"Top-p mask difference too large: {diff_pct:.2f}% "
                     f"(max diff {max_diff} values out of {max_kept})"
                 )
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    @pytest.mark.parametrize("k_value", [None, 200], ids=["top-p", "top-k-top-p"])
+    def test_scaled_mask_preserves_stored_logits(
+        self, dtype: torch.dtype, k_value: int | None
+    ):
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch_size, vocab_size = 7, 1009
+        backing = torch.randn(
+            batch_size,
+            vocab_size + 3,
+            generator=self.generator,
+            dtype=dtype,
+        )
+        logits = backing[:, :vocab_size]
+        stored = logits.clone()
+        temperatures = torch.tensor([0.5, 2.0, 1.0, 0.5, 2.0, 1.0, 0.0])
+        effective_temperatures = torch.where(temperatures == 0.0, 1.0, temperatures)
+        k = (
+            torch.full((batch_size,), k_value, dtype=torch.int32)
+            if k_value is not None
+            else None
+        )
+        p = torch.full((batch_size,), 0.9, dtype=torch.float32)
+
+        expected = apply_top_k_top_p_triton(
+            stored.float() / effective_temperatures.unsqueeze(1), k, p
+        )
+        result = apply_top_k_top_p(logits, k, p, temperatures)
+        kept = torch.isfinite(expected)
+
+        assert result.data_ptr() == logits.data_ptr()
+        assert torch.equal(torch.isfinite(result), kept)
+        assert torch.equal(result[kept], stored[kept])
 
     @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])

@@ -17,7 +17,7 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
 
 _TRITON_TABLE_CACHE: dict[tuple[torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
-_TRITON_BUFFER_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
+_TRITON_BUFFER_CACHE: dict[tuple[torch.device, int], torch.Tensor] = {}
 
 # fmt: off
 _NORMAL_CDF_TO_SIGMA_TABLE = [
@@ -92,6 +92,14 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
 
 
 @triton.jit
+def _load_scaled_logits(ptr, offsets, mask, temperature):
+    return (
+        tl.load(ptr + offsets, mask=mask, other=-float("inf")).to(tl.float32)
+        / temperature
+    )
+
+
+@triton.jit
 def _topk_topp_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
@@ -100,6 +108,7 @@ def _topk_topp_kernel(
     NORMAL_CDF_TO_SIGMA_TABLE,
     K,
     P,
+    TEMPERATURES,
     BATCH_SIZE,
     VOCAB_SIZE: tl.constexpr,
     MASK_VALUE: tl.constexpr,
@@ -107,6 +116,7 @@ def _topk_topp_kernel(
     BLOCK_SIZE_TRUNC: tl.constexpr,
     TOPK_ENABLED: tl.constexpr,
     TOPP_ENABLED: tl.constexpr,
+    APPLY_TEMPERATURE: tl.constexpr,
 ):
     NUM_TILES: tl.constexpr = (VOCAB_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE
     pid = tl.program_id(0)
@@ -114,6 +124,10 @@ def _topk_topp_kernel(
     for row_id in tl.range(pid, BATCH_SIZE, num_programs):
         LOGITS_ROW = LOGITS + row_id.to(tl.int64) * LOGITS_STRIDE_0
         BUFFER_ROW = BUFFER + pid * VOCAB_SIZE
+        temperature = 1.0
+        if APPLY_TEMPERATURE:
+            temperature = tl.load(TEMPERATURES + row_id).to(tl.float32)
+            temperature = tl.where(temperature == 0.0, 1.0, temperature)
 
         final_pivot = -float("inf")
         duplicate_logit = float("inf")
@@ -130,9 +144,7 @@ def _topk_topp_kernel(
                 # Zeroth pass: Compute avg and std from a sample block
                 offs = tl.arange(0, BLOCK_SIZE)
                 mask_n = offs < VOCAB_SIZE
-                logits_blk0 = tl.load(
-                    LOGITS_ROW + offs, mask=mask_n, other=-float("inf")
-                )
+                logits_blk0 = _load_scaled_logits(LOGITS_ROW, offs, mask_n, temperature)
                 # Exclude -inf values (e.g. from grammar bitmasks) from
                 # statistics to avoid NaN in pivot computation.
                 finite_mask = (logits_blk0 > -float("inf")) & mask_n
@@ -163,8 +175,8 @@ def _topk_topp_kernel(
                 for i in range(0, NUM_TILES):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < VOCAB_SIZE
-                    logits_blk = tl.load(
-                        LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                    logits_blk = _load_scaled_logits(
+                        LOGITS_ROW, offs_n, mask_n, temperature
                     )
 
                     max_logit = tl.maximum(max_logit, tl.max(logits_blk))
@@ -304,8 +316,8 @@ def _topk_topp_kernel(
                         for i in range(0, NUM_TILES):
                             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                             mask_n = offs_n < VOCAB_SIZE
-                            logits_blk2 = tl.load(
-                                LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                            logits_blk2 = _load_scaled_logits(
+                                LOGITS_ROW, offs_n, mask_n, temperature
                             )
 
                             above_0 = logits_blk2 > k_pivot_0
@@ -454,10 +466,11 @@ def _topk_topp_kernel(
                                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                                 mask_n = offs_n < VOCAB_SIZE
 
-                                probs_blk = tl.load(
-                                    LOGITS_ROW + offs_n,
-                                    mask=mask_n,
-                                    other=-float("inf"),
+                                probs_blk = _load_scaled_logits(
+                                    LOGITS_ROW,
+                                    offs_n,
+                                    mask_n,
+                                    temperature,
                                 )
 
                                 outlier_mask = (probs_blk > min_logit) & mask_n
@@ -599,9 +612,7 @@ def _topk_topp_kernel(
                 # Zeroth pass: Compute avg and std from a sample block
                 offs = tl.arange(0, BLOCK_SIZE)
                 mask_n = offs < VOCAB_SIZE
-                logits_blk0 = tl.load(
-                    LOGITS_ROW + offs, mask=mask_n, other=-float("inf")
-                )
+                logits_blk0 = _load_scaled_logits(LOGITS_ROW, offs, mask_n, temperature)
                 # Exclude -inf values (e.g. from grammar bitmasks) from
                 # statistics to avoid NaN in pivot computation.
                 finite_mask = (logits_blk0 > -float("inf")) & mask_n
@@ -625,8 +636,8 @@ def _topk_topp_kernel(
                 for i in range(0, NUM_TILES):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < VOCAB_SIZE
-                    logits_blk = tl.load(
-                        LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                    logits_blk = _load_scaled_logits(
+                        LOGITS_ROW, offs_n, mask_n, temperature
                     )
                     max_logit = tl.maximum(max_logit, tl.max(logits_blk))
                     # Exclude -inf from min to keep binary search bounds
@@ -659,8 +670,8 @@ def _topk_topp_kernel(
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < VOCAB_SIZE
 
-                    probs_blk = tl.load(
-                        LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                    probs_blk = _load_scaled_logits(
+                        LOGITS_ROW, offs_n, mask_n, temperature
                     )
                     probs_blk = tl.exp(probs_blk - max_sample)
                     probs_blk = probs_blk / sum_exp_logits
@@ -753,8 +764,8 @@ def _topk_topp_kernel(
                         offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                         mask_n = offs_n < VOCAB_SIZE
 
-                        probs_blk = tl.load(
-                            LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                        probs_blk = _load_scaled_logits(
+                            LOGITS_ROW, offs_n, mask_n, temperature
                         )
                         probs_blk = tl.exp(probs_blk - max_sample)
                         probs_blk = probs_blk / sum_exp_logits
@@ -834,9 +845,10 @@ def _topk_topp_kernel(
             for i in range(0, NUM_TILES):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < VOCAB_SIZE
-                logits_blk = tl.load(
+                stored_logits = tl.load(
                     LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
                 )
+                logits_blk = stored_logits.to(tl.float32) / temperature
                 keep_mask = (logits_blk > final_pivot) & mask_n
 
                 # Duplicate logit handling
@@ -850,14 +862,15 @@ def _topk_topp_kernel(
                     num_kept += tl.sum(duplicate_keep_mask)
                     keep_mask = keep_mask & (~duplicate_remove_mask)
 
-                logits_blk = tl.where(keep_mask, logits_blk, MASK_VALUE)
-                tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
+                stored_logits = tl.where(keep_mask, stored_logits, MASK_VALUE)
+                tl.store(LOGITS_ROW + offs_n, stored_logits, mask=mask_n)
 
 
 def apply_top_k_top_p_triton(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
+    temperatures: torch.Tensor | None = None,
     mask_value: float = float("-inf"),
 ) -> torch.Tensor:
     """
@@ -867,19 +880,21 @@ def apply_top_k_top_p_triton(
     to the remaining k values (by probability).
 
     Args:
-        logits: [batch_size, vocab_size] float32 tensor. The returned tensor
+        logits: [batch_size, vocab_size] floating-point tensor. The returned tensor
             may alias this input or be a new contiguous tensor for unsupported
             layouts.
         k: [batch_size] int32 tensor of top-k values per row, or None to disable top-k
         p: [batch_size] float32 tensor of top-p values per row (0 to 1),
             or None to disable top-p
+        temperatures: Optional [batch_size] temperatures applied while computing
+            the mask. Kept logits remain unscaled.
         mask_value: Value for masked positions (default: -inf)
 
     Returns:
         The masked logits tensor. It may or may not be modified in-place.
     """
     assert logits.ndim == 2
-    assert logits.dtype == torch.float32
+    assert logits.dtype in (torch.float32, torch.bfloat16, torch.float16)
     batch_size, vocab_size = logits.shape
     topk_enabled = k is not None
     topp_enabled = p is not None
@@ -904,15 +919,21 @@ def apply_top_k_top_p_triton(
     else:
         p_ptr = logits  # Dummy pointer (won't be read)
 
+    if temperatures is not None:
+        assert temperatures.ndim == 1 and temperatures.shape[0] == batch_size
+        temperatures_ptr = temperatures
+    else:
+        temperatures_ptr = logits  # Dummy pointer (won't be read)
+
     num_sm = num_compute_units(logits.device.index)
     NUM_PROGRAMS = min(num_sm, batch_size)
 
     # Cache per-Triton Program buffer on each device.
-    buf_key = (logits.device, logits.dtype, vocab_size)
+    buf_key = (logits.device, vocab_size)
     buffer = _TRITON_BUFFER_CACHE.get(buf_key)
     if buffer is None or buffer.shape[0] < NUM_PROGRAMS:
         size = min(next_power_of_2(NUM_PROGRAMS), num_sm)
-        buffer = logits.new_empty((size, vocab_size))
+        buffer = logits.new_empty((size, vocab_size), dtype=torch.float32)
         _TRITON_BUFFER_CACHE[buf_key] = buffer
     if buffer.shape[0] > NUM_PROGRAMS:
         buffer = buffer[:NUM_PROGRAMS]
@@ -921,8 +942,12 @@ def apply_top_k_top_p_triton(
     tables = _TRITON_TABLE_CACHE.get(logits.device)
     if tables is None:
         with gpu_sync_allowed():
-            normal_cdf_to_sigma_table = logits.new_tensor(_NORMAL_CDF_TO_SIGMA_TABLE)
-            percentile_to_std_table = logits.new_tensor(_PERCENTILE_TO_STD_TABLE)
+            normal_cdf_to_sigma_table = logits.new_tensor(
+                _NORMAL_CDF_TO_SIGMA_TABLE, dtype=torch.float32
+            )
+            percentile_to_std_table = logits.new_tensor(
+                _PERCENTILE_TO_STD_TABLE, dtype=torch.float32
+            )
             _TRITON_TABLE_CACHE[logits.device] = (
                 normal_cdf_to_sigma_table,
                 percentile_to_std_table,
@@ -954,6 +979,7 @@ def apply_top_k_top_p_triton(
         normal_cdf_to_sigma_table,
         k_ptr,
         p_ptr,
+        temperatures_ptr,
         BATCH_SIZE=batch_size,
         MASK_VALUE=mask_value,
         VOCAB_SIZE=vocab_size,
@@ -961,6 +987,7 @@ def apply_top_k_top_p_triton(
         BLOCK_SIZE_TRUNC=block_size_trunc,
         TOPK_ENABLED=topk_enabled,
         TOPP_ENABLED=topp_enabled,
+        APPLY_TEMPERATURE=temperatures is not None,
         **launch_kwargs,
     )
 
