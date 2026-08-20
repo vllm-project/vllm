@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
 use super::types::GenerateRequest;
@@ -37,6 +38,7 @@ pub(super) fn prepare_generate_request(
     request: GenerateRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
+    mm_features: Option<MmFeatures>,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
@@ -52,9 +54,9 @@ pub(super) fn prepare_generate_request(
             .as_ref()
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let include_logprobs = request.sampling_params.logprobs.is_some();
-    let include_prompt_logprobs = request.sampling_params.prompt_logprobs.is_some();
-    let mut sampling_params = request.sampling_params;
+    let include_logprobs = request.sampling_params.inner.logprobs.is_some();
+    let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
+    let mut sampling_params = request.sampling_params.inner;
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
         request.kv_transfer_params.as_ref(),
@@ -67,7 +69,7 @@ pub(super) fn prepare_generate_request(
     let text_request = TextRequest {
         request_id: ctx.request_id.clone(),
         prompt: Prompt::TokenIds(request.token_ids),
-        mm_features: None,
+        mm_features,
         sampling_params,
         decode_options: TextDecodeOptions::default(),
         intermediate: false,
@@ -75,6 +77,7 @@ pub(super) fn prepare_generate_request(
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
+        session_id: ctx.session_id,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
@@ -133,6 +136,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            None,
         )
         .expect("prepare");
 
@@ -174,6 +178,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            None,
         )
         .expect("prepare");
 
@@ -203,6 +208,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            None,
         )
         .expect("prepare");
 

@@ -5,7 +5,7 @@ import time
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -18,7 +18,8 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     GenerationError,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
+    SpeculativeDecodingMetrics,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -37,16 +38,21 @@ from vllm.tracing import (
 )
 from vllm.v1.metrics.stats import RequestStateStats
 
+if TYPE_CHECKING:
+    from vllm.outputs import RequestOutput
+
 logger = init_logger(__name__)
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
+SESSION_ID_HEADER = "X-Session-ID"
+PRIORITY_HEADER = "X-Vllm-Priority"
 
 
 def build_per_request_timing_metrics(
     metrics: RequestStateStats | None,
     num_generation_tokens: int,
-) -> PerRequestTimingMetrics:
+) -> PerRequestMetrics:
     """Build per-request timing metrics from ``RequestStateStats``.
 
     ``generation_time_ms`` is the decode interval only (first output token to
@@ -58,7 +64,7 @@ def build_per_request_timing_metrics(
     unavailable.
     """
     if metrics is None:
-        return PerRequestTimingMetrics()
+        return PerRequestMetrics()
 
     queued_ts = metrics.queued_ts
     scheduled_ts = metrics.scheduled_ts
@@ -89,13 +95,30 @@ def build_per_request_timing_metrics(
         if inference_time_ms > 0:
             tokens_per_second = num_generation_tokens / inference_time_ms * 1000
 
-    return PerRequestTimingMetrics(
+    return PerRequestMetrics(
         time_to_first_token_ms=time_to_first_token_ms,
         generation_time_ms=generation_time_ms,
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,
         tokens_per_second=tokens_per_second,
     )
+
+
+def build_spec_decoding_metrics(
+    final_res: "RequestOutput | None",
+) -> SpeculativeDecodingMetrics | None:
+    """Build per-request spec-decode acceptance metrics from the single output
+    sequence, or ``None`` when unavailable (metrics disabled, or no sequence
+    yet).
+
+    Only meaningful for single-sequence requests; callers suppress it for n>1.
+    """
+    if final_res is None or not final_res.outputs:
+        return None
+    metrics = final_res.outputs[0].spec_decode_metrics
+    if metrics is None:
+        return None
+    return SpeculativeDecodingMetrics(**metrics.to_dict())
 
 
 @dataclass(kw_only=True)
@@ -214,6 +237,43 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             return int(rank_str)
         except ValueError:
             return None
+
+    @staticmethod
+    def _get_session_id_from_headers(raw_request: Request | None) -> str | None:
+        if raw_request is None:
+            return None
+        if value := raw_request.headers.get(SESSION_ID_HEADER):
+            return value
+        return None
+
+    @staticmethod
+    def _get_session_id(
+        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        raw_request: Request | None,
+    ) -> str | None:
+        if request.session_id:
+            return request.session_id
+        if value := GenerateBaseServing._get_session_id_from_headers(raw_request):
+            return value
+        if request.vllm_xargs:
+            session_id = request.vllm_xargs.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                return session_id
+        return None
+
+    @staticmethod
+    def _get_priority(
+        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        raw_request: Request | None,
+    ) -> int:
+        if raw_request is not None:
+            priority = raw_request.headers.get(PRIORITY_HEADER)
+            if priority is not None:
+                try:
+                    return int(priority)
+                except ValueError:
+                    pass
+        return request.priority
 
     async def _with_kv_transfer_rejection_cleanup(
         self,

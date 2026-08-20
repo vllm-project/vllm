@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+import time
+from collections.abc import Collection
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 
@@ -12,8 +18,15 @@ from vllm.multimodal.utils import (
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
 )
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
+from vllm.v1.worker.utils import (
+    EncoderTimingStats,
+    sanity_check_mm_encoder_outputs,
+)
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
 
@@ -27,6 +40,8 @@ class EncoderRunner:
         encoder_cache: EncoderCache,
         dtype: torch.dtype,
         device: torch.device,
+        cudagraph_manager: "EncoderCudaGraphManager | None" = None,
+        enable_timing: bool = False,
     ):
         self.model = model
         self.max_num_tokens = max_num_tokens
@@ -35,10 +50,33 @@ class EncoderRunner:
         self.dtype = dtype
         self.device = device
         self.is_realtime = supports_realtime(model)
+        self.cudagraph_manager = cudagraph_manager
+        self.enable_timing = enable_timing
+        self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
+        self._timing_lock = threading.Lock()
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
         )
+
+    def has_cudagraph(self) -> bool:
+        return self.cudagraph_manager is not None
+
+    @torch.inference_mode()
+    def capture(self) -> None:
+        manager = self.cudagraph_manager
+        assert manager is not None
+
+        from vllm.distributed.parallel_state import graph_capture
+        from vllm.platforms import current_platform
+
+        with graph_capture(device=self.device):
+            manager.capture(graph_pool=current_platform.graph_pool_handle())
+            torch.accelerator.synchronize()
+
+    def clear(self) -> None:
+        if self.cudagraph_manager is not None:
+            self.cudagraph_manager.clear()
 
     def prepare_mm_inputs(
         self, scheduled_encoder_inputs: dict[str, list[int]]
@@ -50,6 +88,19 @@ class EncoderRunner:
             for mm_input_id in encoder_input_ids:
                 mm_feature = mm_features[mm_input_id]
                 if mm_feature.data is None:
+                    continue
+                if mm_feature.identifier in self.encoder_cache.encoder_outputs:
+                    continue
+                if mm_feature.modality == "prompt_embeds":
+                    # Passthrough modality: the tensor is already in the
+                    # model's embedding space, so no encoder runs. Cache it
+                    # directly so gather_mm_embeddings splices it via the
+                    # standard is_mm_embed path.
+                    embeds = mm_feature.data["embedding"].data
+                    assert isinstance(embeds, torch.Tensor)
+                    self.encoder_cache.encoder_outputs[mm_feature.identifier] = (
+                        async_tensor_h2d(embeds, device=self.device)
+                    )
                     continue
                 mm_hashes.append(mm_feature.identifier)
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
@@ -101,12 +152,54 @@ class EncoderRunner:
     ) -> list[torch.Tensor]:
         encoder_outputs: list[torch.Tensor] = []
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
-            mm_kwargs, device=self.device, pin_memory=True
+            mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
         ):
-            batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
+            cg_manager = self.cudagraph_manager
+            cudagraph_output = (
+                cg_manager.execute(mm_kwargs_batch)
+                if cg_manager is not None
+                and cg_manager.is_captured()
+                and cg_manager.supports_modality(modality)
+                else None
+            )
+            batch_outputs = (
+                cudagraph_output
+                if cudagraph_output is not None
+                else self.model.embed_multimodal(**mm_kwargs_batch)
+            )
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
         return encoder_outputs
+
+    @contextmanager
+    def timed_encoder_operation(self, request_ids: Collection[str]):
+        if not (self.enable_timing and request_ids):
+            yield
+            return
+
+        torch.accelerator.synchronize()
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            torch.accelerator.synchronize()
+            per_request_time = (time.perf_counter() - start_time) / len(request_ids)
+            with self._timing_lock:
+                for req_id in request_ids:
+                    stats = self.encoder_timing_registry.setdefault(
+                        req_id, EncoderTimingStats()
+                    )
+                    stats.encoder_forward_secs += per_request_time
+                    stats.num_encoder_calls += 1
+
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        with self._timing_lock:
+            stats = {
+                req_id: stats_obj.to_dict()
+                for req_id, stats_obj in self.encoder_timing_registry.items()
+            }
+            self.encoder_timing_registry.clear()
+            return stats
 
     def gather_mm_embeddings(
         self,

@@ -26,7 +26,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.serve.utils.error_response import create_error_response
+from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import (
     EngineInput,
@@ -201,6 +201,15 @@ class OnlineRenderer:
             )
         else:
             # For GPT-OSS.
+            if self.parser is not None:
+                # HarmonyParser doesn't need chat_template_kwargs
+                # TODO: Unify adjust_request() call with non-harmony branch
+                self.parser(
+                    self.renderer.get_tokenizer(),
+                    request.tools,
+                    model_config=self.model_config,
+                ).adjust_request(request=request)
+
             should_include_tools = tool_dicts is not None
             conversation, engine_inputs = self._make_request_with_harmony(
                 request, should_include_tools
