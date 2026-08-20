@@ -11,7 +11,7 @@ from vllm.renderers import ChatParams
 from vllm.renderers.kimi_k3 import (
     KimiK3Renderer,
     _merge_k3_media_io_kwargs,
-    _preserve_malformed_tool_arguments,
+    _preserve_raw_tool_arguments,
 )
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.registry import TokenizerRegistry
@@ -413,8 +413,9 @@ def test_apply_chat_template_keeps_user_schema_content():
     assert tokenizer.calls[-1]["tools"] == tools
 
 
-def test_preserve_malformed_tool_arguments_helper():
-    # Malformed strings are wrapped as JSON string literals; valid strings,
+def test_preserve_raw_tool_arguments_helper():
+    # Every string is wrapped as a JSON string literal -- valid or not -- so
+    # the downstream json.loads round-trips it to the original raw string;
     # dicts and non-list tool_calls pass through untouched.
     messages = [
         {"role": "user", "content": "hi"},
@@ -441,16 +442,17 @@ def test_preserve_malformed_tool_arguments_helper():
         },
     ]
 
-    (out,) = _preserve_malformed_tool_arguments(messages)[1:2]
+    (out,) = _preserve_raw_tool_arguments(messages)[1:2]
     calls = out["tool_calls"]
     assert json.loads(calls[0]["function"]["arguments"]) == '{"x": 1'
-    assert calls[1]["function"]["arguments"] == '{"x": 1}'
+    assert json.loads(calls[1]["function"]["arguments"]) == '{"x": 1}'
     assert calls[2]["function"]["arguments"] == {"x": 1}
 
 
-def test_preserve_malformed_tool_arguments_whitespace_only():
-    # Whitespace-only arguments are normalized to empty arguments instead of
-    # failing json.loads downstream (K3 treats them as empty).
+def test_preserve_raw_tool_arguments_whitespace_only():
+    # Whitespace-only arguments are preserved like everything else: they
+    # would fail json.loads downstream, and K3's encoding renders them via
+    # its raw-text fallback rather than treating them as empty.
     messages = [
         {
             "role": "assistant",
@@ -465,21 +467,24 @@ def test_preserve_malformed_tool_arguments_whitespace_only():
         },
     ]
 
-    (out,) = _preserve_malformed_tool_arguments(messages)
-    assert out["tool_calls"][0]["function"]["arguments"] == "{}"
+    (out,) = _preserve_raw_tool_arguments(messages)
+    assert json.loads(out["tool_calls"][0]["function"]["arguments"]) == "  \n "
 
 
-def test_render_messages_preserves_malformed_tool_arguments():
-    """Malformed tool-call arguments round-trip to K3's encoding byte-exact.
+def test_render_messages_preserves_raw_tool_arguments():
+    """Tool-call arguments round-trip to K3's encoding byte-exact.
 
-    parse_chat_messages json.loads string arguments, so the renderer wraps
-    unparsable ones as JSON string literals; the loads round-trips them to
-    the original string, which K3's encoding renders via its raw-text
-    fallback exactly like the platform tokenism.
+    parse_chat_messages json.loads string arguments into Python objects, so
+    the renderer wraps them as JSON string literals; the loads round-trips
+    them to the original string, which K3's encoding parses with literal
+    preservation -- or renders via its raw-text fallback for malformed JSON
+    -- exactly like the platform tokenism.
     """
     tokenizer = StubTokenizer([1, 2])
     renderer = _make_renderer(tokenizer)
     malformed = '{"location":"北京"'
+    literal = '{"temperature": 1e2, "dates": [1,2]}'
+    non_object = "[1,2]"
 
     conversation, prompt = renderer.render_messages(
         [
@@ -492,7 +497,17 @@ def test_render_messages_preserves_malformed_tool_arguments():
                         "id": "call_1",
                         "type": "function",
                         "function": {"name": "get_weather", "arguments": malformed},
-                    }
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": literal},
+                    },
+                    {
+                        "id": "call_3",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": non_object},
+                    },
                 ],
             },
             {"role": "tool", "tool_call_id": "call_1", "content": "晴"},
@@ -503,14 +518,23 @@ def test_render_messages_preserves_malformed_tool_arguments():
 
     assert prompt == {"prompt_token_ids": [1, 2]}
     sent = tokenizer.conversations[-1]
-    assert sent[1]["tool_calls"][0]["function"]["arguments"] == malformed
+    tool_calls = sent[1]["tool_calls"]
+    # Malformed JSON survives (a bare json.loads would 400 here).
+    assert tool_calls[0]["function"]["arguments"] == malformed
+    # Valid JSON keeps its literal bytes instead of round-tripping through
+    # a dict (``1e2`` -> ``100.0``, ``[1,2]`` -> ``[1, 2]``).
+    assert tool_calls[1]["function"]["arguments"] == literal
+    # Valid non-object JSON stays a string instead of becoming a list, which
+    # K3's encoding would reject with a TypeError.
+    assert tool_calls[2]["function"]["arguments"] == non_object
 
 
 @pytest.mark.asyncio
-async def test_render_messages_async_preserves_malformed_tool_arguments():
+async def test_render_messages_async_preserves_raw_tool_arguments():
     tokenizer = StubTokenizer([3])
     renderer = _make_renderer(tokenizer)
     malformed = '{"location":"北京"'
+    literal = '{"temperature": 1e2}'
 
     await renderer.render_messages_async(
         [
@@ -522,7 +546,12 @@ async def test_render_messages_async_preserves_malformed_tool_arguments():
                         "id": "call_1",
                         "type": "function",
                         "function": {"name": "get_weather", "arguments": malformed},
-                    }
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": literal},
+                    },
                 ],
             },
         ],
@@ -530,7 +559,9 @@ async def test_render_messages_async_preserves_malformed_tool_arguments():
     )
 
     sent = tokenizer.conversations[-1]
-    assert sent[0]["tool_calls"][0]["function"]["arguments"] == malformed
+    tool_calls = sent[0]["tool_calls"]
+    assert tool_calls[0]["function"]["arguments"] == malformed
+    assert tool_calls[1]["function"]["arguments"] == literal
 
 
 def test_render_messages_converts_developer_to_system():

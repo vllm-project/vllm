@@ -60,10 +60,13 @@ def _convert_developer_to_system(
                 {"role": "system", "tools": msg["tools"]}  # type: ignore[misc]
             )
             converted.append(
-                {
-                    **{k: v for k, v in msg.items() if k != "tools"},
-                    "role": "system",
-                }  # type: ignore[misc]
+                cast(
+                    ConversationMessage,
+                    {
+                        **{k: v for k, v in msg.items() if k != "tools"},
+                        "role": "system",
+                    },
+                )
             )
         else:
             converted.append({**msg, "role": "system"})  # type: ignore[misc]
@@ -93,15 +96,20 @@ def _drop_null_tool_fields(tools: Any) -> Any:
     return cleaned
 
 
-def _preserve_malformed_tool_arguments(
+def _preserve_raw_tool_arguments(
     messages: list[ChatCompletionMessageParam],
 ) -> list[ChatCompletionMessageParam]:
-    """Wrap unparsable tool-call ``arguments`` as JSON string literals.
+    """Wrap string tool-call ``arguments`` as JSON string literals.
 
-    ``parse_chat_messages`` rejects malformed JSON arguments with a 400,
-    while K3's encoding tolerates them via a raw-text fallback. Wrapping the
-    string as a JSON string literal survives that ``loads`` (round-tripping
-    to the original string), so the text reaches K3's encoding byte-exact.
+    ``parse_chat_messages`` unconditionally ``json.loads`` string arguments
+    into Python objects (the Transformers dict convention), while K3's
+    ``encoding_k3`` wants the raw string: valid JSON objects keep their
+    literal bytes (``1e2`` stays ``1e2``, ``[1,2]`` keeps its compact form),
+    and anything else -- malformed JSON, valid non-object JSON, whitespace --
+    falls back to a raw-text block rendered from the original string.
+    Wrapping the string as a JSON string literal survives that ``loads``
+    (round-tripping to the original string), so the text reaches K3's
+    encoding byte-exact in every case.
     """
     preserved: list[ChatCompletionMessageParam] = []
     for message in messages:
@@ -116,25 +124,13 @@ def _preserve_malformed_tool_arguments(
                 if isinstance(function, dict):
                     arguments = function.get("arguments")
                     if isinstance(arguments, str):
-                        if not arguments.strip():
-                            # Whitespace-only arguments read as a non-empty
-                            # string downstream and fail json.loads; K3 treats
-                            # them as empty arguments.
-                            tool_call = {
-                                **tool_call,
-                                "function": {**function, "arguments": "{}"},
-                            }
-                        else:
-                            try:
-                                json.loads(arguments)
-                            except json.JSONDecodeError:
-                                tool_call = {
-                                    **tool_call,
-                                    "function": {
-                                        **function,
-                                        "arguments": json.dumps(arguments),
-                                    },
-                                }
+                        tool_call = {
+                            **tool_call,
+                            "function": {
+                                **function,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
             new_calls.append(tool_call)
         preserved.append({**message, "tool_calls": new_calls})  # type: ignore[typeddict-item]
     return preserved
@@ -288,7 +284,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         conversation, mm_data, mm_uuids = parse_chat_messages(
-            _preserve_malformed_tool_arguments(messages),
+            _preserve_raw_tool_arguments(messages),
             self.model_config,
             content_format="string",
             media_io_kwargs=_merge_k3_media_io_kwargs(params.media_io_kwargs),
@@ -314,7 +310,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
-            _preserve_malformed_tool_arguments(messages),
+            _preserve_raw_tool_arguments(messages),
             self.model_config,
             content_format="string",
             media_io_kwargs=_merge_k3_media_io_kwargs(params.media_io_kwargs),
