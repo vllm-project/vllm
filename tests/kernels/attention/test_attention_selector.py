@@ -627,11 +627,14 @@ def _hd256_config(
         ({}, {"rswa_window": 512}, 2),
         ({}, {"dcp_size": 2}, 2),
         ({}, {"softcap": 50.0}, 2),
-        # Only (256, 256) hits the dedicated kernel; every other head-dim
-        # combination keeps the generic FA4 forward and its 16-token pages.
+        # Only (256, 256) hits the dedicated kernel; head-dim combinations FA4
+        # can serve keep the generic forward and its 16-token pages.
         ({"head_size": 128, "kv_cache_block_size": 16}, {}, 4),
         ({"head_size": 192, "head_size_v": 128, "kv_cache_block_size": 16}, {}, 4),
-        ({"head_size": 256, "head_size_v": 128, "kv_cache_block_size": 16}, {}, 4),
+        # (256, != 256) is not a shape FA4 can serve on SM100 (_validate_head_dims
+        # in flash_attn/cute/interface.py asserts), so the TMEM block gives FA2.
+        ({"head_size": 256, "head_size_v": 128, "kv_cache_block_size": 16}, {}, 2),
+        ({"head_size": 256, "head_size_v": 64}, {}, 2),
     ],
 )
 def test_fa4_hd256_fallback_matrix(kwargs, config_kwargs, expected):
