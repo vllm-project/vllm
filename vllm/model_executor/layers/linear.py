@@ -957,6 +957,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param = getattr(self, name, self)
             if param is None and name == "bias":
                 continue
+            if not isinstance(param, Parameter):
+                raise ValueError(
+                    f"{self.prefix}: cannot load {name!r} — no such parameter, "
+                    f"got {type(param).__name__} instead. This usually means the "
+                    f"checkpoint carries a tensor the layer does not declare, e.g. a "
+                    f"quantization scale on a layer built without a quant_config."
+                )
             param.weight_loader(param, loaded_weight, shard_id)
             logger.debug(
                 "Loaded shard %s with shape %s into %s.%s",
