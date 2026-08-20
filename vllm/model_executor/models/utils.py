@@ -407,6 +407,38 @@ class AutoWeightsLoader:
 
                     continue
 
+                if "layers." in prefix:
+                    import regex as re
+
+                    m = re.search(r"layers\.(\d+)", prefix)
+                    if m:
+                        layer_idx = int(m.group(1))
+
+                        config = getattr(self.module, "config", None)
+                        num_hidden_layers = None
+                        if config is not None:
+                            num_hidden_layers = getattr(
+                                config, "num_hidden_layers", None
+                            )
+                            if num_hidden_layers is None and hasattr(
+                                config, "text_config"
+                            ):
+                                num_hidden_layers = getattr(
+                                    config.text_config, "num_hidden_layers", None
+                                )
+
+                        if (
+                            num_hidden_layers is not None
+                            and layer_idx >= num_hidden_layers
+                        ):
+                            logger.warning(
+                                "Ignoring layer %d weights because "
+                                "num_hidden_layers is configured to %d",
+                                layer_idx,
+                                num_hidden_layers,
+                            )
+                            continue
+
                 named_parameters = module.named_parameters(recurse=True)
                 desc_param_keys = {
                     maybe_prefix(base_prefix, k) for k, _ in named_parameters

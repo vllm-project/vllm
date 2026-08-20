@@ -265,3 +265,40 @@ def test_merge_multimodal_embeddings_no_sync():
         _merge_multimodal_embeddings(
             inputs_embeds, multimodal_embeddings, is_multimodal
         )
+
+
+class ModuleWithLayersConfig:
+    def __init__(self, num_hidden_layers):
+        self.num_hidden_layers = num_hidden_layers
+
+
+class ModuleWithLayers(torch.nn.Module):
+    def __init__(self, num_hidden_layers: int = 5):
+        super().__init__()
+        self.config = ModuleWithLayersConfig(num_hidden_layers)
+        self.layers = torch.nn.ModuleList(
+            [torch.nn.Linear(2, 2) for _ in range(num_hidden_layers)]
+        )
+
+
+@pytest.mark.cpu_test
+def test_autoload_truncates_layers():
+    """Ensure the auto weight loader can gracefully truncate layers based on config."""
+    # Model configured to have only 2 layers
+    mod = ModuleWithLayers(num_hidden_layers=2)
+
+    # We provide weights for 4 layers
+    def weight_generator():
+        for i in range(4):
+            yield f"layers.{i}.weight", torch.ones(2, 2)
+            yield f"layers.{i}.bias", torch.zeros(2)
+
+    loader = AutoWeightsLoader(mod)
+    # This should not raise ValueError for layers.2 or .3 because num_hidden_layers=2
+    loader.load_weights(weight_generator())
+
+    # Check that the loaded layers match the ones provided
+    assert torch.all(mod.layers[0].weight == 1.0)
+    assert torch.all(mod.layers[0].bias == 0.0)
+    assert torch.all(mod.layers[1].weight == 1.0)
+    assert torch.all(mod.layers[1].bias == 0.0)

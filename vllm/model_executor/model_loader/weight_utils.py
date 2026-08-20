@@ -591,8 +591,9 @@ def filter_duplicate_safetensors_files(
     hf_weights_files_set = set(hf_weights_files)
     missing_files = weight_files_in_index - hf_weights_files_set
     if missing_files:
-        raise FileNotFoundError(
-            f"Weight files referenced in index but missing: {missing_files}"
+        logger.warning(
+            "Weight files referenced in index but missing (likely due to ignore_patterns): %s",
+            missing_files,
         )
     # Filter out any fields that are not found in the index file.
     hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
