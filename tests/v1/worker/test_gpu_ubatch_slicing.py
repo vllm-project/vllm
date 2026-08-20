@@ -236,26 +236,14 @@ def test_trailing_microbatch_absorbs_cudagraph_padding():
 
 DECODE_THRESHOLD = 32
 PREFILL_THRESHOLD = 128
-
-
-class _StubUBatchRunner:
-    """Stands in for `UBatchRunner`: the DP handshake only asks for the vote."""
-
-    num_ubatches = 2
-
-    def wants_ubatch(self, num_tokens: int, uniform_token_count: int | None) -> bool:
-        threshold = DECODE_THRESHOLD if uniform_token_count == 1 else PREFILL_THRESHOLD
-        return num_tokens >= threshold
-
-
-_STUB_UBATCH_RUNNER = _StubUBatchRunner()
+DECODE_QUERY_LEN = 1
 
 
 def test_dummy_batch_can_be_microbatched():
     """A DP rank with no work still has to split, so its dummy batch must slice.
 
-    All ranks agree on whether to microbatch by recomputing each other's votes,
-    so a rank running a dummy batch cannot opt out on its own.
+    Microbatching is all-or-nothing across the group, so a rank whose step is a
+    dummy batch runs it microbatched like everyone else.
     """
     num_reqs, num_tokens = 1, 32
     buffers = _make_buffers()
@@ -281,23 +269,23 @@ def test_dummy_batch_can_be_microbatched():
 def _sync_dp(
     num_tokens_per_rank: list[int],
     uniform_token_count_per_rank: list[int] | None = None,
-    ubatch_runner: _StubUBatchRunner | None = _STUB_UBATCH_RUNNER,
+    allow_ubatching: bool = True,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
     The microbatching decision lives inside `sync_cudagraph_and_dp_padding`, so
     the cases below stand in for the collective rather than for the decision,
     and need no process group. Every rank asks for eager, which keeps the
-    non-microbatched path off the cudagraph manager.
+    non-microbatched path off the cudagraph manager. This rank is rank 0.
     """
     dp_size = len(num_tokens_per_rank)
-    reduced = torch.zeros(4, dp_size, dtype=torch.int32)
+    uniform_token_counts = uniform_token_count_per_rank or [0] * dp_size
+    reduced = torch.zeros(5, dp_size, dtype=torch.int32)
     reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
     reduced[1] = CUDAGraphMode.NONE.value
-    reduced[2] = torch.tensor(
-        uniform_token_count_per_rank or [0] * dp_size, dtype=torch.int32
-    )
+    reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
     reduced[3] = -1  # max_query_len, -1 means None
+    reduced[4] = int(allow_ubatching)
 
     with (
         patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
@@ -312,27 +300,33 @@ def _sync_dp(
             ),
             num_tokens=num_tokens_per_rank[0],
             num_reqs=8,
-            uniform_token_count=None,
+            uniform_token_count=uniform_token_counts[0] or None,
             dp_size=dp_size,
             dp_rank=0,
-            ubatch_runner=cast("UBatchRunner | None", ubatch_runner),
+            parallel_config=ParallelConfig(
+                enable_dbo=True,
+                dbo_decode_token_threshold=DECODE_THRESHOLD,
+                dbo_prefill_token_threshold=PREFILL_THRESHOLD,
+            ),
+            allow_ubatching=allow_ubatching,
+            uniform_decode=uniform_token_counts[0] == DECODE_QUERY_LEN,
         )
 
 
 def test_every_dp_rank_must_agree_to_microbatch():
     """One rank below the threshold is enough to keep the group on one batch.
 
-    The votes are not communicated -- each rank recomputes every other rank's
-    from the token counts the all-reduce already carries -- so this also pins
-    that the whole vector is consulted, not just this rank's own entry.
+    The thresholds are not communicated -- they are checked against the token
+    counts the all-reduce already carries -- so this also pins that the whole
+    vector is consulted, not just this rank's own entry.
     """
     assert _sync_dp([256, 256])[0].num_ubatches == 2
     assert _sync_dp([256, 100])[0].num_ubatches == 1
     assert _sync_dp([100, 256])[0].num_ubatches == 1
 
 
-def test_ubatch_vote_uses_each_rank_own_decode_threshold():
-    """Uniform-decode ranks are held to the decode threshold, not the prefill one."""
+def test_decode_threshold_only_applies_when_every_rank_is_a_uniform_decode():
+    """Otherwise the group is held to the prefill threshold."""
     # 64 tokens clears the decode threshold but not the prefill one, so it only
     # microbatches when both ranks are uniform decodes.
     assert _sync_dp([64, 64], uniform_token_count_per_rank=[1, 1])[0].num_ubatches == 2
@@ -399,8 +393,8 @@ def test_all_padding_microbatch_has_no_work_to_do():
     )
 
 
-def test_microbatching_off_when_not_configured():
-    assert _sync_dp([256, 256], ubatch_runner=None)[0].num_ubatches == 1
+def test_microbatching_off_when_a_rank_does_not_allow_it():
+    assert _sync_dp([256, 256], allow_ubatching=False)[0].num_ubatches == 1
 
 
 def test_slice_model_inputs_handles_mrope_positions():
@@ -432,7 +426,6 @@ def _make_execution_runner(vllm_config: VllmConfig) -> UBatchRunner:
         attn_groups=[],
         kv_cache_config=cast(KVCacheConfig, None),
         max_num_reqs=MAX_NUM_REQS,
-        decode_query_len=1,
     )
 
 
@@ -448,26 +441,15 @@ def _make_ubatch_state(
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
-def test_runner_declines_batches_too_small_to_split():
+def test_thresholds_below_the_microbatch_count_are_rejected():
     """A batch with fewer tokens than microbatches cannot be split at all.
 
-    The thresholds are configurable down to zero, so they are not enough on
-    their own: a one-token decode split two ways leaves an empty microbatch.
+    Nothing downstream copes with an unsplittable batch, so the thresholds are
+    what keep one out: a one-token decode split two ways leaves an empty
+    microbatch.
     """
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
-        parallel_config=ParallelConfig(
-            enable_dbo=True,
-            all2all_backend="deepep_low_latency",
-            dbo_decode_token_threshold=1,
-            dbo_prefill_token_threshold=1,
-        ),
-    )
-    runner = _make_execution_runner(vllm_config)
-
-    assert not runner.wants_ubatch(1, uniform_token_count=1)
-    assert runner.wants_ubatch(2, uniform_token_count=1)
+    with pytest.raises(ValueError, match="number of microbatches"):
+        ParallelConfig(enable_dbo=True, dbo_decode_token_threshold=1)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")

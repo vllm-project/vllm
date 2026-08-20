@@ -163,6 +163,10 @@ def init_attn_backend(
                 # it on the prefill backend), so each ubatch needs its own.
                 num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
             )
+            # Per-group properties, so the first microbatch's builder answers
+            # for all of them. The workspace is deliberately not shared with the
+            # others: microbatches run concurrently, and a workspace the
+            # attention kernels write to cannot be shared between them.
             builder = group.get_metadata_builder(0)
             if attn_backend_workspace is None:
                 if hasattr(builder, "_get_workspace_buffer"):
@@ -183,6 +187,12 @@ def init_attn_backend(
         min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
     )
     return attn_groups, attn_cg_support_info, kernel_block_sizes
+
+
+def get_backend_names(attn_groups: list[list[AttentionGroup]]) -> str:
+    """Comma-separated names of the backends behind ``attn_groups``."""
+    names = (group.backend.__name__ for groups in attn_groups for group in groups)
+    return ", ".join(dict.fromkeys(names))
 
 
 def get_query_lens_mismatch_unsupported_backend(

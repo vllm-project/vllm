@@ -2,20 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
 import torch.distributed as dist
 
+from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
+from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
 
 
 def sync_cudagraph_and_dp_padding(
@@ -28,26 +25,33 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
-    ubatch_runner: UBatchRunner | None = None,
+    parallel_config: ParallelConfig | None = None,
+    allow_ubatching: bool = False,
+    uniform_decode: bool = False,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
+
+    `parallel_config` is only needed to decide whether to microbatch, so callers
+    that never do (`allow_ubatching=False`) can leave it out.
 
     Returns (synced_batch_desc, num_tokens_across_dp).
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(5, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
+    tensor[4][dp_rank] = int(allow_ubatching)
     dist.all_reduce(tensor, group=group)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
     max_query_lens_across_dp = tensor[3]
+    allow_ubatching_across_dp = tensor[4]
 
     if torch.all(num_tokens_across_dp == 0).item():
         synced_desc = BatchExecutionDescriptor(
@@ -55,12 +59,29 @@ def sync_cudagraph_and_dp_padding(
         )
         return synced_desc, None
 
-    if ubatch_runner is not None and all(
-        ubatch_runner.wants_ubatch(int(num_tokens), int(uniform_token_count) or None)
-        for num_tokens, uniform_token_count in zip(
-            num_tokens_across_dp, uniform_token_counts_across_dp
+    if bool(torch.all(allow_ubatching_across_dp == 1).item()):
+        # This rank voted too, so it asked for microbatching itself.
+        assert parallel_config is not None
+        # The group is a uniform decode only if every rank runs the same uniform
+        # query length as this one, which this rank already compared against its
+        # own decode length. That length is identical group-wide, so every rank
+        # comes to the same answer here.
+        uniform_decode_across_dp = uniform_decode and bool(
+            torch.all(
+                uniform_token_counts_across_dp == (uniform_token_count or 0)
+            ).item()
         )
-    ):
+        should_ubatch = check_ubatch_thresholds(
+            parallel_config,
+            # The thresholds only grow with the token count, so holding the
+            # smallest rank to them is the same as holding every rank to them.
+            int(num_tokens_across_dp.min().item()),
+            uniform_decode=uniform_decode_across_dp,
+        )
+    else:
+        should_ubatch = False
+
+    if should_ubatch:
         # Microbatching is all-or-nothing: every rank has to split, because the
         # expert all-to-all is collective, and every rank has to run the same
         # number of tokens so each can assume the others' microbatches are the
@@ -73,7 +94,7 @@ def sync_cudagraph_and_dp_padding(
             cg_mode=CUDAGraphMode.NONE,
             num_tokens=ubatch_num_tokens,
             num_reqs=num_reqs,
-            num_ubatches=ubatch_runner.num_ubatches,
+            num_ubatches=get_num_ubatches(parallel_config),
         ), torch.full_like(num_tokens_across_dp, ubatch_num_tokens)
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
@@ -132,7 +153,9 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
-    ubatch_runner: UBatchRunner | None = None,
+    parallel_config: ParallelConfig | None = None,
+    allow_ubatching: bool = False,
+    uniform_decode: bool = False,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
@@ -169,5 +192,7 @@ def dispatch_cg_and_sync_dp(
         dp_rank,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
-        ubatch_runner=ubatch_runner,
+        parallel_config=parallel_config,
+        allow_ubatching=allow_ubatching,
+        uniform_decode=uniform_decode,
     )

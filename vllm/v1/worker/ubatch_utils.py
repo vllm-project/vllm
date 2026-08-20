@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig
 from vllm.distributed import get_ep_group
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import set_num_sms as deep_gemm_set_num_sms
@@ -81,13 +81,15 @@ class SMControlContextManager:
         self.set_compute_sms(self.total_sms)
 
 
-def create_sm_control_context(vllm_config: VllmConfig) -> SMControlContextManager:
+def create_sm_control_context(
+    parallel_config: ParallelConfig,
+) -> SMControlContextManager:
     """Reserve SMs for communication kernels while microbatches overlap."""
     comm_sms: int = envs.VLLM_DBO_COMM_SMS
     rocm_deepep_ht_dbo = (
         current_platform.is_rocm()
-        and vllm_config.parallel_config.enable_dbo
-        and vllm_config.parallel_config.all2all_backend == "deepep_high_throughput"
+        and parallel_config.enable_dbo
+        and parallel_config.all2all_backend == "deepep_high_throughput"
     )
     if rocm_deepep_ht_dbo:
         # On ROCm, reserving CUs for DeepEP HT communication under DBO
@@ -96,7 +98,7 @@ def create_sm_control_context(vllm_config: VllmConfig) -> SMControlContextManage
         comm_sms = 0
 
     set_comm_sms = lambda sms: None
-    if vllm_config.parallel_config.enable_expert_parallel:
+    if parallel_config.enable_expert_parallel:
         # Currently only DeepEP highthroughput supports SM control so this
         # only affects that case.
         ep_group = get_ep_group()
