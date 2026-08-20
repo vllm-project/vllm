@@ -32,7 +32,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn,
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
@@ -41,6 +40,9 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
+from vllm.models.kimi_k3.amd.ops.fused_qkv_conv1d import (
+    fused_qkv_causal_conv1d_fn,
+)
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
     is_fused_kda_decode_supported,
     make_decode_conv1d_weight_loader,
@@ -368,12 +370,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
-        q_conv_weight, k_conv_weight, v_conv_weight = conv_weights.split(
-            self.local_projection_size, dim=0
-        )
-        q_conv_state, k_conv_state, v_conv_state = conv_state.split(
-            self.local_projection_size, dim=-2
-        )
 
         # Split tokens into the multi-query spec-decode part and the remaining
         # (prefill / plain decode) part.
@@ -453,35 +449,20 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
             if m.num_prefills > 0:
-                q_ns, k_ns, v_ns = mixed_qkv_ns.split(
-                    self.local_projection_size, dim=-1
+                #Fused conv, keeps things updated in place like the seperate calls before
+                q_ns, k_ns, v_ns = fused_qkv_causal_conv1d_fn(
+                    mixed_qkv_ns.transpose(0, 1),
+                    conv_weights,
+                    None,
+                    conv_state,
+                    non_spec_query_start_loc,
+                    self.local_projection_size,
+                    self.local_projection_size,
+                    cache_indices=non_spec_state_indices_tensor,
+                    has_initial_state=has_initial_state,
+                    activation="silu",
+                    metadata=m,
                 )
-
-                # Packed prefill conv would require copying V solely to make
-                # it dense for KDA. Separate calls accept the strided inputs
-                # and produce dense Q/K/V without that extra traffic.
-                # TODO: Use packed conv once every KDA prefill backend accepts
-                # row-strided Q/K/V directly.
-                def _prefill_conv(
-                    x: torch.Tensor,
-                    state: torch.Tensor,
-                    weight: torch.Tensor,
-                ) -> torch.Tensor:
-                    return causal_conv1d_fn(
-                        x.transpose(0, 1),
-                        weight,
-                        None,
-                        activation="silu",
-                        conv_states=state,
-                        has_initial_state=has_initial_state,
-                        cache_indices=non_spec_state_indices_tensor,
-                        query_start_loc=non_spec_query_start_loc,
-                        metadata=m,
-                    ).transpose(0, 1)
-
-                q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
-                k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
-                v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
                 q_ns, k_ns, v_ns = (
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                     for x in (q_ns, k_ns, v_ns)
