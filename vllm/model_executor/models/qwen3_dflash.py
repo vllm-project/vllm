@@ -729,8 +729,14 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
                 torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
                 requires_grad=False,
             )
+            # Precomputed draft→target index mapping; updated after weight load.
+            self._draft_targets = nn.Parameter(
+                torch.arange(self.config.draft_vocab_size, dtype=torch.long),
+                requires_grad=False,
+            )
         else:
             self.draft_id_to_target_id = None
+            self._draft_targets = None
 
     def embed_input_ids(
         self,
@@ -764,13 +770,11 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         if self.draft_id_to_target_id is None:
             return logits
 
-        base = torch.arange(self.config.draft_vocab_size, device=logits.device)
-        targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full(
             (logits.shape[0], self.config.vocab_size),
             float("-inf"),
         )
-        logits_new[:, targets] = logits
+        logits_new[:, self._draft_targets] = logits
         return logits_new
 
     def precompute_and_store_context_kv(
@@ -851,6 +855,14 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         )
         loader.load_weights(model_weights.items())
         self.model._build_fused_kv_buffers()
+        if self.draft_id_to_target_id is not None:
+            self._draft_targets.data = (
+                torch.arange(
+                    self.config.draft_vocab_size,
+                    device=self.draft_id_to_target_id.device,
+                )
+                + self.draft_id_to_target_id
+            )
 
     def _read_mask_embedding(self) -> torch.Tensor | None:
         """Checks for an override mask embedding in `mask_embedding.pt` and returns it.

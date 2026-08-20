@@ -311,6 +311,10 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
             torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
             requires_grad=False,
         )
+        self._draft_targets = nn.Parameter(
+            torch.arange(self.config.draft_vocab_size, dtype=torch.long),
+            requires_grad=False,
+        )
 
     def embed_input_ids(
         self,
@@ -341,8 +345,6 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
             )
             return logits
 
-        base = torch.arange(self.config.draft_vocab_size, device=logits.device)
-        targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full(
             (
                 logits.shape[0],
@@ -350,7 +352,7 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
             ),
             float("-inf"),
         )
-        logits_new[:, targets] = logits
+        logits_new[:, self._draft_targets] = logits
         return logits_new
 
     def combine_hidden_states(
@@ -384,7 +386,7 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
 
-        skip_substrs = []
+        skip_substrs = ["_draft_targets"]
         if not includes_draft_id_mapping:
             skip_substrs.append("draft_id_to_target_id")
         if not includes_embed_tokens:
@@ -396,6 +398,12 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
+        self._draft_targets.data = (
+            torch.arange(
+                self.config.draft_vocab_size, device=self.draft_id_to_target_id.device
+            )
+            + self.draft_id_to_target_id
+        )
 
 
 # Aliases for compatibility

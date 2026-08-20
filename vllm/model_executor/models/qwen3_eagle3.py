@@ -315,6 +315,10 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
             torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
             requires_grad=False,
         )
+        self._draft_targets = nn.Parameter(
+            torch.arange(self.config.draft_vocab_size, dtype=torch.long),
+            requires_grad=False,
+        )
 
         self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
 
@@ -354,8 +358,6 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
             )
             return logits
 
-        base = torch.arange(self.config.draft_vocab_size, device=logits.device)
-        targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full(
             (
                 logits.shape[0],
@@ -363,7 +365,7 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
             ),
             float("-inf"),
         )
-        logits_new[:, targets] = logits
+        logits_new[:, self._draft_targets] = logits
         return logits_new
 
     def combine_hidden_states(
@@ -425,7 +427,7 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
                 "Please provide mask_hidden in the weights."
             )
 
-        skip_substrs = ["mask_hidden"]
+        skip_substrs = ["mask_hidden", "_draft_targets"]
         if not includes_draft_id_mapping:
             skip_substrs.append("draft_id_to_target_id")
         if not includes_embed_tokens:
@@ -440,3 +442,9 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
+        self._draft_targets.data = (
+            torch.arange(
+                self.config.draft_vocab_size, device=self.draft_id_to_target_id.device
+            )
+            + self.draft_id_to_target_id
+        )
