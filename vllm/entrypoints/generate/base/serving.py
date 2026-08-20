@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import time
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import ClassVar, Generic, TypeVar
@@ -16,6 +16,7 @@ from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     ErrorResponse,
     GenerationError,
     PerRequestTimingMetrics,
@@ -29,6 +30,7 @@ from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.outputs import CompletionOutput
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
     contains_trace_headers,
@@ -43,6 +45,19 @@ RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
 SESSION_ID_HEADER = "X-Session-ID"
 PRIORITY_HEADER = "X-Vllm-Priority"
+
+
+def make_completion_tokens_details(
+    outputs: Sequence[CompletionOutput],
+) -> CompletionTokenUsageInfo | None:
+    accepted = sum(output.num_accepted_spec_tokens for output in outputs)
+    rejected = sum(output.num_rejected_spec_tokens for output in outputs)
+    if not accepted and not rejected:
+        return None
+    return CompletionTokenUsageInfo(
+        accepted_prediction_tokens=accepted,
+        rejected_prediction_tokens=rejected,
+    )
 
 
 def build_per_request_timing_metrics(

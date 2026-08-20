@@ -175,6 +175,8 @@ class RequestState:
         self.queue = queue
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
+        self.num_accepted_spec_tokens = 0
+        self.num_rejected_spec_tokens = 0
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -427,6 +429,8 @@ class RequestState:
             sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
+            num_accepted_spec_tokens=self.num_accepted_spec_tokens,
+            num_rejected_spec_tokens=self.num_rejected_spec_tokens,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
         )
@@ -643,6 +647,12 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
+            req_state.num_accepted_spec_tokens += (
+                engine_core_output.num_accepted_spec_tokens
+            )
+            req_state.num_rejected_spec_tokens += (
+                engine_core_output.num_rejected_spec_tokens
+            )
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts

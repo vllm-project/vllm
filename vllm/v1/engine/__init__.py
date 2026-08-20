@@ -222,6 +222,8 @@ class EngineCoreOutput(
     # from its sender cache and the request is resent with the data. Appended last
     # so `array_like` positional serialization stays backward compatible.
     mm_cache_miss_hashes: list[str] | None = None
+    num_accepted_spec_tokens: int = 0
+    num_rejected_spec_tokens: int = 0
 
     new_sampling_mask: SamplingMaskLists | None = None
 

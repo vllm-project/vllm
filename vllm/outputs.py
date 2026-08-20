@@ -60,6 +60,8 @@ class CompletionOutput:
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
     sampling_mask: SamplingMask | None = None
+    num_accepted_spec_tokens: int = 0
+    num_rejected_spec_tokens: int = 0
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -188,6 +190,12 @@ class RequestOutput:
                         )
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
+                        completion.num_accepted_spec_tokens = (
+                            next_completion.num_accepted_spec_tokens
+                        )
+                        completion.num_rejected_spec_tokens = (
+                            next_completion.num_rejected_spec_tokens
+                        )
                     else:
                         # Replace the output with the new one
                         self.outputs[i] = next_completion

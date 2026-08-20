@@ -3,6 +3,7 @@
 
 import math
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,11 +23,16 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+    RequestState,
+)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 
@@ -215,6 +221,63 @@ def test_request_stream_interval_raises_but_not_below_engine_default(
         assert gen_tokens[request_id] == dummy_test_vectors.generation_tokens[idx]
 
     assert not output_processor.has_unfinished_requests()
+
+
+def test_speculative_token_counts_accumulate_per_request():
+    output_processor = OutputProcessor(None, log_stats=False, stream_interval=1)
+    detokenizer = MagicMock()
+    detokenizer.update.return_value = None
+    detokenizer.get_next_output_text.return_value = ""
+    logprobs_processor = MagicMock()
+    logprobs_processor.logprobs = None
+    logprobs_processor.cumulative_logprob = None
+    logprobs_processor.pop_prompt_logprobs.return_value = None
+    output_processor.request_states["request-int"] = RequestState(
+        request_id="request-int",
+        external_req_id="request",
+        parent_req=None,
+        request_index=0,
+        lora_request=None,
+        output_kind=RequestOutputKind.DELTA,
+        prompt="",
+        prompt_token_ids=[1],
+        prompt_embeds=None,
+        logprobs_processor=logprobs_processor,
+        detokenizer=detokenizer,
+        max_tokens_param=2,
+        arrival_time=0,
+        queue=None,
+        log_stats=False,
+        stream_interval=1,
+    )
+    output_processor.external_req_ids["request"].append("request-int")
+
+    first = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-int",
+                new_token_ids=[2],
+                num_accepted_spec_tokens=2,
+                num_rejected_spec_tokens=1,
+            )
+        ]
+    ).request_outputs[0]
+    second = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-int",
+                new_token_ids=[3],
+                finish_reason=FinishReason.LENGTH,
+                num_accepted_spec_tokens=1,
+                num_rejected_spec_tokens=2,
+            )
+        ]
+    ).request_outputs[0]
+
+    assert first.outputs[0].num_accepted_spec_tokens == 2
+    assert first.outputs[0].num_rejected_spec_tokens == 1
+    assert second.outputs[0].num_accepted_spec_tokens == 3
+    assert second.outputs[0].num_rejected_spec_tokens == 3
 
 
 def _validate_logprobs(

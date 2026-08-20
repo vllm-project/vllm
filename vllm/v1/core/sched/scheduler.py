@@ -1834,13 +1834,23 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            num_accepted_spec_tokens = 0
+            num_rejected_spec_tokens = 0
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
+                num_invalid = (
+                    scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
+                    if scheduler_output.num_invalid_spec_tokens
+                    else 0
+                )
                 num_rejected = num_draft_tokens - num_accepted
+                num_accepted_spec_tokens = num_accepted
+                num_rejected_spec_tokens = num_rejected - num_invalid
+                assert num_rejected_spec_tokens >= 0
                 # Rejections roll back num_computed_tokens (and, under async
                 # scheduling, num_output_placeholders, which covers the spec
                 # tokens). A stale rejection count predates the preemption
@@ -2024,6 +2034,8 @@ class Scheduler(SchedulerInterface):
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
+                        num_accepted_spec_tokens=num_accepted_spec_tokens,
+                        num_rejected_spec_tokens=num_rejected_spec_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
