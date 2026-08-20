@@ -80,6 +80,7 @@ def test_recirculation_config_disables_identity_mix(beta: float | None) -> None:
         {"source_layer": 3, "destination_layer": 0},
         {"source_layer": 2, "destination_layer": 0, "alpha": 1.1},
         {"source_layer": 2, "destination_layer": 0, "ramp_tokens": -1},
+        {"source_layer": 2, "destination_layer": 0, "wavefront": 1},
         {"source_layer": 2, "destination_layer": 0, "unexpected": True},
     ],
 )
@@ -191,3 +192,67 @@ def test_gemma3_recirculation_overwrites_only_upper_layer_cache(
     torch.testing.assert_close(kv_cache[1], recirculated + 2.0)
     torch.testing.assert_close(kv_cache[2], recirculated + 5.0)
     assert calls == [0, 1, 2, 1, 2]
+
+
+def _make_wavefront_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Gemma3Model, list[int]]:
+    pp_group = SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    monkeypatch.setattr(
+        "vllm.model_executor.models.gemma3.get_pp_group", lambda: pp_group
+    )
+    calls: list[int] = []
+    model = Gemma3Model.__new__(Gemma3Model)
+    nn.Module.__init__(model)
+    model.start_layer = 0
+    model.end_layer = 3
+    model.layers = nn.ModuleList([_AdditiveLayer(i, calls) for i in range(3)])
+    model.norm = _FinalNorm()
+    model.recirculation_config = RecirculationConfig(
+        source_layer=1,
+        destination_layer=0,
+        alpha=0.2,
+        wavefront=True,
+    )
+    return model, calls
+
+
+def test_gemma3_wavefront_warms_up_without_rerunning_upper_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model, calls = _make_wavefront_model(monkeypatch)
+
+    output = model.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        inputs_embeds=torch.zeros(1, 2),
+        recirculation_wavefront_warmup=True,
+    )
+
+    torch.testing.assert_close(output[0:1], torch.full((1, 2), 6.0))
+    torch.testing.assert_close(output[1:2], torch.ones(1, 2))
+    assert calls == [0, 1, 2]
+
+
+def test_gemma3_wavefront_batches_previous_and_current_upper_stacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model, calls = _make_wavefront_model(monkeypatch)
+    kv_cache: dict[int, torch.Tensor] = {}
+
+    output = model.forward(
+        input_ids=None,
+        positions=torch.tensor([1]),
+        inputs_embeds=torch.ones(1, 2),
+        recirculation_wavefront_warmup=False,
+        recirculation_wavefront_positions=torch.tensor([0, 1]),
+        recirculation_wavefront_pending=torch.ones(1, 2),
+        kv_cache=kv_cache,
+    )
+
+    torch.testing.assert_close(output[0:1], torch.full((1, 2), 7.0))
+    torch.testing.assert_close(output[1:2], torch.full((1, 2), 2.0))
+    assert kv_cache[0].shape[0] == 1
+    assert kv_cache[1].shape[0] == 2
+    assert kv_cache[2].shape[0] == 2
+    assert calls == [0, 1, 2]

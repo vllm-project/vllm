@@ -204,23 +204,46 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
+        self.compute_slot_mapping_into(
+            num_reqs,
+            query_start_loc,
+            positions,
+            self.slot_mapping.gpu,
+            self.max_num_batched_tokens,
+        )
+
+    def compute_slot_mapping_into(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        max_num_tokens: int | None = None,
+    ) -> None:
+        """Compute slots into a caller-owned buffer."""
         num_tokens = positions.shape[0]
         if self.slot_mapping_mode == SlotMappingMode.NONE:
             # Mamba/GDN groups consume the block table as recurrent state
             # indices and do not use per-token slot mappings.
             return
         assert self.slot_mapping_mode == SlotMappingMode.TOKEN_TO_KV_SLOT
+        if max_num_tokens is None:
+            max_num_tokens = num_tokens
+        if max_num_tokens < num_tokens:
+            raise ValueError("max_num_tokens is smaller than the input")
+        if slot_mapping.numel() < max_num_tokens:
+            raise ValueError("slot_mapping is smaller than max_num_tokens")
 
         _COMPUTE_SLOT_MAPPING_KERNEL(
             num_reqs,
             num_tokens,
-            self.max_num_batched_tokens,
+            max_num_tokens,
             query_start_loc,
             positions,
             self.block_table.gpu,
             self.block_table.gpu.stride(0),
             self.block_size,
-            self.slot_mapping.gpu,
+            slot_mapping,
             self.kv_cache_block_size,
             self.blocks_per_kv_block,
             self.dcp_world_size,

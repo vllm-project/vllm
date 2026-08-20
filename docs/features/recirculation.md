@@ -1,8 +1,9 @@
 # Recirculation
 
 !!! warning
-    Recirculation support is experimental. The current implementation is a
-    correctness-first, serial implementation for text-only Gemma 3 models.
+    Recirculation support is experimental. The serial implementation supports
+    text-only Gemma 3 models; the optimized wavefront path has the additional
+    restrictions listed below.
 
 [Recirculation](https://arxiv.org/abs/2608.17981) feeds a norm-matched deep
 residual-stream activation back into a shallower layer. vLLM returns the logits
@@ -34,6 +35,35 @@ accordingly.
 An identity configuration with `alpha = 0` and `beta` omitted or set to `1`
 disables Recirculation. It therefore agrees exactly with the baseline and does
 not incur a redundant upper-layer pass.
+
+## Wavefront execution
+
+Set `"wavefront": true` to execute exact tokenwise Recirculation as a
+two-token wavefront. After the first-token warmup, the layers above the
+destination process the previous token's recurrent state and the current
+token's normal state in one layer call. Each upper attention layer first
+overwrites the previous token's KV entry, so the current token attends to the
+same recurrent cache that the serial implementation would have produced.
+
+```bash
+vllm serve google/gemma-3-1b-pt \
+  --hf-overrides '{
+    "recirculation_config": {
+      "source_layer": 11,
+      "destination_layer": 4,
+      "alpha": 0.15,
+      "ramp_tokens": 10,
+      "wavefront": true
+    }
+  }' \
+  --max-num-seqs 1 \
+  --long-prefill-token-threshold 1 \
+  --no-enable-prefix-caching
+```
+
+Wavefront mode captures a dedicated one-token CUDA graph whose upper stack has
+the internal two-token batch. Torch compilation remains enabled unless
+`--enforce-eager` is also set.
 
 The paper reports the following fixed configurations for its pretrained-model
 perplexity evaluation:
@@ -77,8 +107,9 @@ uv pip install 'datasets>=3.3.0,<=3.6.0'
 
 .venv/bin/python benchmarks/benchmark_recirculation.py \
   --mode recirculation \
+  --wavefront \
   --windows-file results/recirculation-windows.json \
-  --output results/recirculation-exact.json
+  --output results/recirculation-wavefront.json
 ```
 
 Use `--num-windows 50` for a larger sample. For a normal-scheduler baseline
@@ -111,5 +142,7 @@ assuming one value is universally optimal.
 - Only `Gemma3ForCausalLM` is supported. Multimodal Gemma 3 models are not.
 - Pipeline parallelism is not supported.
 - Only fixed scalar coefficients and source norm matching are implemented.
-- Layers above the destination run serially a second time. Wavefront execution
-  that overlaps the normal and recirculated stacks is not yet implemented.
+- Wavefront execution currently requires one sequence, one scheduled token per
+  step, FlashAttention, no prefix caching or speculative decoding, and no data,
+  decode-context, sequence, or pipeline parallelism.
+- Serial execution remains available when `"wavefront"` is omitted or false.

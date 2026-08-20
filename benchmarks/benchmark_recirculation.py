@@ -297,6 +297,7 @@ def run(args: argparse.Namespace, window_data: dict[str, Any]) -> dict[str, Any]
                 "destination_layer": args.destination_layer,
                 "alpha": args.alpha,
                 "ramp_tokens": args.ramp_tokens,
+                "wavefront": args.wavefront,
             }
         }
     start = time.perf_counter()
@@ -366,6 +367,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--destination-layer", type=int, default=4)
     parser.add_argument("--alpha", type=float, default=0.15)
     parser.add_argument("--ramp-tokens", type=int, default=10)
+    parser.add_argument(
+        "--wavefront",
+        action="store_true",
+        help="Batch the previous recurrent token with the current upper stack.",
+    )
     parser.add_argument("--device-index", type=int, default=0)
     parser.add_argument("--performance-only", action="store_true")
     args = parser.parse_args()
@@ -373,6 +379,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--window-size must equal --max-model-len")
     if not 0 < args.decode_tokens < args.max_model_len:
         parser.error("--decode-tokens must be between 1 and max-model-len - 1")
+    if args.wavefront and args.mode != "recirculation":
+        parser.error("--wavefront requires --mode recirculation")
+    if args.wavefront and args.long_prefill_token_threshold != 1:
+        parser.error("--wavefront requires --long-prefill-token-threshold 1")
     return args
 
 
@@ -406,6 +416,7 @@ def main() -> None:
                     "alpha": args.alpha,
                     "beta": None,
                     "ramp_tokens": args.ramp_tokens,
+                    "wavefront": args.wavefront,
                 }
             ),
         },

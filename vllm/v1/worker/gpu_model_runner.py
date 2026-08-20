@@ -95,6 +95,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -141,6 +142,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
@@ -517,6 +519,32 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        raw_recirculation_config = getattr(
+            self.model_config.hf_config, "recirculation_config", None
+        )
+        self.recirculation_wavefront_enabled = bool(
+            isinstance(raw_recirculation_config, dict)
+            and raw_recirculation_config.get("wavefront") is True
+            and not (
+                raw_recirculation_config.get("alpha", 0.15) == 0.0
+                and raw_recirculation_config.get("beta") in (None, 1.0)
+            )
+        )
+        self.recirculation_wavefront_destination_layer: int | None = None
+        if self.recirculation_wavefront_enabled:
+            assert isinstance(raw_recirculation_config, dict)
+            self._validate_recirculation_wavefront_config(raw_recirculation_config)
+            self.recirculation_wavefront_destination_layer = raw_recirculation_config[
+                "destination_layer"
+            ]
+            # The external graph batch contains one token; the upper stack's
+            # second row is created inside the model. Preserve explicit eager
+            # execution, but specialize any enabled graph configuration for
+            # the fixed-shape wavefront decode path.
+            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+                self.compilation_config.cudagraph_capture_sizes = [1]
+                self.compilation_config.max_cudagraph_capture_size = 1
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         model_config = self.model_config
@@ -819,6 +847,24 @@ class GPUModelRunner(
         self.positions = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=self.device
         )
+        if self.recirculation_wavefront_enabled:
+            self.recirculation_wavefront_positions = torch.tensor(
+                [0, 1], dtype=torch.int64, device=self.device
+            )
+            self.recirculation_wavefront_query_start_loc = torch.tensor(
+                [0, 2], dtype=torch.int32, device=self.device
+            )
+            self.recirculation_wavefront_seq_lens = torch.tensor(
+                [2], dtype=torch.int32, device=self.device
+            )
+            self.recirculation_wavefront_slot_mappings: dict[int, torch.Tensor] = {}
+            self.recirculation_wavefront_request_id: str | None = None
+            self.recirculation_wavefront_pending = torch.zeros(
+                1,
+                self.inputs_embeds_size,
+                dtype=self.dtype,
+                device=self.device,
+            )
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
         )
@@ -4275,6 +4321,162 @@ class GPUModelRunner(
 
         return slot_mappings_by_gid, slot_mappings_by_layer
 
+    def _validate_recirculation_wavefront_config(
+        self, raw_config: dict[str, Any]
+    ) -> None:
+        architectures = getattr(self.model_config.hf_config, "architectures", None)
+        if architectures != ["Gemma3ForCausalLM"]:
+            raise ValueError(
+                "Recirculation wavefront execution only supports Gemma3ForCausalLM"
+            )
+        if self.scheduler_config.max_num_seqs != 1:
+            raise ValueError(
+                "Recirculation wavefront execution requires max_num_seqs=1"
+            )
+        if self.scheduler_config.long_prefill_token_threshold != 1:
+            raise ValueError(
+                "Recirculation wavefront execution requires "
+                "long_prefill_token_threshold=1"
+            )
+        if self.cache_config.enable_prefix_caching:
+            raise ValueError(
+                "Recirculation wavefront execution requires prefix caching "
+                "to be disabled"
+            )
+        if self.speculative_config is not None:
+            raise ValueError(
+                "Recirculation wavefront execution does not support "
+                "speculative decoding"
+            )
+        if self.parallel_config.use_ubatching:
+            raise ValueError(
+                "Recirculation wavefront execution does not support microbatching"
+            )
+        if self.parallel_config.decode_context_parallel_size != 1:
+            raise ValueError(
+                "Recirculation wavefront execution does not support decode "
+                "context parallelism"
+            )
+        if self.parallel_config.data_parallel_size != 1:
+            raise ValueError(
+                "Recirculation wavefront execution does not support data parallelism"
+            )
+        if self.compilation_config.pass_config.enable_sp:
+            raise ValueError(
+                "Recirculation wavefront execution does not support sequence "
+                "parallelism"
+            )
+        if type(raw_config.get("destination_layer")) is not int:
+            raise ValueError("destination_layer must be an integer")
+
+    def _apply_recirculation_wavefront_attention_metadata(
+        self,
+        attn_metadata: AttnMetadataDict,
+        slot_mappings: dict[str, torch.Tensor],
+        wavefront_slots_by_group: dict[int, torch.Tensor],
+    ) -> None:
+        assert self.recirculation_wavefront_destination_layer is not None
+        replacements: dict[tuple[int, int], FlashAttentionMetadata] = {}
+        for gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
+            wavefront_slots = wavefront_slots_by_group[gid]
+            for layer_name in kv_cache_group.layer_names:
+                if (
+                    extract_layer_index(layer_name)
+                    <= self.recirculation_wavefront_destination_layer
+                ):
+                    continue
+                metadata = attn_metadata[layer_name]
+                if not isinstance(metadata, FlashAttentionMetadata):
+                    raise RuntimeError(
+                        "Recirculation wavefront execution currently requires "
+                        "the FlashAttention backend"
+                    )
+                key = (id(metadata), gid)
+                wavefront_metadata = replacements.get(key)
+                if wavefront_metadata is None:
+                    wavefront_metadata = replace(
+                        metadata,
+                        num_actual_tokens=2,
+                        max_query_len=2,
+                        query_start_loc=self.recirculation_wavefront_query_start_loc,
+                        seq_lens=self.recirculation_wavefront_seq_lens,
+                        slot_mapping=wavefront_slots,
+                        use_cascade=False,
+                        common_prefix_len=0,
+                        cu_prefix_query_lens=None,
+                        prefix_kv_lens=None,
+                        suffix_kv_lens=None,
+                        scheduler_metadata=None,
+                        prefix_scheduler_metadata=None,
+                        max_num_splits=0,
+                    )
+                    replacements[key] = wavefront_metadata
+                attn_metadata[layer_name] = cast(AttentionMetadata, wavefront_metadata)
+                slot_mappings[layer_name] = wavefront_slots
+
+    def _prepare_recirculation_wavefront(
+        self,
+        attn_metadata: PerLayerAttnMetadata,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+        positions: torch.Tensor,
+        num_reqs: int,
+        num_tokens_unpadded: int,
+        num_tokens_padded: int,
+        num_scheduled_tokens_np: np.ndarray,
+    ) -> bool:
+        """Prepare the two-token upper-stack view and return whether it is warmup."""
+        if (
+            num_reqs != 1
+            or num_tokens_unpadded != 1
+            or num_tokens_padded != 1
+            or num_scheduled_tokens_np.tolist() != [1]
+        ):
+            raise RuntimeError(
+                "Recirculation wavefront execution requires exactly one "
+                "scheduled token from one request per step"
+            )
+        if not isinstance(attn_metadata, dict) or not isinstance(slot_mappings, dict):
+            raise RuntimeError(
+                "Recirculation wavefront execution requires unsplit attention metadata"
+            )
+
+        request_id = self.input_batch.req_ids[0]
+        warmup = self.input_batch.num_computed_tokens_cpu[0] == 0
+        if warmup:
+            self.recirculation_wavefront_request_id = request_id
+            return True
+        if self.recirculation_wavefront_request_id != request_id:
+            raise RuntimeError(
+                "A Recirculation wavefront request resumed without its pending "
+                "recurrent state"
+            )
+
+        self.recirculation_wavefront_positions[0].copy_(positions[0])
+        self.recirculation_wavefront_positions[0].sub_(1)
+        self.recirculation_wavefront_positions[1].copy_(positions[0])
+        self.recirculation_wavefront_seq_lens.copy_(self.seq_lens[:1])
+
+        wavefront_slots_by_group: dict[int, torch.Tensor] = {}
+        for gid, _ in enumerate(self.kv_cache_config.kv_cache_groups):
+            block_table = self.input_batch.block_table[gid]
+            wavefront_slots = self.recirculation_wavefront_slot_mappings.get(gid)
+            if wavefront_slots is None:
+                wavefront_slots = torch.empty(2, dtype=torch.int64, device=self.device)
+                self.recirculation_wavefront_slot_mappings[gid] = wavefront_slots
+            block_table.compute_slot_mapping_into(
+                1,
+                self.recirculation_wavefront_query_start_loc,
+                self.recirculation_wavefront_positions,
+                wavefront_slots,
+            )
+            wavefront_slots_by_group[gid] = wavefront_slots
+
+        self._apply_recirculation_wavefront_attention_metadata(
+            attn_metadata, slot_mappings, wavefront_slots_by_group
+        )
+
+        return False
+
     def _is_all_reqs_chunked_prefill(self) -> bool:
         """Check if all scheduled requests are marked to discard sampled tokens.
 
@@ -4523,6 +4725,27 @@ class GPUModelRunner(
             ) = self._preprocess(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
+            recirculation_wavefront_warmup = False
+            if self.recirculation_wavefront_enabled:
+                recirculation_wavefront_warmup = self._prepare_recirculation_wavefront(
+                    attn_metadata=attn_metadata,
+                    slot_mappings=slot_mappings,
+                    positions=positions,
+                    num_reqs=num_reqs,
+                    num_tokens_unpadded=num_tokens_unpadded,
+                    num_tokens_padded=num_tokens_padded,
+                    num_scheduled_tokens_np=num_scheduled_tokens_np,
+                )
+                model_kwargs["recirculation_wavefront_warmup"] = (
+                    recirculation_wavefront_warmup
+                )
+                if not recirculation_wavefront_warmup:
+                    model_kwargs["recirculation_wavefront_positions"] = (
+                        self.recirculation_wavefront_positions
+                    )
+                    model_kwargs["recirculation_wavefront_pending"] = (
+                        self.recirculation_wavefront_pending
+                    )
 
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
@@ -4553,7 +4776,7 @@ class GPUModelRunner(
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
-                skip_compiled=has_encoder_input,
+                skip_compiled=(has_encoder_input or recirculation_wavefront_warmup),
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(
@@ -4568,6 +4791,11 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+            if self.recirculation_wavefront_enabled:
+                assert isinstance(model_output, torch.Tensor)
+                assert model_output.shape[0] == 2
+                self.recirculation_wavefront_pending.copy_(model_output[1:])
+                model_output = model_output[:1]
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -6219,6 +6447,28 @@ class GPUModelRunner(
             else:
                 positions = self.positions[:num_tokens_padded]
 
+            recirculation_wavefront_dummy = bool(
+                self.recirculation_wavefront_enabled
+                and num_tokens_unpadded == 1
+                and isinstance(attn_metadata, dict)
+                and isinstance(slot_mappings, dict)
+            )
+            if recirculation_wavefront_dummy:
+                assert isinstance(attn_metadata, dict)
+                assert isinstance(slot_mappings, dict)
+                self._apply_recirculation_wavefront_attention_metadata(
+                    attn_metadata,
+                    slot_mappings,
+                    self.recirculation_wavefront_slot_mappings,
+                )
+                model_kwargs["recirculation_wavefront_warmup"] = False
+                model_kwargs["recirculation_wavefront_positions"] = (
+                    self.recirculation_wavefront_positions
+                )
+                model_kwargs["recirculation_wavefront_pending"] = (
+                    self.recirculation_wavefront_pending
+                )
+
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
@@ -6256,6 +6506,10 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
+                    skip_compiled=(
+                        self.recirculation_wavefront_enabled
+                        and not recirculation_wavefront_dummy
+                    ),
                 ),
             ):
                 outputs = self.model(
@@ -7788,6 +8042,11 @@ class GPUModelRunner(
 
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
+        if self.recirculation_wavefront_enabled:
+            self.recirculation_wavefront_slot_mappings = {
+                gid: torch.full((2,), -1, dtype=torch.int64, device=self.device)
+                for gid, _ in enumerate(kv_cache_config.kv_cache_groups)
+            }
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
         )

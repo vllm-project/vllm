@@ -289,7 +289,14 @@ class Gemma3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
 class Gemma3Model(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
@@ -355,6 +362,9 @@ class Gemma3Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        recirculation_wavefront_warmup: bool | None = None,
+        recirculation_wavefront_positions: torch.Tensor | None = None,
+        recirculation_wavefront_pending: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
@@ -367,6 +377,21 @@ class Gemma3Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        if (
+            self.recirculation_config is not None
+            and self.recirculation_config.wavefront
+            and recirculation_wavefront_warmup is not None
+        ):
+            return self._forward_recirculation_wavefront(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
+                warmup=recirculation_wavefront_warmup,
+                wavefront_positions=recirculation_wavefront_positions,
+                wavefront_pending=recirculation_wavefront_pending,
+                **kwargs,
+            )
 
         destination_states = None
         source_states = None
@@ -405,6 +430,68 @@ class Gemma3Model(nn.Module):
                     **kwargs,
                 )
         return hidden_states
+
+    def _forward_recirculation_wavefront(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        warmup: bool,
+        wavefront_positions: torch.Tensor | None,
+        wavefront_pending: torch.Tensor | None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Run the normal and previous-token recurrent upper stacks together."""
+        config = self.recirculation_config
+        assert config is not None and config.wavefront
+        assert positions.shape[0] == 1
+
+        destination_states = None
+        source_states = None
+        if warmup:
+            for layer_idx in range(self.start_layer, self.end_layer):
+                hidden_states, residual = self.layers[layer_idx](
+                    positions,
+                    hidden_states,
+                    residual,
+                    **kwargs,
+                )
+                if layer_idx == config.destination_layer:
+                    destination_states = hidden_states + residual
+                if layer_idx == config.source_layer:
+                    source_states = hidden_states + residual
+            hidden_states, _ = self.norm(hidden_states, residual)
+        else:
+            assert wavefront_positions is not None
+            assert wavefront_positions.shape[0] == 2
+            assert wavefront_pending is not None
+            assert wavefront_pending.shape == hidden_states.shape
+            for layer_idx in range(self.start_layer, config.destination_layer + 1):
+                hidden_states, residual = self.layers[layer_idx](
+                    positions,
+                    hidden_states,
+                    residual,
+                    **kwargs,
+                )
+
+            destination_states = hidden_states + residual
+            hidden_states = torch.cat((wavefront_pending, destination_states), dim=0)
+            residual = None
+            for layer_idx in range(config.destination_layer + 1, self.end_layer):
+                hidden_states, residual = self.layers[layer_idx](
+                    wavefront_positions,
+                    hidden_states,
+                    residual,
+                    **kwargs,
+                )
+                if layer_idx == config.source_layer:
+                    source_states = (hidden_states + residual)[1:]
+            hidden_states, _ = self.norm(hidden_states, residual)
+            hidden_states = hidden_states[1:]
+
+        assert destination_states is not None and source_states is not None
+        next_pending = config.mix(source_states, destination_states, positions)
+        return torch.cat((hidden_states, next_pending), dim=0)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

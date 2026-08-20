@@ -17,6 +17,7 @@ class RecirculationConfig:
     alpha: float = 0.15
     beta: float | None = None
     ramp_tokens: int = 0
+    wavefront: bool = False
 
     @classmethod
     def from_hf_config(cls, hf_config: object) -> "RecirculationConfig | None":
@@ -32,6 +33,7 @@ class RecirculationConfig:
             "alpha",
             "beta",
             "ramp_tokens",
+            "wavefront",
         }
         unknown_keys = raw_config.keys() - valid_keys
         if unknown_keys:
@@ -49,6 +51,7 @@ class RecirculationConfig:
             alpha=raw_config.get("alpha", 0.15),
             beta=raw_config.get("beta"),
             ramp_tokens=raw_config.get("ramp_tokens", 0),
+            wavefront=raw_config.get("wavefront", False),
         )
         config.validate(hf_config.num_hidden_layers)
         if config.alpha == 0.0 and config.beta in (None, 1.0):
@@ -71,6 +74,8 @@ class RecirculationConfig:
             )
         if self.ramp_tokens < 0:
             raise ValueError("ramp_tokens must be non-negative")
+        if type(self.wavefront) is not bool:
+            raise ValueError("wavefront must be a boolean")
 
         self._validate_coefficient("alpha", self.alpha)
         if self.beta is not None:
