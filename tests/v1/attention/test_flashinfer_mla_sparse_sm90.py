@@ -22,6 +22,7 @@ import torch  # noqa: E402
 import vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 as sm90_mod  # noqa: E402
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (  # noqa: E402
     FlashInferMLASparseSM90Backend,
+    FlashInferMLASparseSM90Builder,
     FlashInferMLASparseSM90Impl,
 )
 # isort: on
@@ -72,8 +73,8 @@ class FakeState:
         self.wrapper = FakeWrapper()
         self.plan_calls = []
 
-    def plan(self, num_tokens, topk_width):
-        self.plan_calls.append((num_tokens, topk_width))
+    def plan(self, num_tokens, kv_lens):
+        self.plan_calls.append((num_tokens, kv_lens))
 
 
 def make_impl(qk_rope, kv_dtype="fp8_e4m3", num_heads=2, topk_width=TOPK):
@@ -129,7 +130,8 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     )
     assert lse is None and out.shape == (rows, impl.num_heads, HEAD)
 
-    # Reserved buffers carry this step's slots and valid counts.
+    # Reserved buffers carry this step's slots; lengths are NOT refreshed
+    # here (the builder plans them host-side before capture/replay).
     ref_slots, ref_counts = ref_convert(
         meta.req_id_per_token, meta.block_table, impl.topk_indices_buffer
     )
@@ -138,8 +140,7 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     for t in range(rows):
         k = int(ref_counts[t])
         assert got_slots[t, :k].tolist() == ref_slots[t, :k].tolist()
-    assert state.kv_len_arr[:rows].tolist() == ref_counts.tolist()
-    assert state.plan_calls == [(rows, width)]
+    assert state.plan_calls == []
 
     assert state.wrapper.run_args is not None
     q_pe, ckv, kpe, kwargs = state.wrapper.run_args[1:]
@@ -153,7 +154,12 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
 
 
 def test_plan_uses_state_params(monkeypatch):
-    """The NoPE/rope dims and scale live on the shared state, not the layer."""
+    """The NoPE/rope dims and scale live on the shared state, not the layer.
+
+    plan() takes exact per-row KV lengths; the schedule is rebuilt on every
+    call (contexts grow between steps) and the indptrs are always full-size
+    with zero-query padding rows past num_tokens.
+    """
     impl, rows = make_impl(64, "auto")
     wrapper = FakeWrapper()
     state = sm90_mod._SM90State.__new__(sm90_mod._SM90State)
@@ -164,22 +170,53 @@ def test_plan_uses_state_params(monkeypatch):
     state.kv_lora_rank = HEAD
     state.qk_rope_head_dim = 64
     state.sm_scale = 576**-0.5
-    state.kv_indices = torch.zeros(16)
-    state.kv_len_arr = torch.full((4,), TOPK, dtype=torch.int32)
-    state.planned_shape = None
+    state.max_tokens = 4
+    state.topk_width = TOPK
+    state.kv_indices = torch.zeros(4 * TOPK)
 
-    state.plan(3, TOPK)
+    state.plan(3, torch.tensor([2, 5, 7], dtype=torch.int32))
     assert wrapper.plan_args is not None
     args, kwargs = wrapper.plan_args
     (qo, kv, indices, kv_len, heads, ckv, kpe, page, causal, scale) = args
-    assert qo.tolist() == [0, 1, 2, 3] and kv.tolist() == [0, TOPK, 2 * TOPK, 3 * TOPK]
+    assert qo.tolist() == [0, 1, 2, 3, 3]  # clamp: rows past 3 have no queries
+    assert kv.tolist() == [i * TOPK for i in (0, 1, 2, 3, 3)]
+    assert kv_len.tolist() == [2, 5, 7, TOPK]  # padded row keeps full width
     assert (heads, ckv, kpe, page, causal) == (4, HEAD, 64, 1, False)
     assert scale == 576**-0.5
     assert kwargs["q_data_type"] == torch.bfloat16
     assert kwargs["kv_data_type"] == torch.bfloat16
-    assert state.planned_shape == (3, TOPK)
-    state.plan(3, TOPK)  # cached: no re-plan
-    assert state.wrapper.plan_args is not None
+
+
+def test_kv_lens_host_formula():
+    """Per-row host lengths: context == position + 1; capped at
+    index_topk + trailing-pool remainder past the sparse threshold."""
+    builder = object.__new__(FlashInferMLASparseSM90Builder)
+    builder._index_topk = 2048
+    builder._index_kpool = 4
+    cam = SimpleNamespace(
+        num_reqs=3,
+        query_start_loc_cpu=torch.tensor([0, 5, 7, 10], dtype=torch.int32),
+        seq_lens=torch.tensor([100, 9, 3000], dtype=torch.int32),
+    )
+    num_rows, lens = builder._kv_lens_host(cam)
+    assert num_rows == 10
+    # req0: positions 95..99 -> ctx 96..100 (all <= 2048: full context)
+    # req1: positions 7,8 -> ctx 8,9
+    # req2: positions 2997..2999 -> ctx 2998..3000 (> 2048: topk + ctx%4)
+    assert lens.tolist() == [96, 97, 98, 99, 100, 8, 9, 2050, 2051, 2048]
+
+
+def test_kv_lens_host_empty():
+    builder = object.__new__(FlashInferMLASparseSM90Builder)
+    builder._index_topk = 2048
+    builder._index_kpool = 4
+    cam = SimpleNamespace(
+        num_reqs=0,
+        query_start_loc_cpu=torch.tensor([0], dtype=torch.int32),
+        seq_lens=torch.zeros(0, dtype=torch.int32),
+    )
+    num_rows, lens = builder._kv_lens_host(cam)
+    assert num_rows == 0 and lens.numel() == 0
 
 
 def test_supports_combination_gates(monkeypatch, default_vllm_config):

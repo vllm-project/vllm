@@ -17,13 +17,15 @@ encoded by the indexer's selection, so ``causal=False``.
 CUDA-graph handling: ``plan()`` copies its inputs to host unconditionally,
 so it must stay outside graph capture. A process-wide state object owns the
 wrapper (created eagerly at impl construction with the model's head count
-and KV dtype), reserved capture-stable device buffers, and the planned
-shape. The metadata builder re-plans outside the graph when the batch shape
-changes; per-step varying content (top-k slots, valid counts) is written
-into the reserved buffers by kernels inside the captured forward, and the
-kernel bounds each row by the device-side ``kv_len``. Planning uses the
-constant worst-case length (the full top-k width), which is valid because
-the schedule only sizes the work partitioning.
+and KV dtype), reserved capture-stable device buffers, and the plan
+parameters. The wrapper bakes the per-row ``kv_len`` into its int schedule
+at plan() time — ``run()`` never reads the device-side buffer — so the
+metadata builder replans every step (outside capture) with exact host-side
+lengths derived from the batch's sequence lengths; a full-width schedule
+would send the kernel past each row's valid count into the -1 tail of the
+converted index buffer (illegal address). Per-step content (top-k slots)
+is written into the reserved buffers by kernels inside the captured
+forward, and captured runs read the refreshed plan buffers on replay.
 
 KV cache format: plain contiguous E4M3 ``[num_blocks, block_size, 512]``
 (uint8 storage) with a per-tensor ``k_scale``; BF16 caches also work. The
@@ -35,6 +37,7 @@ from typing import Any, ClassVar
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
@@ -56,10 +59,26 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
+
+# The BatchMLAPagedAttentionWrapper keeps its plan/schedule state inside the
+# workspace between plan() and run() (across layers and steps, including CUDA
+# graph replays). The shared step workspace is clobbered by the indexer and
+# MoE kernels that run between MLA layers, so this must be a private buffer
+# with a stable address.
+_SM90_WORKSPACE: torch.Tensor | None = None
+
+
+def _get_sm90_workspace(device: torch.device) -> torch.Tensor:
+    global _SM90_WORKSPACE
+    if _SM90_WORKSPACE is None:
+        _SM90_WORKSPACE = torch.empty(
+            _WORKSPACE_BYTES, dtype=torch.uint8, device=device
+        )
+    return _SM90_WORKSPACE
 
 
 class FlashInferMLASparseSM90Backend(AttentionBackend):
@@ -175,9 +194,7 @@ class _SM90State:
     ) -> None:
         from flashinfer.mla import BatchMLAPagedAttentionWrapper
 
-        (float_workspace,) = current_workspace_manager().get_simultaneous(
-            ((_WORKSPACE_BYTES,), torch.uint8),
-        )
+        float_workspace = _get_sm90_workspace(device)
         self.device = device
         self.num_heads = num_heads
         self.kv_dtype = kv_dtype
@@ -203,34 +220,40 @@ class _SM90State:
             use_cuda_graph=True,
             backend="fa3",
         )
-        self.planned_shape: tuple[int, int] | None = None
 
-    def plan(self, num_tokens: int, topk_width: int) -> None:
-        """Plan outside graph capture; CPU indptrs keep plan() sync-free."""
-        # Callers disagree on topk_width: the builder passes
-        # metadata.topk_tokens (index_topk) while forward_mqa passes the
-        # topk buffer's actual row width (kpool-widened). kv_indices rows
-        # are always spaced by the buffer width, so normalize to it —
-        # otherwise the two call sites never share the planned_shape cache
-        # (forcing a replan inside CUDA graph capture) and the schedule is
-        # built with the wrong row stride.
-        topk_width = self.topk_width
-        if self.planned_shape == (num_tokens, topk_width):
-            return
+    def plan(self, num_tokens: int, kv_lens: torch.Tensor) -> None:
+        """Replan with exact per-row KV lengths (CPU int32, ``[num_tokens]``).
+
+        The wrapper bakes kv_len into its int schedule from host values;
+        run() never reads the device kv_len_arr buffer. Scheduling with the
+        full buffer width while kv_indices rows carry a -1 tail past each
+        row's valid count makes the kernel compute ``-1 * ckv_stride_page``
+        (illegal address), so the lengths must be exact at plan time and
+        replanned every step as contexts grow. Must run outside CUDA graph
+        capture: the in-place refreshed plan_info/indptr buffers are what
+        captured runs read.
+        """
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "FlashInferMLASparseSM90 plan() called inside CUDA graph "
+                "capture; lengths must be planned host-side before capture."
+            )
         # use_cuda_graph=True makes the wrapper copy qo/kv indptr into its
         # fixed (max_tokens+1)-sized buffers with exact-size copy_, so the
         # indptr must always be full-size. Rows past num_tokens are padded
         # empty (qo_indptr flat at num_tokens) — zero-query rows read no q
         # and schedule no work.
         qo = torch.arange(self.max_tokens + 1, dtype=torch.int32).clamp_(max=num_tokens)
-        kv = qo * topk_width
+        kv = qo * self.topk_width
+        # Padded (zero-query) rows keep the full width; their len value is
+        # never dereferenced because qo_indptr is flat past num_tokens.
+        lens = torch.full((self.max_tokens,), self.topk_width, dtype=torch.int32)
+        lens[:num_tokens] = kv_lens.to(torch.int32)
         self.wrapper.plan(
             qo.to(self.device),
             kv.to(self.device),
             self.kv_indices,
-            # Worst case: the schedule only sizes work partitioning; actual
-            # per-row lengths are refreshed inside the captured graph.
-            self.kv_len_arr,
+            lens.to(self.device),
             self.num_heads,
             self.kv_lora_rank,  # head_dim_ckv
             self.qk_rope_head_dim,  # 0 (NoPE) or 64 (rope MLA)
@@ -240,7 +263,6 @@ class _SM90State:
             q_data_type=torch.bfloat16,
             kv_data_type=self.kv_dtype,
         )
-        self.planned_shape = (num_tokens, topk_width)
 
 
 _SM90_STATE: _SM90State | None = None
@@ -255,6 +277,62 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
 
     metadata_cls = FlashInferMLASparseMetadata
 
+    def __init__(
+        self,
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        hf_config = vllm_config.model_config.hf_text_config
+        self._index_topk = int(getattr(hf_config, "index_topk", 2048))
+        self._index_kpool = int(getattr(hf_config, "index_kpool", 1))
+
+    def _kv_lens_host(self, cam: CommonAttentionMetadata) -> tuple[int, torch.Tensor]:
+        """Exact per-row KV lengths, host-side (the flashinfer wrapper bakes
+        them into its schedule at plan time; there is no device-side path).
+
+        A row for the j-th query token of request i attends
+        ``seq_lens[i] - q_len[i] + j + 1`` tokens. The indexer's selection
+        then bounds the valid count: contexts up to ``index_topk`` select
+        everything (valid == context); longer contexts keep the top
+        ``index_topk`` pool-expanded tokens plus the trailing incomplete
+        pool (valid == ``index_topk + context % index_kpool``). Both match
+        the count of non -1 entries the convert kernel produces.
+        """
+        num_reqs = cam.num_reqs
+        qsl = cam.query_start_loc_cpu[: num_reqs + 1]
+        num_rows = int(qsl[-1])
+        if num_rows == 0:
+            return 0, torch.zeros(0, dtype=torch.int32)
+        # Row context == positions[row] + 1: the indexer's own convention for
+        # both prefill and decode top-k (``_decode_topk_seq_lens`` uses
+        # pos + 1). Positions are contiguous per request on real batches
+        # (equivalent to seq_lens - q_len + j + 1) but NOT under capture
+        # dummies, so positions are the only faithful source.
+        positions = getattr(cam, "positions", None)
+        if positions is not None and num_rows <= positions.shape[0]:
+            ctx = positions[:num_rows].cpu().to(torch.int64) + 1
+        else:
+            seq_lens = cam.seq_lens[:num_reqs].cpu().to(torch.int32)
+            q_lens = qsl[1:] - qsl[:-1]
+            first_pos = seq_lens - q_lens
+            req_of_row = torch.repeat_interleave(
+                torch.arange(num_reqs, dtype=torch.int64), q_lens.to(torch.int64)
+            )
+            rows = torch.arange(num_rows, dtype=torch.int32)
+            ctx = (
+                first_pos.to(torch.int64)[req_of_row]
+                + rows.to(torch.int64)
+                - qsl.to(torch.int64)[req_of_row]
+                + 1
+            )
+        topk = self._index_topk
+        kpool = max(self._index_kpool, 1)
+        lens = torch.where(ctx <= topk, ctx, topk + ctx % kpool)
+        return num_rows, lens.to(torch.int32)
+
     def build(
         self,
         common_prefix_len: int,
@@ -262,10 +340,11 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         fast_build: bool = False,
     ) -> FlashInferMLASparseMetadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
-        # Re-plan outside any CUDA graph capture when the batch shape
-        # changes; capture and replay hit the planned-shape cache.
+        # Replan every step outside any CUDA graph capture with this step's
+        # exact per-row lengths; captured runs read the refreshed buffers.
         if _SM90_STATE is not None:
-            _SM90_STATE.plan(metadata.num_actual_tokens, metadata.topk_tokens)
+            num_rows, kv_lens = self._kv_lens_host(common_attn_metadata)
+            _SM90_STATE.plan(num_rows, kv_lens)
         return metadata
 
 
@@ -347,6 +426,9 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseMetadat
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_tokens]
+        # return_valid_counts=True keeps the compacted-prefix layout: valid
+        # entries at [0, valid_count), -1 past it — exactly the prefix the
+        # planned per-row lengths address.
         topk_slots, valid_counts = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_tokens],
             attn_metadata.block_table,
@@ -357,14 +439,18 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseMetadat
         )
         state = _SM90_STATE
         assert state is not None
-        # Refresh the reserved buffers' contents with in-graph device copies
-        # so captured runs observe this step's top-k rows and valid counts.
+        # Refresh the kv_indices contents with in-graph device copies so
+        # captured runs observe this step's top-k rows. Per-row lengths are
+        # NOT refreshed here: the wrapper bakes them into its schedule at
+        # plan() time (host-side), which the builder does every step before
+        # capture/replay. Planned lengths are upper bounds of the valid count;
+        # clamp the -1 tail to slot 0 so any over-scheduled read (e.g. the
+        # capture dummy's degenerate rows) lands on a valid page instead of a
+        # negative address. A no-op whenever plan is exact.
         width = topk_slots.shape[1]
         state.kv_indices[: num_tokens * width].copy_(
-            topk_slots.reshape(-1).to(torch.int32)
+            topk_slots.reshape(-1).clamp_(min=0).to(torch.int32)
         )
-        state.kv_len_arr[:num_tokens].copy_(valid_counts.to(torch.int32))
-        state.plan(num_tokens, width)
 
         flat = (
             kv_c_and_k_pe_cache.view(torch.float8_e4m3fn)
