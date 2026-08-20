@@ -95,10 +95,14 @@ def get_humming_moe_gemm_type() -> str:
 def _fixup_moe_tuning_config(tuning_config: list, max_k_block: int = 128) -> None:
     """Fix up each MoE tile in place: cap the K-block and widen warp-N.
 
-    Only the K-capped tiles (block_shape[2] > ``max_k_block``, which the driver
-    rejects with CUDA_ERROR_MISALIGNED_ADDRESS) are touched: cap K at 128 and
-    widen their warp-N to 32. Widening warp-N on the non-capped tiles regresses
-    accuracy (gsm8k 0.94 -> 0.86), so leave them at the heuristic's warp-N.
+    - block_shape[2] (K-block) > ``max_k_block``: the driver rejects the TMA
+      descriptor at launch (CUDA_ERROR_MISALIGNED_ADDRESS). Cap at 128, which
+      Humming already uses for larger M.
+    - warp_shape[1] (warp-N) < 32: block-FP8 (group-128) activations route the
+      w13 (gate/up) GEMM to a tuning table that pins warp-N to 16, under-filling
+      the Hopper WGMMA N dimension and corrupting the GEMM output (gsm8k
+      0.94 -> 0.89). Widen to 32 whenever block_n % 32 == 0 -- on every tile,
+      not just the K-capped ones. w2 (down) already uses warp_n=32.
     """
     logger.info_once("Attempting to override humming GEMM config")
     for entry in tuning_config:
@@ -111,11 +115,12 @@ def _fixup_moe_tuning_config(tuning_config: list, max_k_block: int = 128) -> Non
         logger.info_once(f"Overriding humming GEMM config. Previous config\n: {config}")
         if block_k > max_k_block:
             config["block_shape"] = [block_m, block_n, max_k_block]
-            warp_shape = config.get("warp_shape")
+
+        warp_shape = config.get("warp_shape")
+        if warp_shape and warp_shape[1] < 32 and block_n % 32 == 0:
             config["warp_shape"] = [warp_shape[0], 32, warp_shape[2]]
-            logger.info_once(
-                f"Overridden humming GEMM config. Current config\n: {config}"
-            )
+
+        logger.info_once(f"Overridden humming GEMM config. Current config\n: {config}")
 
 
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
