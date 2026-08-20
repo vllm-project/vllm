@@ -279,7 +279,6 @@ class MPTForCausalLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        assert config.tie_word_embeddings
         self.quant_config = quant_config
 
         self.transformer = MPTModel(

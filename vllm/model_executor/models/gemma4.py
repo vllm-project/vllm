@@ -1694,15 +1694,12 @@ class Gemma4ForCausalLM(
                 yield name, weight
 
         # Skip multimodal weights — handled by the multimodal wrapper.
-        # Also skip lm_head when weights are tied.
         skip = [
             "audio_tower.",
             "vision_tower.",
             "embed_audio.",
             "embed_vision.",
         ]
-        if self.config.tie_word_embeddings:
-            skip.append("lm_head.")
 
         loader = AutoWeightsLoader(self, skip_substrs=skip)
         return loader.load_weights(_weight_iterator())

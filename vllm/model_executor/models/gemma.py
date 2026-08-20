@@ -346,8 +346,6 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        # currently all existing Gemma models have `tie_word_embeddings` enabled
-        assert config.tie_word_embeddings
 
         self.quant_config = quant_config
         self.model = GemmaModel(
@@ -381,8 +379,5 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
