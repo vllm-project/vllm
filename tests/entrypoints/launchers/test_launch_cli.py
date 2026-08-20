@@ -164,6 +164,7 @@ blocked_prefixes = (
     "uvloop",
     "vllm.env_override",
     "vllm.entrypoints.openai.api_server",
+    "vllm.utils.argparse_utils",
     "vllm.v1.executor",
     "vllm.v1.metrics",
 )
@@ -225,58 +226,86 @@ finally:
     return result.stdout, set(json.loads(report))
 
 
-def test_snapshot_create_preserves_vllm_environment(
+def test_snapshot_actions_preserve_complete_vllm_environment(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from vllm.entrypoints.cli import main as cli_main
 
+    parent_calls: list[str] = []
     calls: list[str] = []
     monkeypatch.setattr(
         cli_main,
-        "_setup_cli_environment",
-        lambda: os.environ.__setitem__("VLLM_UNEXPECTED_SETUP", "1"),
+        "cli_env_setup",
+        lambda: parent_calls.append("cli_env_setup"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "apply_runtime_environment",
+        lambda: parent_calls.append("apply_runtime_environment"),
     )
     monkeypatch.setattr(
         snapshot_cli, "run_create", lambda _args: calls.append("create")
     )
+    monkeypatch.setattr(
+        snapshot_cli, "run_inspect", lambda _args: calls.append("inspect")
+    )
+    monkeypatch.setattr(
+        snapshot_cli, "run_restore", lambda _args: calls.append("restore")
+    )
     monkeypatch.setenv("VLLM_USER_SETTING", "configured")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
     before = {
         name: value for name, value in os.environ.items() if name.startswith("VLLM_")
     }
 
-    _run_cli(
+    for argv in (
         [
             "snapshot",
             "create",
             "Qwen/Qwen3-0.6B",
             "--snapshot-dir=/tmp/vllm-snapshot",
-        ]
-    )
+        ],
+        ["snapshot", "inspect", "/tmp/vllm-snapshot"],
+        ["snapshot", "restore", "/tmp/vllm-snapshot"],
+    ):
+        _run_cli(argv)
+
     after = {
         name: value for name, value in os.environ.items() if name.startswith("VLLM_")
     }
-    assert calls == ["create"]
+    assert parent_calls == []
+    assert calls == ["create", "inspect", "restore"]
     assert after == before
 
 
 def parse_snapshot(*argv: str):
-    with patch.object(sys, "argv", ["vllm", "snapshot", *argv]):
-        parser = FlexibleArgumentParser()
-        subparsers = parser.add_subparsers(dest="subparser", required=True)
-        snapshot_cli.SnapshotSubcommand().subparser_init(subparsers)
-        return parser.parse_args(["snapshot", *argv])
+    parser = FlexibleArgumentParser()
+    subparsers = parser.add_subparsers(dest="subparser", required=True)
+    snapshot_cli.SnapshotSubcommand(
+        create_requested=argv[:1] == ("create",)
+    ).subparser_init(subparsers)
+    return parser.parse_args(["snapshot", *argv])
 
 
-def test_snapshot_help_stays_lazy():
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["snapshot", "--help"], id="snapshot"),
+        pytest.param(["snapshot", "inspect", "--help"], id="inspect"),
+        pytest.param(["snapshot", "restore", "--help"], id="restore"),
+    ],
+)
+def test_snapshot_help_stays_lazy(argv: list[str]):
     runtime_modules = {
         "torch",
         "uvloop",
         "vllm.entrypoints.openai.cli_args",
         "vllm.snapshot.controller",
         "vllm.snapshot.server",
+        "vllm.utils.argparse_utils",
         "vllm.v1.worker.gpu_model_runner",
     }
-    stdout, loaded = _run_cli_module_probe(["snapshot", "--help"], runtime_modules)
+    stdout, loaded = _run_cli_module_probe(argv, runtime_modules)
     assert "snapshot" in stdout.lower()
     assert loaded == set()
 
@@ -1079,6 +1108,31 @@ def test_serve_parser_uses_explicit_args_not_host_sys_argv():
 
     assert selected_command.name == "serve"
     assert args.host == "127.0.0.1"
+
+
+def test_snapshot_create_parser_uses_explicit_args_not_host_sys_argv():
+    from vllm.entrypoints.cli.main import _build_parser
+
+    with patch.object(sys, "argv", ["foreign-host", "snapshot", "inspect"]):
+        parser, selected_command = _build_parser(
+            "snapshot",
+            use_flexible_parser=True,
+            snapshot_create_requested=True,
+        )
+        args = parser.parse_args(
+            [
+                "snapshot",
+                "create",
+                "Qwen/Qwen3-0.6B",
+                "--snapshot-dir=/tmp/snapshot",
+                "--revision",
+                _MODEL_REVISION,
+            ]
+        )
+
+    assert selected_command is not None
+    assert selected_command.name == "snapshot"
+    assert args.model_tag == "Qwen/Qwen3-0.6B"
 
 
 def test_public_lazy_exports_apply_runtime_environment_once():

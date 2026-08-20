@@ -5,7 +5,6 @@ import argparse
 import json
 import os
 import platform
-import sys
 import typing
 from pathlib import Path
 
@@ -107,6 +106,9 @@ class SnapshotSubcommand(CLISubcommand):
 
     name = "snapshot"
 
+    def __init__(self, *, create_requested: bool = False) -> None:
+        self.create_requested = create_requested
+
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         args.snapshot_dispatch(args)
@@ -124,8 +126,7 @@ class SnapshotSubcommand(CLISubcommand):
         create_parser = actions.add_parser(
             "create", help="Create a snapshot from an initialized TP1 engine."
         )
-        create_requested = sys.argv[1:3] == ["snapshot", "create"]
-        if create_requested:
+        if self.create_requested:
             from vllm.entrypoints.openai.cli_args import make_arg_parser
 
             create_parser = make_arg_parser(create_parser)
@@ -157,5 +158,5 @@ class SnapshotSubcommand(CLISubcommand):
         return parser
 
 
-def cmd_init() -> list[CLISubcommand]:
-    return [SnapshotSubcommand()]
+def cmd_init(*, create_requested: bool = False) -> list[CLISubcommand]:
+    return [SnapshotSubcommand(create_requested=create_requested)]
