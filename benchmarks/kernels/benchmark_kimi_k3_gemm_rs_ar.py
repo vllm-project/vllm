@@ -430,6 +430,8 @@ def main() -> None:
     sync_output = torch.empty_like(sync_input)
 
     def device_barrier() -> None:
+        # Order the timed launch after a device-side rank rendezvous without
+        # including the rendezvous itself in the measured event interval.
         pynccl_comm.all_reduce(sync_input, sync_output)
 
     gemm_rs_ar = GemmRsAr(

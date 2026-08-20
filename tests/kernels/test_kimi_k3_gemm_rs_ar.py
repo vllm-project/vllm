@@ -113,6 +113,7 @@ def _run_mode(
         _assert_valid_rows_close(actual, expected, M, rank, all_reduce)
 
     if all_reduce:
+        # AR outputs must remain valid after the symmetric workspace is reused.
         lifetime_M, lifetime_K = 257, 768
         input_generator.manual_seed(2500)
         lifetime_x = torch.randn(

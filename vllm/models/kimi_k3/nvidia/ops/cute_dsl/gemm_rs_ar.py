@@ -32,7 +32,7 @@ def nanosleep(ns: int, *, loc=None, ip=None) -> None:
 
 @dsl_user_op
 def multimem_ld_reduce_16B(x: cute.Tensor, *, loc=None, ip=None) -> cute.Tensor:
-    # NOTE: assume x is contiguous
+    # The vector instruction assumes x is contiguous and 16-byte aligned.
     assert x.element_type == BFloat16
     vec_type = ".v4.bf16x2"
 
@@ -68,6 +68,8 @@ def multimem_ld_reduce_16B(x: cute.Tensor, *, loc=None, ip=None) -> cute.Tensor:
 
 @dsl_user_op
 def multimem_st_16B(dst: cute.Tensor, value: cute.Tensor, *, loc=None, ip=None) -> None:
+    # The vector instruction assumes dst and value are contiguous BF16x8 vectors
+    # and dst is 16-byte aligned.
     assert dst.element_type == BFloat16
     assert value.element_type == BFloat16
     ptr = dst.iterator.toint(loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
@@ -408,7 +410,7 @@ class Sm100GemmRsArBF16:
                             )
                     cute.arch.barrier(barrier_id=BAR_COMM, number_of_threads=128)
 
-                    # Issue every multimem reduction before storing any result.
+                    # Issue multimem.ld_reduce before storing any result.
                     reduced_vecs = []
                     for vec_iter in cutlass.range_constexpr(vecs_per_tile // 128):
                         vec_idx = tid_ + vec_iter * 128
@@ -828,6 +830,7 @@ class GemmRsAr:
             num_ctas,
         )
         if self.all_reduce:
+            # The next launch reuses partial, so return an owning snapshot.
             return self.partial[:M].clone()
         assert output is not None
         return output
