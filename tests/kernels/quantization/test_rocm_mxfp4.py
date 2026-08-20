@@ -405,7 +405,7 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
     from aiter import per_1x32_f4_quant_hip
     from aiter.ops.shuffle import shuffle_weight
     from aiter.ops.triton.gemm_afp4wfp4 import (
-        gemm_afp4wfp4_preshuffled_weight_scales,
+        gemm_afp4wfp4_preshuffle,
     )
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
@@ -441,7 +441,7 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
 
     def run_preshuffled() -> torch.Tensor:
         y = torch.empty(M, N, device="cuda", dtype=torch.bfloat16)
-        return gemm_afp4wfp4_preshuffled_weight_scales(
+        return gemm_afp4wfp4_preshuffle(
             A_q.contiguous().view(torch.uint8),
             B_fp4.contiguous().view(torch.uint8).reshape(B_fp4.shape[0] // 16, -1),
             A_s,
