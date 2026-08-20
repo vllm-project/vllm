@@ -66,6 +66,36 @@ class MultiModalFeatures(BaseModel):
     ``None`` for metadata-only (cache-hit) responses.
     """
 
+    raw_images: dict[str, list[str | None]] | None = None
+    """Per-modality base64-encoded *original* encoded image bytes.
+
+    Populated instead of ``kwargs_data`` when the render request set
+    ``skip_pixel_values=True``.  Each value is a list parallel to
+    ``mm_hashes[modality]``; each entry is the base64 of the exact bytes
+    that were fetched from the URL (or decoded from the data URL) — not a
+    data URL, and not re-encoded pixels.  ``/generate`` re-runs the HF
+    processor over these to reproduce the tensors, consulting its cache
+    first.  Mutually exclusive with ``kwargs_data``.
+    """
+
+    @model_validator(mode="after")
+    def _check_payload_fields(self) -> "MultiModalFeatures":
+        if self.kwargs_data is not None and self.raw_images is not None:
+            raise ValueError("kwargs_data and raw_images are mutually exclusive")
+        if self.raw_images is not None:
+            for modality, items in self.raw_images.items():
+                hashes = self.mm_hashes.get(modality)
+                if hashes is None:
+                    raise ValueError(
+                        f"raw_images has modality {modality!r} absent from mm_hashes"
+                    )
+                if len(items) != len(hashes):
+                    raise ValueError(
+                        f"raw_images[{modality!r}] has {len(items)} entries but "
+                        f"mm_hashes[{modality!r}] has {len(hashes)}"
+                    )
+        return self
+
 
 class GenerateRequest(BaseModel):
     request_id: str = Field(

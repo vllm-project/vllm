@@ -4,6 +4,7 @@
 """Multimodal tests for the /render endpoints that expose prompt preprocessing."""
 
 import httpx
+import pybase64
 import pytest
 import pytest_asyncio
 
@@ -153,3 +154,58 @@ async def test_tokenize_matches_render_for_multimodal_input(
 
     assert tokenize_data["tokens"] == render_data["token_ids"]
     assert tokenize_data["count"] == len(render_data["token_ids"])
+
+
+@pytest.mark.asyncio
+async def test_skip_pixel_values_returns_source_bytes_not_tensors(
+    vision_client,
+    local_asset_server,
+):
+    """``skip_pixel_values`` must swap the payload carrier without changing
+    anything the downstream engine keys off: tokens, hashes and placeholders
+    stay identical, only the tensors are replaced by the source bytes."""
+
+    image = local_asset_server.get_image_asset("RGBA_comp.png")
+    data_url = encode_image_url(image, format="PNG")
+    source_bytes = pybase64.b64decode(data_url.split(",", 1)[1], validate=True)
+
+    def payload(skip: bool) -> dict:
+        return {
+            "model": VISION_MODEL_NAME,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "text", "text": "What's in this image?"},
+                    ],
+                }
+            ],
+            "skip_pixel_values": skip,
+        }
+
+    full_resp = await vision_client.post(
+        "/v1/chat/completions/render", json=payload(False)
+    )
+    skipped_resp = await vision_client.post(
+        "/v1/chat/completions/render", json=payload(True)
+    )
+    full = full_resp.json()
+    skipped = skipped_resp.json()
+
+    assert skipped["token_ids"] == full["token_ids"]
+    assert skipped["features"]["mm_hashes"] == full["features"]["mm_hashes"]
+    assert skipped["features"]["mm_placeholders"] == full["features"]["mm_placeholders"]
+
+    assert full["features"]["kwargs_data"] is not None
+    assert skipped["features"]["kwargs_data"] is None
+
+    raw_images = skipped["features"]["raw_images"]
+    assert list(raw_images) == ["image"]
+    assert len(raw_images["image"]) == len(skipped["features"]["mm_hashes"]["image"])
+    # The exact bytes the renderer loaded, so the /generate side recomputes
+    # the same hash when it reloads them.
+    assert pybase64.b64decode(raw_images["image"][0], validate=True) == source_bytes
+
+    # The point of the flag: source bytes are far cheaper than pixel_values.
+    assert len(skipped_resp.content) < len(full_resp.content)

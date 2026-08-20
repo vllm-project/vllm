@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import cast
 
+import pybase64
+
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
@@ -139,7 +141,9 @@ class ServingRender(BaseServing):
             request_id=request_id,
             token_ids=token_ids,
             assistant_tokens_mask=assistant_tokens_mask,
-            features=self._extract_mm_features(engine_input),
+            features=self._extract_mm_features(
+                engine_input, skip_pixel_values=request.skip_pixel_values
+            ),
             sampling_params=params,
             model=request.model,
             stream=bool(request.stream),
@@ -195,7 +199,9 @@ class ServingRender(BaseServing):
                 GenerateRequest(
                     request_id=request_id,
                     token_ids=token_ids,
-                    features=self._extract_mm_features(engine_input),
+                    features=self._extract_mm_features(
+                        engine_input, skip_pixel_values=request.skip_pixel_values
+                    ),
                     sampling_params=params,
                     model=request.model,
                     stream=bool(request.stream),
@@ -211,10 +217,20 @@ class ServingRender(BaseServing):
     @staticmethod
     def _extract_mm_features(
         engine_input: EngineInput,
+        *,
+        skip_pixel_values: bool = False,
     ) -> MultiModalFeatures | None:
         """Extract multimodal metadata from a rendered engine prompt.
 
-        Returns ``None`` for text-only prompts.
+        Args:
+            engine_input: A rendered engine prompt.
+            skip_pixel_values: Return the source image bytes in
+                ``raw_images`` instead of serializing the processed tensors
+                into ``kwargs_data``. Falls back to ``kwargs_data`` if any
+                item did not retain its source bytes.
+
+        Returns:
+            The extracted features, or ``None`` for text-only prompts.
         """
         if engine_input.get("type") != "multimodal":
             return None
@@ -231,6 +247,15 @@ class ServingRender(BaseServing):
             for modality, ranges in raw_placeholders.items()
         }
 
+        if skip_pixel_values:
+            raw_images = _encode_raw_images(mm_hashes, mm_engine_input)
+            if raw_images is not None:
+                return MultiModalFeatures(
+                    mm_hashes=mm_hashes,
+                    mm_placeholders=mm_placeholders,
+                    raw_images=raw_images,
+                )
+
         # Serialize tensor data per modality.
         kwargs_data: dict[str, list[str | None]] | None = None
         if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
@@ -246,3 +271,44 @@ class ServingRender(BaseServing):
             mm_placeholders=mm_placeholders,
             kwargs_data=kwargs_data,
         )
+
+
+def _encode_raw_images(
+    mm_hashes: MultiModalHashes,
+    mm_engine_input: MultiModalInput,
+) -> dict[str, list[str | None]] | None:
+    """Base64-encode the source bytes of every multimodal item.
+
+    Args:
+        mm_hashes: Per-modality item hashes from the rendered prompt.
+        mm_engine_input: The rendered prompt.
+
+    Returns:
+        Per-modality base64 strings aligned with ``mm_hashes``, or ``None``
+        if any item lacks source bytes — in which case the caller must fall
+        back to serializing the processed tensors.
+    """
+    raw_bytes = mm_engine_input.get("mm_raw_bytes") or {}
+
+    encoded: dict[str, list[str | None]] = {}
+    uncovered: list[str] = []
+    for modality, hashes in mm_hashes.items():
+        items = raw_bytes.get(modality, [])
+        if len(items) != len(hashes) or any(b is None for b in items):
+            uncovered.append(modality)
+            continue
+        encoded[modality] = [
+            pybase64.b64encode(b).decode("utf-8")
+            for b in items
+            if b is not None  # narrowing only; checked above
+        ]
+
+    if uncovered:
+        logger.warning(
+            "skip_pixel_values was requested but %s items did not retain "
+            "their source bytes; returning processed tensors instead.",
+            ", ".join(sorted(uncovered)),
+        )
+        return None
+
+    return encoded

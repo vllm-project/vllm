@@ -30,6 +30,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
+from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalUUIDItems,
@@ -67,6 +68,36 @@ logger = init_logger(__name__)
 
 
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
+
+
+def _collect_raw_mm_bytes(
+    mm_data_items: MultiModalDataItems,
+) -> Mapping[str, list[bytes | None]]:
+    """Collect the original encoded bytes of each multi-modal item.
+
+    Iterates the same `get_item_for_hash` sequence that the hasher uses, so
+    the result is aligned 1:1 with `MultiModalInput.mm_hashes[modality]`.
+    Only media loaders that wrap their output in
+    [`MediaWithBytes`][vllm.multimodal.media.MediaWithBytes] retain the
+    source bytes; every other item yields `None`.
+
+    Args:
+        mm_data_items: Parsed multi-modal data for the request.
+
+    Returns:
+        Per-modality lists of source bytes, omitting modalities where no
+        item retained them.
+    """
+    raw_bytes: dict[str, list[bytes | None]] = {}
+    for modality, items in mm_data_items.items():
+        modality_bytes: list[bytes | None] = [
+            item.original_bytes if isinstance(item, MediaWithBytes) else None
+            for item in items.get_all_items_for_hash()
+        ]
+        if any(b is not None for b in modality_bytes):
+            raw_bytes[modality] = modality_bytes
+
+    return raw_bytes
 
 
 class BaseRenderer(ABC, Generic[_T]):
@@ -735,6 +766,7 @@ class BaseRenderer(ABC, Generic[_T]):
         tokenization_kwargs: dict[str, Any] | None,
         *,
         skip_mm_cache: bool = False,
+        return_raw_mm_bytes: bool = False,
     ) -> "MultiModalInput":
         if skip_mm_cache and self._readonly_mm_processor is not None:
             mm_processor = self._readonly_mm_processor
@@ -764,6 +796,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.update_mm_cache_stats()
 
+        if return_raw_mm_bytes:
+            mm_inputs["mm_raw_bytes"] = _collect_raw_mm_bytes(mm_data_items)
+
         return mm_inputs
 
     def _process_tokens(
@@ -786,6 +821,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 tokenization_kwargs=None,  # Tokenization already done in Step 2
                 mm_uuids=prompt.get("multi_modal_uuids"),
                 skip_mm_cache=skip_mm_cache,
+                return_raw_mm_bytes=bool(prompt.get("return_raw_mm_bytes")),
             )
         else:
             engine_input = tokens_input(prompt_token_ids)
@@ -849,6 +885,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 tokenization_kwargs=None,
                 mm_uuids=prompt.get("multi_modal_uuids"),
                 skip_mm_cache=skip_mm_cache,
+                return_raw_mm_bytes=bool(prompt.get("return_raw_mm_bytes")),
             )
         else:
             engine_input = tokens_input(prompt_token_ids)

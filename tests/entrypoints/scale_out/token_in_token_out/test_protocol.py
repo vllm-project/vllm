@@ -9,7 +9,12 @@ fail loudly if the validator semantics ever drift.
 
 import json
 
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
+import pytest
+
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateRequest,
+    MultiModalFeatures,
+)
 from vllm.sampling_params import SamplingParams
 
 
@@ -68,3 +73,43 @@ def test_internal_instance_construction_treats_all_as_provided():
     assert req.is_sampling_param_provided("temperature")
     # And keys we never touched should also count as provided in this path.
     assert req.is_sampling_param_provided("top_p")
+
+
+def _features_payload(**overrides) -> dict:
+    payload = {
+        "mm_hashes": {"image": ["h0"]},
+        "mm_placeholders": {"image": [{"offset": 3, "length": 4}]},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_raw_images_and_kwargs_data_are_mutually_exclusive():
+    """The two payload carriers describe the same items in different forms;
+    accepting both would leave the consumer no way to pick a winner."""
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        MultiModalFeatures.model_validate(
+            _features_payload(kwargs_data={"image": ["x"]}, raw_images={"image": ["y"]})
+        )
+
+
+def test_raw_images_must_align_with_mm_hashes():
+    """`raw_images[m][i]` is positional against `mm_hashes[m][i]`, so a
+    length or key disagreement means the consumer would mispair items."""
+    with pytest.raises(ValueError, match="raw_images"):
+        MultiModalFeatures.model_validate(
+            _features_payload(raw_images={"image": ["a", "b"]})
+        )
+
+    with pytest.raises(ValueError, match="absent from mm_hashes"):
+        MultiModalFeatures.model_validate(
+            _features_payload(raw_images={"video": ["a"]})
+        )
+
+
+def test_raw_images_alone_is_accepted():
+    features = MultiModalFeatures.model_validate(
+        _features_payload(raw_images={"image": ["a"]})
+    )
+    assert features.kwargs_data is None
+    assert features.raw_images == {"image": ["a"]}

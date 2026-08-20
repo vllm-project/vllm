@@ -163,6 +163,13 @@ class MultiModalInput(_InputOptions):
     Populated when ``return_assistant_tokens_mask=True`` is set on the
     render request and the chat template supports ``{% generation %}``."""
 
+    mm_raw_bytes: NotRequired[Mapping[str, list[bytes | None]]]
+    """The original encoded bytes of each multi-modal item, aligned 1:1
+    with `mm_hashes[modality]`. Populated only when the prompt set
+    `return_raw_mm_bytes`, and only for modalities whose media loader
+    retains the source bytes (currently images); an entry is `None` when
+    the item was supplied in an already-decoded form."""
+
 
 def mm_input(
     prompt_token_ids: list[int],

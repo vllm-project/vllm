@@ -95,6 +95,13 @@ class _PromptOptions(TypedDict):
     Optional cache salt to be used for prefix caching.
     """
 
+    return_raw_mm_bytes: NotRequired[bool]
+    """
+    Ask the renderer to also return the original encoded bytes of each
+    multi-modal item in `MultiModalInput.mm_raw_bytes`. Only items whose
+    media loader retained them (currently images) are reported.
+    """
+
 
 class TextPrompt(_PromptOptions):
     """Schema for a text prompt."""

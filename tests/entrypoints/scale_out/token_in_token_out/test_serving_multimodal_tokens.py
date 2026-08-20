@@ -153,6 +153,92 @@ async def test_render_to_generate_roundtrip(client, test_image):
     )
 
 
+def _color_message(data_url: str) -> list[dict]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+                {
+                    "type": "text",
+                    "text": "What color is this image? Answer in one word.",
+                },
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_skip_pixel_values_roundtrip_preserves_answer(client, test_image):
+    """The raw-bytes payload must yield the same answer as shipping tensors.
+
+    This is the assertion that catches placeholder double-expansion on the
+    generate side: re-processing the already-expanded ``token_ids`` still
+    produces a plausible-looking response, just not the right one.
+    """
+    data_url = encode_image_url(test_image, format="PNG")
+
+    render_resp = await client.post(
+        RENDER_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "messages": _color_message(data_url),
+            "skip_pixel_values": True,
+        },
+    )
+    render_resp.raise_for_status()
+    render_data = render_resp.json()
+
+    features = render_data["features"]
+    assert features["kwargs_data"] is None
+    assert len(features["raw_images"]["image"]) == len(features["mm_hashes"]["image"])
+
+    render_data["sampling_params"] = {"max_tokens": 10, "temperature": 0.0}
+    gen_resp = await client.post(GEN_ENDPOINT, json=render_data)
+    gen_resp.raise_for_status()
+    choice = gen_resp.json()["choices"][0]
+    assert len(choice["token_ids"]) > 0
+
+    detok_resp = await client.post(
+        DETOKENIZE_ENDPOINT,
+        json={"model": MODEL_NAME, "tokens": choice["token_ids"]},
+    )
+    detok_resp.raise_for_status()
+    text = detok_resp.json()["prompt"]
+    assert "red" in text.lower(), (
+        f"Expected model to identify the red image, got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_skip_pixel_values_rejects_mismatched_raw_images(client, test_image):
+    """The hashes are computed by the render tier; the bytes are re-loaded by
+    the generate tier. If they disagree the request must fail loudly rather
+    than run the model against an image nobody asked about."""
+    data_url = encode_image_url(test_image, format="PNG")
+    other_url = encode_image_url(
+        Image.new("RGB", (224, 224), color=(0, 0, 255)), format="PNG"
+    )
+
+    render_resp = await client.post(
+        RENDER_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "messages": _color_message(data_url),
+            "skip_pixel_values": True,
+        },
+    )
+    render_resp.raise_for_status()
+    render_data = render_resp.json()
+
+    render_data["features"]["raw_images"]["image"] = [other_url.split(",", 1)[1]]
+    render_data["sampling_params"] = {"max_tokens": 10, "temperature": 0.0}
+
+    gen_resp = await client.post(GEN_ENDPOINT, json=render_data)
+    assert gen_resp.status_code == 400
+    assert "raw_images" in gen_resp.text
+
+
 @pytest.mark.asyncio
 async def test_content_parts_generates_tokens(client, test_image):
     """content_parts with raw media should produce output tokens."""
