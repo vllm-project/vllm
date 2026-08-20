@@ -8,6 +8,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -38,6 +39,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    derive_mamba_conv_split,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -45,10 +49,12 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -203,6 +209,7 @@ def _compute_sender_transfer_plan(
     local_kv_block_len: int,
     remote_kv_block_len: int,
     producer_cache_replicated: bool,
+    consumer_kv_replicated: bool = False,
 ) -> tuple[bool, int, int, int]:
     """Plan one producer-rank to one consumer-rank copy for heterogeneous TP."""
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
@@ -221,6 +228,12 @@ def _compute_sender_transfer_plan(
         )
 
     if producer_cache_replicated:
+        return True, 0, 0, local_kv_block_len
+
+    if consumer_kv_replicated:
+        # The consumer TP group is wider than the KV-head count, so each
+        # consumer rank holds a full replica of its head group's region rather
+        # than a shard of the producer's region. Copy the region whole.
         return True, 0, 0, local_kv_block_len
 
     ratio_abs = -tp_ratio
@@ -254,6 +267,8 @@ def _validate_asymmetric_region_lengths(
     local_tp_size: int,
     remote_tp_size: int,
     producer_cache_replicated: bool,
+    group_specs: list | None = None,
+    total_num_kv_heads: int = 0,
 ) -> str | None:
     """Validate transfer-region metadata for a fixed producer/consumer pair.
 
@@ -271,9 +286,26 @@ def _validate_asymmetric_region_lengths(
         return None
 
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
+    consumer_kv_replicated = remote_tp_size > total_num_kv_heads
     for idx, (local_region, remote_region) in enumerate(
         zip(local_regions, remote_regions)
     ):
+        if tp_ratio < 0 and consumer_kv_replicated:
+            # Consumer ranks replicate whole head groups instead of sharding
+            # the producer region; Mamba/GDN states still shard by head count.
+            is_mamba = group_specs is not None and isinstance(
+                group_specs[local_region.group_index].kv_cache_spec,
+                MambaSpec,
+            )
+            if not is_mamba:
+                if local_region.kv_block_len != remote_region.kv_block_len:
+                    return (
+                        "Mooncake KV region length mismatch for replicated "
+                        f"consumer KV at region {idx}: "
+                        f"local={local_region.kv_block_len}, "
+                        f"remote={remote_region.kv_block_len}."
+                    )
+                continue
         if tp_ratio == 1:
             if local_region.kv_block_len != remote_region.kv_block_len:
                 return (
@@ -1241,6 +1273,8 @@ class MooncakeConnectorWorker:
             local_tp_size=self.tp_size,
             remote_tp_size=meta.remote_tp_size,
             producer_cache_replicated=self._producer_cache_is_replicated(),
+            group_specs=self.kv_cache_config.kv_cache_groups,
+            total_num_kv_heads=self.transfer_topo.total_num_kv_heads,
         )
         if validation_err is not None:
             response = MooncakeXferResponse(
@@ -1548,6 +1582,14 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
+                    consumer_kv_replicated=(
+                        not isinstance(
+                            group_specs[local_region.group_index].kv_cache_spec,
+                            MambaSpec,
+                        )
+                        and agent_meta.remote_tp_size
+                        > self.transfer_topo.total_num_kv_heads
+                    ),
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -1674,13 +1716,9 @@ class MooncakeConnectorWorker:
                     layer_name,
                 )
                 continue
-            if isinstance(layer_spec, MambaSpec):
-                conv, _ = cache_or_caches
-                cache_list = [conv]
-            else:
-                # K and V are packed into one blocks-first tensor per layer,
-                # so each layer registers as a single region.
-                cache_list = [cache_or_caches]
+            # K/V (and Mamba conv/ssm state) are packed into one blocks-first
+            # tensor per layer, so each layer registers as a single region.
+            cache_list = [cache_or_caches]
 
             logger.debug(
                 "registering layer %s with %d cache tensor(s)",
@@ -1692,23 +1730,63 @@ class MooncakeConnectorWorker:
                 self._log_debug_cache_registration(layer_name, cache)
                 base_addr = cache.data_ptr()
                 block_len = cache.stride(0) * cache.element_size()
-                region_base_addresses.append(base_addr)
 
+                # Each entry is (state byte offset within the block, real
+                # payload bytes per block). The region expander may still
+                # sub-split attention entries into K/V halves.
                 if isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
-                    kv_block_len = layer_spec.page_size_bytes
-                elif self.transfer_topo.virtually_split_kv_in_blocks and not isinstance(
-                    layer_spec, MambaSpec
-                ):
-                    kv_block_len = block_len // 2
+                    region_entries = [(0, layer_spec.page_size_bytes)]
+                elif isinstance(layer_spec, MambaSpec):
+                    if self.transfer_topo.virtually_split_kv_in_blocks:
+                        # The block page packs each state contiguously before
+                        # any padding. Register every state with its real byte
+                        # length so heterogeneous-TP slicing stays head-aligned
+                        # instead of cutting across padding.
+                        conv_bytes = prod(layer_spec.shapes[0]) * get_dtype_size(
+                            layer_spec.dtypes[0]
+                        )
+                        if is_conv_state_dim_first():
+                            # The conv state concatenates sub-projections
+                            # (GDN: Q, K, V) along the dim axis, and each
+                            # sub-projection shards across TP independently.
+                            # Register one region per sub-projection so the
+                            # per-region heterogeneous-TP split never cuts
+                            # across a projection boundary. Only the DS
+                            # (dim, state_len) layout keeps each
+                            # sub-projection contiguous.
+                            split = derive_mamba_conv_split(layer_spec, self.tp_size)
+                            region_entries = [
+                                (offset, size)
+                                for offset, size in split.local_conv_offsets
+                            ]
+                        else:
+                            region_entries = [(0, conv_bytes)]
+                        state_offset = conv_bytes
+                        shape: tuple[int, ...]
+                        dtype: torch.dtype
+                        for shape, dtype in zip(
+                            layer_spec.shapes[1:], layer_spec.dtypes[1:]
+                        ):
+                            state_bytes = prod(shape) * get_dtype_size(dtype)
+                            region_entries.append((state_offset, state_bytes))
+                            state_offset += state_bytes
+                    else:
+                        region_entries = [(0, block_len)]
+                elif self.transfer_topo.virtually_split_kv_in_blocks:
+                    region_entries = [(0, block_len // 2)]
                 else:
-                    kv_block_len = block_len
-                self.block_len_per_layer.append(block_len)
-                self.kv_block_len_per_layer.append(kv_block_len)
-                self.registered_layer_names.append(layer_name)
-                self.registered_layer_indices.append(layer_index)
-                self.registered_group_indices.append(
-                    self._layer_group_indices[layer_name]
-                )
+                    region_entries = [(0, block_len)]
+
+                for state_offset, kv_block_len in region_entries:
+                    region_base_addresses.append(base_addr + state_offset)
+                    self.block_len_per_layer.append(block_len)
+                    self.kv_block_len_per_layer.append(kv_block_len)
+                    self.registered_layer_names.append(layer_name)
+                    self.registered_layer_indices.append(layer_index)
+                    self.registered_group_indices.append(
+                        self._layer_group_indices[layer_name]
+                    )
+
                 storage = cache.untyped_storage()
                 storage_addr = storage.data_ptr()
                 if storage_addr not in seen_storage_ptrs:
@@ -2057,9 +2135,12 @@ class MooncakeConnectorWorker:
             ]
         split_kv_regions = None
         if self.transfer_topo.virtually_split_kv_in_blocks:
+            # Remote (peer PP stage) layers may be absent from the local spec
+            # table; their split flag is unused because region alignment only
+            # matches locally registered layers.
             split_kv_regions = [
                 not isinstance(
-                    self._layer_specs[layer_name],
+                    self._layer_specs.get(layer_name),
                     (MambaSpec, MLAAttentionSpec, SlidingWindowMLASpec),
                 )
                 for layer_name in layer_names
@@ -2081,6 +2162,7 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
+        consumer_kv_replicated: bool = False,
     ) -> tuple[bool, int, int, int]:
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
@@ -2090,6 +2172,7 @@ class MooncakeConnectorWorker:
             local_kv_block_len=local_kv_block_len,
             remote_kv_block_len=remote_kv_block_len,
             producer_cache_replicated=self._producer_cache_is_replicated(),
+            consumer_kv_replicated=consumer_kv_replicated,
         )
 
     def _log_debug_cache_registration(
