@@ -35,7 +35,10 @@ def test_sleep_mode():
         # check sleep metrics
         response = requests.get(remote_server.url_for("metrics"))
         assert response.status_code == 200
-        assert _get_sleep_states(response) == ("paused", "offloaded", "discarded")
+        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
+        assert awake == 0
+        assert weights_offloaded == 1
+        assert discard_all == 0
 
         response = requests.post(remote_server.url_for("wake_up"))
         assert response.status_code == 200
@@ -46,14 +49,20 @@ def test_sleep_mode():
         # check sleep metrics
         response = requests.get(remote_server.url_for("metrics"))
         assert response.status_code == 200
-        assert _get_sleep_states(response) == ("running", "resident", "resident")
+        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
+        assert awake == 1
+        assert weights_offloaded == 0
+        assert discard_all == 0
 
         response = requests.post(remote_server.url_for("release_kv_cache_memory"))
         assert response.status_code == 200
 
         response = requests.get(remote_server.url_for("metrics"))
         assert response.status_code == 200
-        assert _get_sleep_states(response) == ("paused", "resident", "discarded")
+        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
+        assert awake == 0
+        assert weights_offloaded == 0
+        assert discard_all == 0
 
         response = requests.post(
             remote_server.url_for("wake_up"), params={"tags": ["kv_cache"]}
@@ -76,7 +85,8 @@ def test_sleep_mode():
 
         response = requests.get(remote_server.url_for("metrics"))
         assert response.status_code == 200
-        assert _get_sleep_states(response) == ("paused", "resident", "discarded")
+        awake, _, _ = _get_sleep_metrics_from_api(response)
+        assert awake == 0
 
         response = requests.post(
             remote_server.url_for("wake_up"), params={"tags": ["kv_cache"]}
@@ -90,19 +100,31 @@ def test_sleep_mode():
         # check sleep metrics
         response = requests.get(remote_server.url_for("metrics"))
         assert response.status_code == 200
-        assert _get_sleep_states(response) == ("running", "resident", "resident")
+        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
+        assert awake == 1
+        assert weights_offloaded == 0
+        assert discard_all == 0
 
 
-def _get_sleep_states(response: requests.Response):
-    """Return scheduler, weights, and KV cache states."""
-    values = {}
+def _get_sleep_metrics_from_api(response: requests.Response):
+    """Return (awake, weights_offloaded, discard_all)"""
+
+    awake, weights_offloaded, discard_all = None, None, None
 
     for family in text_string_to_metric_families(response.text):
-        if family.name == "vllm:engine_sleep_component_state":
+        if family.name == "vllm:engine_sleep_state":
             for sample in family.samples:
-                key = (sample.labels["component"], sample.labels["state"])
-                values[key] = sample.value
+                if sample.name == "vllm:engine_sleep_state":
+                    for label_name, label_value in sample.labels.items():
+                        if label_value == "awake":
+                            awake = sample.value
+                        elif label_value == "weights_offloaded":
+                            weights_offloaded = sample.value
+                        elif label_value == "discard_all":
+                            discard_all = sample.value
 
-    assert len(values) == 7
-    active = {component: state for (component, state), value in values.items() if value}
-    return active["scheduler"], active["weights"], active["kv_cache"]
+    assert awake is not None
+    assert weights_offloaded is not None
+    assert discard_all is not None
+
+    return awake, weights_offloaded, discard_all

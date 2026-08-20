@@ -326,10 +326,10 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
-    def sleep(self, level: int = 1) -> bool:
+    def sleep(self, level: int = 1):
         if self.is_sleeping and self.sleeping_tags != {"kv_cache"}:
             logger.warning("Executor is already sleeping.")
-            return False
+            return
         time_before_sleep = time.perf_counter()
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
@@ -338,20 +338,18 @@ class Executor(ABC):
         logger.info(
             "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
         )
-        return True
 
-    def wake_up(self, tags: list[str] | None = None) -> set[str]:
+    def wake_up(self, tags: list[str] | None = None):
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
-            return set()
+            return
         if tags:
             for tag in tags:
                 if tag not in self.sleeping_tags:
                     logger.warning(
                         "Tag %s is not in sleeping tags %s", tag, self.sleeping_tags
                     )
-                    return set()
-        wakeup_tags = set(tags) if tags else self.sleeping_tags.copy()
+                    return
         time_before_wakeup = time.perf_counter()
         self.collective_rpc("wake_up", kwargs=dict(tags=tags))
         time_after_wakeup = time.perf_counter()
@@ -367,23 +365,23 @@ class Executor(ABC):
             self.sleeping_tags.clear()
         if not self.sleeping_tags:
             self.is_sleeping = False
-        return wakeup_tags
 
-    def discard(self, tags: tuple[str, ...]) -> set[str]:
+    def discard(self, tags: tuple[str, ...]) -> None:
         if set(tags).issubset(self.sleeping_tags):
             logger.warning("Tags %s are already sleeping.", tags)
-            return set()
+            return
         time_before_discard = time.perf_counter()
-        self.collective_rpc("discard", args=(tags,))
-        self.sleeping_tags.update(tags)
-        self.is_sleeping = True
+        try:
+            self.collective_rpc("discard", args=(tags,))
+        finally:
+            self.sleeping_tags.update(tags)
+            self.is_sleeping = True
         time_after_discard = time.perf_counter()
         logger.info(
             "It took %.6f seconds to discard tags %s.",
             time_after_discard - time_before_discard,
             tags,
         )
-        return set(tags)
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

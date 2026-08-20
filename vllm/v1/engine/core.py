@@ -64,7 +64,6 @@ from vllm.v1.engine import (
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
-    EngineSleepStateUpdates,
     FinishReason,
     PauseMode,
     ReconfigureDistributedRequest,
@@ -865,9 +864,7 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
-    def sleep(
-        self, level: int = 1, mode: PauseMode = "abort"
-    ) -> EngineSleepStateUpdates | Future[EngineSleepStateUpdates]:
+    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
         """Put the engine to sleep at the specified level.
 
         Args:
@@ -883,28 +880,21 @@ class EngineCore:
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
+        if level < 1:
+            return pause_future
+
+        # Level 1+: Delegate to executor for GPU memory management
         model_executor = self.model_executor
-        resource_updates: EngineSleepStateUpdates = {}
-        if level >= 1:
-            resource_updates = {
-                "weights": "offloaded" if level == 1 else "discarded",
-                "kv_cache": "discarded",
-            }
-        updates: EngineSleepStateUpdates = {"scheduler": "paused"}
-
         if pause_future is None:
-            if level >= 1 and model_executor.sleep(level):
-                updates.update(resource_updates)
-            return updates
+            model_executor.sleep(level)
+            return None
 
-        future: Future[EngineSleepStateUpdates] = Future()
+        future = Future[Any]()
 
         def pause_complete(f: Future):
             try:
                 f.result()  # propagate any exception
-                if level >= 1 and model_executor.sleep(level):
-                    updates.update(resource_updates)
-                future.set_result(updates)
+                future.set_result(model_executor.sleep(level))
             except Exception as e:
                 future.set_exception(e)
 
@@ -912,7 +902,7 @@ class EngineCore:
         pause_future.add_done_callback(pause_complete)
         return future
 
-    def wake_up(self, tags: list[str] | None = None) -> EngineSleepStateUpdates:
+    def wake_up(self, tags: list[str] | None = None):
         """Wake up the engine from sleep.
 
         Args:
@@ -922,45 +912,32 @@ class EngineCore:
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
 
-        updates: EngineSleepStateUpdates = {}
         if tags is None or tags:
-            wakeup_tags = self.model_executor.wake_up(tags)
-            if "weights" in wakeup_tags:
-                updates["weights"] = "resident"
-            if "kv_cache" in wakeup_tags:
-                updates["kv_cache"] = "resident"
+            self.model_executor.wake_up(tags)
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
-        if not self.model_executor.is_sleeping and self.is_scheduler_paused():
+        if not self.model_executor.is_sleeping:
             self.resume_scheduler()
-            updates["scheduler"] = "running"
-        return updates
 
-    def release_kv_cache_memory(
-        self, mode: PauseMode = "abort"
-    ) -> EngineSleepStateUpdates | Future[EngineSleepStateUpdates]:
+    def release_kv_cache_memory(self, mode: PauseMode = "abort") -> None | Future:
         """Discard KV cache physical memory and pause until its explicit wake."""
         pause_future = self.pause_scheduler(mode=mode, clear_cache=True)
-        updates: EngineSleepStateUpdates = {"scheduler": "paused"}
 
         if pause_future is None:
-            if self.model_executor.discard(("kv_cache",)):
-                updates["kv_cache"] = "discarded"
-            return updates
+            self.model_executor.discard(("kv_cache",))
+            return None
 
-        future: Future[EngineSleepStateUpdates] = Future()
+        future: Future[None] = Future()
 
         def pause_complete(f: Future) -> None:
             try:
                 f.result()
-                discarded = self.model_executor.discard(("kv_cache",))
+                self.model_executor.discard(("kv_cache",))
             except Exception as e:
                 future.set_exception(e)
             else:
-                if discarded:
-                    updates["kv_cache"] = "discarded"
-                future.set_result(updates)
+                future.set_result(None)
 
         logger.info("Waiting for in-flight requests to complete before release...")
         pause_future.add_done_callback(pause_complete)

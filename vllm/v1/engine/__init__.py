@@ -26,14 +26,6 @@ from vllm.v1.serial_utils import UtilityResult
 # - "keep": Freeze requests in queue; they resume on resume_generation().
 PauseMode = Literal["abort", "wait", "keep"]
 
-
-EngineSleepComponent = Literal["scheduler", "weights", "kv_cache"]
-EngineComponentState = Literal[
-    "running", "paused", "resident", "offloaded", "discarded"
-]
-
-EngineSleepStateUpdates = dict[EngineSleepComponent, EngineComponentState]
-
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
 FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
