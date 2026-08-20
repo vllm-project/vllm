@@ -346,7 +346,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
     ]
-    if current_platform.is_device_capability_family(90) and has_humming():
+    if current_platform.is_device_capability(90) and has_humming():
         _AVAILABLE_BACKENDS.append(Mxfp4MoeBackend.HUMMING)
     _AVAILABLE_BACKENDS.extend([Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN])
     return _AVAILABLE_BACKENDS
