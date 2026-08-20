@@ -675,13 +675,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         assert self.hisparse_cache is not None
         n = topk_indices.shape[0] if num_decode_tokens is None else num_decode_tokens
         if req_id_per_token is None:
-            assert (
-                num_decode_tokens is None
-                or n == attn_metadata.num_decodes
-                or self.hisparse_cache.fully_resident
-            ), (
-                "Non-resident multi-token HiSparse decode must resolve one step "
-                "at a time."
+            assert num_decode_tokens is None or n == attn_metadata.num_decodes, (
+                "Multi-token HiSparse decode must resolve one step at a time."
             )
             req_id_per_token = attn_metadata.req_id_per_token[:n]
         return self.hisparse_cache.resolve_topk(

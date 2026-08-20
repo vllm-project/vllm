@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import torch
@@ -56,13 +54,8 @@ class KVConnector:
     def set_disabled(self, disabled: bool) -> None:
         pass
 
-    @property
-    def fully_resident_kv(self) -> bool:
-        return True
-
-    @contextmanager
-    def capture_kv_residency(self) -> Iterator[Callable[[bool], None] | None]:
-        yield None
+    def reset_capture_state(self) -> None:
+        pass
 
 
 class ActiveKVConnector(KVConnector):
@@ -116,23 +109,9 @@ class ActiveKVConnector(KVConnector):
         if not self._disabled and self.hisparse_connector is not None:
             self.hisparse_connector.finish_forward()
 
-    @property
-    def fully_resident_kv(self) -> bool:
-        connector = self.hisparse_connector
-        return connector is None or connector.fully_resident_kv
-
-    @contextmanager
-    def capture_kv_residency(self) -> Iterator[Callable[[bool], None] | None]:
-        connector = self.hisparse_connector
-        if connector is None:
-            yield None
-            return
-        connector.set_fully_resident_kv(True)
-        try:
-            yield connector.set_fully_resident_kv
-        finally:
-            connector.set_fully_resident_kv(False)
-            connector.reset_hot_state()
+    def reset_capture_state(self) -> None:
+        if self.hisparse_connector is not None:
+            self.hisparse_connector.reset_hot_state()
 
     def post_forward(
         self, finished_req_ids: set[str], wait_for_save: bool = True
@@ -169,8 +148,6 @@ class ActiveKVConnector(KVConnector):
     def set_disabled(self, disabled: bool) -> None:
         # Ensure that layer-wise connector hooks aren't called when disabled.
         kv_transfer_state._KV_CONNECTOR_AGENT = None if disabled else self.kv_connector
-        if self.hisparse_connector is not None:
-            self.hisparse_connector.set_fully_resident_kv(disabled)
         self._disabled = disabled
 
 

@@ -244,7 +244,6 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     )
     first = make_request("first", list(range(128)), HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(first, num_new_tokens=128) is not None
-    assert manager.hisparse_coordinator.are_requests_fully_resident(["first"])
     assert manager.block_pools[0].get_num_free_blocks() == 1
 
     second = make_request(
@@ -264,7 +263,6 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     spill_counts = {transfer.transfer_id: 1 for transfer in spills}
     manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
     assert not manager.hisparse_coordinator.has_pending_reclamation()
-    assert not manager.hisparse_coordinator.are_requests_fully_resident(["first"])
     assert (
         manager.allocate_slots(
             second,
@@ -305,9 +303,6 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     blocks = manager.get_block_ids(request.request_id)
     assert len(blocks[2]) == 2
     assert blocks[3] == []
-    assert manager.hisparse_coordinator.are_requests_fully_resident(
-        [request.request_id]
-    )
 
     spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
     assert len(spills) == 2

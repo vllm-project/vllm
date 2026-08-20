@@ -105,15 +105,6 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self._worker is not None
         self._worker.set_request_state_indices(indices)
 
-    @property
-    def fully_resident_kv(self) -> bool:
-        assert self._worker is not None
-        return self._worker.fully_resident_batch
-
-    def set_fully_resident_kv(self, fully_resident: bool) -> None:
-        assert self._worker is not None
-        self._worker.set_fully_resident_batch(fully_resident)
-
     def reset_hot_state(self) -> None:
         assert self._worker is not None
         self._worker.reset_hot_state()

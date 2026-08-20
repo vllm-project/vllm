@@ -232,9 +232,6 @@ class HiSparseWorker:
             host_copies,
             self.host_write_event,
         )
-        self.set_fully_resident_batch(
-            command.fully_resident if command is not None else False
-        )
         transfers = command.page_transfers if command is not None else []
         if transfers:
             self._post_forward_transfers = [
@@ -282,14 +279,6 @@ class HiSparseWorker:
         slots = (blocks[:, None] * self.kernel_block_size + offsets[None, :]).flatten()
         for runtime in self.leader_runtimes:
             runtime.invalidate_slots(slots, request_state_indices)
-
-    def set_fully_resident_batch(self, fully_resident: bool) -> None:
-        for cache in self.cache_handles:
-            cache.fully_resident = fully_resident
-
-    @property
-    def fully_resident_batch(self) -> bool:
-        return self.cache_handles[0].fully_resident
 
     def reset_hot_state(self) -> None:
         for runtime in self.leader_runtimes:

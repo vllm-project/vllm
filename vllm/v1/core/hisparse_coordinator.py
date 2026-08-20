@@ -528,7 +528,6 @@ class HiSparseCoordinator:
             self.request_states[request_id].indexer_ready = False
         command = SparseKVOffloadCommand(
             page_transfers=self.spills_to_send,
-            fully_resident=self.are_requests_fully_resident(request_ids),
             indexer_ready_req_ids=indexer_ready_req_ids,
         )
         self.spills_to_send = []
@@ -541,17 +540,6 @@ class HiSparseCoordinator:
         ) or any(
             pending.release_after and not pending.resident_released
             for pending in self.pending_spills.values()
-        )
-
-    def are_requests_fully_resident(self, request_ids: Sequence[str]) -> bool:
-        return (
-            bool(request_ids)
-            and bool(self.resident_managers)
-            and all(
-                manager.is_fully_resident(request_id)
-                for request_id in request_ids
-                for manager in self.resident_managers
-            )
         )
 
     def update_spills(

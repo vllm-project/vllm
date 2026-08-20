@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from math import gcd
 
 import psutil
 import torch
@@ -17,9 +16,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
-from vllm.v1.attention.backends.mla.sparse_utils import (
-    triton_convert_req_index_to_global_index,
-)
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
 logger = init_logger(__name__)
@@ -718,7 +714,6 @@ class HiSparseCacheHandle:
         self.compressed_slot_mapping: torch.Tensor | None = None
         self.logical_block_size = 0
         self.runtime = runtime
-        self.fully_resident = False
         self.decode_batch = False
 
     def bind_cache(
@@ -810,22 +805,6 @@ class HiSparseCacheHandle:
         prefetch_followers: bool = True,
     ) -> HiSparseTopKResult:
         num_tokens = topk_indices.shape[0]
-        if self.fully_resident:
-            assert self.block_table is not None and self.view is not None
-            converted = triton_convert_req_index_to_global_index(
-                req_id_per_token[:num_tokens],
-                self.block_table,
-                topk_indices,
-                BLOCK_SIZE=self.view.block_size,
-                PHYSICAL_BLOCK_STRIDE=self.view.attention_block_stride,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-                BLOCK_N=gcd(topk_indices.shape[1], 128),
-                return_valid_counts=return_valid_counts,
-            )
-            if return_valid_counts:
-                indices, valid_counts = converted
-                return self.view.attention_cache, indices, valid_counts
-            return self.view.attention_cache, converted
         if not self.runtime.is_group_leader:
             return self.runtime.apply_plan(
                 block_size=block_size,

@@ -58,7 +58,6 @@ def sync_cudagraph_and_dp_padding(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=desired_batch_desc.num_active_loras,
-            fully_resident_kv=desired_batch_desc.fully_resident_kv,
         ), num_tokens_across_dp
 
     assert cudagraph_manager is not None, (
@@ -81,14 +80,13 @@ def sync_cudagraph_and_dp_padding(
 
     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
     # so we don't perform request padding for PIECEWISE graphs.
-    # LoRA state and KV residency are per-rank and need no cross-rank agreement.
+    # LoRA state is per-rank and needs no cross-rank agreement.
     synced_desc = cudagraph_manager.dispatch(
         num_reqs,
         synced_num_tokens,
         synced_uniform_token_count,
         num_active_loras=num_active_loras,
         max_query_len=synced_max_query_len,
-        fully_resident_kv=desired_batch_desc.fully_resident_kv,
     )
 
     # Update num_tokens_across_dp to reflect padded size.
@@ -107,7 +105,6 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
-    fully_resident_kv: bool = True,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
@@ -115,7 +112,6 @@ def dispatch_cg_and_sync_dp(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=num_active_loras,
-            fully_resident_kv=fully_resident_kv,
         )
     else:
         assert cudagraph_manager is not None, (
@@ -128,7 +124,6 @@ def dispatch_cg_and_sync_dp(
             uniform_token_count,
             num_active_loras=num_active_loras,
             max_query_len=max_query_len,
-            fully_resident_kv=fully_resident_kv,
         )
 
     if dp_size == 1:

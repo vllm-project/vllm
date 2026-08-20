@@ -1040,14 +1040,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         block = blocks[block_idx]
         return None if block.is_null else block
 
-    def is_fully_resident(self, request_id: str) -> bool:
-        blocks = self.req_to_blocks.get(request_id)
-        return (
-            blocks is not None
-            and bool(blocks)
-            and all(not block.is_null for block in blocks)
-        )
-
     def release_resident_page(
         self,
         request_id: str,

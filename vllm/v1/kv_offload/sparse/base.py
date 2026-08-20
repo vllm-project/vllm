@@ -20,5 +20,4 @@ class SparseKVOffloadCommand:
     """Opaque scheduler-to-worker command for one model step."""
 
     page_transfers: list[SparseKVPageTransfer]
-    fully_resident: bool
     indexer_ready_req_ids: tuple[str, ...] = ()

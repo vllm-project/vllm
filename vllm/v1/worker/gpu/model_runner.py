@@ -592,7 +592,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            capture_hybrid_kv=kv_cache_config.has_hybrid_kv_residency,
             varlen_decode=self.adaptive_verification is not None,
         )
         check_attention_cp_compatibility(self.vllm_config)
@@ -887,24 +886,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model_state.encoder_runner.capture()
 
             if capture_decoder:
-                with self.kv_connector.capture_kv_residency() as residency_hook:
-                    self.cudagraph_manager.capture(
-                        self.model,
-                        self.model_state,
-                        self.input_buffers,
-                        self.intermediate_tensors,
-                        self.block_tables,
-                        self.attn_groups,
-                        self.kv_cache_config,
-                        has_lora=self.lora_config is not None,
-                        use_aux_hidden_state_outputs=(
-                            self.use_aux_hidden_state_outputs
-                        ),
-                        lora_capture_hook=create_lora_capture_hook(
-                            self.lora_config, self
-                        ),
-                        kv_residency_capture_hook=residency_hook,
-                    )
+                self.cudagraph_manager.capture(
+                    self.model,
+                    self.model_state,
+                    self.input_buffers,
+                    self.intermediate_tensors,
+                    self.block_tables,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                    has_lora=self.lora_config is not None,
+                    use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+                    lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
+                )
+                self.kv_connector.reset_capture_state()
                 if self.speculator is not None:
                     with use_workspace_lane(self._draft_workspace_lane):
                         self.speculator.capture()
@@ -1484,7 +1478,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
-            fully_resident_kv=self.kv_connector.fully_resident_kv,
         )
 
         if batch_desc.num_tokens == 0:
