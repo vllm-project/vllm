@@ -98,7 +98,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
-        self.aiter_ag_rs_comm: AiterCustomAllreduce | None = None
+        self.use_aiter_ag_rs: bool = False
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
@@ -133,14 +133,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "dp" in unique_name
             and self.world_size in (2, 4, 8)
             and current_platform.is_rocm()
-            and rocm_aiter_ops.is_custom_ag_rs_enabled()
+            and rocm_aiter_ops.is_custom_all_reduce_enabled()
         ):
-            self.aiter_ag_rs_comm = AiterCustomAllreduce(
+            self.aiter_ar_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
             )
-            if self.aiter_ag_rs_comm.disabled:
-                self.aiter_ag_rs_comm = None
+            if self.aiter_ar_comm.disabled:
+                self.aiter_ar_comm = None
+            else:
+                self.use_aiter_ag_rs = True
 
         if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
             # Initialize a custom quick all-reduce implementation for AMD.
@@ -272,7 +274,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("QUICK_REDUCE")
         if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
             enabled_ar_backends.append("FLASHINFER")
-        if self.aiter_ar_comm is not None and not self.aiter_ar_comm.disabled:
+        if (
+            self.use_aiter_allreduce
+            and self.aiter_ar_comm is not None
+            and not self.aiter_ar_comm.disabled
+        ):
             enabled_ar_backends.append("AITER_CUSTOM")
         if self.ca_comm is not None and not self.ca_comm.disabled:
             enabled_ar_backends.append("CUSTOM")
@@ -321,7 +327,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             return out
         aiter_ar_comm = self.aiter_ar_comm
         if (
-            aiter_ar_comm is not None
+            self.use_aiter_allreduce
+            and aiter_ar_comm is not None
             and not aiter_ar_comm.disabled
             and aiter_ar_comm.should_custom_ar(input_)
         ):
@@ -462,7 +469,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
         if self._can_use_aiter_ag_rs(sizes):
-            aiter_comm = self.aiter_ag_rs_comm
+            aiter_comm = self.aiter_ar_comm
             assert aiter_comm is not None
             if aiter_comm.should_custom_rs(input_tensor, dim=0):
                 output = torch.empty(
@@ -611,9 +618,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.aiter_ar_comm is not None:
             self.aiter_ar_comm.close()
             self.aiter_ar_comm = None
-        if self.aiter_ag_rs_comm is not None:
-            self.aiter_ag_rs_comm.close()
-            self.aiter_ag_rs_comm = None
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None
@@ -628,7 +632,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         - uniform batches
         - FULL CUDAgraphs
         """
-        if self.aiter_ag_rs_comm is None or self.aiter_ag_rs_comm.disabled:
+        if (
+            not self.use_aiter_ag_rs
+            or self.aiter_ar_comm is None
+            or self.aiter_ar_comm.disabled
+        ):
             return False
         if sizes is not None:
             return False
@@ -679,7 +687,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             sizes = None
 
         if self._can_use_aiter_ag_rs(sizes):
-            aiter_comm = self.aiter_ag_rs_comm
+            aiter_comm = self.aiter_ar_comm
             assert aiter_comm is not None
             if isinstance(input_, torch.Tensor):
                 if aiter_comm.should_custom_ag(input_):
