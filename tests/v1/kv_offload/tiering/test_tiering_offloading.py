@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+import vllm.v1.kv_offload.tiering.manager as tiering_manager_module
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -170,6 +171,10 @@ def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
         metrics[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES],
         OffloadingCounterMetadata,
     )
+    assert isinstance(
+        metrics[TieringOffloadingMetrics.HIT_PENDING_TIMEOUTS],
+        OffloadingCounterMetadata,
+    )
     for metric_name in (
         TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC,
         TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC,
@@ -216,6 +221,14 @@ def test_tiering_manager_aggregates_secondary_stats():
     second_stats = manager.get_stats()
     assert second_stats is not None
     assert MetricsSecondaryTierManager.MY_TIER_METRIC not in second_stats.data["data"]
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("inf"), float("nan")])
+def test_tiering_manager_rejects_invalid_hit_pending_timeout(timeout):
+    with pytest.raises(ValueError, match="must be a positive number"):
+        TieringOffloadingManager(
+            primary_tier=MagicMock(), hit_pending_timeout_s=timeout
+        )
 
 
 class TestExampleSecondaryTierManager:
@@ -287,6 +300,14 @@ class TestTieringOffloadingManager:
     def _start_request(self, req_context: ReqContext = _CTX):
         if req_context.req_id not in self.manager._req_state:
             self.manager.on_new_request(req_context)
+
+    @staticmethod
+    def _install_clock(monkeypatch) -> list[float]:
+        now = [100.0]
+        clock = MagicMock()
+        clock.monotonic.side_effect = lambda: now[0]
+        monkeypatch.setattr(tiering_manager_module, "time", clock)
+        return now
 
     def test_failed_promotion_finalizes_primary_with_failure(self, manager_setup):
         """A failed promotion still finalizes the primary slots with
@@ -469,6 +490,104 @@ class TestTieringOffloadingManager:
 
         # Lookup should find all blocks in primary
         assert count_hits(self.manager, blocks) == 3
+
+    def test_primary_hit_pending_times_out_and_stays_miss(
+        self, manager_setup, monkeypatch
+    ):
+        """A stalled primary write cannot defer one request indefinitely."""
+        now = self._install_clock(monkeypatch)
+
+        ctx = ReqContext(req_id="stalled-primary")
+        self._start_request(ctx)
+        block = to_keys([10])[0]
+        self.primary_tier.lookup = MagicMock(return_value=LookupResult.HIT_PENDING)
+
+        assert self.manager.lookup(block, ctx) is LookupResult.HIT_PENDING
+        now[0] += 4.999
+        assert self.manager.lookup(block, ctx) is LookupResult.HIT_PENDING
+        now[0] += 0.001
+        assert self.manager.lookup(block, ctx) is LookupResult.MISS
+
+        stats = self.manager.get_stats()
+        assert stats is not None
+        assert (
+            stats.data["data"][TieringOffloadingMetrics.HIT_PENDING_TIMEOUTS][()] == 1
+        )
+
+        self.primary_tier.lookup.return_value = LookupResult.HIT
+        assert self.manager.lookup(block, ctx) is LookupResult.MISS
+
+        self.manager.on_request_finished(ctx)
+        assert ctx.req_id not in self.manager._primary_pending_lookups
+
+    def test_primary_hit_pending_deadline_is_per_request(
+        self, manager_setup, monkeypatch
+    ):
+        """A later request gets its own full wait window for the same key."""
+        now = self._install_clock(monkeypatch)
+
+        block = to_keys([10])[0]
+        first_ctx = ReqContext(req_id="first-waiter")
+        second_ctx = ReqContext(req_id="second-waiter")
+        self._start_request(first_ctx)
+        self._start_request(second_ctx)
+        self.primary_tier.lookup = MagicMock(return_value=LookupResult.HIT_PENDING)
+
+        assert self.manager.lookup(block, first_ctx) is LookupResult.HIT_PENDING
+        now[0] += 4.0
+        assert self.manager.lookup(block, second_ctx) is LookupResult.HIT_PENDING
+        now[0] += 1.0
+        assert self.manager.lookup(block, first_ctx) is LookupResult.MISS
+        assert self.manager.lookup(block, second_ctx) is LookupResult.HIT_PENDING
+
+    def test_primary_hit_pending_deadline_is_per_key(self, manager_setup, monkeypatch):
+        """A later key gets its own full wait window within one request."""
+        now = self._install_clock(monkeypatch)
+
+        ctx = ReqContext(req_id="multi-key-waiter")
+        self._start_request(ctx)
+        first_block, second_block = to_keys([10, 11])
+        self.primary_tier.lookup = MagicMock(return_value=LookupResult.HIT_PENDING)
+
+        assert self.manager.lookup(first_block, ctx) is LookupResult.HIT_PENDING
+        now[0] += 4.0
+        assert self.manager.lookup(second_block, ctx) is LookupResult.HIT_PENDING
+        now[0] += 1.0
+        assert self.manager.lookup(first_block, ctx) is LookupResult.MISS
+        assert self.manager.lookup(second_block, ctx) is LookupResult.HIT_PENDING
+
+    def test_primary_hit_pending_deadline_clears_on_resolution(
+        self, manager_setup, monkeypatch
+    ):
+        """A resolved primary lookup does not retain its old deadline."""
+        now = self._install_clock(monkeypatch)
+
+        ctx = ReqContext(req_id="resolving-primary")
+        self._start_request(ctx)
+        block = to_keys([10])[0]
+        self.primary_tier.lookup = MagicMock(return_value=LookupResult.HIT_PENDING)
+
+        assert self.manager.lookup(block, ctx) is LookupResult.HIT_PENDING
+        now[0] += 4.0
+        self.primary_tier.lookup.return_value = LookupResult.HIT
+        assert self.manager.lookup(block, ctx) is LookupResult.HIT
+
+        now[0] += 2.0
+        self.primary_tier.lookup.return_value = LookupResult.HIT_PENDING
+        assert self.manager.lookup(block, ctx) is LookupResult.HIT_PENDING
+
+    def test_promotion_starts_hit_pending_deadline(self, manager_setup, monkeypatch):
+        """The lookup that initiates a promotion starts the wait window."""
+        now = self._install_clock(monkeypatch)
+
+        ctx = ReqContext(req_id="stalled-promotion")
+        self._start_request(ctx)
+        block = to_keys([10])[0]
+        self.secondary_tier1.blocks[block] = True
+
+        assert self.manager.lookup(block, ctx) is LookupResult.HIT_PENDING
+        now[0] += 5.0
+        assert self.manager.lookup(block, ctx) is LookupResult.MISS
 
     def test_promotion_from_secondary(self, manager_setup):
         """Test promotion of blocks from secondary to primary tier."""
@@ -1101,6 +1220,7 @@ class TestTieringOffloadingManager:
             is LookupResult.HIT_PENDING
         )
         assert self.manager._pending_load_submissions
+        assert self.manager._primary_pending_lookups
 
         # Request-level tier registration.
         self.secondary_tier1.on_new_request = lambda req_context: (
@@ -1123,6 +1243,7 @@ class TestTieringOffloadingManager:
         # Orchestrator state cleared.
         assert self.manager._jobs == {}
         assert self.manager._pending_load_submissions == {}
+        assert self.manager._primary_pending_lookups == {}
         assert set(self.manager._req_state) == {_CTX.req_id, rl_ctx.req_id}
         assert self.manager._processed_jobs_this_step is False
 

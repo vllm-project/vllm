@@ -16,6 +16,8 @@ Configuration via kv_connector_extra_config:
   - cache_policy_module_path: (optional) Python import path to load
     eviction_policy from when it names an out-of-tree CachePolicy not
     registered via CachePolicyFactory
+  - hit_pending_timeout_s: (optional) Maximum time a request waits for an
+    in-flight primary-tier write before recomputing locally (default: 5 seconds)
   - secondary_tiers: (optional) List of secondary tier configurations
     Each secondary tier config is a dict with:
       - type: (required) Type of secondary tier (e.g., "example", "fs",
@@ -74,6 +76,7 @@ from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
+    DEFAULT_HIT_PENDING_TIMEOUT_S,
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
@@ -209,6 +212,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 ),
             )
         )
+        metrics[TieringOffloadingMetrics.HIT_PENDING_TIMEOUTS] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of primary-tier writes that exceeded the per-request "
+                    "HIT_PENDING deadline."
+                ),
+            )
+        )
         metrics[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC] = (
             OffloadingGaugeMetadata(
                 documentation=(
@@ -335,6 +346,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 tiering_manager = TieringOffloadingManager(
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
+                    hit_pending_timeout_s=self.extra_config.get(
+                        "hit_pending_timeout_s", DEFAULT_HIT_PENDING_TIMEOUT_S
+                    ),
                 )
                 self._manager = tiering_manager
             except Exception:
