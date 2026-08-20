@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 def set_eagle3_aux_hidden_state_layers(
     model: nn.Module,
     spec_config: SpeculativeConfig,
-) -> None:
+) -> tuple[int, ...]:
     if not supports_eagle3(model):
         raise RuntimeError("Model does not support EAGLE3 interface")
     # mypy may infer the class-level overload for supports_eagle3.
@@ -30,6 +30,7 @@ def set_eagle3_aux_hidden_state_layers(
         aux_layers = eagle3_model.get_eagle3_default_aux_hidden_state_layers()
         logger.info("Using Eagle3 auxiliary layers from model: %s", aux_layers)
     eagle3_model.set_aux_hidden_state_layers(aux_layers)
+    return aux_layers
 
 
 def get_eagle3_aux_layers_from_config(

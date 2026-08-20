@@ -33,6 +33,21 @@ def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module
     )
 
 
+def get_target_model_inner(target_model: nn.Module) -> nn.Module:
+    target_language_model = (
+        target_model.get_language_model()
+        if hasattr(target_model, "get_language_model")
+        else target_model
+    )
+    return getattr(target_language_model, "model", target_language_model)
+
+
+def get_target_topk_indices_buffer(
+    target_model: nn.Module,
+) -> torch.Tensor | None:
+    return getattr(get_target_model_inner(target_model), "topk_indices_buffer", None)
+
+
 def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     from vllm.compilation.backends import set_model_tag
 
@@ -57,7 +72,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
         if hasattr(target_model, "get_language_model")
         else target_model
     )
-    target_inner = target_language_model.model
+    target_inner = get_target_model_inner(target_model)
     draft_inner = eagle_model.model
 
     # Skip embedding sharing under PP — each rank owns its own embedding.

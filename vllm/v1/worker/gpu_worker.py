@@ -46,6 +46,7 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
 )
+from vllm.distributed.pp_payload import PPForwardPayload
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
     WeightTransferEngineFactory,
@@ -1062,7 +1063,7 @@ class Worker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        all_gather_tensors = {}
+        all_gather_tensors = PPForwardPayload.make_all_gather_policy()
         compilation_config = self.vllm_config.compilation_config
         parallel_config = self.vllm_config.parallel_config
 
@@ -1089,11 +1090,9 @@ class Worker(WorkerBase):
                     use_cascade_attn=False,  # TODO(lucas): Handle cascade attention
                 )
             )
-            all_gather_tensors = {
-                "residual": not is_residual_scattered_for_sp(
-                    self.vllm_config, batch_desc.num_tokens
-                )
-            }
+            all_gather_tensors["residual"] = not is_residual_scattered_for_sp(
+                self.vllm_config, batch_desc.num_tokens
+            )
 
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
