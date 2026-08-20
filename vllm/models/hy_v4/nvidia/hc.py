@@ -8,16 +8,19 @@ channels to one hidden state (``HYV4HCPreLayer``), runs the sub-block, then
 scatters the result back over the channels (``HYV4HCPostLayer``). The final
 ``HYV4HCHeadLayer`` merges the channels before the model's output norm.
 
-NOTE: The reference implementation additionally offers fused HPC kernels for
-each of these steps (and a cross-layer post+pre fusion). Those kernels are not
-available here, so this port keeps only the eager implementation.
-TODO: restore the fused paths once the HPC iHC kernels land.
+NOTE: Each of the three steps has an optional single-kernel HPC replacement
+(``HpcIHCPre`` / ``HpcIHCPost`` / ``HpcIHCHead``). They are only constructed
+when the hpc package is installed, ``VLLM_ENABLE_HPC_IHC=1`` and the shape /
+device constraints hold; otherwise the eager path below runs unchanged.
+TODO: port the cross-layer post+pre fusion (``HpcIHCPostPre``) as well; it
+requires restructuring the decoder-layer forward scheduling.
 """
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+from vllm.model_executor.layers.hpc import HpcIHCHead, HpcIHCPost, HpcIHCPre
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
 
@@ -65,6 +68,20 @@ class HYV4HCPreLayer(nn.Module):
 
         self.reset_parameters(init_std, base_noise_std)
 
+        # Optional single-kernel HPC replacement for the whole forward below.
+        # ``norm_owner`` is left unset: the RMSNorm that follows the pre block
+        # lives in the decoder layer and is not folded in yet.
+        self.hpc_op: HpcIHCPre | None = None
+        if HpcIHCPre.support(hc_mult, hidden_dim):
+            self.hpc_op = HpcIHCPre(
+                hc_mult=hc_mult,
+                hidden_size=hidden_dim,
+                magnitude=magnitude,
+                hc_eps=hc_eps,
+                norm_eps=layernorm_epsilon,
+                fallback_op=self,
+            )
+
     def reset_parameters(self, init_std: float, base_noise_std: float = 0.0) -> None:
         """Initialize the gate scale and per-channel gate bias."""
         del init_std  # hc_fn is initialized by ReplicatedLinear
@@ -87,6 +104,9 @@ class HYV4HCPreLayer(nn.Module):
             A tuple of the pre-gated reduction ``[num_tokens, d]`` and the post
             gates ``[num_tokens, hc]`` consumed by `HYV4HCPostLayer`.
         """
+        if self.hpc_op is not None:
+            return self.hpc_op(x)
+
         shape = x.size()  # [num_tokens, hc, d]
         hc = self.hc_mult
         hc_eps = self.hc_eps
@@ -132,6 +152,14 @@ class HYV4HCPostLayer(nn.Module):
         super().__init__()
         self.config = config
 
+        # Optional single-kernel HPC replacement for the whole forward below.
+        # Only constructed under enable_ihc (see HYV4HCLayer), so hc_mult is
+        # present; getattr keeps this robust if that ever changes.
+        self.hpc_op: HpcIHCPost | None = None
+        hc_mult = getattr(config, "hc_mult", 0)
+        if HpcIHCPost.support(hc_mult, config.hidden_size):
+            self.hpc_op = HpcIHCPost(hc_mult=hc_mult, hidden_size=config.hidden_size)
+
     def forward(
         self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor
     ) -> torch.Tensor:
@@ -145,6 +173,9 @@ class HYV4HCPostLayer(nn.Module):
         Returns:
             The updated residual channels ``[num_tokens, hc, d]``.
         """
+        if self.hpc_op is not None:
+            return self.hpc_op(x, residual, post)
+
         dtype = x.dtype
         x = x.float()
         residual = residual.float()
@@ -189,6 +220,17 @@ class HYV4HCHeadLayer(nn.Module):
 
         self.reset_parameters(init_std, base_noise_std)
 
+        # Optional single-kernel HPC replacement for the whole forward below.
+        self.hpc_op: HpcIHCHead | None = None
+        if HpcIHCHead.support(hc_mult, hidden_size):
+            self.hpc_op = HpcIHCHead(
+                hc_mult=hc_mult,
+                hidden_size=hidden_size,
+                hc_eps=hc_eps,
+                norm_eps=config.rms_norm_eps,
+                fallback_op=self,
+            )
+
     def reset_parameters(
         self, init_std: float = 6e-3, base_noise_std: float = 0.0
     ) -> None:
@@ -215,6 +257,9 @@ class HYV4HCHeadLayer(nn.Module):
         Returns:
             The merged hidden state ``[num_tokens, d]``.
         """
+        if self.hpc_op is not None:
+            return self.hpc_op(x)
+
         shape, x_dtype = x.size(), x.dtype
 
         x = x.flatten(1).float()  # [num_tokens, hc*d]

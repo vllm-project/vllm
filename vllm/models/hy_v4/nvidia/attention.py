@@ -3,9 +3,11 @@
 """MLA attention and lightning indexer for HY V4 (NVIDIA).
 
 NOTE: The reference implementation also offers a fused MLA preprocessing
-wrapper and an HPC gated-MLA GEMM. Neither is available here, so this port
-keeps the eager MLA path with an FP8 indexer cache. TODO: restore the fused
-variants once the kernels land.
+wrapper, which is not available here, so this port keeps the eager MLA path
+with an FP8 indexer cache. TODO: restore the fused preprocessing once the
+kernel lands. The HPC gated-MLA GEMM *is* wired up: it replaces the eager
+output gating when the hpc package is installed, ``VLLM_USE_HPC_GATED_MLA=1``
+and the elementwise/dtype/alignment constraints hold.
 
 The per-head learnable sink is supported through `.flashmla_sparse`, which
 subclasses the platform's sparse MLA backend to forward ``attn_sink``.
@@ -24,6 +26,7 @@ from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.hpc import hpc_gated_mla_gemm, hpc_gated_mla_supported
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -465,8 +468,12 @@ class HYV4MLAAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.linear_gate",
             )
+            self.use_hpc_gated_mla = hpc_gated_mla_supported(
+                config.gating_type, self.linear_gate
+            )
         else:
             self.linear_gate = None
+            self.use_hpc_gated_mla = False
         self.prefix = prefix
 
         # Per-head learnable attention sink. Created BEFORE ``MLAAttention`` so
@@ -701,14 +708,27 @@ class HYV4MLAAttention(nn.Module):
         )
 
         if self.gated_mla and self.linear_gate is not None:
-            gate_score = self.linear_gate(hidden_states)[0]
-            if self.config.gating_type == "headwise":
-                gate_score = gate_score.unsqueeze(-1)
-                attn_out = attn_out.reshape(*attn_out.shape[:-1], -1, self.v_head_dim)
-                attn_out = attn_out * torch.sigmoid(gate_score)
-                attn_out = attn_out.reshape(*attn_out.shape[:-2], -1)
+            if self.use_hpc_gated_mla:
+                # Projection, sigmoid and the product in one launch. The gate
+                # is column-parallel and unbiased, so its local weight shard
+                # maps straight onto the local attn_out columns.
+                assert hidden_states.is_contiguous() and attn_out.is_contiguous()
+                attn_out = hpc_gated_mla_gemm(
+                    hidden_states,
+                    self.linear_gate.weight,
+                    attn_out,
+                )
             else:
-                attn_out = attn_out * torch.sigmoid(gate_score)
+                gate_score = self.linear_gate(hidden_states)[0]
+                if self.config.gating_type == "headwise":
+                    gate_score = gate_score.unsqueeze(-1)
+                    attn_out = attn_out.reshape(
+                        *attn_out.shape[:-1], -1, self.v_head_dim
+                    )
+                    attn_out = attn_out * torch.sigmoid(gate_score)
+                    attn_out = attn_out.reshape(*attn_out.shape[:-2], -1)
+                else:
+                    attn_out = attn_out * torch.sigmoid(gate_score)
 
         out, _ = self.o_proj(attn_out)
         return out
