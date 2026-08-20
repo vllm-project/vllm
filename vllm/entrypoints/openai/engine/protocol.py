@@ -109,6 +109,12 @@ class ModelList(OpenAIBaseModel):
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
+    local_cached_tokens: int | None = None
+    """Tokens with prefix-cache hit on the local GPU prefix cache."""
+    external_cached_tokens: int | None = None
+    """Tokens with prefix-cache hit fetched from an external KV store / another
+    instance via the KV connector. ``cached_tokens`` is the sum of
+    ``local_cached_tokens`` and ``external_cached_tokens``."""
     created_cache_tokens: int | None = None
     multimodal_tokens: dict[str, int] | None = None
     """Prompt tokens contributed by each input modality, keyed by modality name

@@ -22,12 +22,17 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
 )
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    IterationStats,
+    PrefillStats,
+    SchedulerStats,
+)
 
 
 def _ref_convert_id_to_token(
@@ -1047,6 +1052,46 @@ def test_iteration_stats(dummy_test_vectors):
 
     assert iteration_stats.num_prompt_tokens == 0
     assert iteration_stats.num_generation_tokens == num_active
+
+
+def test_prefill_stats_local_external_threading(dummy_test_vectors):
+    """num_local/num_external_cached_tokens are threaded from PrefillStats into
+    the RequestState by the OutputProcessor, preserving the invariant
+    num_cached_tokens == local + external."""
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="r1",
+        external_req_id="r1-ext",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, None)
+
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=len(request.prompt_token_ids),
+        num_local_cached_tokens=6,
+        num_external_cached_tokens=4,
+    )
+    output = EngineCoreOutput(
+        request_id="r1",
+        new_token_ids=[dummy_test_vectors.generation_tokens[0][0]],
+        new_logprobs=None,
+        new_prompt_logprobs_tensors=None,
+        prefill_stats=prefill_stats,
+    )
+    output_processor.process_outputs([output], time.monotonic(), IterationStats())
+
+    req_state = output_processor.request_states["r1"]
+    assert req_state.num_cached_tokens == 10
+    assert req_state.num_local_cached_tokens == 6
+    assert req_state.num_external_cached_tokens == 4
 
 
 @pytest.mark.parametrize("log_stats", [True, False])
