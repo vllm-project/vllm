@@ -238,6 +238,8 @@ def mistral_config(
 
 
 class MistralParser(ParserEngine):
+    supports_required_and_named = False
+
     """Mistral parser: engine-based reasoning + ``[TOOL_CALLS]`` tool calls.
 
     Reasoning encoding is auto-detected from the tokenizer:
@@ -309,6 +311,7 @@ class MistralParser(ParserEngine):
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
+        request.skip_special_tokens = False
         if not isinstance(request, ResponsesRequest) and request._grammar_from_parser:
             return request
         so_non_supported_attributes = [

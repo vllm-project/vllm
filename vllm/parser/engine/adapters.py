@@ -10,7 +10,7 @@ any changes to the serving layer itself.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -112,7 +112,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ChatCompletionRequest | ResponsesRequest:
-        return self._parser_engine.adjust_request(request)
+        return request
 
     def has_engine_confirmed_reasoning_end(self) -> bool:
         return self._parser_engine.reasoning_ended
@@ -170,8 +170,8 @@ class ParserEngineToolAdapter(ToolParser):
         self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ChatCompletionRequest | ResponsesRequest:
-        request = super().adjust_request(request)
-        return self._parser_engine.adjust_request(request)
+        request = self._parser_engine.adjust_request(request)
+        return super().adjust_request(request)
 
     def extract_tool_calls(
         self,
@@ -210,16 +210,24 @@ class ParserEngineToolAdapter(ToolParser):
 
 def make_adapters(
     parser_engine_cls: type[ParserEngine],
+    *,
+    tool_adapter_attrs: Mapping[str, object] | None = None,
 ) -> tuple[type[ParserEngineReasoningAdapter], type[ParserEngineToolAdapter]]:
     reasoning_adapter = type(
         f"{parser_engine_cls.__name__}ReasoningAdapter",
         (ParserEngineReasoningAdapter,),
         {"_parser_engine_cls": parser_engine_cls},
     )
+    tool_attrs = {
+        "_parser_engine_cls": parser_engine_cls,
+        "structural_tag_model": parser_engine_cls.structural_tag_model,
+        "supports_required_and_named": parser_engine_cls.supports_required_and_named,
+        **(tool_adapter_attrs or {}),
+    }
     tool_adapter = type(
         f"{parser_engine_cls.__name__}ToolAdapter",
         (ParserEngineToolAdapter,),
-        {"_parser_engine_cls": parser_engine_cls},
+        tool_attrs,
     )
     # Let the serving layer find the adapters and call adjust_request(),
     # which sets skip_special_tokens=False for the detokenizer.

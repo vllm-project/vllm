@@ -34,6 +34,7 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.parser.parser_manager import ParserManager
+from vllm.sampling_params import StructuredOutputsParams
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -1312,6 +1313,117 @@ class TestToolAdapterForwardsKwargs:
         )
         engine = adapter._parser_engine
         assert engine.parser_engine_config.initial_state == expected_state
+
+
+class TestAdapterRequestAdjustment:
+    @staticmethod
+    def _request() -> MagicMock:
+        request = MagicMock(spec=ChatCompletionRequest)
+        request.tools = [{"type": "function", "function": {"name": "f"}}]
+        request.tool_choice = "auto"
+        request.skip_special_tokens = True
+        request.structured_outputs = None
+        request.response_format = MagicMock()
+        return request
+
+    def test_direct_engine_applies_structural_tag(self, monkeypatch):
+        class StructuralEngine(_CombinedTestEngine):
+            structural_tag_model = "test-model"
+
+        tag = MagicMock(model_dump=lambda: {"type": "structural_tag"})
+        get_tag = MagicMock(return_value=tag)
+        monkeypatch.setattr(
+            "vllm.tool_parsers.structural_tag_registry.get_model_structural_tag",
+            get_tag,
+        )
+        monkeypatch.setattr("vllm.envs.VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+
+        request = StructuralEngine(make_mock_tokenizer(_VOCAB)).adjust_request(
+            self._request()
+        )
+
+        assert request.skip_special_tokens is True
+        assert json.loads(request.structured_outputs.structural_tag) == {
+            "type": "structural_tag"
+        }
+        assert request.response_format is None
+        get_tag.assert_called_once_with(
+            model="test-model",
+            tools=request.tools,
+            tool_choice="auto",
+            reasoning=False,
+        )
+
+    def test_reasoning_adapter_does_not_adjust_request(self, monkeypatch):
+        class ReasoningStructuralEngine(_CombinedTestEngine):
+            structural_tag_model = "reasoning-model"
+
+        ReasoningAdapter, _ = make_adapters(ReasoningStructuralEngine)
+        get_tag = MagicMock()
+        monkeypatch.setattr(
+            "vllm.tool_parsers.structural_tag_registry.get_model_structural_tag",
+            get_tag,
+        )
+
+        request = ReasoningAdapter(make_mock_tokenizer(_VOCAB)).adjust_request(
+            self._request()
+        )
+
+        assert request.skip_special_tokens is True
+        assert request.structured_outputs is None
+        get_tag.assert_not_called()
+
+    def test_existing_structural_tag_is_not_overwritten(self, monkeypatch):
+        class StructuralEngine(_CombinedTestEngine):
+            structural_tag_model = "test-model"
+
+        get_tag = MagicMock()
+        monkeypatch.setattr(
+            "vllm.tool_parsers.structural_tag_registry.get_model_structural_tag",
+            get_tag,
+        )
+        request = self._request()
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag='{"existing": true}'
+        )
+
+        adjusted = StructuralEngine(make_mock_tokenizer(_VOCAB)).adjust_request(request)
+
+        assert adjusted.structured_outputs.structural_tag == '{"existing": true}'
+        get_tag.assert_not_called()
+
+    def test_adapter_only_attrs_do_not_leak_to_engine(self):
+        class AdapterAttrsEngine(_CombinedTestEngine):
+            structural_tag_model = "test-model"
+
+        _, ToolAdapter = make_adapters(
+            AdapterAttrsEngine,
+            tool_adapter_attrs={"custom_adapter_flag": True},
+        )
+
+        assert AdapterAttrsEngine.structural_tag_model == "test-model"
+        assert "custom_adapter_flag" not in AdapterAttrsEngine.__dict__
+        assert ToolAdapter.custom_adapter_flag is True
+
+    def test_engine_capabilities_are_copied_to_tool_adapter(self):
+        class EngineCapabilities(_CombinedTestEngine):
+            supports_required_and_named = False
+
+        _, ToolAdapter = make_adapters(EngineCapabilities)
+
+        assert ToolAdapter.supports_required_and_named is False
+
+    def test_qwen3_subclasses_disable_inherited_structural_tag(self):
+        from vllm.parser.nemotron_v3 import NemotronV3Parser
+        from vllm.parser.qwen3 import Qwen3Parser
+        from vllm.parser.seed_oss import SeedOssParser
+
+        assert Qwen3Parser.structural_tag_model == "qwen_3_coder"
+        assert Qwen3Parser.supports_required_and_named is False
+        assert SeedOssParser.structural_tag_model is None
+        assert SeedOssParser.supports_required_and_named is True
+        assert NemotronV3Parser.structural_tag_model is None
+        assert NemotronV3Parser.supports_required_and_named is True
 
 
 # ── TestExtractContentIdsNoEmptyReturn ─────────────────────────────

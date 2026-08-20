@@ -393,6 +393,14 @@ class Gemma4Parser(ParserEngine):
     - Detects ``<|tool_call>`` token as implicit reasoning end
     """
 
+    supports_required_and_named = False
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request.skip_special_tokens = False
+        return super().adjust_request(request)
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
