@@ -260,12 +260,10 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
                 dtype=v_cache.dtype,
                 device=v_cache.device,
             )
-            softmax_scale = self.kv_lora_rank ** (-0.5)
         else:
             k_cache = kv_cache[:, :, self.kv_lora_rank :].view(
                 -1, 1, 1, self.qk_rope_head_dim
             )
-            softmax_scale = self.scale
 
         out = flash_attn_varlen_func(
             q=q_rope,
@@ -277,7 +275,7 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
             max_seqlen_k=topk_indices.shape[1],
             seqused_k=valid_counts,
             block_table=topk_indices,
-            softmax_scale=softmax_scale,
+            softmax_scale=self.scale,
             causal=True,
             fa_version=3,
             only_qv=only_qv,

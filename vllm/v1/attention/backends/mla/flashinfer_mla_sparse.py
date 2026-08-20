@@ -387,11 +387,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
-        # Native no-rope MLA (qk_rope_head_dim == 0): FlashInfer scores only the
-        # NoPE part, so the softmax scale is over kv_lora_rank rather than the
-        # with-rope qk head size, and the kernel additionally requires a
-        # per-query-token active top-k length tensor. Mirrors the FlashMLA /
-        # FlashAttention sparse backends.
+        # Native no-rope MLA additionally requires a per-query-token active
+        # top-k length tensor.
         self.is_nope_mla = self.qk_rope_head_dim == 0
 
         # fp8 query quantization is required when using fp8 kv_cache,
@@ -440,9 +437,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             self._workspace_buffer = _get_workspace_buffer(q.device)
 
         if self.bmm1_scale is None:
-            self.bmm1_scale = (
-                self.kv_lora_rank**-0.5 if self.is_nope_mla else self.scale
-            )
+            self.bmm1_scale = self.scale
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
         if self.bmm2_scale is None:

@@ -310,15 +310,7 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseMetadat
                 topk_indices_buffer.shape[1],
                 kv_lora_rank=self.kv_lora_rank,
                 qk_rope_head_dim=self.qk_rope_head_dim,
-                # NoPE scores come from the latent dot product only, so the
-                # scale spans kv_lora_rank (the only_qv convention the FA
-                # sparse and FlashMLA paths also use); rope MLA uses the
-                # model's own scale.
-                sm_scale=(
-                    self.kv_lora_rank**-0.5
-                    if self.qk_rope_head_dim == 0
-                    else self.scale
-                ),
+                sm_scale=self.scale,
             )
 
     def forward_mqa(
