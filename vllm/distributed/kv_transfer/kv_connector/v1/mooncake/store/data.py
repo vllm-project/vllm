@@ -330,7 +330,9 @@ class TPSharedChunkedTokenDatabase(ChunkedTokenDatabase):
             PoolKey.build_prefix(metadata, tp_rank=shard_id)
             for shard_id in self.store_shard_ids
         )
-        self._layer_layouts: list[tuple[int, int, int, int, int, bool]] = []
+        self._shard_segment_templates: tuple[
+            tuple[np.ndarray, np.ndarray, list[int]], ...
+        ] = ()
 
     def key_for_shard(self, store_shard_id: int, chunk_hash: BlockHash) -> str:
         local_shard = store_shard_id - self.store_shard_ids[0]
@@ -387,7 +389,44 @@ class TPSharedChunkedTokenDatabase(ChunkedTokenDatabase):
                     is_nhd,
                 )
             )
-        self._layer_layouts = layouts
+        templates = []
+        for local_shard in range(self.shards_per_rank):
+            head_start = local_shard * self.heads_per_store_shard
+            addr_bases: list[int] = []
+            block_strides: list[int] = []
+            sizes: list[int] = []
+            for (
+                base_addr,
+                block_stride,
+                head_stride,
+                token_stride,
+                content_bytes,
+                is_nhd,
+            ) in layouts:
+                if is_nhd:
+                    # Canonical objects use HND order, so NHD contributes one
+                    # segment per head/token content cell.
+                    for head_idx in range(self.heads_per_store_shard):
+                        for token_idx in range(self.block_size):
+                            addr_bases.append(
+                                base_addr
+                                + token_idx * token_stride
+                                + (head_start + head_idx) * head_stride
+                            )
+                            block_strides.append(block_stride)
+                            sizes.append(content_bytes)
+                else:
+                    addr_bases.append(base_addr + head_start * head_stride)
+                    block_strides.append(block_stride)
+                    sizes.append(self.heads_per_store_shard * head_stride)
+            templates.append(
+                (
+                    np.asarray(addr_bases, dtype=np.uint64),
+                    np.asarray(block_strides, dtype=np.uint64),
+                    sizes,
+                )
+            )
+        self._shard_segment_templates = tuple(templates)
 
     def prepare_values_for_shards(
         self,
@@ -405,34 +444,10 @@ class TPSharedChunkedTokenDatabase(ChunkedTokenDatabase):
             if end - start != self.block_size:
                 raise ValueError("TP-shared Mooncake store requires full KV blocks")
             block_id = block_ids[start // self.block_size]
-            head_start = (store_shard_id - first_shard) * self.heads_per_store_shard
-            addrs: list[int] = []
-            sizes: list[int] = []
-            for (
-                base_addr,
-                block_stride,
-                head_stride,
-                token_stride,
-                content_bytes,
-                is_nhd,
-            ) in self._layer_layouts:
-                block_addr = base_addr + block_id * block_stride
-                if is_nhd:
-                    # Store objects always use canonical HND byte order. NHD
-                    # tensors gather/scatter one content cell at a time so P
-                    # and D can share the same object across local layouts.
-                    for head_idx in range(self.heads_per_store_shard):
-                        for token_idx in range(self.block_size):
-                            addrs.append(
-                                block_addr
-                                + token_idx * token_stride
-                                + (head_start + head_idx) * head_stride
-                            )
-                            sizes.append(content_bytes)
-                else:
-                    addrs.append(block_addr + head_start * head_stride)
-                    sizes.append(self.heads_per_store_shard * head_stride)
-            addr_lists.append(addrs)
+            addr_bases, block_strides, sizes = self._shard_segment_templates[
+                store_shard_id - first_shard
+            ]
+            addr_lists.append((addr_bases + block_id * block_strides).tolist())
             size_lists.append(sizes)
             chunk_block_ids.append(block_id)
         return addr_lists, size_lists, chunk_block_ids

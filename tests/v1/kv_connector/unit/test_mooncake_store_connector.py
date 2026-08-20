@@ -42,6 +42,30 @@ def _make_vllm_config():
     )
 
 
+def test_store_tp_defaults_to_hnd_layout():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"store_tp_size": 4},
+    )
+
+    assert (
+        mooncake_store_connector.MooncakeStoreConnector.get_required_kvcache_layout(
+            vllm_config
+        )
+        == "HND"
+    )
+
+
+def test_rank_local_store_keeps_default_layout():
+    assert (
+        mooncake_store_connector.MooncakeStoreConnector.get_required_kvcache_layout(
+            _make_vllm_config()
+        )
+        is None
+    )
+
+
 def _make_kv_cache_config() -> KVCacheConfig:
     """Single-group full-attention KVCacheConfig — enough for the connector
     constructor's validate() pass."""

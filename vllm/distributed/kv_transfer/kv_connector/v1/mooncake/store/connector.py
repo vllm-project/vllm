@@ -89,6 +89,23 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is None:
+            return None
+        store_tp_size = kv_transfer_config.kv_connector_extra_config.get(
+            "store_tp_size"
+        )
+        if type(store_tp_size) is not int:
+            return None
+        logger.info_once(
+            "MooncakeStoreConnector setting KV cache layout to HND for "
+            "efficient heterogeneous TP store sharing. Set "
+            "VLLM_KV_CACHE_LAYOUT=NHD to use NHD explicitly."
+        )
+        return "HND"
+
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         extra_config = self._kv_transfer_config.kv_connector_extra_config
