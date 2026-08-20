@@ -119,7 +119,7 @@ class _ArenaPickler(pickle.Pickler):
             idx = self.arena.write_tensor(obj)        # ONE memcpy into a free slot
             if idx is not None:
                 return (_rebuild_arena_tensor,
-                        (arena_name, idx, nbytes, dtype_str, shape))
+                        (idx, nbytes, dtype_str, shape))
         return NotImplemented   # fall through to dispatch_table → _reduce_tensor
 ```
 
@@ -142,8 +142,8 @@ structurally impossible.
 The stub unpickles through a module-level rebuild function:
 
 ```python
-def _rebuild_arena_tensor(arena_name, slot_idx, nbytes, dtype_str, shape):
-    arena = _TENSOR_ARENAS[arena_name]            # this process's attached arena
+def _rebuild_arena_tensor(slot_idx, nbytes, dtype_str, shape):
+    arena = _TENSOR_ARENA                         # this process's attached arena
     return arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
     # get_tensor: torch.frombuffer over the mapped slot — zero bytes copied
 ```

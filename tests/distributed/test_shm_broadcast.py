@@ -895,9 +895,7 @@ def test_arena_pickler_composes(monkeypatch):
     arena declines falls through to `_reduce_tensor` unchanged."""
     writer, (reader,) = _make_arena(n_reader=1)
     monkeypatch.setattr(shm_broadcast, "_ARENA_MIN_BYTES", 1 << 20)
-    monkeypatch.setitem(
-        shm_broadcast._TENSOR_ARENAS, writer.shared_memory.name, reader
-    )
+    monkeypatch.setattr(shm_broadcast, "_TENSOR_ARENA", reader)
     big = torch.randn(1024, 1024)  # 4MiB -> diverted into the arena
     small = torch.randn(16, 16)  # 1KiB -> falls through to _reduce_tensor
     data, buffers = _dumps_arena({"big": big, "small": small}, writer)
@@ -921,9 +919,7 @@ def test_arena_pickler_composes(monkeypatch):
 def test_arena_pickler_noncontig_falls_through(monkeypatch):
     writer, (reader,) = _make_arena(n_reader=1)
     monkeypatch.setattr(shm_broadcast, "_ARENA_MIN_BYTES", 1 << 20)
-    monkeypatch.setitem(
-        shm_broadcast._TENSOR_ARENAS, writer.shared_memory.name, reader
-    )
+    monkeypatch.setattr(shm_broadcast, "_TENSOR_ARENA", reader)
     nc = torch.randn(2048, 1024)[:, ::2]  # non-contiguous, above threshold
     assert not nc.is_contiguous()
     data, buffers = _dumps_arena(nc, writer)
@@ -1027,7 +1023,8 @@ def worker_fn_arena_broadcast():
         assert torch.equal(received["huge"], payload["huge"])
         assert torch.equal(received["mid"], payload["mid"])
         # The huge tensor is a zero-copy view of an arena slot.
-        (arena,) = shm_broadcast._TENSOR_ARENAS.values()
+        arena = shm_broadcast._TENSOR_ARENA
+        assert arena is not None
         (idx,) = arena._pending_release
         nbytes = received["huge"].numel() * received["huge"].element_size()
         slot_ptr = torch.frombuffer(

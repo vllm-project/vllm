@@ -492,10 +492,11 @@ _ARENA_SLOT_BYTES = 256 * 1024 * 1024
 # take the out-of-band pickle-buffer path.
 _ARENA_MIN_BYTES = 8 * 1024 * 1024
 
-# Reader-side registry: arena shm name -> attached ShmTensorArena. Populated
-# by MessageQueue.create_from_handle; consumed by _rebuild_arena_tensor when
+# The arena this reader process is attached to (at most one: only the
+# engine-to-worker broadcast queue creates arenas). Set by
+# MessageQueue.create_from_handle; consumed by _rebuild_arena_tensor when
 # unpickling a tensor stub.
-_TENSOR_ARENAS: dict[str, "ShmTensorArena"] = {}
+_TENSOR_ARENA: "ShmTensorArena | None" = None
 
 
 class ShmTensorArena:
@@ -738,10 +739,10 @@ class ShmTensorArena:
                 pass
 
 
-def _rebuild_arena_tensor(arena_name, slot_idx, nbytes, dtype_str, shape):
+def _rebuild_arena_tensor(slot_idx, nbytes, dtype_str, shape):
     """Unpickle hook: rebuild a tensor as a zero-copy view of an arena slot."""
-    arena = _TENSOR_ARENAS[arena_name]
-    return arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
+    assert _TENSOR_ARENA is not None
+    return _TENSOR_ARENA.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
 
 
 class _ArenaPickler(pickle.Pickler):
@@ -769,7 +770,6 @@ class _ArenaPickler(pickle.Pickler):
                 return (
                     _rebuild_arena_tensor,
                     (
-                        self.arena.shared_memory.name,
                         idx,
                         obj.numel() * obj.element_size(),
                         str(obj.dtype).removeprefix("torch."),
@@ -924,9 +924,8 @@ class MessageQueue:
                 self.tensor_arena = ShmTensorArena(
                     *arena_handle, reader_rank=self.local_reader_rank
                 )
-                _TENSOR_ARENAS[self.tensor_arena.shared_memory.name] = (
-                    self.tensor_arena
-                )
+                global _TENSOR_ARENA
+                _TENSOR_ARENA = self.tensor_arena
 
             self.local_socket = context.socket(SUB)
             self.local_socket.setsockopt_string(SUBSCRIBE, "")
