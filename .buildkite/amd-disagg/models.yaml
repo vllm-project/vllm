@@ -86,13 +86,13 @@ models:
   - model: Kimi-K2.6-MXFP4
     env:
       VLLM_ROCM_USE_AITER: "1"
-      VLLM_ROCM_USE_AITER_MLA: "1"
       AMDGCN_USE_BUFFER_OPS: "1"
+      VLLM_ROCM_USE_AITER_MLA: "1"
       VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
       VLLM_ROCM_USE_SKINNY_GEMM: "0"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
       AITER_DISABLE_FMHA_OPUS: "1"
-    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --mm-encoder-tp-mode data --block-size 16"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --mm-encoder-tp-mode data --block-size 16 --attention-backend ROCM_AITER_MLA"
     prefill:
       tp: "--gpu-memory-utilization 0.9"
     decode:
