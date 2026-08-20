@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.model_executor.layers import qwen3_next_fp8_qkv as prep_module
@@ -115,6 +116,72 @@ def test_qwen3_next_fp8_prep_translates_attention_metadata(monkeypatch):
     assert recorded_kwargs["num_actual_tokens"] == 7
     assert recorded_kwargs["quant_token_start"] == 1
     assert recorded_kwargs["quant_sequence_start"] == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA graph support")
+def test_qwen3_next_fp8_prep_without_metadata_is_cuda_graph_safe(monkeypatch):
+    inputs = tuple(tensor.to(device="cuda") for tensor in _make_inputs())
+    monkeypatch.setattr(
+        attention_module,
+        "get_attention_context",
+        lambda layer_name: (None, None, None, None),
+    )
+    recorded_cu_seqlens = None
+
+    def fake_aiter_prep(*args, **kwargs):
+        nonlocal recorded_cu_seqlens
+        recorded_cu_seqlens = args[7]
+        return (
+            inputs[0],
+            inputs[1],
+            inputs[0],
+            inputs[0],
+            inputs[1],
+            inputs[2],
+            inputs[3],
+            inputs[4],
+            inputs[3],
+        )
+
+    monkeypatch.setattr(
+        prep_module.rocm_aiter_ops,
+        "qwen3_next_fp8_qkv_prep",
+        fake_aiter_prep,
+    )
+
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(capture_stream):
+        prep_module._qwen3_next_fp8_qkv_prep_impl(
+            *inputs,
+            "layer",
+            1.0e-6,
+            NUM_QUERY_HEADS,
+            NUM_KV_HEADS,
+            HEAD_DIM,
+            ROTARY_DIM,
+        )
+    capture_stream.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=capture_stream):
+        prep_module._qwen3_next_fp8_qkv_prep_impl(
+            *inputs,
+            "layer",
+            1.0e-6,
+            NUM_QUERY_HEADS,
+            NUM_KV_HEADS,
+            HEAD_DIM,
+            ROTARY_DIM,
+        )
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    assert recorded_cu_seqlens is not None
+    torch.testing.assert_close(
+        recorded_cu_seqlens,
+        torch.tensor([0, inputs[0].shape[0]], dtype=torch.int32, device="cuda"),
+    )
 
 
 def test_qwen3_next_fp8_prep_pure_decode_uses_bf16_fallback(monkeypatch):

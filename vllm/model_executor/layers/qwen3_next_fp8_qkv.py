@@ -104,10 +104,13 @@ def _qwen3_next_fp8_qkv_prep_impl(
     total_tokens = q_gate.shape[0]
     if attn_metadata is None:
         num_actual_tokens = total_tokens
-        cu_seqlens = torch.tensor(
-            [0, total_tokens],
-            dtype=torch.int32,
-            device=q_gate.device,
+        cu_seqlens = (
+            torch.arange(
+                2,
+                dtype=torch.int32,
+                device=q_gate.device,
+            )
+            * total_tokens
         )
         quant_token_start = 0
         quant_sequence_start = 0
