@@ -1909,13 +1909,14 @@ def get_kv_cache_groups(
     #   attention:
     #     backend_per_kind:
     #       sliding_window: FLASH_ATTN
-    attention_config = vllm_config.attention_config
-    logger.info("backend_per_kind=%s", attention_config.backend_per_kind)
-    if attention_config.backend_per_kind.get("sliding_window"):
-        page_sizes = {s.page_size_bytes for s in filtered_spec.values()}
-        if len(page_sizes) == 1:
-            max_page_size = page_sizes.pop()
-            filtered_spec = _reduce_block_size_lcm(filtered_spec, max_page_size)
+    attention_config = getattr(vllm_config, "attention_config", None)
+    if attention_config is not None:
+        logger.info("backend_per_kind=%s", attention_config.backend_per_kind)
+        if attention_config.backend_per_kind.get("sliding_window"):
+            page_sizes = {s.page_size_bytes for s in filtered_spec.values()}
+            if len(page_sizes) == 1:
+                max_page_size = page_sizes.pop()
+                filtered_spec = _reduce_block_size_lcm(filtered_spec, max_page_size)
 
     groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
 
