@@ -58,7 +58,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
-            use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
+            # FlashInfer all-reduce does not provide a fixed reduction order.
+            use_flashinfer_allreduce = (
+                envs.VLLM_ALLREDUCE_USE_FLASHINFER and not envs.VLLM_BATCH_INVARIANT
+            )
             use_aiter_allreduce = use_custom_allreduce and bool(
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )

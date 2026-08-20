@@ -260,7 +260,7 @@ if TYPE_CHECKING:
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
-    VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
+    VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -1857,7 +1857,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
-        int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0"))
+        int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "1"))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
