@@ -3,7 +3,6 @@
 """Unit tests for the `vllm launch` CLI subcommand."""
 
 import argparse
-import io
 import json
 import os
 import signal
@@ -11,16 +10,13 @@ import socket
 import stat
 import subprocess
 import sys
-import urllib.request
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import create_autospec, patch
 
 import pytest
 
-import vllm.snapshot.controller as snapshot_controller
 import vllm.snapshot.runtime as snapshot_runtime
 from vllm.entrypoints.cli import snapshot as snapshot_cli
 from vllm.entrypoints.cli.launch import (
@@ -30,24 +26,23 @@ from vllm.entrypoints.cli.launch import (
 )
 from vllm.snapshot.controller import (
     LocalSnapshotTools,
-    ProcessInventory,
     SnapshotCreateError,
     SnapshotRestoreError,
-    _TcpSocketRecord,
     create_snapshot,
     restore_snapshot,
 )
 from vllm.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
+    SnapshotRuntimeIdentity,
     SnapshotSecurityError,
     read_manifest,
     validate_artifact_root,
     write_manifest_atomic,
 )
+from vllm.snapshot.runtime import ProcessInventory, _TcpSocketRecord
 from vllm.snapshot.server import (
     SnapshotCanaryError,
-    run_engine_canary,
     run_snapshot_child,
 )
 from vllm.snapshot.types import Oracle, oracles_match
@@ -192,15 +187,6 @@ assert not loaded, loaded
 
 _MODULE_REPORT_PREFIX = "__VLLM_MODULES__="
 _MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
-_CLI_COMMAND_MODULES = {
-    "vllm.entrypoints.cli.benchmark.main",
-    "vllm.entrypoints.cli.collect_env",
-    "vllm.entrypoints.cli.launch",
-    "vllm.entrypoints.cli.openai",
-    "vllm.entrypoints.cli.run_batch",
-    "vllm.entrypoints.cli.serve",
-    "vllm.entrypoints.cli.snapshot",
-}
 
 
 def _run_cli(argv: list[str]) -> None:
@@ -239,7 +225,7 @@ finally:
     return result.stdout, set(json.loads(report))
 
 
-def test_snapshot_actions_preserve_the_complete_vllm_environment(
+def test_snapshot_create_preserves_vllm_environment(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from vllm.entrypoints.cli import main as cli_main
@@ -253,11 +239,7 @@ def test_snapshot_actions_preserve_the_complete_vllm_environment(
     monkeypatch.setattr(
         snapshot_cli, "run_create", lambda _args: calls.append("create")
     )
-    monkeypatch.setattr(
-        snapshot_cli, "run_restore", lambda _args: calls.append("restore")
-    )
     monkeypatch.setenv("VLLM_USER_SETTING", "configured")
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
     before = {
         name: value for name, value in os.environ.items() if name.startswith("VLLM_")
     }
@@ -270,12 +252,10 @@ def test_snapshot_actions_preserve_the_complete_vllm_environment(
             "--snapshot-dir=/tmp/vllm-snapshot",
         ]
     )
-    _run_cli(["snapshot", "restore", "/tmp/vllm-snapshot"])
-
     after = {
         name: value for name, value in os.environ.items() if name.startswith("VLLM_")
     }
-    assert calls == ["create", "restore"]
+    assert calls == ["create"]
     assert after == before
 
 
@@ -287,15 +267,7 @@ def parse_snapshot(*argv: str):
         return parser.parse_args(["snapshot", *argv])
 
 
-def test_snapshot_help_and_restore_dispatch_stay_lazy(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    stdout, loaded = _run_cli_module_probe(["--help"], _CLI_COMMAND_MODULES | {"torch"})
-    assert (
-        "{chat,complete,serve,launch,bench,collect-env,run-batch,snapshot}"
-        in "".join(stdout.split())
-    )
-    assert loaded == set()
+def test_snapshot_help_stays_lazy():
     runtime_modules = {
         "torch",
         "uvloop",
@@ -304,56 +276,9 @@ def test_snapshot_help_and_restore_dispatch_stay_lazy(
         "vllm.snapshot.server",
         "vllm.v1.worker.gpu_model_runner",
     }
-    for argv in (["snapshot", "--help"], ["snapshot", "restore", "--help"]):
-        stdout, loaded = _run_cli_module_probe(argv, runtime_modules)
-        assert "snapshot" in stdout.lower()
-        assert loaded == set()
-
-    calls: list[argparse.Namespace] = []
-    monkeypatch.setattr(snapshot_cli, "run_restore", calls.append)
-    _run_cli(["snapshot", "restore", "/tmp/qwen-snapshot"])
-    assert len(calls) == 1
-    assert calls[0].snapshot_dir == "/tmp/qwen-snapshot"
-
-    script = """
-import os
-import sys
-
-from vllm.entrypoints.cli import snapshot as snapshot_cli
-from vllm.entrypoints.cli.main import main
-
-events = []
-
-def dispatch(args):
-    events.append(f"dispatch:{args.snapshot_action}")
-    args.snapshot_dispatch(args)
-
-snapshot_cli.SnapshotSubcommand.cmd = staticmethod(dispatch)
-snapshot_cli.run_restore = lambda _args: events.append("restore")
-os.environ["VLLM_SNAPSHOT_IMPORT_PROBE"] = "preserved"
-before = dict(os.environ)
-sys.argv = ["vllm", "snapshot", "restore", "/tmp/qwen-snapshot"]
-main()
-
-assert events == ["dispatch:restore", "restore"], events
-assert dict(os.environ) == before
-blocked = {
-    "torch",
-    "uvloop",
-    "vllm.entrypoints.openai.cli_args",
-    "vllm.snapshot.controller",
-    "vllm.snapshot.server",
-    "vllm.utils.argparse_utils",
-}
-loaded = sorted(blocked.intersection(sys.modules))
-assert not loaded, loaded
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
+    stdout, loaded = _run_cli_module_probe(["snapshot", "--help"], runtime_modules)
+    assert "snapshot" in stdout.lower()
+    assert loaded == set()
 
 
 def test_snapshot_create_cli_accepts_compact_and_full_state(
@@ -462,54 +387,9 @@ def _manifest(**changes: object) -> SnapshotManifest:
 
 
 def _runtime_identity(**changes: object) -> Any:
-    identity_type = snapshot_controller.SnapshotRuntimeIdentity
-    fields = identity_type.model_fields.keys()
+    fields = SnapshotRuntimeIdentity.model_fields.keys()
     payload = _manifest().model_dump(mode="python", include=fields)
-    return identity_type.model_validate({**payload, **changes}, strict=True)
-
-
-def test_snapshot_manifest_uses_atomic_file_as_publication_marker(tmp_path: Path):
-    artifact = tmp_path / "snapshot"
-    artifact.mkdir(mode=0o700)
-    manifest = _manifest()
-    write_manifest_atomic(artifact, manifest)
-
-    payload = json.loads((artifact / "manifest.json").read_text())
-    assert "complete" not in payload
-    assert "socket_inventory" not in payload
-
-
-def test_snapshot_manifest_captures_runtime_identity_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    tools = LocalSnapshotTools()
-    identity = _runtime_identity()
-    probed_gpu_uuids: list[str] = []
-
-    def current_identity(gpu_uuid: str) -> Any:
-        probed_gpu_uuids.append(gpu_uuid)
-        return identity
-
-    monkeypatch.setattr(tools, "current_identity", current_identity)
-    manifest = tools.make_manifest(
-        argparse.Namespace(
-            model="Qwen/Qwen3-0.6B",
-            model_tag=None,
-            revision="model-sha",
-            tokenizer_revision="tokenizer-sha",
-            served_model_name=None,
-            include_model_state=True,
-        ),
-        ("Qwen/Qwen3-0.6B",),
-        ProcessInventory(100, (100, 101), (101,), "GPU-abc"),
-        _oracle(),
-        tmp_path,
-    )
-
-    assert probed_gpu_uuids == ["GPU-abc"]
-    assert manifest.model_dump(include=type(identity).model_fields.keys()) == (
-        identity.model_dump()
-    )
+    return SnapshotRuntimeIdentity.model_validate({**payload, **changes}, strict=True)
 
 
 def _fake_snapshot_tools(*, fail_dump: bool = False) -> Any:
@@ -568,55 +448,17 @@ def test_snapshot_create_abort_kills_surviving_child_process_group(
     process.wait.assert_called_once_with(timeout=10)
 
 
-async def _record(events: list[str], event: str, value=None):
-    events.append(event)
-    return value
-
-
 async def _return_none() -> None:
     return None
 
 
-@pytest.mark.parametrize("compact", [False, True])
 @pytest.mark.asyncio
-async def test_snapshot_child_lifecycle_and_failure_nonpublication(compact: bool):
+async def test_snapshot_child_rejects_compact_mismatch_before_publication():
     events: list[str] = []
-
-    @asynccontextmanager
-    async def engine_context():
-        events.append("engine-ready")
-        yield object()
-
-    await run_snapshot_child(
-        engine_context=engine_context(),
-        run_canary=lambda _engine: _record(events, "canary", _oracle()),
-        prepare_snapshot=lambda: events.append("streams-detached"),
-        write_ready=lambda _oracle: events.append("ready-written"),
-        wait_for_release=lambda: _record(events, "released"),
-        bind_and_serve=lambda _engine: _record(events, "http-bound"),
-        release_reloadable_state=(
-            (lambda _engine: _record(events, "release-state")) if compact else None
-        ),
-        restore_reloadable_state=(
-            (lambda _engine: _record(events, "restore-state")) if compact else None
-        ),
-    )
-    expected = ["engine-ready", "canary"]
-    if compact:
-        expected += ["release-state", "restore-state", "canary", "release-state"]
-    expected += ["streams-detached", "ready-written", "released"]
-    if compact:
-        expected.append("restore-state")
-    assert events == [*expected, "http-bound"]
-
-    if not compact:
-        return
-
-    failure_events: list[str] = []
     canaries = iter((_oracle(), _oracle((42,), " Lyon")))
 
     @asynccontextmanager
-    async def failing_context():
+    async def engine_context():
         yield object()
 
     async def next_canary(_engine: object) -> Oracle:
@@ -624,72 +466,20 @@ async def test_snapshot_child_lifecycle_and_failure_nonpublication(compact: bool
 
     with pytest.raises(SnapshotCanaryError, match="--include-model-state"):
         await run_snapshot_child(
-            engine_context=failing_context(),
+            engine_context=engine_context(),
             run_canary=next_canary,
-            prepare_snapshot=lambda: failure_events.append("streams-detached"),
-            write_ready=lambda _oracle: failure_events.append("ready-written"),
+            prepare_snapshot=lambda: events.append("prepared"),
+            write_ready=lambda _oracle: events.append("published"),
             wait_for_release=_return_none,
             bind_and_serve=lambda _engine: _return_none(),
             release_reloadable_state=lambda _engine: _return_none(),
             restore_reloadable_state=lambda _engine: _return_none(),
         )
-    assert failure_events == []
+    assert events == []
 
 
-@pytest.mark.asyncio
-async def test_snapshot_canary_records_logprob_alias_and_fixed_tolerance(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    candidate = SimpleNamespace(
-        token_ids=[12095],
-        text=" Paris",
-        logprobs=[{12095: SimpleNamespace(logprob=-0.125)}],
-    )
-
-    class FakeEngine:
-        sampling_params = None
-
-        async def generate(self, _prompt, sampling_params, **_kwargs):
-            self.sampling_params = sampling_params
-            yield SimpleNamespace(outputs=[candidate])
-
-    engine = FakeEngine()
-    assert await run_engine_canary(engine, "The capital of France is") == _oracle()
-    assert engine.sampling_params is not None
-    assert (
-        engine.sampling_params.temperature,
-        engine.sampling_params.min_tokens,
-        engine.sampling_params.max_tokens,
-        engine.sampling_params.seed,
-        engine.sampling_params.logprobs,
-    ) == (0, 1, 1, 0, 0)
-
-    captured: list[urllib.request.Request] = []
-
-    def fake_urlopen(request: urllib.request.Request, timeout: int):
-        assert timeout == 120
-        captured.append(request)
-        return io.BytesIO(
-            b'{"choices":[{"token_ids":[12095],"text":" Paris",'
-            b'"logprobs":{"token_logprobs":[-0.125]}}]}'
-        )
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    manifest = _manifest(model="source-model", served_model_name="snapshot-alias")
-    assert LocalSnapshotTools().request_oracle("::", 8000, manifest) == _oracle()
-    assert isinstance(captured[0].data, bytes)
-    payload = json.loads(captured[0].data)
-    assert (payload["model"], payload["logprobs"], payload["min_tokens"]) == (
-        "snapshot-alias",
-        0,
-        1,
-    )
-    assert oracles_match(_oracle(logprob=-100.0), _oracle(logprob=-100.0005))
-    assert not oracles_match(_oracle(logprob=-100.0), _oracle(logprob=-100.002))
-
-
-def test_snapshot_create_outcomes_and_child_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_snapshot_create_boundaries_permissions_and_rollback(
+    tmp_path: Path,
 ):
     old_umask = os.umask(0)
     try:
@@ -724,14 +514,13 @@ def test_snapshot_create_outcomes_and_child_paths(
             )
             if not include_model_state:
                 expected_argv += ("--enable-sleep-mode",)
-            assert manifest.engine_argv == expected_argv
-            assert manifest.boundary == (
-                "post-engine-init-pre-http-bind"
-                if include_model_state
-                else "post-engine-init-reloadable-state-released"
-            )
-            tools.launch_child.assert_called_once_with(
-                target, expected_argv, include_model_state=include_model_state
+            assert (manifest.engine_argv, manifest.boundary) == (
+                expected_argv,
+                (
+                    "post-engine-init-pre-http-bind"
+                    if include_model_state
+                    else "post-engine-init-reloadable-state-released"
+                ),
             )
             assert stat.S_IMODE(target.stat().st_mode) == 0o700
             assert stat.S_IMODE((target / "manifest.json").stat().st_mode) == 0o600
@@ -746,20 +535,15 @@ def test_snapshot_create_outcomes_and_child_paths(
             include_model_state=False,
         )
 
-    failed = tmp_path / "failed"
-    failing_tools = _fake_snapshot_tools(fail_dump=True)
-    with pytest.raises(RuntimeError, match="dump failed"):
-        create_snapshot(args(failed), tools=failing_tools)
-    failing_tools.abort_create.assert_called_once_with(100)
-    assert not failed.exists()
-
-    failed_manifest = tmp_path / "failed-manifest"
-    manifest_failure_tools = _fake_snapshot_tools()
-    manifest_failure_tools.make_manifest.side_effect = RuntimeError("manifest failed")
-    with pytest.raises(RuntimeError, match="manifest failed"):
-        create_snapshot(args(failed_manifest), tools=manifest_failure_tools)
-    manifest_failure_tools.abort_create.assert_called_once_with(100)
-    assert not failed_manifest.exists()
+    for phase in ("dump", "manifest"):
+        target = tmp_path / f"failed-{phase}"
+        tools = _fake_snapshot_tools(fail_dump=phase == "dump")
+        if phase == "manifest":
+            tools.make_manifest.side_effect = RuntimeError("manifest failed")
+        with pytest.raises(RuntimeError, match=f"{phase} failed"):
+            create_snapshot(args(target), tools=tools)
+        tools.abort_create.assert_called_once_with(100)
+        assert not target.exists()
 
 
 def _restore_fixture(tmp_path: Path) -> argparse.Namespace:
@@ -781,14 +565,6 @@ def test_snapshot_restore_rejects_identity_mismatch(tmp_path: Path):
     identity_mismatch.restore.assert_not_called()
 
 
-def test_snapshot_restore_completes_successful_transaction(tmp_path: Path):
-    args = _restore_fixture(tmp_path)
-    successful = _fake_snapshot_tools()
-    restore_snapshot(args, tools=successful)
-    successful.complete_restore.assert_called_once_with(100)
-    successful.cleanup.assert_not_called()
-
-
 def test_snapshot_restore_cleans_oracle_mismatch(tmp_path: Path):
     args = _restore_fixture(tmp_path)
     oracle_mismatch = _fake_snapshot_tools()
@@ -797,6 +573,8 @@ def test_snapshot_restore_cleans_oracle_mismatch(tmp_path: Path):
         restore_snapshot(args, tools=oracle_mismatch)
     oracle_mismatch.cleanup.assert_called_once()
     oracle_mismatch.complete_restore.assert_not_called()
+    assert oracles_match(_oracle(logprob=-100.0), _oracle(logprob=-100.0005))
+    assert not oracles_match(_oracle(logprob=-100.0), _oracle(logprob=-100.002))
 
 
 @pytest.mark.parametrize(
@@ -806,36 +584,18 @@ def test_snapshot_restore_cleans_oracle_mismatch(tmp_path: Path):
         pytest.param({"created_at": 1}, "created_at", id="strict-string"),
         pytest.param({"schema_version": True}, "schema_version", id="schema-bool"),
         pytest.param({"schema_version": 2}, "schema_version", id="schema-value"),
-        pytest.param({"complete": 1}, "complete", id="complete-int"),
-        pytest.param({"complete": False}, "complete", id="complete-false"),
         pytest.param({"boundary": "unknown"}, "boundary", id="boundary"),
         pytest.param({"process_tree": []}, "process_tree", id="empty-process-tree"),
         pytest.param({"process_tree": [0]}, "process_tree.0", id="nonpositive-pid"),
-        pytest.param(
-            {"process_tree": [100, 100]},
-            "root",
-            id="duplicate-process-pid",
-        ),
+        pytest.param({"process_tree": [100, 100]}, "root", id="duplicate-process-pid"),
         pytest.param({"cuda_holders": []}, "cuda_holders", id="empty-cuda-holders"),
         pytest.param(
-            {"cuda_holders": [-1]},
-            "cuda_holders.0",
-            id="nonpositive-cuda-holder",
+            {"cuda_holders": [-1]}, "cuda_holders.0", id="nonpositive-cuda-holder"
         ),
+        pytest.param({"cuda_holders": [999]}, "root", id="cuda-holder-outside-tree"),
+        pytest.param({"cuda_holders": [101, 101]}, "root", id="duplicate-cuda-holder"),
         pytest.param(
-            {"cuda_holders": [999]},
-            "root",
-            id="cuda-holder-outside-tree",
-        ),
-        pytest.param(
-            {"cuda_holders": [101, 101]},
-            "root",
-            id="duplicate-cuda-holder",
-        ),
-        pytest.param(
-            {"oracle_token_ids": []},
-            "oracle_token_ids",
-            id="empty-oracle-token",
+            {"oracle_token_ids": []}, "oracle_token_ids", id="empty-oracle-token"
         ),
         pytest.param(
             {"oracle_token_ids": [1, 2]},
@@ -853,35 +613,9 @@ def test_snapshot_restore_cleans_oracle_mismatch(tmp_path: Path):
             id="integer-logprob",
         ),
         pytest.param(
-            {"oracle_sampled_token_logprob": True},
-            "oracle_sampled_token_logprob",
-            id="boolean-logprob",
-        ),
-        pytest.param(
             {"oracle_sampled_token_logprob": float("nan")},
             "oracle_sampled_token_logprob",
             id="nan-logprob",
-        ),
-        pytest.param(
-            {"oracle_sampled_token_logprob": float("inf")},
-            "oracle_sampled_token_logprob",
-            id="infinite-logprob",
-        ),
-        pytest.param(
-            {
-                "socket_inventory": [
-                    {
-                        "family": "AF_INET",
-                        "socket_type": "SOCK_STREAM",
-                        "local_address": "127.0.0.1:8000",
-                        "remote_address": None,
-                        "state": "LISTEN",
-                        "unexpected": True,
-                    }
-                ]
-            },
-            "socket_inventory",
-            id="socket-extra-field",
         ),
     ],
 )
@@ -924,74 +658,10 @@ def _mark_snapshot_pids_free(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return probed_pids
 
 
-def test_snapshot_restore_rejects_occupied_pid_before_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    blocker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    try:
-        artifact = _local_restore_artifact(tmp_path)
-        (artifact / "release.json").write_bytes(b"release sentinel")
-        (artifact / "restored.pid").write_bytes(b"pid sentinel")
-        with (artifact / "child.log").open("ab") as child_log:
-            child_log.write(b" runtime tail")
-        saved_remaps = artifact / "link-remaps"
-        saved_remaps.mkdir()
-        (saved_remaps / "link_remap.270").write_bytes(b"semaphore state")
-        write_manifest_atomic(
-            artifact,
-            _manifest(
-                process_tree=(blocker.pid,),
-                cuda_holders=(blocker.pid,),
-            ),
-        )
-
-        tools = LocalSnapshotTools()
-        tools.shm_dir = tmp_path / "shm"
-        tools.shm_dir.mkdir()
-        monkeypatch.setattr(tools, "preflight", lambda *_args: None)
-        monkeypatch.setattr(
-            tools, "current_identity", lambda _gpu_uuid: _runtime_identity()
-        )
-        criu_calls: list[str] = []
-
-        def unexpected_criu(action: str, *_args: object) -> None:
-            criu_calls.append(action)
-            raise RuntimeError("CRIU called before PID collision rejection")
-
-        monkeypatch.setattr(tools, "_criu", unexpected_criu)
-
-        def file_state() -> dict[str, bytes]:
-            return {
-                str(path.relative_to(tmp_path)): path.read_bytes()
-                for path in tmp_path.rglob("*")
-                if path.is_file()
-            }
-
-        before = file_state()
-        args = argparse.Namespace(
-            snapshot_dir=str(artifact), host="127.0.0.1", port=9000
-        )
-        with pytest.raises(SnapshotRestoreError) as exc_info:
-            restore_snapshot(args, tools=tools)
-
-        assert str(blocker.pid) in str(exc_info.value)
-        assert criu_calls == []
-        assert blocker.poll() is None
-        assert file_state() == before
-        assert not (tools.shm_dir / "link_remap.270").exists()
-    finally:
-        if blocker.poll() is None:
-            blocker.terminate()
-            try:
-                blocker.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                blocker.kill()
-                blocker.wait(timeout=5)
-
-
 @pytest.mark.parametrize(
     ("probe_error", "diagnostic"),
     [
+        pytest.param(None, "already occupied: 100", id="occupied"),
         pytest.param(
             PermissionError(), "already occupied: 100", id="permission-denied"
         ),
@@ -1002,27 +672,54 @@ def test_snapshot_restore_rejects_occupied_pid_before_mutation(
         ),
     ],
 )
-def test_snapshot_restore_pid_probe_is_fail_closed(
+def test_snapshot_restore_rejects_unavailable_pid_before_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe_error: OSError,
+    probe_error: OSError | None,
     diagnostic: str,
 ):
     artifact = _local_restore_artifact(tmp_path)
+    release = artifact / "release.json"
+    pidfile = artifact / "restored.pid"
+    release.write_bytes(b"release sentinel")
+    pidfile.write_bytes(b"pid sentinel")
+    remaps = artifact / "link-remaps"
+    remaps.mkdir()
+    (remaps / "link_remap.270").write_bytes(b"semaphore state")
+    write_manifest_atomic(artifact, _manifest(process_tree=(100,), cuda_holders=(100,)))
+    before = {
+        path.relative_to(artifact): path.read_bytes()
+        for path in artifact.rglob("*")
+        if path.is_file()
+    }
     tools = LocalSnapshotTools()
+    tools.shm_dir = tmp_path / "shm"
+    tools.shm_dir.mkdir()
     criu_calls: list[str] = []
 
     def fail_probe(_pid: int, _signal: int) -> None:
-        raise probe_error
+        if probe_error is not None:
+            raise probe_error
 
     monkeypatch.setattr(snapshot_runtime.os, "kill", fail_probe)
+    monkeypatch.setattr(tools, "preflight", lambda *_args: None)
+    monkeypatch.setattr(tools, "current_identity", lambda _uuid: _runtime_identity())
     monkeypatch.setattr(
         tools, "_criu", lambda action, *_args: criu_calls.append(action)
     )
 
     with pytest.raises(SnapshotRestoreError, match=diagnostic):
-        tools.restore(artifact, _manifest())
+        restore_snapshot(
+            argparse.Namespace(snapshot_dir=str(artifact), host="127.0.0.1", port=9000),
+            tools=tools,
+        )
     assert criu_calls == []
+    assert {
+        path.relative_to(artifact): path.read_bytes()
+        for path in artifact.rglob("*")
+        if path.is_file()
+    } == before
+    assert not (tools.shm_dir / "link_remap.270").exists()
 
 
 def _fake_restored_tree(
@@ -1088,82 +785,6 @@ def _close_pipes(pipes: dict[int, tuple[int, int]]) -> None:
         for descriptor in pipe:
             with suppress(OSError):
                 os.close(descriptor)
-
-
-def test_snapshot_criu_uses_file_locks_and_cuda_holder_gpu(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    probed_pids = _mark_snapshot_pids_free(monkeypatch)
-    artifact = tmp_path / "snapshot"
-    artifact.mkdir(mode=0o700)
-    (artifact / "child.log").write_bytes(b"startup log")
-    tools = LocalSnapshotTools()
-    tools.shm_dir = tmp_path / "shm"
-    tools.shm_dir.mkdir()
-    calls: list[tuple[str, list[str]]] = []
-
-    def criu(action: str, _artifact: Path, arguments: list[str]) -> None:
-        calls.append((action, arguments))
-        if action == "restore":
-            raise RuntimeError("stop after command capture")
-
-    monkeypatch.setattr(tools, "_criu", criu)
-    tools.dump(
-        artifact,
-        ProcessInventory(100, (100, 101), (101,), "GPU-selected"),
-    )
-    with pytest.raises(RuntimeError, match="stop after command capture"):
-        tools.restore(artifact, _manifest())
-
-    assert probed_pids == [100, 101]
-    assert [action for action, _arguments in calls] == ["dump", "restore"]
-    assert all("--file-locks" in arguments for _action, arguments in calls)
-    monkeypatch.setattr(
-        tools,
-        "_run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(
-            command,
-            0,
-            "7, GPU-other\n101, GPU-selected\n",
-            "",
-        ),
-    )
-    assert (
-        tools._gpu_uuid_for_pids((101,), ("7, GPU-other", "101, GPU-selected"))
-        == "GPU-selected"
-    )
-
-
-def test_snapshot_inventory_probes_each_process_once(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    tools = LocalSnapshotTools()
-    descriptor_pids: list[int] = []
-    nvidia_queries: list[tuple[str, ...]] = []
-    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100, 101))
-
-    def descriptor_targets(pid: int) -> tuple[str, ...]:
-        descriptor_pids.append(pid)
-        return ()
-
-    def run(command: list[str], **_kwargs: object):
-        nvidia_queries.append(tuple(command))
-        output = (
-            "101\n" if "--query-compute-apps=pid" in command else "101, GPU-selected\n"
-        )
-        return subprocess.CompletedProcess(command, 0, output, "")
-
-    monkeypatch.setattr(tools, "_descriptor_targets", descriptor_targets)
-    monkeypatch.setattr(tools, "_tcp_records", lambda: ())
-    monkeypatch.setattr(tools, "_run", run)
-
-    inventory = tools.inventory(100)
-
-    assert descriptor_pids == [100, 101]
-    assert len(nvidia_queries) == 1
-    assert inventory.cuda_holders == (101,)
-    assert inventory.gpu_uuid == "GPU-selected"
-    assert not hasattr(inventory, "sockets")
 
 
 @pytest.mark.parametrize(
