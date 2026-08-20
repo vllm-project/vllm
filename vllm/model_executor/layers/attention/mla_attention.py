@@ -811,6 +811,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
+        use_forced_mqa = False
 
         if self.impl.is_sparse and num_mha_tokens > 0:
             prefill = getattr(attn_metadata, "prefill", None)
@@ -829,10 +830,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
             )
-            use_mha = (use_dense_mha or use_masked_mha) and not (
+            use_forced_mqa = not (use_dense_mha or use_masked_mha) or (
                 self._vllm_config.attention_config.sparse_mla_force_mqa
             )
-            if not use_mha:
+            if use_forced_mqa:
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
 
@@ -980,16 +981,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 assert lse is not None
                 assert self.dcp_manager is not None
                 decode_metadata = getattr(attn_metadata, "decode", None)
-                seq_lens = (
-                    decode_metadata.seq_lens
-                    if decode_metadata is not None
-                    else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
-                        : attn_metadata.num_decodes
+                if use_forced_mqa:
+                    seq_lens = cast(torch.Tensor, attn_metadata.seq_lens)  # type: ignore[attr-defined]
+                    query_start_loc = attn_metadata.query_start_loc
+                else:
+                    seq_lens = (
+                        decode_metadata.seq_lens
+                        if decode_metadata is not None
+                        else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
+                            : attn_metadata.num_decodes
+                        ]
+                    )
+                    query_start_loc = attn_metadata.query_start_loc[
+                        : attn_metadata.num_decodes + 1
                     ]
-                )
-                query_start_loc = attn_metadata.query_start_loc[
-                    : attn_metadata.num_decodes + 1
-                ]
                 attn_out = self.dcp_manager.combine(
                     attn_out,
                     lse,
