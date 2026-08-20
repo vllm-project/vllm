@@ -8,6 +8,7 @@
 #include <ATen/ops/empty.h>
 #include <ATen/ops/gelu.h>
 #include <c10/util/BFloat16.h>
+#include <torch/all.h>
 
 constexpr uint32_t ActivationLutSize = 1u << 16;
 
