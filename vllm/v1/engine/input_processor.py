@@ -51,7 +51,6 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
@@ -128,18 +127,15 @@ class InputProcessor:
                     "not configured. Please set --reasoning-parser "
                     "and/or --reasoning-config to use thinking_token_budget."
                 )
-            if params.trace_decode_token_ids:
-                if not self.model_config.enable_trace_replay:
-                    raise VLLMValidationError(
-                        "trace_decode_token_ids is set but trace replay is not "
-                        "enabled. Start the engine with --enable-trace-replay "
-                        "to use it."
-                    )
-                if not self.use_v2_model_runner:
-                    raise VLLMValidationError(
-                        "trace_decode_token_ids is only supported by model "
-                        "runner V2, but this engine is running model runner V1."
-                    )
+            if (
+                params.trace_decode_token_ids
+                and not self.model_config.enable_trace_replay
+            ):
+                raise VLLMValidationError(
+                    "trace_decode_token_ids is set but trace replay is not "
+                    "enabled. Start the engine with --enable-trace-replay "
+                    "to use it."
+                )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS

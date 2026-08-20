@@ -113,6 +113,16 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def test_trace_replay_requires_v2_model_runner():
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_trace_replay=True),
+        use_v2_model_runner=False,
+    )
+
+    with pytest.raises(ValueError, match="trace replay requires Model Runner V2"):
+        VllmConfig._verify_trace_replay_config(config)
+
+
 def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):
     """ROCm keeps DeepSeek V4 on MRV1, which is still faster there."""
     from vllm.config.vllm import default_v2_model_runner_architectures
