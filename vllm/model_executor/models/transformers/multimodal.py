@@ -350,24 +350,21 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> "BatchFeature":
         """Run the HF processor and unpad inputs."""
         try:
-            hf_inputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs, tok_kwargs
-            )
+            hf_inputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
         except ValueError:
             if any(mm_data.values()):
                 raise
             # Some processors reject a prompt holding placeholders with
             # no data to go with them, so tokenize it without them
-            prompt_ids = self.info.get_tokenizer().encode(prompt, **tok_kwargs)
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
             hf_inputs = transformers.BatchFeature(
                 dict(input_ids=[prompt_ids]), tensor_type="pt"
             )
         self._unpad_images(hf_inputs)
-        self._unpad_audios(hf_inputs, mm_data, mm_kwargs, tok_kwargs)
+        self._unpad_audios(hf_inputs, mm_data, mm_kwargs)
         return hf_inputs
 
     def _unpad_audios(
@@ -375,7 +372,6 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         hf_inputs: "BatchFeature",
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> None:
         """Replace the audio fields with each audio processed on its own.
 
@@ -395,7 +391,7 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
                 dict(
                     text=self.dummy_inputs.get_dummy_text({"audio": 1}), audio=[audio]
                 ),
-                dict(**mm_kwargs, **tok_kwargs),
+                mm_kwargs,
             )
             for audio in audios
         ]
@@ -459,13 +455,12 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> "BatchFeature":
         """Ask which modality owns each token of the expanded prompt, which is the
         only marking of the tokens an expansion adds around an item."""
         if any(mm_data.values()):
             mm_data = {**mm_data, "return_mm_token_type_ids": True}
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
 
     def _get_mm_token_ids(self, modality: str) -> list[int]:
         """Token ids marking where `modality` sits in the prompt, which for some
@@ -744,7 +739,6 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
         *,
         enable_hf_prompt_update: bool,
     ) -> tuple[list[int], "BatchFeature", bool]:
@@ -774,7 +768,6 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
             prompt,
             mm_items,
             hf_processor_mm_kwargs,
-            tokenization_kwargs,
             enable_hf_prompt_update=False,
         )
 
@@ -832,13 +825,12 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> "BatchFeature":
         """Ask for the replacement each placeholder expands to, and record it as
         per-item fields: its token ids, and the tokens or patches behind them."""
         if has_mm_data := any(mm_data.values()):
             mm_data = {**mm_data, "return_text_replacement_offsets": True}
-        hf_inputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        hf_inputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
         # Drop the inputs the model would reject
         hf_inputs.pop("mm_token_type_ids", None)
         hf_inputs.pop("token_type_ids", None)
