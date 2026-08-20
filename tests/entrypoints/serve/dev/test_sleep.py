@@ -26,6 +26,8 @@ def test_sleep_mode():
         args,
         env_dict={"VLLM_SERVER_DEV_MODE": "1", "CUDA_VISIBLE_DEVICES": "0"},
     ) as remote_server:
+        response = requests.post(remote_server.url_for("pause"))
+        assert response.status_code == 200
         response = requests.post(remote_server.url_for("sleep"), params={"level": "1"})
         assert response.status_code == 200
         response = requests.get(remote_server.url_for("is_sleeping"))
@@ -55,6 +57,8 @@ def test_sleep_mode():
         assert discard_all == 0
 
         # test wake up with tags
+        response = requests.post(remote_server.url_for("pause"))
+        assert response.status_code == 200
         response = requests.post(remote_server.url_for("sleep"), params={"level": "1"})
         assert response.status_code == 200
 

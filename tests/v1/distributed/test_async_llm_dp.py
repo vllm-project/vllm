@@ -411,6 +411,7 @@ async def test_dp_sleep_late_request_does_not_block_drain():
             pass
         assert await _poll_flag(engine, False, timeout=30)
 
+        await engine.pause_generation()
         await engine.sleep(level=1)
         assert await engine.is_sleeping()
 
@@ -713,3 +714,38 @@ async def test_dp_pause_barrier_request_deadlock():
         assert not await engine.is_paused()
         # Let the two requests we sent mid-barrier complete.
         await asyncio.gather(*mid_barrier_tasks)
+
+
+@pytest.mark.asyncio
+async def test_dp_sleep_requires_completed_pause():
+    """RFC #51476 layering: pause owns request fate and quiescence, sleep
+    owns memory. Sleep is refused before a pause completes, and releases
+    and restores memory cleanly after one."""
+    with ExitStack() as after:
+        engine = AsyncLLM.from_engine_args(_get_dp_pause_engine_args(True))
+        after.callback(engine.shutdown)
+
+        async for _ in engine.generate(
+            request_id="warmup",
+            prompt=DP_PAUSE_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+
+        with pytest.raises(Exception, match="pause"):
+            await engine.sleep(level=1)
+        assert not await engine.is_sleeping()
+
+        await engine.pause_generation(mode="abort")
+        await engine.sleep(level=1)
+        assert await engine.is_sleeping()
+
+        await engine.wake_up()
+        assert not await engine.is_sleeping()
+        async for out in engine.generate(
+            request_id="after-layered-sleep",
+            prompt=DP_PAUSE_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert out.finished

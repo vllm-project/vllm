@@ -177,6 +177,7 @@ def test_end_to_end(model: str):
     # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
     # which is difficult to measure in the test. therefore, we only
     # test sleep level 1 here.
+    llm.pause_generation()
     llm.sleep(level=1)
 
     free_gpu_bytes_after_sleep, total = torch.accelerator.get_memory_info()
@@ -196,6 +197,7 @@ def test_end_to_end(model: str):
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
+    llm.pause_generation()
     llm.sleep(level=1)
     llm.wake_up(tags=["weights"])
 
@@ -224,6 +226,7 @@ def test_deep_sleep():
     output = llm.generate(prompt, sampling_params)
 
     # Put the engine to deep sleep
+    llm.pause_generation()
     llm.sleep(level=2)
 
     free_gpu_bytes_after_sleep, total = torch.accelerator.get_memory_info()
@@ -266,6 +269,7 @@ def test_deep_sleep_lora():
     output = llm.generate(prompt, sampling_params)
 
     # Level-2 sleep discards all GPU memory
+    llm.pause_generation()
     llm.sleep(level=2)
 
     # Reload weights from checkpoint
@@ -277,6 +281,7 @@ def test_deep_sleep_lora():
 
     # Multiple cycles should not accumulate corruption
     for _ in range(3):
+        llm.pause_generation()
         llm.sleep(level=2)
         llm.wake_up(tags=["weights"])
         llm.collective_rpc("reload_weights")
@@ -329,6 +334,7 @@ def test_deep_sleep_lora_tp2(num_gpus_available, monkeypatch):
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
 
+    llm.pause_generation()
     llm.sleep(level=2)
     llm.wake_up(tags=["weights"])
     llm.collective_rpc("reload_weights")
@@ -356,6 +362,7 @@ def test_deep_sleep_async():
             pass
 
         # Put the engine to deep sleep
+        await llm.pause_generation()
         await llm.sleep(level=2)
 
         await llm.wake_up(tags=["weights"])
@@ -387,6 +394,7 @@ def test_deep_sleep_fp8_kvcache():
     output = llm.generate(prompt, sampling_params)
 
     # Put the engine to deep sleep
+    llm.pause_generation()
     llm.sleep(level=2)
 
     used_bytes = current_platform.get_current_memory_usage() - used_bytes_baseline

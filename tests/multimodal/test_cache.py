@@ -689,6 +689,7 @@ def test_sleep_wake_preserves_mm_cache_consistency():
     )
 
     llm.generate([prompt], sampling_params)
+    llm.pause_generation()
     llm.sleep(level=1)
     llm.wake_up()
     output2 = llm.generate([prompt], sampling_params)

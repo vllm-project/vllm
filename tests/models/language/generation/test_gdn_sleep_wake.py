@@ -56,6 +56,7 @@ def test_gdn_sleep_wake_no_stale_state():
 
     # Default sleep offloads weights and DISCARDS the kv / GDN state cache;
     # wake_up re-creates that memory (fresh, not guaranteed zeroed).
+    llm.pause_generation()
     llm.sleep()
     llm.wake_up()
 

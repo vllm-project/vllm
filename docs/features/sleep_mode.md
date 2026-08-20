@@ -35,6 +35,8 @@ llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
 
 ```python
 # Sleep level 1
+# Pause generation first: sleep only releases memory
+llm.pause_generation()
 # Put the engine to sleep (level=1: offload weights to CPU RAM, discard KV cache)
 llm.sleep(level=1)
 
@@ -44,6 +46,7 @@ llm.wake_up()
 
 ```python
 # Sleep level 2
+llm.pause_generation()
 # Put the engine to sleep (level=2: discard both weights and KV cache)
 llm.sleep(level=2)
 
@@ -64,7 +67,8 @@ During RLHF training, vLLM allows you to selectively wake up only the model weig
 Use `tags=["weights"]` or `tags=["kv_cache"]` to control which resources are restored, useful for RLHF and weight updates. **Note** that `is_sleeping` will report `true` until all components are awake.
 
 ```python
-# Put engine to deep sleep (level=2)
+# Pause generation, then put the engine to deep sleep (level=2)
+llm.pause_generation()
 llm.sleep(level=2)
 # ... Get the new weights
 # Wake up only weights to avoid OOM
@@ -91,6 +95,7 @@ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
 Below is an example of how to sleep and wake up a model in level 1.
 
 ```bash
+curl -X POST 'http://localhost:8000/pause'
 curl -X POST 'http://localhost:8000/sleep?level=1'
 curl -X POST 'http://localhost:8000/wake_up'
 ```
@@ -98,6 +103,7 @@ curl -X POST 'http://localhost:8000/wake_up'
 And this is an example of how to sleep and wake up a model in level 2.
 
 ```bash
+curl -X POST 'http://localhost:8000/pause'
 curl -X POST 'http://localhost:8000/sleep?level=2'
 # Reallocate weights memory only
 curl -X POST 'http://localhost:8000/wake_up?tags=weights'
@@ -109,6 +115,7 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 #### HTTP endpoints
 
+- `POST /pause` — Pause generation; required before `/sleep` (see RFC #51476).
 - `POST /sleep?level=1` — Put the model to sleep (`level=1`).
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).

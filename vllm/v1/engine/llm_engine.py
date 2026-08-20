@@ -360,10 +360,18 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def pause_generation(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> None:
+        self.engine_core.pause_scheduler(mode, clear_cache)
+
+    def resume_generation(self) -> None:
+        self.engine_core.resume_scheduler()
+
+    def sleep(self, level: int = 1):
         if level >= 1:
             self.renderer.clear_mm_cache()
-        self.engine_core.sleep(level, mode)
+        self.engine_core.sleep(level)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)

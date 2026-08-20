@@ -71,6 +71,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.exceptions import EngineNotPausedError
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -864,43 +865,30 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
-        """Put the engine to sleep at the specified level.
+    def _paused_and_idle(self) -> bool:
+        """Whether a completed pause has quiesced this engine."""
+        return (
+            self.is_scheduler_paused()
+            and not self.scheduler.has_requests()
+            and not self.batch_queue
+        )
+
+    def sleep(self, level: int = 1) -> None:
+        """Release GPU memory. Requires a completed pause: request fate and
+        quiescence belong to pause_scheduler (RFC #51476).
 
         Args:
             level: Sleep level.
-                - Level 0: Pause scheduling only. Requests are still accepted
-                           but not processed. No GPU memory changes.
                 - Level 1: Offload model weights to CPU, discard KV cache.
                 - Level 2: Discard all GPU memory.
-            mode: Pause mode - how to deal with any existing requests, see
-                documentation of pause_scheduler method.
         """
-
-        # Pause scheduler before sleeping.
-        clear_prefix_cache = level >= 1
-        pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
-        if level < 1:
-            return pause_future
-
-        # Level 1+: Delegate to executor for GPU memory management
-        model_executor = self.model_executor
-        if pause_future is None:
-            model_executor.sleep(level)
-            return None
-
-        future = Future[Any]()
-
-        def pause_complete(f: Future):
-            try:
-                f.result()  # propagate any exception
-                future.set_result(model_executor.sleep(level))
-            except Exception as e:
-                future.set_exception(e)
-
-        logger.info("Waiting for in-flight requests to complete before sleeping...")
-        pause_future.add_done_callback(pause_complete)
-        return future
+        if not self._paused_and_idle():
+            raise EngineNotPausedError(
+                "sleep() requires a completed pause_generation() first"
+            )
+        if level >= 1:
+            self._reset_caches()
+            self.model_executor.sleep(level)
 
     def wake_up(self, tags: list[str] | None = None):
         """Wake up the engine from sleep.
@@ -1382,6 +1370,11 @@ class EngineCoreProc(EngineCore):
             or self.scheduler.has_requests()
             or bool(self.batch_queue)
         )
+
+    def _paused_and_idle(self) -> bool:
+        # engines_running also covers a pause whose DP consensus is still
+        # in flight: kick-started ranks must not release memory yet.
+        return self.is_scheduler_paused() and not self.has_work()
 
     def is_running(self) -> bool:
         """Returns true if shutdown has not been requested."""
