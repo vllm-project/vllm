@@ -979,9 +979,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
                 assert self.dcp_manager is not None
+                decode_metadata = getattr(attn_metadata, "decode", None)
                 seq_lens = (
-                    attn_metadata.decode.seq_lens
-                    if attn_metadata.decode is not None
+                    decode_metadata.seq_lens
+                    if decode_metadata is not None
                     else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
                         : attn_metadata.num_decodes
                     ]
