@@ -149,6 +149,10 @@ def fused_qk_rmsnorm_rope_gate(
     rotary_dim: int,
     mrope_section: list[int] | tuple[int, int, int] | None = None,
     norm_beta: float = 0.0,
+    *,
+    query_out: torch.Tensor | None = None,
+    key_out: torch.Tensor | None = None,
+    gate_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused split + QK-RMSNorm + (partial) RoPE + gate copy for Qwen attn.
 
@@ -166,6 +170,9 @@ def fused_qk_rmsnorm_rope_gate(
         rotary_dim: rotary dimension; must be even and <= head_dim
         mrope_section: interleaved T/H/W frequency counts for 2D positions
         norm_beta: scalar added to the RMSNorm weight
+        query_out: optional caller-owned Q output buffer
+        key_out: optional caller-owned K output buffer
+        gate_out: optional caller-owned gate output buffer
 
     Returns:
         (q_out, k_out, gate_out) -- all contiguous (n_tokens, heads * head_dim).
@@ -224,13 +231,25 @@ def fused_qk_rmsnorm_rope_gate(
         positions_stride_t = positions.stride(0)
 
     n_tokens = q_gate.shape[0]
-    q_out = torch.empty(
-        (n_tokens, num_q_heads * head_dim), dtype=q_gate.dtype, device=q_gate.device
-    )
-    k_out = torch.empty(
-        (n_tokens, num_kv_heads * head_dim), dtype=k.dtype, device=k.device
-    )
-    gate_out = torch.empty_like(q_out)
+    provided_outputs = (query_out, key_out, gate_out)
+    if any(output is not None for output in provided_outputs):
+        if not all(output is not None for output in provided_outputs):
+            raise ValueError("Q/K/gate output buffers must be all set or all unset")
+        q_out = query_out
+        k_out = key_out
+        assert q_out is not None
+        assert k_out is not None
+        assert gate_out is not None
+    else:
+        q_out = torch.empty(
+            (n_tokens, num_q_heads * head_dim),
+            dtype=q_gate.dtype,
+            device=q_gate.device,
+        )
+        k_out = torch.empty(
+            (n_tokens, num_kv_heads * head_dim), dtype=k.dtype, device=k.device
+        )
+        gate_out = torch.empty_like(q_out)
     if n_tokens == 0:
         return q_out, k_out, gate_out
 

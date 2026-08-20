@@ -256,6 +256,7 @@ def test_splitting_ops_dynamic():
     assert splitting_ops is not None
     assert {
         "vllm::qwen_gdn_attention_core_fused_norm_packed",
+        "vllm::qwen3_next_fp8_qkv_prep",
     } <= set(splitting_ops)
 
     # When use_inductor_graph_partition=True

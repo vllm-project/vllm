@@ -778,6 +778,13 @@ class CompilationConfig:
         "vllm::hpc_rope_norm_forward",
     ]
 
+    # Ops that consume runtime-only forward context and must execute outside
+    # mixed piecewise CUDA graphs. Unlike attention ops, these do not affect
+    # splitting_ops_contain_attention().
+    _piecewise_cudagraph_unsafe_ops: ClassVar[list[str]] = [
+        "vllm::qwen3_next_fp8_qkv_prep",
+    ]
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
@@ -1154,6 +1161,7 @@ class CompilationConfig:
                 # for details. Make a copy to avoid mutating the class-level
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
+                self.splitting_ops.extend(self._piecewise_cudagraph_unsafe_ops)
 
                 # unified_kv_cache_update has a string param that prevents Inductor
                 # from reusing piecewise graphs. Remove it from the compiled graph.
