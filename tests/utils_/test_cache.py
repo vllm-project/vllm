@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
+
 from vllm.utils.cache import CacheInfo, LRUCache
 
 
@@ -125,6 +127,7 @@ def test_lru_cache():
     assert 6 in cache
 
 
+<<<<<<< HEAD
 def test_cache_info_hit_ratio():
     # No queries yet: ratio should be a float 0.0, not int 0, to match the
     # `-> float` return type of the property.
@@ -138,3 +141,16 @@ def test_cache_info_hit_ratio():
 
     full_info = CacheInfo(hits=3, total=3)
     assert full_info.hit_ratio == 1.0
+=======
+def test_lru_cache_put_if_fits():
+    cache = LRUCache(10, getsizeof=lambda x: x)
+
+    assert cache.put_if_fits("ok", 4) is True
+    assert cache["ok"] == 4
+
+    assert cache.put_if_fits("big", 11) is False
+    assert "big" not in cache
+
+    with pytest.raises(ValueError, match="value too large"):
+        cache.put("big", 11)
+>>>>>>> upstream/main
