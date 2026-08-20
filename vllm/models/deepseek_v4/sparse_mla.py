@@ -264,6 +264,8 @@ class DeepseekV4SparseMLAMetadataBuilder(
             ),
             self.c128a_max_compressed,
         )
+        assert active_topk_width >= cm.max_seq_len // self.compress_ratio
+        assert active_topk_width % _C128A_TOPK_ALIGNMENT == 0
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],
@@ -327,10 +329,19 @@ def build_c128a_topk_metadata(
     """
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
+    assert max_compressed_tokens % _C128A_TOPK_ALIGNMENT == 0
+    assert (
+        0
+        < max_compressed_tokens
+        <= min(global_decode_buffer.shape[1], prefill_buffer.shape[1])
+    )
+    assert global_decode_buffer.stride(-1) == prefill_buffer.stride(-1) == 1
 
     global_decode = global_decode_buffer[:num_decode_tokens, :max_compressed_tokens]
     decode_lens = decode_lens_buffer[:num_decode_tokens]
     prefill_local = prefill_buffer[:num_prefill_tokens, :max_compressed_tokens]
+    assert global_decode.stride(0) == global_decode_buffer.stride(0)
+    assert prefill_local.stride(0) == prefill_buffer.stride(0)
 
     if num_tokens == 0:
         return global_decode, decode_lens, prefill_local
