@@ -15,6 +15,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.distributed.utils import split_tensor_along_last_dim
+from vllm.logger import init_logger
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
@@ -31,6 +32,8 @@ from vllm.model_executor.models.transformers.layers import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
 
 
 def _is_squared(node: object, x: fx.Node) -> bool:
@@ -122,6 +125,10 @@ class RMSNormFuser(BaseFuser):
     """Gemma-style `(1 + weight)` scaling (weight initialised at zero)."""
     source_cls: str
     """Class name of the norm this was matched from (for logging)."""
+    eps_attr: str | None = None
+    """Attribute holding `eps`, read per instance in `fuse`."""
+    eps: float | None = None
+    """`eps` itself, when it is not held in an attribute (see `_eps_source`)."""
 
     def info(self, name: str) -> str:
         norm = "GemmaRMSNorm" if self.zero_centered else "RMSNorm"
@@ -140,7 +147,13 @@ class RMSNormFuser(BaseFuser):
         if rms_norm is not None and rms_norm.args and peel(rms_norm.args[0]) is x:
             if _has_trailing_compute(graph, rms_norm):
                 return None
-            return cls(zero_centered=False, source_cls=type(module).__name__)
+            eps_attr, eps = cls._eps_source(graph, module)
+            return cls(
+                zero_centered=False,
+                source_cls=type(module).__name__,
+                eps_attr=eps_attr,
+                eps=eps,
+            )
         # Handle explicit `x * rsqrt(mean(x**2, -1) + eps)` pattern.
         # The rsqrt over the mean-square variance is the spine of the norm.
         rsqrt = None
@@ -169,7 +182,51 @@ class RMSNormFuser(BaseFuser):
         # The norm must be the last compute in forward, or it is not a pure norm.
         if _has_trailing_compute(graph, tail):
             return None
-        return cls(zero_centered=zero_centered, source_cls=type(module).__name__)
+        eps_attr, eps = cls._eps_source(graph, module)
+        return cls(
+            zero_centered=zero_centered,
+            source_cls=type(module).__name__,
+            eps_attr=eps_attr,
+            eps=eps,
+        )
+
+    @classmethod
+    def _eps_source(
+        cls, graph: fx.Graph, module: nn.Module
+    ) -> tuple[str | None, float | None]:
+        """Where `fuse` should read `eps` from, resolved once per class."""
+        eps = cls._eps_from_graph(graph)
+        if eps is None:
+            return None, None
+        # Whatever supplied the constant must still equal it.
+        candidates = {
+            name: value
+            for name, value in vars(module).items()
+            if isinstance(value, float) and value == eps
+        }
+        # Use unique markers and retrace to verify exactly which attribute is eps.
+        markers = {float(-index - 1): name for index, name in enumerate(candidates)}
+        marked = None
+        if markers:
+            try:
+                for marker, name in markers.items():
+                    setattr(module, name, marker)
+                if (remarked := trace(module)) is not None:
+                    marked = cls._eps_from_graph(remarked)
+            finally:
+                for name, value in candidates.items():
+                    setattr(module, name, value)
+        if (name := markers.get(marked)) is not None:
+            return name, None
+        logger.debug_once(
+            "%s does not hold its eps (%s) in an attribute. Every instance in this "
+            "model will use the value traced from this instance. If this is not "
+            "desired, consider storing and reading eps using attribute of %s.",
+            type(module).__name__,
+            eps,
+            type(module).__name__,
+        )
+        return None, eps
 
     @staticmethod
     def _eps_from_graph(graph: fx.Graph) -> float | None:
@@ -180,7 +237,7 @@ class RMSNormFuser(BaseFuser):
         if fused is not None and fused.args and peel(fused.args[0]) is x:
             args, kwargs = fused.args, fused.kwargs
             eps = args[3] if len(args) > 3 else kwargs.get("eps")
-            return eps if isinstance(eps, (int, float)) else None
+            return float(eps) if isinstance(eps, (int, float)) else None
         for node in graph.nodes:
             if is_op(node, "rsqrt") and (eps := _variance_eps(node, x)) is not None:
                 return eps
@@ -196,10 +253,9 @@ class RMSNormFuser(BaseFuser):
         weight = getattr(module, "weight", None)
         has_weight = weight is not None
         hidden_size = weight.size(0) if has_weight else 0
-        graph = trace(module)
-        eps = self._eps_from_graph(graph) if graph is not None else None
-        if eps is None:
-            # If eps not in graph, match torch behaviour.
+        eps = getattr(module, self.eps_attr, None) if self.eps_attr else self.eps
+        if not isinstance(eps, (int, float)):
+            # If eps was not detected, match torch behaviour.
             dtype = weight.dtype if has_weight else vllm_config.model_config.dtype
             eps = torch.finfo(dtype).eps
         if self.zero_centered:
