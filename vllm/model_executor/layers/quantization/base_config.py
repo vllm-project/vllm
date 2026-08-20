@@ -11,6 +11,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.models.utils import WeightsMapper
 else:
@@ -225,6 +226,10 @@ class QuantizationConfig(ABC):
             re.compile(r"(?<!\.attn)\.([qkv])_zero_point$"): r".attn.\1_zero_point",
         }
         return WeightsMapper(orig_to_new_regex=orig_to_new_regex)
+
+    def get_kv_cache_dtype(self, prefix: str) -> "CacheDType | None":
+        """Return a checkpoint-selected KV-cache dtype for one layer."""
+        return None
 
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"

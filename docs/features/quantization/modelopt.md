@@ -19,6 +19,22 @@ following `quantization.quant_algo` values:
 - `NVFP4`: ModelOpt NVFP4 checkpoints (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
 
+### Layer-wise mixed-precision KV cache
+
+ModelOpt checkpoints may select full FP8 K/V or full NVFP4 K/V independently
+for each attention layer. When `kv_cache_quant_algo` is `MIXED_PRECISION`, vLLM
+reads the versioned `kv_cache_quantized_layers` mapping and dispatches each
+listed layer to its existing FP8 or NVFP4 KV-cache implementation. Layers not
+listed in the mapping keep the model dtype.
+
+Keep `kv_cache_dtype="auto"` (the default) to use the checkpoint recipe. An
+explicit `--kv-cache-dtype` overrides the recipe for every layer, and
+`--kv-cache-dtype-skip-layers` still takes precedence for selected layers.
+
+This integration supports full FP8 K/V and full NVFP4 K/V layers. A format
+that mixes K and V within one layer, such as FP8 K with NVFP4 V, requires a
+separate attention-kernel implementation.
+
 !!! note
     For NVFP4 checkpoints, vLLM selects a GEMM kernel automatically at load
     time from the backends available on the current platform (CUTLASS,

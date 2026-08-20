@@ -19,10 +19,12 @@ from vllm.model_executor.kernels.linear import (
     HummingNvFp4LinearKernel,
     MarlinNvFp4LinearKernel,
 )
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptFp8LinearMethod,
+    ModelOptKVCacheMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
@@ -70,11 +72,19 @@ def _mock_lm_head() -> Mock:
     return lm_head
 
 
-def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionConfig:
+def _mixed_precision_config(
+    quantized_layers: dict,
+    *,
+    kv_cache_quant_method: str | None = None,
+    kv_cache_quantized_layers: dict | None = None,
+    kv_cache_schema_version: int | None = None,
+) -> ModelOptMixedPrecisionConfig:
     return ModelOptMixedPrecisionConfig(
-        kv_cache_quant_method=None,
+        kv_cache_quant_method=kv_cache_quant_method,
         exclude_modules=[],
         quantized_layers=quantized_layers,
+        kv_cache_quantized_layers=kv_cache_quantized_layers or {},
+        kv_cache_schema_version=kv_cache_schema_version,
         fp8_config=ModelOptFp8Config(
             quant_method="FP8",
             is_checkpoint_fp8_serialized=True,
@@ -98,6 +108,60 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
             exclude_modules=[],
         ),
     )
+
+
+def test_modelopt_mixed_precision_resolves_layerwise_kv_cache_dtype():
+    config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quant_method": "modelopt",
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": "MIXED_PRECISION",
+            "kv_cache_schema_version": 1,
+            "kv_cache_quantized_layers": {
+                "model.layers.0.self_attn": {"quant_algo": "FP8"},
+                "model.layers.1.self_attn": {"quant_algo": "NVFP4"},
+            },
+        }
+    )
+
+    assert config.get_kv_cache_dtype("model.layers.0.self_attn.attn") == "fp8_e4m3"
+    assert config.get_kv_cache_dtype("model.layers.1.self_attn.attn") == "nvfp4"
+    assert config.get_kv_cache_dtype("model.layers.2.self_attn.attn") is None
+
+    mapped_attention = Mock(spec=Attention)
+    mapped_attention.__class__ = Attention
+    assert isinstance(
+        config.get_quant_method(mapped_attention, "model.layers.0.self_attn.attn"),
+        ModelOptKVCacheMethod,
+    )
+    assert (
+        config.get_quant_method(mapped_attention, "model.layers.2.self_attn.attn")
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "quant_algo", "error"),
+    [
+        (2, "FP8", "kv_cache_schema_version=1"),
+        (1, "FP8_K_NVFP4_V", "Supported formats are"),
+    ],
+)
+def test_modelopt_mixed_precision_rejects_unsupported_kv_cache_config(
+    schema_version, quant_algo, error
+):
+    with pytest.raises(ValueError, match=error):
+        ModelOptMixedPrecisionConfig.from_config(
+            {
+                "quant_method": "modelopt",
+                "quant_algo": "MIXED_PRECISION",
+                "kv_cache_quant_algo": "MIXED_PRECISION",
+                "kv_cache_schema_version": schema_version,
+                "kv_cache_quantized_layers": {
+                    "model.layers.0.self_attn": {"quant_algo": quant_algo},
+                },
+            }
+        )
 
 
 def test_modelopt_nvfp4_quantizes_parallel_lm_head():
@@ -210,7 +274,12 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
-        }
+        },
+        kv_cache_quant_method="MIXED_PRECISION",
+        kv_cache_quantized_layers={
+            "model.language_model.layers.0.self_attn": {"quant_algo": "FP8"}
+        },
+        kv_cache_schema_version=1,
     )
 
     config.apply_vllm_mapper(
@@ -224,6 +293,10 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
         "language_model.model.layers.1.moe.gate_up_proj",
     }
     assert config._resolve_quant_algo(expected_prefix) == "NVFP4"
+    assert (
+        config.get_kv_cache_dtype("language_model.model.layers.0.self_attn.attn")
+        == "fp8_e4m3"
+    )
 
 
 def test_modelopt_mixed_precision_infers_fused_gate_up_projection():
