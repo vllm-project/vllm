@@ -547,7 +547,7 @@ class Mistral3ForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        hidden_states = self.language_model.model(
+        hidden_states = self.language_model.model.forward(
             input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
