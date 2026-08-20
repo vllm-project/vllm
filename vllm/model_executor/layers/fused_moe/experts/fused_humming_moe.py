@@ -890,7 +890,7 @@ class HummingIndexedExperts(HummingExpertsBase):
             inputs=buffers["down_output"].view(*topk_ids.shape, -1),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            expert_map=None,
+            expert_map=expert_map,
             outputs=output,
         )
 
