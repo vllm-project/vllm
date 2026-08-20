@@ -80,7 +80,13 @@ const IDLE_MARKERS: &[&str] = &[
     MESSAGE_CLOSE,
     END_OF_MSG,
 ];
-const REASONING_MARKERS: &[&str] = &[THINK_CLOSE, END_OF_MSG];
+const REASONING_MARKERS: &[&str] = &[
+    THINK_CLOSE,
+    RESPONSE_OPEN,
+    RESPONSE_CLOSE,
+    TOOLS_OPEN,
+    END_OF_MSG,
+];
 const RESPONSE_MARKERS: &[&str] = &[RESPONSE_CLOSE, TOOLS_OPEN, MESSAGE_CLOSE, END_OF_MSG];
 const EPILOGUE_MARKERS: &[&str] = &[TOOLS_OPEN, MESSAGE_CLOSE, END_OF_MSG];
 const TOOLS_MARKERS: &[&str] = &[CALL_OPEN, TOOLS_CLOSE, MESSAGE_CLOSE, END_OF_MSG];
@@ -349,6 +355,13 @@ fn parse_idle_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
 fn parse_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
     alt((
         literal(THINK_CLOSE).value(KimiK3Event::ThinkClose),
+        // The model intermittently omits `<|close|>think<|sep|>` and jumps
+        // straight into a later channel. Each later-channel marker is
+        // unambiguous inside `think`, so treat it as an implicit think close
+        // instead of leaking it (and the tool calls after it) into reasoning.
+        literal(RESPONSE_OPEN).value(KimiK3Event::ResponseOpen),
+        literal(RESPONSE_CLOSE).value(KimiK3Event::ResponseClose),
+        literal(TOOLS_OPEN).value(KimiK3Event::ToolsOpen),
         // `<|end_of_msg|>` can reach the parser under `ignore_eos` or
         // `include_stop_str_in_output`; never leak it into reasoning.
         literal(END_OF_MSG).value(KimiK3Event::MessageEnd),
@@ -819,6 +832,89 @@ mod tests {
 
         assert_eq!(output.reasoning_text(), "reasoning");
         assert_eq!(output.normal_text(), "answer");
+    }
+
+    #[test]
+    fn kimi_k3_missing_think_close_recovers_tool_calls() {
+        // The model omits `<|close|>think<|sep|>` / `<|open|>response<|sep|>`
+        // and runs reasoning and answer prose together, then closes a response
+        // channel it never opened and emits a well-formed tools block.
+        let mut parser = test_parser();
+        let prompt = tokenizer().encode(THINK_OPEN, false).unwrap();
+        parser.initialize(&prompt).unwrap();
+
+        let text = format!(
+            "planning the edit. Applying it now:{RESPONSE_CLOSE}{TOOLS_OPEN}{}{TOOLS_CLOSE}<|close|>message{SEP}",
+            call("tool=\"bash\" index=\"1\"", &arg("command", "string", "ls")),
+        );
+        let output = parser.parse_complete(&text).unwrap();
+
+        assert_eq!(
+            output.reasoning_text(),
+            "planning the edit. Applying it now:"
+        );
+        assert!(output.normal_text().is_empty());
+        assert_eq!(first_call(&output).name.as_deref(), Some("bash"));
+        assert_eq!(first_call(&output).arguments, r#"{"command":"ls"}"#);
+    }
+
+    #[test]
+    fn kimi_k3_missing_think_close_recovers_response_open() {
+        let mut parser = test_parser();
+        let prompt = tokenizer().encode(THINK_OPEN, false).unwrap();
+        parser.initialize(&prompt).unwrap();
+
+        let output = parser
+            .parse_complete(&format!(
+                "thinking{RESPONSE_OPEN}answer{RESPONSE_CLOSE}<|close|>message{SEP}"
+            ))
+            .unwrap();
+
+        assert_eq!(output.reasoning_text(), "thinking");
+        assert_eq!(output.normal_text(), "answer");
+    }
+
+    #[test]
+    fn kimi_k3_missing_think_close_recovers_direct_tools_open() {
+        let mut parser = test_parser();
+        let prompt = tokenizer().encode(THINK_OPEN, false).unwrap();
+        parser.initialize(&prompt).unwrap();
+
+        let text = format!(
+            "thinking{TOOLS_OPEN}{}{TOOLS_CLOSE}<|close|>message{SEP}",
+            call("tool=\"calc\" index=\"1\"", &arg("x", "number", "1")),
+        );
+        let output = parser.parse_complete(&text).unwrap();
+
+        assert_eq!(output.reasoning_text(), "thinking");
+        assert_eq!(first_call(&output).name.as_deref(), Some("calc"));
+    }
+
+    #[test]
+    fn kimi_k3_missing_think_close_recovery_survives_chunk_splits() {
+        let text = format!(
+            "reason then answer:{RESPONSE_CLOSE}{TOOLS_OPEN}{}{TOOLS_CLOSE}<|close|>message{SEP}",
+            call("tool=\"calc\" index=\"1\"", &arg("x", "number", "42")),
+        );
+
+        for size in [1, 3, 7] {
+            let mut parser = test_parser();
+            let prompt = tokenizer().encode(THINK_OPEN, false).unwrap();
+            parser.initialize(&prompt).unwrap();
+
+            let chunks = char_chunks(&text, size);
+            let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+            let output = collect_stream(&mut parser, &chunk_refs);
+
+            assert_eq!(
+                output.reasoning_text(),
+                "reason then answer:",
+                "chunk size {size}"
+            );
+            assert!(output.normal_text().is_empty(), "chunk size {size}");
+            assert_eq!(first_call(&output).name.as_deref(), Some("calc"));
+            assert_eq!(first_call(&output).arguments, r#"{"x":42}"#);
+        }
     }
 
     #[test]
