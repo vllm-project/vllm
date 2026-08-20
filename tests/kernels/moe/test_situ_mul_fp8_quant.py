@@ -7,11 +7,11 @@ Mirrors ``test_silu_mul_fp8_quant_deep_gemm.py`` in structure: build a reference
 activation + block-FP8 quant, drive random per-row scale magnitudes, exercise
 the masked (``valid_rows``) contiguous layout, and compare per valid row.
 
-The kernel uses approximate device math (``tanh.approx.f32`` + ``__expf``), which
-cannot be reproduced bit-exactly in torch. It is therefore validated against the
-*ideal* FP8 quantizer of the exact fp64 activation: the approximation must be
-negligible on top of the unavoidable FP8 block-quant error (within 1 fp8 code
-for ~all elements, never off by more than 2).
+The kernel computes SITU in fp32 and converts to fp8 with hardware rounding,
+which torch cannot reproduce bit-exactly. It is therefore validated against the
+*ideal* FP8 quantizer of the exact fp64 activation: the difference must stay
+within the unavoidable FP8 block-quant error (within 1 fp8 code for ~all
+elements, never off by more than 2).
 """
 
 import pytest
@@ -25,8 +25,8 @@ fp8_dtype = current_platform.fp8_dtype()
 DEVICE = current_platform.device_type
 FP8_MAX = torch.finfo(fp8_dtype).max
 
-# The kernel uses inline ``tanh.approx.f32`` PTX and fp8 e4m3 conversion, so it
-# is CUDA-only and needs SM89+ (Ada/Hopper). There is no Triton fallback.
+# The kernel uses fp8 e4m3 conversion, so it is CUDA-only and needs SM89+
+# (Ada/Hopper). There is no Triton fallback.
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda() or not current_platform.has_device_capability(89),
     reason="situ_and_mul_quant persistent kernel requires CUDA SM89+ (fp8 e4m3).",
@@ -143,12 +143,12 @@ def test_situ_and_mul_quant_pipelined(
     assert torch.isfinite(scale[:rows]).all()
     assert not torch.isnan(out[:rows].float()).any()
 
-    # Scales: the approximate activation shifts the per-group absmax only
-    # marginally.
+    # Scales: the kernel's fp32 SITU shifts the per-group absmax only
+    # marginally vs the fp64 reference.
     torch.testing.assert_close(scale[:rows], ref_s, rtol=3e-2, atol=1e-5)
 
-    # FP8 codes: the approximation must land within 1 code of the ideal quantizer
-    # for ~all elements, never off by more than 2.
+    # FP8 codes: must land within 1 code of the ideal quantizer for ~all
+    # elements, never off by more than 2.
     dist = fp8_code_dist(out[:rows], ref_q)
     assert dist.max().item() <= 2
     assert (dist <= 1).float().mean().item() >= 0.99
