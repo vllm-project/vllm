@@ -481,7 +481,8 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
-    dcp_comm_backend: DCPCommBackend = ParallelConfig.dcp_comm_backend
+    dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
+    dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
@@ -543,6 +544,7 @@ class EngineArgs:
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     use_fp64_gumbel: bool = ModelConfig.use_fp64_gumbel
+    enable_trace_replay: bool = ModelConfig.enable_trace_replay
     disable_log_stats: bool = False
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
@@ -655,6 +657,9 @@ class EngineArgs:
     collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
     )
+    per_request_spec_decode_metrics: Literal["none", "summary", "detailed"] = (
+        ObservabilityConfig.per_request_spec_decode_metrics
+    )
     kv_cache_metrics: bool = ObservabilityConfig.kv_cache_metrics
     kv_cache_metrics_sample: float = get_field(
         ObservabilityConfig, "kv_cache_metrics_sample"
@@ -759,7 +764,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal["auto", "triton", "flashkda"] | None = None
+    kda_prefill_backend: Literal["auto", "triton", "flashkda", "fused"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -884,6 +889,9 @@ class EngineArgs:
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
         model_group.add_argument("--use-fp64-gumbel", **model_kwargs["use_fp64_gumbel"])
+        model_group.add_argument(
+            "--enable-trace-replay", **model_kwargs["enable_trace_replay"]
+        )
         model_group.add_argument(
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
         )
@@ -1062,6 +1070,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--dcp-comm-backend",
             **parallel_kwargs["dcp_comm_backend"],
+        )
+        parallel_group.add_argument(
+            "--dcp-q-replicate",
+            **parallel_kwargs["dcp_q_replicate"],
         )
         parallel_group.add_argument(
             "--dcp-kv-cache-interleave-size",
@@ -1473,6 +1485,10 @@ class EngineArgs:
             **observability_kwargs["collect_detailed_traces"],
         )
         observability_group.add_argument(
+            "--per-request-spec-decode-metrics",
+            **observability_kwargs["per_request_spec_decode_metrics"],
+        )
+        observability_group.add_argument(
             "--kv-cache-metrics", **observability_kwargs["kv_cache_metrics"]
         )
         observability_group.add_argument(
@@ -1704,9 +1720,10 @@ class EngineArgs:
         parser.add_argument(
             "--kda-prefill-backend",
             dest="kda_prefill_backend",
-            choices=["auto", "triton", "flashkda"],
+            choices=["auto", "triton", "flashkda", "fused"],
             default=None,
-            help="Select KDA prefill backend.",
+            help="Select KDA prefill backend. 'flashkda' is CUDA-only and "
+            "'fused' is ROCm-only; 'auto' picks a supported backend.",
         )
         return parser
 
@@ -1760,6 +1777,7 @@ class EngineArgs:
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
+            enable_trace_replay=self.enable_trace_replay,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
@@ -1929,6 +1947,7 @@ class EngineArgs:
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
+            per_request_spec_decode_metrics=self.per_request_spec_decode_metrics,
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
             cudagraph_metrics=self.cudagraph_metrics,
@@ -2282,6 +2301,7 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_comm_backend=self.dcp_comm_backend,
+            dcp_q_replicate=self.dcp_q_replicate,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
@@ -2504,6 +2524,17 @@ class EngineArgs:
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
+            if (
+                self.kda_prefill_backend == "flashkda"
+                and not current_platform.is_cuda()
+            ):
+                raise ValueError(
+                    "--kda-prefill-backend=flashkda is only available on CUDA."
+                )
+            if self.kda_prefill_backend == "fused" and not current_platform.is_rocm():
+                raise ValueError(
+                    "--kda-prefill-backend=fused is only available on ROCm."
+                )
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
 
         config = VllmConfig(
