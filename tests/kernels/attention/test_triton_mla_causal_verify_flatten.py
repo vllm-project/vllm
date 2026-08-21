@@ -94,11 +94,13 @@ def _run_forward_mqa(seq_lens: list[int], query_len: int, causal: bool, q_rows=N
     return captured
 
 
-def test_flag_pair_moves_together():
-    """query_len_support gates supports_spec_decode, which raises
-    reorder_batch_threshold; UNIFORM_BATCH capture probes max_query_len > 1."""
-    if TritonMLAMetadataBuilder._cudagraph_support == AttentionCGSupport.UNIFORM_BATCH:
-        assert TritonMLAMetadataBuilder.query_len_support != QueryLenSupport.SINGLE_ONLY
+def test_multi_token_decode_flags_are_declared_together():
+    """Capture probes max_query_len > 1, which only clears the assert in
+    build_for_cudagraph_capture once query_len_support raised the threshold."""
+    assert (
+        TritonMLAMetadataBuilder._cudagraph_support == AttentionCGSupport.UNIFORM_BATCH
+    )
+    assert TritonMLAMetadataBuilder.query_len_support == QueryLenSupport.UNIFORM
 
 
 @pytest.mark.parametrize("query_len", [2, 3, 4, 5, 8])
@@ -131,7 +133,7 @@ def test_causal_block_rows_see_prefix_plus_own_position(query_len):
         assert all(n > 0 for n in rows), f"non-positive KV extent in {rows}"
 
 
-def test_cudagraph_padding_rows_clamp_to_empty():
+def test_cudagraph_padding_rows_present_no_kv_extent():
     """Padding requests carry seq_len 0, so the causal tail drives their rows
     negative. The kernel skips a row whose extent is not positive
     (``if split_kv_end > split_kv_start``), so this is a no-op rather than a
@@ -182,18 +184,17 @@ def test_single_token_decode_is_untouched(causal):
     assert captured["block_table"].shape[0] == len(seq_lens)
 
 
-def test_row_count_mismatch_is_reported(caplog_vllm):
-    """A short block_table surfaces as an opaque memory fault inside the kernel,
-    so the mismatch is reported at the launch site while it is attributable."""
-    # More q rows than the metadata accounts for, i.e. the shape that faulted.
-    _run_forward_mqa(
-        _seq_lens(1), query_len=1, causal=True, q_rows=len(CONTEXT_LENS) * 4
-    )
+def test_expansion_factor_follows_the_q_row_count():
+    """The kernel indexes block_table and seq_lens by program_id, so the
+    expansion must follow q rows, not the token/request counts."""
+    num_rows = len(CONTEXT_LENS) * 4
+    captured = _run_forward_mqa(_seq_lens(1), query_len=1, causal=True, q_rows=num_rows)
 
-    assert "[MQAOOB]" in caplog_vllm.text
+    assert captured["block_table"].shape[0] == num_rows
+    assert captured["seq_lens"].shape[0] == num_rows
 
 
-def test_no_warning_when_rows_match(caplog_vllm):
-    _run_forward_mqa(_seq_lens(4), query_len=4, causal=True)
-
-    assert "[MQAOOB]" not in caplog_vllm.text
+def test_non_uniform_block_is_rejected():
+    """q rows must divide evenly across the decode requests."""
+    with pytest.raises(AssertionError, match="non-uniform decode block"):
+        _run_forward_mqa(_seq_lens(1), query_len=1, causal=True, q_rows=6)

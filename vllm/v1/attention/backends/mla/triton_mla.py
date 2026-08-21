@@ -49,24 +49,17 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
 
 
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    # Both flags must move together: query_len_support gates supports_spec_decode,
-    # which is what raises reorder_batch_threshold to 1 + num_speculative_tokens.
-    # Setting only the first trips the max_query_len assert during capture.
+    # forward_mqa flattens a uniform multi-token block to one decode row per
+    # query token, so causal verify and non-causal draft blocks both take the
+    # decode path. Setting either flag without the other breaks capture.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
-    # Non-causal DSpark block is flattened to one decode row per query token in
-    # forward_mqa, so no intra-block causal masking is required.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         # DCP local sequence lengths are not advanced between draft steps.
         self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
-        # Only the non-causal DSpark draft group serves multi-token blocks via
-        # the decode path; raise its reorder threshold to the spec block length
-        # so full-cudagraph capture admits it. Causal usage stays single-token.
-        if getattr(self, "non_causal_multi_token_decode", False):
-            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
         self._reserve_attn_logits_workspace()
 
     def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:
@@ -82,12 +75,12 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         """
         if not is_workspace_manager_initialized():
             return
-        # Decode reorder threshold is 1, so decode tokens <= max_num_seqs.
-        B = self.vllm_config.scheduler_config.max_num_seqs
-        # Non-causal DSpark draft flattens each request's block to query_len
-        # decode rows; cover max_num_seqs * block_len rows.
-        if getattr(self, "non_causal_multi_token_decode", False):
-            B *= self.reorder_batch_threshold
+        # forward_mqa flattens each request's block to query_len decode rows,
+        # and query_len is bounded by the reorder threshold.
+        B = (
+            self.vllm_config.scheduler_config.max_num_seqs
+            * self.reorder_batch_threshold
+        )
         # DCP all-gathers the query heads before forward_mqa.
         q_num_heads = self.num_heads * self.dcp_world_size
         max_splits = _compute_num_kv_splits(
@@ -293,45 +286,27 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         block_table = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens
-        # Flatten a uniform multi-token decode block to one row per query token.
-        # decode_attention_fwd has no causal flag but reads B_Seqlen per row, so
-        # causality is expressed via per-row seq_lens (as in sparse_swa.py).
-        if attn_metadata.num_decodes > 0:
-            query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
-            if query_len > 1:
-                block_table = block_table.repeat_interleave(query_len, dim=0)
-                if attn_metadata.causal:
-                    # Causal verify: the block is the last query_len positions,
-                    # so row i may attend the prefix plus block tokens 0..i.
-                    tail = torch.arange(
-                        query_len - 1,
-                        -1,
-                        -1,
-                        device=seq_lens.device,
-                        dtype=seq_lens.dtype,
-                    ).repeat(attn_metadata.num_decodes)
-                    seq_lens = seq_lens.repeat_interleave(query_len) - tail
-                else:
-                    # Non-causal block: every row sees the same committed prefix.
-                    seq_lens = seq_lens.repeat_interleave(query_len)
-
-        # The kernel indexes B_Seqlen/block_table by program_id, so extra q rows
-        # read out of bounds and surface much later as an opaque memory fault.
-        # Report the shape mismatch here, where it is still attributable.
-        if q.shape[0] != block_table.shape[0] or q.shape[0] != seq_lens.shape[0]:
-            logger.warning(
-                "[MQAOOB] row-count mismatch entering decode_attention_fwd -- "
-                "the kernel will read block_table/seq_lens out of bounds. "
-                "q_rows=%d bt_rows=%d sl_rows=%d causal=%s num_decodes=%d "
-                "num_decode_tokens=%d layer=%s",
-                q.shape[0],
-                block_table.shape[0],
-                seq_lens.shape[0],
-                attn_metadata.causal,
-                attn_metadata.num_decodes,
-                attn_metadata.num_decode_tokens,
-                getattr(layer, "layer_name", "?"),
-            )
+        # decode_attention_fwd has no causal flag: it launches one program per
+        # row of q and reads that row's KV extent from seq_lens, so intra-block
+        # causality is expressed as per-row extents. Deriving query_len from the
+        # tensors the kernel indexes keeps the three row counts in step.
+        num_decodes = seq_lens.shape[0]
+        query_len, remainder = divmod(B, num_decodes) if num_decodes else (1, 0)
+        assert remainder == 0, (
+            f"non-uniform decode block: {B} query rows over {num_decodes} requests"
+        )
+        if query_len > 1:
+            block_table = block_table.repeat_interleave(query_len, dim=0)
+            if attn_metadata.causal:
+                # Row t attends the prefix plus block tokens 0..t. Padding rows
+                # carry seq_len 0, go non-positive, and the kernel skips them.
+                offsets = torch.arange(
+                    1 - query_len, 1, device=seq_lens.device, dtype=seq_lens.dtype
+                )
+                seq_lens = (seq_lens.unsqueeze(1) + offsets).flatten()
+            else:
+                # Non-causal draft block: every row sees the same prefix.
+                seq_lens = seq_lens.repeat_interleave(query_len)
 
         # Run MQA — always pass layer scales. When KV cache is
         # BF16 the kernel's `if dtype.is_fp8()` check is a no-op.
