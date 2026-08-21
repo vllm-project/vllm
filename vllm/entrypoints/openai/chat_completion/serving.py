@@ -85,27 +85,6 @@ def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
     }
 
 
-def _engine_bound_chat_template_kwargs(
-    chat_template_kwargs: dict[str, Any],
-) -> dict[str, Any]:
-    """Filter ``chat_template_kwargs`` to entries safe to msgpack-encode.
-
-    ``reasoning_parser_kwargs`` on :class:`EngineCoreRequest` is a
-    :class:`msgspec.Struct` field, so everything under it crosses the
-    frontend→engine-core ZMQ boundary through msgpack. Frontends may
-    stash request-scoped, in-process-only state in
-    ``chat_template_kwargs`` under leading-underscore keys (e.g.
-    :data:`vllm.renderers.cohere.POSITION_TO_SOURCE_KEY` and
-    :data:`vllm.renderers.cohere.MESSAGES_CITATIONS_KEY`, which carry
-    Pydantic ``CitationSource`` values that msgpack can't natively
-    encode). Those keys exist only to hand data to the API-server-side
-    parser instance already constructed above with the full dict; the
-    engine-core-side parser (used for structured-output reasoning-end
-    gating) doesn't consult them, so filter them out.
-    """
-    return {k: v for k, v in chat_template_kwargs.items() if not k.startswith("_")}
-
-
 def _make_prompt_tokens_details(
     enable_prompt_tokens_details: bool,
     num_cached_tokens: int | None,
@@ -209,6 +188,24 @@ class OpenAIServingChat(GenerateBaseServing):
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
         )
+
+    def _engine_chat_template_kwargs(
+        self, chat_template_kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Subclass hook to narrow ``chat_template_kwargs`` for the engine.
+
+        The same dict is used twice: to build the API-server-side parser
+        instance, and to populate
+        ``EngineCoreRequest.reasoning_parser_kwargs`` for the engine-core
+        side. The latter crosses ZMQ as msgpack, so a handler that stashes
+        request-scoped state only the API-server-side parser needs (values
+        msgpack can't encode, or payloads not worth shipping) can drop
+        those entries here without affecting the in-process parser.
+
+        Must not mutate the argument -- the caller still needs the full
+        dict. The default forwards it unchanged.
+        """
+        return chat_template_kwargs
 
     async def render_chat_request(
         self,
@@ -374,7 +371,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                     reasoning_ended=reasoning_ended,
                     reasoning_parser_kwargs={
-                        "chat_template_kwargs": _engine_bound_chat_template_kwargs(
+                        "chat_template_kwargs": self._engine_chat_template_kwargs(
                             chat_template_kwargs
                         ),
                     }

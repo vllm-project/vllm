@@ -101,6 +101,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Reserved ``chat_template_kwargs`` entries this handler populates for
+# the API-server-side parser and renderer only. Stripped before the dict
+# is forwarded to the engine core -- see
+# :meth:`CohereServingChatV2._engine_chat_template_kwargs`.
+_API_SERVER_ONLY_TEMPLATE_KWARGS = frozenset(
+    {
+        MESSAGES_CITATIONS_KEY,
+        POSITION_TO_SOURCE_KEY,
+        TOOL_MESSAGE_V2_CONTENT_KEY,
+    }
+)
+
+
 # ---------------------------------------------------------------------------
 # SSE helpers
 # ---------------------------------------------------------------------------
@@ -307,6 +320,28 @@ class CohereServingChatV2(OpenAIServingChat):
                 return self._chat_completion_to_v2(generator, request)
             case _:
                 return self._chat_completion_stream_to_v2(generator, request)
+
+    def _engine_chat_template_kwargs(
+        self, chat_template_kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Keep this handler's internal entries out of the engine hop.
+
+        Overrides :meth:`OpenAIServingChat._engine_chat_template_kwargs`.
+        The reserved keys in :data:`_API_SERVER_ONLY_TEMPLATE_KWARGS`
+        exist only to hand request-side state to the API-server-side
+        parser and renderer; the engine-core-side reasoning parser (used
+        for structured-output reasoning-end gating) never reads them. They
+        also can't survive the trip: ``POSITION_TO_SOURCE_KEY`` holds
+        :class:`CitationSource` models, and msgpack -- which encodes
+        ``reasoning_parser_kwargs`` on the way to the engine core -- has
+        no native encoding for Pydantic models, so forwarding them fails
+        the request with a ``TypeError``.
+        """
+        return {
+            k: v
+            for k, v in chat_template_kwargs.items()
+            if k not in _API_SERVER_ONLY_TEMPLATE_KWARGS
+        }
 
     # ==================================================================
     # Request conversion: Cohere V2 -> ChatCompletionRequest

@@ -35,11 +35,60 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.renderers.cohere import TOOL_MESSAGE_V2_CONTENT_KEY
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.renderers.cohere import (
+    MESSAGES_CITATIONS_KEY,
+    POSITION_TO_SOURCE_KEY,
+    TOOL_MESSAGE_V2_CONTENT_KEY,
+)
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+# A full grounded tool round-trip: a tool call, a tool result carrying both
+# a document and a bare text block, and an assistant turn citing it. Between
+# them these populate every reserved ``_``-prefixed chat_template_kwargs key.
+_TOOL_ROUND_TRIP_MESSAGES: list[dict[str, Any]] = [
+    {"role": "user", "content": "What is the capital?"},
+    {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "search", "arguments": '{"q": "capital"}'},
+            }
+        ],
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": [
+            {
+                "type": "document",
+                "document": {"id": "doc-9", "data": {"text": "Paris"}},
+            },
+            {"type": "text", "text": "Paris is the capital."},
+        ],
+    },
+    {
+        "role": "assistant",
+        "content": "Paris.",
+        "citations": [
+            {
+                "start": 0,
+                "end": 5,
+                "text": "Paris",
+                "sources": [
+                    {"type": "tool", "id": "doc-9", "tool_output": {"text": "Paris"}}
+                ],
+            }
+        ],
+    },
+    {"role": "user", "content": "Are you sure?"},
+]
 
 
 def _make_request(**kwargs) -> CohereChatV2Request:
@@ -894,6 +943,107 @@ class TestApplyCohereTemplateKwargs:
         # renderers see a clean request.
         result = _convert(_make_request())
         assert result.chat_template_kwargs is None
+
+
+# ======================================================================
+# Engine-core hop (_engine_chat_template_kwargs)
+# ======================================================================
+
+
+class TestEngineChatTemplateKwargs:
+    """The internal ``_``-prefixed entries must not reach the engine core.
+
+    ``OpenAIServingChat`` uses one ``chat_template_kwargs`` dict twice:
+    to build the API-server-side parser, and to populate
+    ``EngineCoreRequest.reasoning_parser_kwargs``, which crosses ZMQ as
+    msgpack. This handler's reserved keys are only meaningful to the
+    former, and ``_position_to_source`` holds ``CitationSource`` models
+    that msgpack cannot encode at all -- forwarding them fails the
+    request with a ``TypeError``. The
+    ``_engine_chat_template_kwargs`` override drops them.
+    """
+
+    @staticmethod
+    def _engine_kwargs(request: CohereChatV2Request) -> dict[str, Any]:
+        full = _convert(request).chat_template_kwargs
+        assert full, "expected the request to populate chat_template_kwargs"
+        return _FakeServing()._engine_chat_template_kwargs(full)
+
+    def test_grounded_request_drops_internal_keys_keeps_public_ones(self):
+        request = _make_request(
+            documents=[{"id": "d1", "data": {"text": "hi"}}],
+            citation_options={"mode": "accurate"},
+        )
+        full = _convert(request).chat_template_kwargs
+        # Sanity: the key we expect to be dropped is actually present.
+        assert POSITION_TO_SOURCE_KEY in full
+
+        engine_kwargs = self._engine_kwargs(request)
+        assert POSITION_TO_SOURCE_KEY not in engine_kwargs
+        # Public template inputs the engine-side parser may legitimately
+        # read must survive.
+        assert engine_kwargs["citation_options"] == {"mode": "accurate"}
+        assert engine_kwargs["documents"] == [{"id": "d1", "data": {"text": "hi"}}]
+
+    def test_all_internal_keys_dropped(self):
+        """Exercises all three reserved keys at once: the tool-result
+        position map, the inbound assistant citations, and the raw v2 tool
+        content blocks.
+        """
+        request = _make_request(messages=_TOOL_ROUND_TRIP_MESSAGES)
+        full = _convert(request).chat_template_kwargs
+        internal = {k for k in full if k.startswith("_")}
+        # Sanity: this request really does populate all three.
+        assert internal == {
+            MESSAGES_CITATIONS_KEY,
+            POSITION_TO_SOURCE_KEY,
+            TOOL_MESSAGE_V2_CONTENT_KEY,
+        }
+
+        engine_kwargs = self._engine_kwargs(request)
+        assert not [k for k in engine_kwargs if k.startswith("_")]
+
+    def test_engine_kwargs_are_msgpack_encodable(self):
+        """The real failure mode: the full dict raises, the filtered one
+        doesn't. Pins that the filter is what makes the engine hop work.
+        """
+        request = _make_request(messages=_TOOL_ROUND_TRIP_MESSAGES)
+        full = _convert(request).chat_template_kwargs
+
+        with pytest.raises(TypeError, match="is not serializable"):
+            MsgpackEncoder().encode({"chat_template_kwargs": full})
+
+        engine_kwargs = self._engine_kwargs(request)
+        encoder = MsgpackEncoder()
+        decoder = MsgpackDecoder(dict[str, Any])
+        round_tripped = decoder.decode(
+            encoder.encode({"chat_template_kwargs": engine_kwargs})[0]
+        )
+        assert round_tripped["chat_template_kwargs"] == engine_kwargs
+
+    def test_original_dict_not_mutated(self):
+        """The caller still passes the full dict to the in-process parser,
+        so the filter must return a copy.
+        """
+        request = _make_request(documents=[{"id": "d1", "data": {"text": "hi"}}])
+        full = _convert(request).chat_template_kwargs
+        before = set(full)
+
+        self._engine_kwargs(request)
+        assert set(full) == before
+
+    def test_base_implementation_is_a_passthrough(self):
+        """Only the Cohere subclass filters; plain chat completions must
+        keep forwarding whatever the request asked for.
+        """
+        kwargs = {
+            "documents": [{"id": "d1"}],
+            POSITION_TO_SOURCE_KEY: {(0, 0): object()},
+        }
+        passed_through = OpenAIServingChat._engine_chat_template_kwargs(
+            _FakeServing(), kwargs
+        )
+        assert passed_through == kwargs
 
 
 # ======================================================================

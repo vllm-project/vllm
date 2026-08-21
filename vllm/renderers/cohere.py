@@ -422,9 +422,9 @@ def _v2_tool_content_to_melody_block(block: dict[str, Any]) -> dict[str, Any] | 
     * ``DocumentToolContent`` -- ``{"type": "document", "document":
       {"id"?: str, "data": {...}}}``.
 
-    Both need to end up as melody ``document`` blocks so cmd3/cmd4
-    tool-result templates can key each result field individually.
-    This mirrors the cohere api's tool-content rendering rule:
+    Both are emitted as melody ``document`` blocks, mirroring the cohere
+    api, which routes every tool content part through the same
+    "tool output as document" conversion. The rules:
 
     * Text that parses to a JSON object becomes that object directly
       (so structured tool output flows through as first-class fields).
@@ -435,6 +435,18 @@ def _v2_tool_content_to_melody_block(block: dict[str, Any]) -> dict[str, Any] | 
       the melody payload; ``document.id`` is intentionally dropped
       here because outbound citation binding tracks it separately via
       ``POSITION_TO_SOURCE_KEY``.
+
+    Only the JSON-object case actually changes what gets rendered. The
+    cmd3/cmd4 templates already wrap a bare ``text`` content block as
+    ``{"content": <text>}`` themselves, so routing plain text through
+    here is a no-op on the prompt -- it is the JSON-object unwrap that
+    promotes structured tool output from an escaped string blob into
+    individually addressable (and citable) result fields.
+
+    Note the payload is the *flat* field map: melody's ``Content``
+    carries ``document`` as a plain map, so re-nesting it under a
+    ``data`` key would render a spurious ``{"data": {...}}`` wrapper
+    into the tool-result block.
 
     Returns ``None`` for unrecognised shapes; the caller should skip
     those blocks (the citation-numbering walk in
