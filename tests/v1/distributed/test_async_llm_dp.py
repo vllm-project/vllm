@@ -780,12 +780,16 @@ async def test_dp_pause_while_asleep():
 
 
 @pytest.mark.asyncio
-async def test_dp_pause_completion_implies_device_idle():
+async def test_dp_pause_completion_implies_device_idle(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """A resolved pause future promises an idle device. Inflate the dummy
     batches the pause consensus manufactures so any work the pause fails to
     wait on stays visible, then require a quiet worker stream the moment
     pause_generation() returns."""
     with ExitStack() as after:
+        # The probes below ship functions through collective_rpc.
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
         engine = AsyncLLM.from_engine_args(_get_dp_pause_engine_args(True))
         after.callback(engine.shutdown)
 
