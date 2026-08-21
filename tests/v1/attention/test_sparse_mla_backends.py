@@ -1250,6 +1250,49 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     assert out == expected
 
 
+@pytest.mark.parametrize("compress_ratio", [1, 4])
+def test_indexer_prefill_budget_matches_compressed_gather_buffer(compress_ratio):
+    """Builder prefill budget must equal the consumer K-gather buffer capacity."""
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerMetadataBuilder,
+        get_max_prefill_buffer_size,
+    )
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+    from vllm.v1.worker.block_table import get_block_table_width
+
+    max_model_len = 1024
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        compress_ratio=compress_ratio,
+    )
+    vllm_config = create_vllm_config(max_model_len=max_model_len)
+    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+    block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["dummy"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        block_table_width=block_table_width,
+    )
+
+    consumer_buffer_rows = get_max_prefill_buffer_size(vllm_config) // compress_ratio
+    assert builder.max_prefill_buffer_size == consumer_buffer_rows
+
+    compressed_seq_lens = torch.tensor([consumer_buffer_rows])
+    split_indexer_prefill_chunks(
+        compressed_seq_lens,
+        torch.tensor([1]),
+        builder.max_prefill_buffer_size,
+        10**15,
+    )
+    admitted_rows = int(compressed_seq_lens.sum().item())
+    assert admitted_rows <= consumer_buffer_rows
+
+
 # 384 is not a power of two, so it counts via the tiled atomic accumulation
 # rather than the single-tile path 128 takes.
 @pytest.mark.parametrize("num_topk_tokens", [128, 384])
