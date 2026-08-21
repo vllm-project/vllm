@@ -46,6 +46,10 @@ RoutingBuffers = tuple[
 )
 @pytest.mark.parametrize("inter_dim", [256, 512])
 def test_flydsl_moe(num_tokens: int, inter_dim: int):
+    # Seed for determinism: int4 weights vs the bf16 fused_experts reference agree to
+    # quant precision (mean |diff| ~0.06), but the seedless RNG could put a rare tail
+    # element past atol=0.5/rtol=0.1 and flake the allclose.
+    torch.manual_seed(0)
     device = "cuda"
     topk = 8
     num_experts = 384
