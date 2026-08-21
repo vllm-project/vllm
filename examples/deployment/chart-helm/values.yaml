@@ -69,7 +69,9 @@ autoscaling:
 keda:
   # -- Enable a KEDA ScaledObject for this deployment
   enabled: false
-  # -- Minimum replicas (kept >=1 to avoid scale-to-zero cold-start cost)
+  # -- Minimum replicas. Set to 0 to allow scale-to-zero (e.g. combined
+  # with keda.cron for business-hours scheduling); keep >=1 if you always
+  # want one GPU replica warm to avoid cold-start cost.
   minReplicaCount: 1
   # -- Maximum replicas
   maxReplicaCount: 3
@@ -90,6 +92,30 @@ keda:
   # This is NOT a strict step function -- see chart README/PR notes for the
   # worked example of how this behaves at low replica counts.
   threshold: "2"
+
+  # -- Optional business-hours scheduling via KEDA's cron trigger, combined
+  # with the Prometheus trigger above in the same ScaledObject. KEDA takes
+  # the max desired replica count across triggers for scale-up decisions:
+  # the cron trigger guarantees at least `desiredReplicas` during its
+  # start-end window (avoiding cold-start pain from scaling all the way to
+  # zero between requests during business hours) and contributes nothing
+  # outside that window -- it does NOT forcibly block the Prometheus
+  # trigger from scaling up outside the window if there's real demand, so
+  # this is a cost-saving default, not a hard access control.
+  # Requires keda.minReplicaCount: 0 to actually reach zero outside the
+  # window -- plain HPA can't scale to zero, but KEDA can.
+  cron:
+    # -- Enable the cron trigger
+    enabled: false
+    # -- IANA timezone name (handles DST automatically, e.g. EST/EDT) --
+    # NOT a fixed UTC offset.
+    timezone: "America/New_York"
+    # -- Standard 5-field cron expression for when the window starts
+    start: "0 6 * * *"
+    # -- Standard 5-field cron expression for when the window ends
+    end: "0 22 * * *"
+    # -- Guaranteed replica count during the start-end window
+    desiredReplicas: "1"
 
 # -- Additional annotations applied to the pod template. Commonly used for
 # Prometheus annotation-based scrape discovery, e.g.:

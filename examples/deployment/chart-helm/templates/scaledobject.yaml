@@ -14,6 +14,16 @@ a Prometheus instance scraping this pod's /metrics endpoint (see
 .Values.autoscaling.enabled (HPA) and .Values.keda.enabled (this) are
 mutually exclusive -- both control the same Deployment's replica count and
 will fight each other if both are enabled simultaneously.
+
+Optionally adds a cron trigger (.Values.keda.cron.enabled) for
+business-hours scheduling, e.g. "keep at least 1 replica warm 6am-10pm,
+scale to zero outside that window." KEDA combines multiple triggers by
+taking the max desired replica count across all of them for scale-up
+decisions -- the cron trigger only ever pushes replicas UP (to
+desiredReplicas) during its window and contributes nothing outside it; it
+does not forcibly block the prometheus trigger from scaling up outside the
+window if there's genuine real demand. Requires minReplicaCount: 0 to
+actually reach zero (KEDA supports this; plain HPA does not).
 */}}
 {{- if .Values.keda.enabled }}
 apiVersion: keda.sh/v1alpha1
@@ -34,6 +44,14 @@ spec:
   initialCooldownPeriod: {{ .Values.keda.initialCooldownPeriod }}
   {{- end }}
   triggers:
+    {{- if .Values.keda.cron.enabled }}
+    - type: cron
+      metadata:
+        timezone: {{ required "Value 'keda.cron.timezone' must be defined when keda.cron.enabled=true !" .Values.keda.cron.timezone | quote }}
+        start: {{ required "Value 'keda.cron.start' must be defined when keda.cron.enabled=true !" .Values.keda.cron.start | quote }}
+        end: {{ required "Value 'keda.cron.end' must be defined when keda.cron.enabled=true !" .Values.keda.cron.end | quote }}
+        desiredReplicas: {{ .Values.keda.cron.desiredReplicas | quote }}
+    {{- end }}
     - type: prometheus
       metadata:
         serverAddress: {{ required "Value 'keda.prometheusServerAddress' must be defined when keda.enabled=true !" .Values.keda.prometheusServerAddress | quote }}
