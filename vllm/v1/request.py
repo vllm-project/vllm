@@ -175,6 +175,10 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
+        # Like cache_salt, salt_regions are expected to be derived by a
+        # trusted serving layer, not accepted raw from untrusted clients.
+        # The first transition must precede the first principal-specific
+        # token; the checks below cannot verify placement.
         if cache_salt is not None and salt_regions is not None:
             raise ValueError("cache_salt and salt_regions are mutually exclusive")
         if salt_regions_required and not salt_regions:
