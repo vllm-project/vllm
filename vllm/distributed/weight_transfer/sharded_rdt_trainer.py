@@ -556,6 +556,21 @@ class _RDTProducerServer:
                     f"workers_per_replica matches the inference fleet's "
                     f"geometry."
                 )
+        # This is where the producer's NIXL serve memory is committed: one ring
+        # of K slots per SHARING GROUP that pulls from this rank -- with a single
+        # deployment, one ring per consumer, since every group is a singleton.
+        # Routing only sends a consumer here for names this rank owns, so the
+        # count is the fan-in, not the fleet.
+        #
+        # Every slot is sized by the LARGEST chunk that consumer pulls from us,
+        # rounded up to a 256 MB multiple, so the whole ring pays for the worst
+        # chunk in the plan while most chunks are far smaller.
+        #
+        # TODO: that over-allocates. Sizing slots per chunk instead of per plan,
+        # or capping chunk bytes so no chunk is an outlier, would shrink it; so
+        # would dropping the 256 MB round-up, which is slack once a buffer never
+        # regrows. Row-splitting the vocab matrix shrinks the outlier itself.
+        # The host-staging TODO above would remove these rings altogether.
         alloc = buffer_alloc_bytes(nbytes, self._buffer_presize)
         with self._serve_lock:
             rings = self._serve_rings.setdefault(sg, [None] * self._nring)
