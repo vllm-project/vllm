@@ -136,7 +136,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_5_moe_text="Qwen3_5MoeTextConfig",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
-    **{"unlimited-ocr": "UnlimitedOCRConfig"},
+    **{"unlimited-ocr": "UnlimitedOCRConfig", "phi4-siglip": "Phi4VisionRConfig"},
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
 )
