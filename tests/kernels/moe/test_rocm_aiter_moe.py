@@ -220,6 +220,8 @@ def ref_moe_forward(
             act = F.silu(gate) * up
         elif activation == "gelu":
             act = F.gelu(gate) * up
+        elif activation == "gelu_tanh":
+            act = F.gelu(gate, approximate="tanh") * up
         else:
             raise ValueError(f"Unknown activation: {activation}")
         output[expert_mask] = act @ w2_f[expert_idx].T
@@ -600,6 +602,7 @@ def test_activation_method_enum_values():
 
     assert ActivationMethod.SILU == 0
     assert ActivationMethod.GELU == 1
+    assert ActivationMethod.GELU_TANH == 4
 
 
 # MXFP4 kernel tests ------------------------------------------------------
@@ -845,6 +848,51 @@ def test_aiter_fused_moe_gelu_accuracy():
         out.float(),
         ref_out,
         label="gelu_accuracy",
+        atol=0.05,
+        rtol=0.0,
+    )
+
+
+def test_aiter_fused_moe_gelu_tanh_accuracy():
+    """The tanh-approx GELU variant (Gemma-family MoE) should stay aligned with
+    the float32 tanh-approx reference."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        ActivationMethod,
+        QuantMethod,
+    )
+
+    _assert_aiter_supported()
+    case = _make_moe_case(
+        num_tokens=32,
+        hidden_dim=512,
+        intermediate_dim=1024,
+        num_experts=4,
+        topk=2,
+        seed=42,
+    )
+    ref_out = ref_moe_forward(
+        case["hidden_states"],
+        case["w1"],
+        case["w2"],
+        case["topk_weights"],
+        case["topk_ids"],
+        activation="gelu_tanh",
+    )
+    out = _run_fused_moe(
+        case["hidden_states"],
+        case["w1"],
+        case["w2"],
+        case["topk_weights"],
+        case["topk_ids"],
+        activation_method=int(ActivationMethod.GELU_TANH),
+        quant_method=int(QuantMethod.NO),
+    )
+
+    assert out.shape == case["hidden_states"].shape
+    _assert_close_budget(
+        out.float(),
+        ref_out,
+        label="gelu_tanh_accuracy",
         atol=0.05,
         rtol=0.0,
     )
