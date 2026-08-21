@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -16,16 +17,18 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
-    combine_sampled_and_draft_tokens,
-    prepare_pos_seq_lens,
 )
 from vllm.v1.worker.gpu.states import RequestState
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
 
 logger = init_logger(__name__)
 
@@ -84,11 +87,6 @@ class PCPManager:
         self._input_buffers = (
             InputBuffers(max_num_local_reqs, max_num_tokens, device)
             if max_num_local_reqs is not None and max_num_tokens is not None
-            else None
-        )
-        self._local_req_idx = (
-            torch.arange(max_num_local_reqs, dtype=torch.int32, device=device)
-            if max_num_local_reqs is not None
             else None
         )
         self._local_block_tables: tuple[torch.Tensor, ...] | None
@@ -411,7 +409,6 @@ class PCPManager:
     ) -> InputBatch:
         assert self._req_states is not None
         assert self._input_buffers is not None
-        req_states = self._req_states
         input_buffers = self._input_buffers
         global_batch = input_batch
         self._global_batch = global_batch
@@ -419,7 +416,6 @@ class PCPManager:
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
         is_prefilling = global_batch.is_prefilling_np
-
         segments_by_rank, per_rank_num_tokens = self._build_batch_layout(
             num_scheduled_tokens,
             num_computed_tokens,
@@ -512,6 +508,17 @@ class PCPManager:
             local_gather_idx,
             out=input_buffers.input_ids[:num_local_tokens_padded],
         )
+        # Positions are derived from the GPU request-state cursor in
+        # prepare_inputs(). Reuse them verbatim so RoPE positions, attention
+        # sequence lengths, and slot mappings all observe the same cursor after
+        # speculative rejection. The CPU num_computed_tokens value below is
+        # only an asynchronous upper bound for metadata construction.
+        torch.index_select(
+            global_batch.positions,
+            0,
+            local_gather_idx,
+            out=input_buffers.positions[:num_local_tokens_padded],
+        )
 
         local_query_start_loc_np = np.empty(
             input_buffers.max_num_reqs + 1, dtype=np.int32
@@ -526,17 +533,16 @@ class PCPManager:
         local_to_global_req_idx = async_copy_to_gpu(
             local_to_global_req_idx_np, device=self.device
         )
-        local_start_pos = async_copy_to_gpu(local_start_pos_np, device=self.device)
-
-        assert self._local_req_idx is not None
-        prepare_pos_seq_lens(
-            self._local_req_idx[:num_local_reqs],
-            local_query_start_loc,
-            local_start_pos,
-            input_buffers.positions,
-            input_buffers.seq_lens[:num_local_reqs],
-        )
         seq_lens = input_buffers.seq_lens[:num_local_reqs]
+        if num_local_tokens > 0:
+            local_end_positions = torch.index_select(
+                input_buffers.positions,
+                0,
+                local_query_start_loc[1:] - 1,
+            )
+            seq_lens.copy_(local_end_positions + 1)
+        else:
+            seq_lens.zero_()
         is_padding = input_buffers.is_padding[:num_local_tokens_padded]
         is_padding[:num_local_tokens].fill_(False)
         is_padding[num_local_tokens:].fill_(True)
@@ -559,18 +565,11 @@ class PCPManager:
             cu_num_logits = torch.zeros(
                 num_local_reqs + 1, device=self.device, dtype=torch.int32
             )
-        logits_indices = combine_sampled_and_draft_tokens(
-            input_buffers.input_ids,
-            local_to_global_req_idx,
-            req_states.last_sampled_tokens,
-            local_query_start_loc,
-            seq_lens,
-            req_states.prefill_len.gpu,
-            req_states.draft_tokens,
-            cu_num_logits,
-            total_num_logits,
-            1,
-        )
+        # The global batch has already materialized sampled and draft tokens.
+        # Recombining the rank-local view as a one-logit batch would overwrite
+        # the final draft token with the last sampled token. Local logits are
+        # never sampled directly; they are restored to the global layout first.
+        logits_indices = local_query_start_loc[1:] - 1
 
         local_prefill_len_np = global_batch.prefill_len_np[
             local_to_global_batch_req_idx_np
@@ -725,6 +724,49 @@ class PCPManager:
     ) -> tuple[torch.Tensor, InputBatch]:
         assert self._global_batch is not None
         return self.restore_hidden_states(hidden_states), self._global_batch
+
+
+def _maybe_prepare_replicated_pcp_attn(
+    manager: PCPManager | None,
+    speculator: "BaseSpeculator",
+    input_batch: InputBatch,
+    attn_metadata: dict[str, Any] | None,
+    slot_mappings: dict[str, torch.Tensor] | None,
+    *,
+    skip_attn: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, torch.Tensor] | None]:
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    if manager is None or not isinstance(speculator, DraftModelSpeculator) or skip_attn:
+        return attn_metadata, slot_mappings
+
+    num_reqs = input_batch.num_reqs
+    num_reqs_padded = input_batch.num_reqs_after_padding
+    num_tokens_padded = input_batch.num_tokens_after_padding
+    speculator.block_tables.gather_block_tables(
+        input_batch.idx_mapping,
+        num_reqs_padded=num_reqs_padded,
+    )
+    slot_mappings_tensor = speculator.block_tables.compute_slot_mappings(
+        input_batch.idx_mapping,
+        input_batch.query_start_loc,
+        input_batch.positions,
+        num_tokens_padded=num_tokens_padded,
+    )
+    slot_mappings = build_slot_mappings_by_layer(
+        slot_mappings_tensor, speculator.kv_cache_config
+    )
+    attn_metadata = speculator._build_draft_attn_metadata(
+        num_reqs=num_reqs,
+        num_reqs_padded=num_reqs_padded,
+        num_tokens_padded=num_tokens_padded,
+        seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+        step=0,
+        query_start_loc_np=input_batch.query_start_loc_np,
+        query_start_loc_gpu=input_batch.query_start_loc,
+        seq_lens=input_batch.seq_lens,
+    )
+    return attn_metadata, slot_mappings
 
 
 def maybe_partition_pcp_batch(
@@ -901,7 +943,6 @@ def maybe_build_pcp_manager(
     pcp_rank = get_pcp_group().rank_in_group
     dcp_size = parallel_config.decode_context_parallel_size
     dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
-
     return cls(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
