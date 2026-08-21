@@ -1371,13 +1371,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 raise NotImplementedError(
                     "FlashInfer non-causal prefill is not supported with DCP yet."
                 )
-            if self.is_kvcache_nvfp4:
+            if self.is_kvcache_nvfp4 and not self.use_fa2_nvfp4_kv:
+                # Only the FA2 paged reader (consumer Blackwell sm120/sm121) can
+                # express non-causal attention over NVFP4 KV pages; trtllm-gen
+                # (sm100f) is causal-only. The FA2 path below shares the exact
+                # forward run + V-scale (nvfp4_kv_block_scales) handling as the
+                # causal FA2-NVFP4 prefill, so the non-causal DFlash drafter
+                # verify reads V-scales identically.
                 raise NotImplementedError(
-                    "FlashInfer non-causal attention is not supported with "
-                    "NVFP4 KV cache."
+                    "FlashInfer non-causal attention with NVFP4 KV cache requires "
+                    "the FA2 paged reader (consumer Blackwell sm120/sm121); "
+                    "trtllm-gen is causal-only."
                 )
             if self._noncausal_prefill_wrapper is None:
                 if self.has_sinks and current_platform.is_device_capability_family(120):
+                    assert not self.is_kvcache_nvfp4
                     self._noncausal_prefill_wrapper = (
                         BatchAttentionWithAttentionSinkWrapper(
                             self._get_workspace_buffer(),
@@ -1391,11 +1399,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         )
                     )
                 else:
+                    # NVFP4 KV: pin the non-causal wrapper to the FA2 paged
+                    # reader (consumer Blackwell sm120/sm121) — the same
+                    # forward run + V-scale handling as the causal FA2-NVFP4
+                    # prefill. All other dtypes keep backend="auto".
+                    noncausal_backend = "fa2" if self.use_fa2_nvfp4_kv else "auto"
                     self._noncausal_prefill_wrapper = (
                         BatchPrefillWithPagedKVCacheWrapper(
                             self._get_workspace_buffer(),
                             get_flashinfer_layout_string(self.kv_cache_layout),
-                            backend="auto",
+                            backend=noncausal_backend,
                         )
                     )
             return self._noncausal_prefill_wrapper
