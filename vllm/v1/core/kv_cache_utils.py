@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    is_kv_cache_spec_dcp_sharded,
     replace_as,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -673,7 +674,7 @@ def resolve_kv_cache_block_sizes(
 
     group_block_sizes = [
         g.kv_cache_spec.block_size * dcp
-        if isinstance(g.kv_cache_spec, AttentionSpec)
+        if is_kv_cache_spec_dcp_sharded(g.kv_cache_spec)
         else g.kv_cache_spec.block_size
         for g in groups
     ]
