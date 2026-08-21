@@ -17,7 +17,8 @@ def rms_norm(
     variance = x_var.pow(2).mean(dim=-1, keepdim=True)
     x = x * torch.rsqrt(variance + epsilon)
     if weight is not None:
-        x = x.to(weight.dtype) * weight
+        weight = weight.to(torch.float32)
+        x = x.to(torch.float32) * weight
     return x.to(orig_dtype)
 
 
@@ -58,7 +59,8 @@ def fused_add_rms_norm(
     variance = x_var.pow(2).mean(dim=-1, keepdim=True)
     x = x * torch.rsqrt(variance + epsilon)
     if weight is not None:
-        x = x.to(weight.dtype) * weight
+        weight = weight.to(torch.float32)
+        x = x.to(torch.float32) * weight
     return x.to(orig_dtype), x_residual
 
 
