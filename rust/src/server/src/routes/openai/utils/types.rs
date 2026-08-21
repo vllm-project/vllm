@@ -215,8 +215,13 @@ pub struct StreamOptions {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tool {
     #[serde(rename = "type")]
+    #[serde(default = "default_function_tool_type")]
     pub tool_type: String,
     pub function: Function,
+}
+
+fn default_function_tool_type() -> String {
+    "function".to_string()
 }
 
 #[serde_with::skip_serializing_none]
@@ -224,6 +229,7 @@ pub struct Tool {
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
+    #[serde(default)]
     pub parameters: Value,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,

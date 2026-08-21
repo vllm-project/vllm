@@ -553,6 +553,33 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_defaults_function_tool_fields() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"function": {"name": "lookup"}}],
+        }))
+        .expect("parse tool defaults");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare tool defaults");
+
+        assert_eq!(
+            prepared.chat_request.tools(),
+            &[VllmChatTool {
+                name: "lookup".to_string(),
+                description: None,
+                parameters: serde_json::Value::Null,
+                strict: None,
+            }]
+        );
+    }
+
+    #[test]
     fn prepare_chat_request_maps_parallel_tool_calls() {
         let mut request = base_request();
         request.parallel_tool_calls = Some(false);
