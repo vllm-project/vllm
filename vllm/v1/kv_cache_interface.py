@@ -170,6 +170,27 @@ class KVCacheSpec:
         """
         raise NotImplementedError
 
+    def steady_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        """Per-request memory held for the request's whole lifetime.
+
+        This excludes the in-flight allowance, which is bounded
+        system-wide rather than per request; see
+        ``transient_memory_usage_bytes``. Defaults to the full per-request
+        peak; specs with a bounded working set (sliding window, chunked
+        local) override this.
+        """
+        return self.max_memory_usage_bytes(vllm_config)
+
+    def transient_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        """Per-request memory held only while tokens are in flight.
+
+        The scheduler settles at most `max_in_flight_tokens` tokens
+        system-wide across *all* requests before the next allocation, so
+        capacity math must reserve this term once per pool instead of
+        once per concurrent request (see #51041).
+        """
+        return 0
+
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         """
         The number of block table entries needed per request, i.e. the row
@@ -523,6 +544,18 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
         )
         return max_blocks * self.page_size_bytes
 
+    def steady_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # The persistent part of the admission cap: one chunk window.
+        num_tokens = min(
+            self.attention_chunk_size, vllm_config.model_config.max_model_len
+        )
+        return cdiv(num_tokens, self.block_size) * self.page_size_bytes
+
+    def transient_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return self.max_memory_usage_bytes(
+            vllm_config
+        ) - self.steady_memory_usage_bytes(vllm_config)
+
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]
     ) -> bool:
@@ -580,6 +613,23 @@ class SlidingWindowSpec(AttentionSpec):
             max_model_len=vllm_config.model_config.max_model_len,
         )
         return max_blocks * self.page_size_bytes
+
+    def steady_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # The persistent part of the admission cap: the trailing window
+        # (plus spec-decode retained tokens), without the in-flight chunk.
+        num_tokens = min(
+            self.sliding_window - 1 + self.extra_retained_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
+
+    def transient_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # Exact complement of `steady` within the admission cap, so pool
+        # sizing (max) and concurrency (steady + one shared transient)
+        # stay consistent with the runtime admission gate.
+        return self.max_memory_usage_bytes(
+            vllm_config
+        ) - self.steady_memory_usage_bytes(vllm_config)
 
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]
@@ -811,6 +861,26 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(
             cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
+            for spec in self.kv_cache_specs.values()
+        )
+        return max_num_pages * self.page_size_bytes
+
+    def steady_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_num_pages = max(
+            cdiv(
+                spec.steady_memory_usage_bytes(vllm_config),
+                spec.page_size_bytes,
+            )
+            for spec in self.kv_cache_specs.values()
+        )
+        return max_num_pages * self.page_size_bytes
+
+    def transient_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_num_pages = max(
+            cdiv(
+                spec.transient_memory_usage_bytes(vllm_config),
+                spec.page_size_bytes,
+            )
             for spec in self.kv_cache_specs.values()
         )
         return max_num_pages * self.page_size_bytes

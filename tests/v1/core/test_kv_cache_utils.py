@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import importlib
+import math
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -11,7 +12,7 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -1548,7 +1549,9 @@ def test_get_max_concurrency_for_kv_cache_config():
     max_concurrency_sliding_window = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config_sliding_window
     )
-    assert max_concurrency_sliding_window == 3
+    # Steady hold is 65 blocks (window only); the 64 in-flight blocks are
+    # reserved once per pool, not per request.
+    assert max_concurrency_sliding_window == pytest.approx((129 * 3 - 64) / 65)
 
     kv_cache_config_hybrid_model = KVCacheConfig(
         num_blocks=(1024 + 129) * 3,
@@ -1563,17 +1566,20 @@ def test_get_max_concurrency_for_kv_cache_config():
     max_concurrency_hybrid_model = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config_hybrid_model
     )
-    assert max_concurrency_hybrid_model == 3
+    # 1024 steady full-attention blocks + 65 steady SWA blocks per request,
+    # plus one pool-wide reservation of 64 transient SWA blocks.
+    assert max_concurrency_hybrid_model == pytest.approx((3459 - 64) / 1089)
     num_tokens, max_concurrency = get_kv_cache_capacity(
         vllm_config, kv_cache_config_hybrid_model
     )
-    assert num_tokens == max_concurrency_hybrid_model * max_model_len
+    assert num_tokens == int(max_concurrency_hybrid_model * max_model_len)
     assert max_concurrency == max_concurrency_hybrid_model
 
     # Unequal group sizes in the standard layout: each group's pages cost
-    # whole pool blocks, so a request needs 1024 + 129 = 1153 blocks — the
-    # same as the equal-hybrid case above, regardless of the second group
-    # holding only 2 layers.
+    # whole pool blocks, so a request needs 1024 steady + 65 steady = 1089
+    # blocks plus one pool-wide 64-block in-flight reservation — the same as
+    # the equal-hybrid case above, regardless of the second group holding
+    # only 2 layers.
     kv_cache_config_unequal_groups = KVCacheConfig(
         num_blocks=1153 * 3,
         kv_cache_tensors=[],
@@ -1582,19 +1588,16 @@ def test_get_max_concurrency_for_kv_cache_config():
             KVCacheGroupSpec(["layer_32", "layer_33"], sliding_window_spec),
         ],
     )
-    assert (
-        get_max_concurrency_for_kv_cache_config(
-            vllm_config, kv_cache_config_unequal_groups
-        )
-        == 3
-    )
+    assert get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_unequal_groups
+    ) == pytest.approx((3459 - 64) / 1089)
 
     # UniformTypeKVCacheSpecs group (worker config shape): the aggregated
     # spec's memory/page ratio equals a single layer's page count, so the
-    # group needs 1024 blocks and the request 1153 in total. The previous
-    # formula normalized both groups' memory by the first group's page size,
-    # reporting 3459/1057 = 3.27 here instead of 3 — and a different value
-    # again for the scheduler-config shape below.
+    # group needs 1024 blocks and the request 1089 steady + 64 reserved in
+    # total, matching the per-layer shape above. A previous formula that
+    # normalized both groups' memory by the first group's page size reported
+    # a different value here than for the scheduler-config shape below.
     uniform_full_spec = UniformTypeKVCacheSpecs(
         block_size=full_attention_spec.block_size,
         kv_cache_specs={f"layer_{i}": full_attention_spec for i in range(4)},
@@ -1607,12 +1610,9 @@ def test_get_max_concurrency_for_kv_cache_config():
             KVCacheGroupSpec(["layer_4", "layer_5"], sliding_window_spec),
         ],
     )
-    assert (
-        get_max_concurrency_for_kv_cache_config(
-            vllm_config, kv_cache_config_uniform_group
-        )
-        == 3
-    )
+    assert get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_uniform_group
+    ) == pytest.approx((3459 - 64) / 1089)
 
     # Scheduler-config shape: generate_scheduler_kv_cache_config replaces the
     # uniform-type group's spec with a representative per-layer spec.
@@ -1626,6 +1626,216 @@ def test_get_max_concurrency_for_kv_cache_config():
     ) == get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config_uniform_group
     )
+
+
+def test_swa_steady_transient_decomposition():
+    """SWA admission cap must decompose exactly into steady + transient.
+
+    The in-flight allowance is bounded system-wide by the scheduler's token
+    budget, so capacity math reserves it once per pool instead of charging
+    every concurrent request for it (see #51041).
+    """
+    model_config = ModelConfig(
+        "Qwen/Qwen1.5-7B",
+        runner="generate",
+        dtype="float16",
+        max_model_len=16384,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+        async_scheduling=False,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=32,
+        head_size=128,
+        dtype=torch.float16,
+        sliding_window=1024,
+    )
+    page = spec.page_size_bytes
+    assert spec.max_memory_usage_bytes(vllm_config) == 129 * page
+    assert spec.steady_memory_usage_bytes(vllm_config) == 65 * page
+    assert spec.transient_memory_usage_bytes(vllm_config) == 64 * page
+
+    # Full attention has no transient component.
+    full_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=32,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    assert full_spec.steady_memory_usage_bytes(vllm_config) == (
+        full_spec.max_memory_usage_bytes(vllm_config)
+    )
+    assert full_spec.transient_memory_usage_bytes(vllm_config) == 0
+
+    # The max_model_len cap keeps steady + transient within the admission
+    # cap when the window alone would exceed the context.
+    capped = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=32,
+        head_size=128,
+        dtype=torch.float16,
+        sliding_window=16384,
+    )
+    assert capped.steady_memory_usage_bytes(vllm_config) <= (
+        capped.max_memory_usage_bytes(vllm_config)
+    )
+    assert capped.transient_memory_usage_bytes(vllm_config) >= 0
+
+
+def test_dsv4_flash_0731_kv_capacity(monkeypatch):
+    """End-to-end capacity math for the DeepSeek-V4-Flash-0731 layout (#51041).
+
+    Mirrors the per-layer KV cache specs of the 0731 checkpoint: 43 layers with
+    compress_ratios [0, 0, (4, 128) x 20, 0] — two SWA-only layers, twenty
+    C4-compressed and twenty C128-compressed layers, and a third SWA-only
+    trailing layer. Every layer carries an SWA cache; compressed layers add a
+    full MLA cache, an indexer cache, and a compressor state cache.
+
+    With the 0731 group layout, charging each SWA-class group's in-flight
+    allowance per request inflated the per-token cost to ~53 KiB and capped
+    1M-token contexts out of an H20-class pool. The transient term must be
+    reserved once per pool instead.
+    """
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    from vllm.v1.core.kv_cache_utils import (
+        _get_kv_cache_config_packed,
+        _get_kv_cache_groups_uniform_groups,
+    )
+
+    block_size = 256
+    ratios = [0, 0]
+    for _ in range(20):
+        ratios.extend((4, 128))
+    ratios.append(0)
+    assert len(ratios) == 43
+
+    specs: dict[str, KVCacheSpec] = {}
+    for i, ratio in enumerate(ratios):
+        prefix = f"model.layers.{i}.self_attn"
+        # Every layer caches its sliding-window tokens.
+        specs[f"{prefix}.swa_cache"] = SlidingWindowMLASpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            sliding_window=128,
+            alignment=576,
+        )
+        if ratio <= 1:
+            continue
+        specs[prefix] = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            compress_ratio=ratio,
+            cache_dtype_str="fp8_ds_mla",
+            alignment=576,
+            model_version="deepseek_v4",
+            state_content_bytes=584,
+        )
+        specs[f"{prefix}.indexer"] = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            compress_ratio=ratio,
+            alignment=576,
+        )
+        specs[f"{prefix}.compressor"] = SlidingWindowMLASpec(
+            block_size=4 if ratio == 4 else 8,
+            num_kv_heads=1,
+            head_size=8208 if ratio == 4 else 4104,
+            dtype=torch.uint8,
+            sliding_window=8 if ratio == 4 else 128,
+            alignment=576,
+        )
+
+    grouped = group_and_unify_kv_cache_specs(specs)
+    assert grouped is not None
+    groups = _get_kv_cache_groups_uniform_groups(grouped)
+    # Full MLA/indexer group, two split SWA groups, C4 and C128 compressor
+    # groups — the 5-group hybrid layout from #50700.
+    assert len(groups) == 5
+    compressor_counts = sorted(
+        len(g.layer_names)
+        for g in groups
+        if isinstance(
+            g.kv_cache_spec.kv_cache_specs[next(iter(g.kv_cache_spec.kv_cache_specs))],
+            SlidingWindowMLASpec,
+        )
+        and "compressor" in g.layer_names[0]
+    )
+    assert compressor_counts == [20, 20]
+
+    max_model_len = 1_048_576
+    model_config = ModelConfig(
+        "Qwen/Qwen1.5-7B",
+        runner="generate",
+        dtype="float16",
+        max_model_len=max_model_len,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=8192,
+        enable_chunked_prefill=True,
+        max_model_len=max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+        async_scheduling=True,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+        cache_config=CacheConfig(block_size=block_size),
+    )
+
+    for g in groups:
+        spec = g.kv_cache_spec
+        assert spec.steady_memory_usage_bytes(vllm_config) <= (
+            spec.max_memory_usage_bytes(vllm_config)
+        )
+        assert spec.steady_memory_usage_bytes(
+            vllm_config
+        ) + spec.transient_memory_usage_bytes(
+            vllm_config
+        ) == spec.max_memory_usage_bytes(vllm_config)
+
+    # H20-class per-rank pool from the issue: 7.71 GiB available KV memory.
+    available = int(7.71 * 2**30)
+    num_blocks, _tensors = _get_kv_cache_config_packed(vllm_config, groups, available)
+    assert num_blocks > 0
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+
+    max_concurrency = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config
+    )
+    per_token_bytes = available / (max_concurrency * max_model_len)
+    # The packed fp8_ds_mla layout costs single-digit KiB per token; the
+    # pre-fix formula reported ~53 KiB on this configuration.
+    assert per_token_bytes < 10 * 1024, per_token_bytes
+
+    # And it must strictly beat the pre-fix per-request-peak formula.
+    old_blocks_per_request = sum(
+        math.ceil(
+            g.kv_cache_spec.max_memory_usage_bytes(vllm_config)
+            / g.kv_cache_spec.page_size_bytes
+        )
+        for g in groups
+    )
+    assert max_concurrency > num_blocks / old_blocks_per_request
 
 
 def test_get_max_concurrency_packed_kv_cache_config():
@@ -1684,13 +1894,13 @@ def test_get_max_concurrency_packed_kv_cache_config():
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
     )
-    # Per-request blocks: the MLA group needs cdiv(16384, 16) = 1024 pages;
-    # the SWA group cdiv(min(128 - 1 + 1024, 16384), 16) + 1 = 73. The
-    # previous formula normalized by the first group's page size and gave
-    # 1061 blocks per request instead of 1097.
+    # Per-request steady blocks: the MLA group needs cdiv(16384, 16) = 1024
+    # pages; the SWA group holds its window, cdiv(128 - 1, 16) + 1 = 9. The
+    # 64 in-flight SWA blocks are reserved once per pool, not per request,
+    # so they subtract once from the numerator instead of the denominator.
     assert get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config_packed
-    ) == num_blocks / (1024 + 73)
+    ) == pytest.approx((num_blocks - 64) / (1024 + 9))
 
 
 def test_allocate_with_lookahead():
