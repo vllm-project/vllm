@@ -13,6 +13,20 @@
 namespace {
 
 #ifndef USE_ROCM
+template <typename DType, int TopK>
+size_t get_filtered_topk_required_smem() {
+  static const size_t required_smem = []() {
+    size_t value = 0;
+    cudaError_t status =
+        vllm::GetFilteredTopKRequiredSmem<DType, int32_t, TopK>(&value);
+    STD_TORCH_CHECK(status == cudaSuccess,
+                    "Failed to query FilteredTopK shared memory: ",
+                    cudaGetErrorString(status));
+    return value;
+  }();
+  return required_smem;
+}
+
 template <int TopK>
 void launch_persistent_topk(const torch::stable::Tensor& logits,
                             const torch::stable::Tensor& lengths,
@@ -37,13 +51,20 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
 
   const bool is_half =
       logits.scalar_type() == torch::headeronly::ScalarType::Half;
-  if (is_half) {
-    STD_TORCH_CHECK(max_smem_per_block >= 128 * 1024,
-                    "FP16 persistent_topk requires at least "
-                    "128KB of shared memory per block");
-  }
+  const size_t filtered_topk_required_smem =
+      is_half ? get_filtered_topk_required_smem<__half, TopK>()
+              : get_filtered_topk_required_smem<float, TopK>();
+  const bool filtered_topk_supported =
+      static_cast<size_t>(max_smem_per_block) >= filtered_topk_required_smem;
+  STD_TORCH_CHECK(!is_half || filtered_topk_supported,
+                  "FP16 persistent_topk requires ", filtered_topk_required_smem,
+                  " bytes of shared memory per block, but the device has ",
+                  max_smem_per_block);
 
-  if ((num_rows > 32 || is_half) && max_smem_per_block >= 128 * 1024) {
+  // The cooperative persistent implementation below remains FP32-only.
+  const bool use_filtered_topk =
+      filtered_topk_supported && (is_half || num_rows > 32);
+  if (use_filtered_topk) {
     cudaError_t status;
     if (is_half) {
       status = vllm::FilteredTopKRaggedTransform<__half, int32_t, TopK>(
@@ -152,10 +173,12 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     // instead of deadlocking. Only relevant when needs_cooperative.
     if (needs_cooperative && total_ctas > hw_resident_cap) {
       STD_TORCH_CHECK(
-          max_smem_per_block >= 128 * 1024,
+          filtered_topk_supported,
           "persistent_topk would oversubscribe and the FilteredTopK "
-          "fallback requires >=128KB smem per block (have ",
-          max_smem_per_block, "). total_ctas=", total_ctas,
+          "fallback requires ",
+          filtered_topk_required_smem,
+          " bytes of shared memory per block (have ", max_smem_per_block,
+          "). total_ctas=", total_ctas,
           " > num_sms*occupancy=", hw_resident_cap, " (TopK=", TopK,
           ", vec_size=", vec_size, ", ctas_per_group=", ctas_per_group,
           ", smem=", smem_size, ").");

@@ -53,6 +53,7 @@ _INDEXER_LOGITS_DTYPES = {
 def _should_use_native_fp16_decode_topk(
     logits_dtype: torch.dtype, num_rows: int, max_seq_len: int
 ) -> bool:
+    # FP16 crossovers measured on GB200 for #52696; retune on Hopper.
     if logits_dtype != torch.float16:
         return False
     if max_seq_len <= 32768:
@@ -659,7 +660,10 @@ def sparse_attn_indexer(
             current_platform.is_cuda()
             and topk_tokens in (512, 1024, 2048)
             and num_rows <= 32
-            and logits.stride(0) % (16 // logits.element_size()) == 0
+            and (
+                # TMA requires 16-byte alignment.
+                logits.stride(0) % (16 // logits.element_size()) == 0
+            )
             and current_platform.has_device_capability(90)
             and not current_platform.is_device_capability_family(120)
         )

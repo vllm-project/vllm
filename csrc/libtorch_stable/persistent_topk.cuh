@@ -1336,6 +1336,41 @@ constexpr int ComputeFilteredTopKVecSize(uint32_t max_len) {
   return static_cast<int>(g);
 }
 
+template <typename DType, typename IdType, uint32_t MAX_K, int VEC_SIZE>
+cudaError_t UpdateFilteredTopKStaticSmem(size_t* max_static_smem) {
+  constexpr int MAX_VEC = 16 / sizeof(DType);
+  auto kernel = FilteredTopKUnifiedKernel<DType, IdType, VEC_SIZE, MAX_K,
+                                          (VEC_SIZE != MAX_VEC)>;
+  cudaFuncAttributes attributes{};
+  cudaError_t status = cudaFuncGetAttributes(&attributes, kernel);
+  if (status != cudaSuccess) return status;
+  if (attributes.sharedSizeBytes > *max_static_smem) {
+    *max_static_smem = attributes.sharedSizeBytes;
+  }
+  return cudaSuccess;
+}
+
+template <typename DType, typename IdType, uint32_t MAX_K = 2048>
+cudaError_t GetFilteredTopKRequiredSmem(size_t* required_smem) {
+  size_t max_static_smem = 0;
+#define QUERY_STATIC_SMEM(VS)                                   \
+  {                                                             \
+    cudaError_t status =                                        \
+        UpdateFilteredTopKStaticSmem<DType, IdType, MAX_K, VS>( \
+            &max_static_smem);                                  \
+    if (status != cudaSuccess) return status;                   \
+  }
+  QUERY_STATIC_SMEM(1)
+  QUERY_STATIC_SMEM(2)
+  QUERY_STATIC_SMEM(4)
+  if constexpr (16 / sizeof(DType) >= 8) {
+    QUERY_STATIC_SMEM(8)
+  }
+#undef QUERY_STATIC_SMEM
+  *required_smem = filtered_topk_smem_dynamic<DType>() + max_static_smem;
+  return cudaSuccess;
+}
+
 template <typename DType, typename IdType, uint32_t MAX_K = 2048>
 cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         IdType* output_indices,
@@ -1376,6 +1411,12 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
 }
 
 }  // namespace filtered_topk
+
+template <typename DType, typename IdType, uint32_t MAX_K = 2048>
+cudaError_t GetFilteredTopKRequiredSmem(size_t* required_smem) {
+  return filtered_topk::GetFilteredTopKRequiredSmem<DType, IdType, MAX_K>(
+      required_smem);
+}
 
 template <typename DType, typename IdType, uint32_t MAX_K = 2048>
 cudaError_t FilteredTopKRaggedTransform(const DType* input,

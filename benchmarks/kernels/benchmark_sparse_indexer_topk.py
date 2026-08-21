@@ -2,34 +2,55 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the sparse-indexer top-k kernels with CUDA graphs.
 
-The benchmark follows the selector dispatch used by ``SparseAttnIndexer``:
-cooperative top-k for at most 32 rows and persistent top-k otherwise. Inputs
-are built from captured model logits, and every result is checked against
-``torch.topk`` before it is timed.
+The default follows the selector dispatch used by ``SparseAttnIndexer``.
+Individual backends can also be selected to compare FP32 performance before
+and after a kernel change. ``persistent_topk`` and ``filtered_topk`` both call
+the public ``persistent_topk`` op with shapes that force the named internal
+implementation. Every result is checked against ``torch.topk`` before timing.
 
 Example:
     .venv/bin/python benchmarks/kernels/benchmark_sparse_indexer_topk.py \
-        --capture /tmp/gvr_real_matrix_valid/gvr_b32_call21.pt \
-        --extra-capture /tmp/gvr_real_matrix_valid/gvr_b32_call0.pt
+        --synthetic --dtypes float32 --backend all
+
+    .venv/bin/python benchmarks/kernels/benchmark_sparse_indexer_topk.py \
+        --synthetic --backend top_k_per_row_prefill \
+        --prefill-pattern causal --rows 128 512 1024 2048
 """
 
 import argparse
+import importlib
 import math
-import statistics
 from collections.abc import Callable
 
 import torch
-import vllm._C_stable_libtorch  # noqa: F401
 
 ROWS = (1, 8, 32, 128, 1024, 8192, 16384)
 KV_LENGTHS = (10_000, 50_000, 100_000, 200_000)
 WORKSPACE_SIZE = 1024 * 1024
+BACKENDS = (
+    "top_k_per_row_prefill",
+    "top_k_per_row_decode",
+    "cooperative_topk",
+    "persistent_topk",
+    "filtered_topk",
+)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--capture", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--capture")
+    source.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Use reproducible synthetic FP32 logits.",
+    )
     parser.add_argument("--extra-capture")
+    parser.add_argument(
+        "--library",
+        help="Load this _C_stable_libtorch library instead of the installed one.",
+    )
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--label", default="current")
     parser.add_argument(
         "--dtypes",
@@ -47,13 +68,35 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--top-k", type=int, default=2048)
-    parser.add_argument("--samples", type=int, default=7)
+    parser.add_argument(
+        "--rep-ms",
+        type=int,
+        default=20,
+        help="Target duration in milliseconds for each CUDA-graph measurement.",
+    )
+    parser.add_argument(
+        "--prefill-pattern",
+        choices=("full", "causal"),
+        default="full",
+        help=(
+            "Use a common full row range or causal row ends for the explicit "
+            "prefill backend."
+        ),
+    )
     parser.add_argument(
         "--backend",
-        choices=("auto", "cooperative", "persistent", "decode"),
-        default="auto",
+        nargs="+",
+        choices=("auto", "all", *BACKENDS),
+        default=("auto",),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.extra_capture and not args.capture:
+        parser.error("--extra-capture requires --capture")
+    if "all" in args.backend and len(args.backend) != 1:
+        parser.error("--backend all cannot be combined with another backend")
+    if "auto" in args.backend and len(args.backend) != 1:
+        parser.error("--backend auto cannot be combined with another backend")
+    return args
 
 
 def _load_logits(path: str) -> torch.Tensor:
@@ -65,17 +108,30 @@ def _load_logits(path: str) -> torch.Tensor:
 
 
 def _make_source(args: argparse.Namespace) -> torch.Tensor:
-    source = _load_logits(args.capture)
-    if args.extra_capture:
-        extra = _load_logits(args.extra_capture)
-        if extra.shape[0] != source.shape[0]:
-            raise ValueError("Captures must contain the same number of rows")
-        source = torch.cat((source, extra), dim=1)
     required = max(max(args.kv_lengths), args.max_seq_len or 0)
+    if args.capture:
+        source = _load_logits(args.capture)
+        if args.extra_capture:
+            extra = _load_logits(args.extra_capture)
+            if extra.shape[0] != source.shape[0]:
+                raise ValueError("Captures must contain the same number of rows")
+            source = torch.cat((source, extra), dim=1)
+    else:
+        generator = torch.Generator().manual_seed(args.seed)
+        source_rows = min(max(args.rows), 32)
+        source = torch.randn(source_rows, required, generator=generator)
     if source.shape[1] < required:
         repeats = math.ceil(required / source.shape[1])
         source = source.repeat(1, repeats)
     return source[:, :required].contiguous()
+
+
+def _workspace_backend(logits: torch.Tensor) -> str:
+    properties = torch.cuda.get_device_properties(logits.device)
+    has_filtered_topk = properties.shared_memory_per_block_optin >= 128 * 1024
+    if (logits.shape[0] > 32 or logits.dtype == torch.float16) and has_filtered_topk:
+        return "filtered_topk"
+    return "persistent_topk"
 
 
 def _selector(
@@ -85,30 +141,39 @@ def _selector(
     workspace: torch.Tensor,
     top_k: int,
     max_seq_len: int,
-    backend_override: str,
-) -> tuple[str, Callable[[], None]]:
+    requested_backend: str,
+    prefill_pattern: str,
+) -> tuple[str, Callable[[], None], torch.Tensor, torch.Tensor] | None:
     use_cooperative = logits.shape[0] <= 32
     use_decode = logits.dtype == torch.float16 and (
         (32768 < max_seq_len <= 65536 and logits.shape[0] >= 768)
         or (65536 < max_seq_len <= 100000 and logits.shape[0] >= 512)
         or (100000 < max_seq_len <= 131072 and logits.shape[0] >= 1024)
     )
-    backend = (
-        ("cooperative" if use_cooperative else "decode" if use_decode else "persistent")
-        if backend_override == "auto"
-        else backend_override
-    )
+    if requested_backend == "auto":
+        backend = (
+            "cooperative_topk"
+            if use_cooperative
+            else "top_k_per_row_decode"
+            if use_decode
+            else _workspace_backend(logits)
+        )
+    else:
+        backend = requested_backend
 
-    if backend == "cooperative":
-        backend = "cooperative"
+    starts = torch.zeros_like(lengths)
+    ends = lengths
+
+    if backend == "cooperative_topk":
+        if logits.shape[0] > 32:
+            return None
 
         def launch() -> None:
             torch.ops._C.cooperative_topk(
                 logits, lengths, output, workspace, top_k, max_seq_len
             )
 
-    elif backend == "decode":
-        backend = "decode"
+    elif backend == "top_k_per_row_decode":
 
         def launch() -> None:
             torch.ops._C.top_k_per_row_decode(
@@ -122,8 +187,35 @@ def _selector(
                 top_k,
             )
 
-    elif backend == "persistent":
-        backend = "persistent"
+    elif backend == "top_k_per_row_prefill":
+        if prefill_pattern == "causal":
+            ends = lengths - torch.arange(
+                logits.shape[0] - 1,
+                -1,
+                -1,
+                dtype=torch.int32,
+                device=logits.device,
+            )
+            if int(ends[0]) - int(starts[0]) < top_k:
+                raise ValueError(
+                    "The first causal prefill row has fewer valid values than top-k"
+                )
+
+        def launch() -> None:
+            torch.ops._C.top_k_per_row_prefill(
+                logits,
+                starts,
+                ends,
+                output,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                top_k,
+            )
+
+    elif backend in ("persistent_topk", "filtered_topk"):
+        if _workspace_backend(logits) != backend:
+            return None
 
         def launch() -> None:
             torch.ops._C.persistent_topk(
@@ -133,69 +225,57 @@ def _selector(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-    return backend, launch
+    return backend, launch, starts, ends
 
 
 def _check_correctness(
-    logits: torch.Tensor, output: torch.Tensor, top_k: int, kv_length: int
+    logits: torch.Tensor,
+    output: torch.Tensor,
+    top_k: int,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
 ) -> None:
-    checked_rows = min(logits.shape[0], 32)
-    actual = torch.gather(logits[:checked_rows], 1, output[:checked_rows].long())
-    actual = actual.sort(dim=1, descending=True).values
-    expected = torch.topk(logits[:checked_rows, :kv_length], top_k, dim=1).values
-    if not torch.equal(actual, expected):
-        mismatch = (actual != expected).sum().item()
-        raise AssertionError(f"Top-k selected values differ at {mismatch} positions")
-    if not bool(((output >= 0) & (output < kv_length)).all()):
-        raise AssertionError("Top-k returned an out-of-range index")
-
-
-def _graph_parameters(num_elements: int) -> tuple[int, int]:
-    graph_calls = min(100, max(1, 100_000_000 // num_elements))
-    graph_elements = graph_calls * num_elements
-    replays = min(20, max(3, 300_000_000 // graph_elements))
-    return graph_calls, replays
-
-
-def _benchmark_graph(
-    launch: Callable[[], None],
-    graph_calls: int,
-    replays: int,
-    samples: int,
-) -> float:
-    for _ in range(3):
-        launch()
-    torch.accelerator.synchronize()
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        for _ in range(graph_calls):
-            launch()
-    for _ in range(5):
-        graph.replay()
-    torch.accelerator.synchronize()
-
-    timings = []
-    for _ in range(samples):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(replays):
-            graph.replay()
-        end.record()
-        end.synchronize()
-        timings.append(start.elapsed_time(end) * 1000 / (graph_calls * replays))
-    return statistics.median(timings)
+    checked_rows = (
+        torch.linspace(
+            0,
+            logits.shape[0] - 1,
+            min(logits.shape[0], 32),
+            device=logits.device,
+        )
+        .round()
+        .long()
+        .unique()
+    )
+    for row_tensor in checked_rows:
+        row = int(row_tensor)
+        row_start = int(row_starts[row])
+        row_end = int(row_ends[row])
+        indices = output[row].long()
+        if not bool(((indices >= row_start) & (indices < row_end)).all()):
+            raise AssertionError(f"Top-k returned an out-of-range index in row {row}")
+        actual = logits[row, indices].sort(descending=True).values
+        expected = torch.topk(logits[row, row_start:row_end], top_k).values
+        if not torch.equal(actual, expected):
+            mismatch = (actual != expected).sum().item()
+            raise AssertionError(
+                f"Top-k selected values differ at {mismatch} positions in row {row}"
+            )
 
 
 @torch.inference_mode()
 def main() -> None:
     args = _parse_args()
+    if args.library:
+        torch.ops.load_library(args.library)
+    else:
+        importlib.import_module("vllm._C_stable_libtorch")
+    triton_testing = importlib.import_module("triton.testing")
     torch.accelerator.set_device_index(0)
     source = _make_source(args).to("cuda")
     dtype_by_name = {"float16": torch.float16, "float32": torch.float32}
     results = []
 
+    requested_backends = BACKENDS if args.backend == ["all"] else args.backend
     for dtype_name in args.dtypes:
         dtype = dtype_by_name[dtype_name]
         for kv_length in args.kv_lengths:
@@ -217,49 +297,80 @@ def main() -> None:
                 workspace = torch.empty(
                     WORKSPACE_SIZE, dtype=torch.uint8, device="cuda"
                 )
-                backend, launch = _selector(
-                    logits,
-                    lengths,
-                    output,
-                    workspace,
-                    args.top_k,
-                    max_seq_len,
-                    args.backend,
-                )
-                launch()
-                torch.accelerator.synchronize()
-                _check_correctness(logits, output, args.top_k, kv_length)
-
-                graph_calls, replays = _graph_parameters(rows * kv_length)
-                latency_us = _benchmark_graph(
-                    launch, graph_calls, replays, args.samples
-                )
-                results.append(
-                    (
-                        dtype_name,
-                        rows,
-                        kv_length,
-                        backend,
-                        latency_us,
-                        graph_calls,
-                        replays,
+                for requested_backend in requested_backends:
+                    selected = _selector(
+                        logits,
+                        lengths,
+                        output,
+                        workspace,
+                        args.top_k,
+                        max_seq_len,
+                        requested_backend,
+                        args.prefill_pattern,
                     )
-                )
-                print(
-                    f"RESULT,{args.label},{dtype_name},{rows},{kv_length},"
-                    f"{backend},{latency_us:.3f},{graph_calls},{replays}",
-                    flush=True,
-                )
-                del logits, lengths, output, workspace, launch
+                    if selected is None:
+                        continue
+                    backend, launch, row_starts, row_ends = selected
+                    launch()
+                    torch.accelerator.synchronize()
+                    _check_correctness(
+                        logits,
+                        output,
+                        args.top_k,
+                        row_starts,
+                        row_ends,
+                    )
+
+                    latency_us = 1000 * triton_testing.do_bench_cudagraph(
+                        launch,
+                        rep=args.rep_ms,
+                        return_mode="median",
+                    )
+                    results.append(
+                        (
+                            dtype_name,
+                            rows,
+                            kv_length,
+                            backend,
+                            latency_us,
+                        )
+                    )
+                    print(
+                        f"RESULT,{args.label},{dtype_name},{rows},{kv_length},"
+                        f"{backend},{latency_us:.3f}",
+                        flush=True,
+                    )
+                    del launch
+                del logits, lengths, output, workspace
                 torch.accelerator.empty_cache()
 
-    print("\n| dtype | rows | KV | backend | us | graph calls | replays |")
-    print("|---|---:|---:|---|---:|---:|---:|")
-    for dtype_name, rows, kv_length, backend, latency, calls, replays in results:
-        print(
-            f"| {dtype_name} | {rows} | {kv_length} | {backend} | "
-            f"{latency:.3f} | {calls} | {replays} |"
-        )
+    print("\n| dtype | rows | KV | backend | us |")
+    print("|---|---:|---:|---|---:|")
+    for dtype_name, rows, kv_length, backend, latency in results:
+        print(f"| {dtype_name} | {rows} | {kv_length} | {backend} | {latency:.3f} |")
+
+    latency_by_shape = {
+        (dtype_name, rows, kv_length, backend): latency
+        for dtype_name, rows, kv_length, backend, latency in results
+    }
+    speedups = []
+    paired_shapes = set()
+    for _, rows, kv_length, backend, _ in results:
+        key = (rows, kv_length, backend)
+        fp16 = latency_by_shape.get(("float16", *key))
+        fp32 = latency_by_shape.get(("float32", *key))
+        if fp16 is not None and fp32 is not None and key not in paired_shapes:
+            speedups.append((*key, fp16, fp32, fp32 / fp16))
+            paired_shapes.add(key)
+
+    if speedups:
+        print("\n| rows | KV | backend | FP16 us | FP32 us | FP32 / FP16 |")
+        print("|---:|---:|---|---:|---:|---:|")
+        for rows, kv_length, backend, fp16, fp32, speedup in speedups:
+            print(
+                f"| {rows} | {kv_length} | {backend} | {fp16:.3f} | "
+                f"{fp32:.3f} | {speedup:.3f}x |"
+            )
 
 
 if __name__ == "__main__":
