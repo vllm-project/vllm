@@ -193,7 +193,6 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
         self.pack_reorder = pack_method == "reorder"
 
         self.use_wna16_backend = True
-        self.wna16_backend = None
         if self.is_symmetric:
             weight_key = kInt4Static32 if self.group_size == 32 else kInt4Static
         else:
@@ -361,7 +360,6 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_backend,
-            layer=layer,
             routing_tables=layer._expert_routing_tables(),
         )
 
