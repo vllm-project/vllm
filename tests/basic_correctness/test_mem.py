@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
+from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
@@ -242,6 +243,40 @@ def test_deep_sleep():
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test()
+def test_deep_sleep_with_fused_mtp_cudagraph(monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    llm = LLM(
+        model="Qwen/Qwen3.5-0.8B-Base",
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 2,
+        },
+        compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
+        enable_prefix_caching=False,
+        enable_sleep_mode=True,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        max_model_len=256,
+        max_num_seqs=1,
+        trust_remote_code=True,
+    )
+    assert llm.collective_rpc(_uses_fused_mtp_decode) == [True]
+    sampling_params = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
+    output = llm.generate("The capital of France is", sampling_params)
+
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+    llm.wake_up(tags=["kv_cache"])
+
+    output_after_wake = llm.generate("The capital of France is", sampling_params)
+    assert output[0].outputs[0].token_ids == output_after_wake[0].outputs[0].token_ids
+
+
+def _uses_fused_mtp_decode(worker) -> bool:
+    return worker.model_runner.speculator.use_fused_multi_step_decode
 
 
 @create_new_process_for_each_test()

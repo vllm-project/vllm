@@ -150,6 +150,7 @@ from vllm.v1.worker.utils import (
     KVBlockZeroer,
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
+    maybe_get_memory_pool_context,
 )
 from vllm.v1.worker.workspace import use_workspace_lane
 
@@ -537,9 +538,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_blocks = get_block_table_width(max_num_blocks, spec.block_size)
             max_num_blocks_per_group.append(max_num_blocks)
 
-        self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
-            self.kv_cache_config, self.vllm_config, self.device
+        initialize_mamba_ssu_backend(
+            self.vllm_config.mamba_config, self.kv_cache_config
         )
+        with maybe_get_memory_pool_context(self.vllm_config, tag="kv_cache"):
+            self.attn_groups, attn_cg_support, self.kernel_block_sizes = (
+                init_attn_backend(self.kv_cache_config, self.vllm_config, self.device)
+            )
+            self.kv_caches: list[torch.Tensor] = []
+            kv_caches_dict = init_kv_cache(
+                self.kv_caches,
+                self.compilation_config.static_forward_context,
+                self.kv_cache_config,
+                self.attn_groups,
+                self.device,
+                self.cache_config.cache_dtype,
+                self.kernel_block_sizes,
+                self.vllm_config,
+            )
         attn_cg_support = attn_cg_support.narrow(
             *self.model_state.get_additional_cg_support()
         )
@@ -576,9 +592,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.block_tables,
             cls=self.pcp_manager_cls,
         )
-        initialize_mamba_ssu_backend(
-            self.vllm_config.mamba_config, self.kv_cache_config
-        )
         if self.adaptive_verification is not None:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
@@ -613,17 +626,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # to its own attention support.
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
-        self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict = init_kv_cache(
-            self.kv_caches,
-            self.compilation_config.static_forward_context,
-            self.kv_cache_config,
-            self.attn_groups,
-            self.device,
-            self.cache_config.cache_dtype,
-            self.kernel_block_sizes,
-            self.vllm_config,
-        )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     def _init_kv_zero_meta(self) -> None:
@@ -836,7 +838,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
 
     def post_kv_cache_wake_up(self) -> None:
-        self.block_tables.init_block_table_layout_tensors()
+        """MRV2 graph metadata is allocated outside the sleepable KV-cache pool."""
 
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:

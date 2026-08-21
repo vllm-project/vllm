@@ -3,6 +3,7 @@
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -11,6 +12,7 @@ import numpy as np
 import torch
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
@@ -37,6 +39,27 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
+
+
+def maybe_get_memory_pool_context(
+    vllm_config: VllmConfig, tag: str
+) -> AbstractContextManager:
+    if (
+        current_platform.is_cuda_alike()
+        and not vllm_config.model_config.enable_cumem_allocator
+    ):
+        return nullcontext()
+    if current_platform.is_xpu() and not vllm_config.model_config.enable_sleep_mode:
+        return nullcontext()
+    if current_platform.is_cpu():
+        return nullcontext()
+
+    allocator = get_mem_allocator_instance()
+    if tag == "weights":
+        assert allocator.get_current_usage() == 0, (
+            "CuMem allocator can only be used for one instance per process."
+        )
+    return allocator.use_memory_pool(tag=tag)
 
 
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
