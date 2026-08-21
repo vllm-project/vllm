@@ -2425,10 +2425,9 @@ class VllmConfig:
 
         from vllm.multimodal import MULTIMODAL_REGISTRY
 
-        if (
-            MULTIMODAL_REGISTRY.supports_multimodal_inputs(model_config)
-            and not MULTIMODAL_REGISTRY.uses_multimodal_encoder(model_config)
-        ):
+        if MULTIMODAL_REGISTRY.supports_multimodal_inputs(
+            model_config
+        ) and not MULTIMODAL_REGISTRY.uses_multimodal_encoder(model_config):
             raise ValueError(
                 "cudagraph_mm_encoder=True is incompatible with embedding-only "
                 "mode, since no multimodal encoder is run. Please disable "
