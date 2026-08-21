@@ -108,6 +108,18 @@ def _warmup_kimi_k3_gemm_rs_ar() -> None:
         logger.info_once("Warmed up %d Kimi-K3 GEMM-RS/AR variants.", compiled)
 
 
+def _warmup_compact_prompt_logprobs(worker: "Worker") -> None:
+    """Compile the opt-in MRV2 prompt-logprobs kernels before serving."""
+    if not worker.use_v2_model_runner:
+        return
+
+    compact_prompt_logprobs = getattr(
+        worker.model_runner, "compact_prompt_logprobs", None
+    )
+    if compact_prompt_logprobs is not None:
+        compact_prompt_logprobs.warmup()
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -136,6 +148,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
             time.perf_counter() - jit_warmup_start,
         )
 
+    _warmup_compact_prompt_logprobs(worker)
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     compilation_config = worker.vllm_config.compilation_config

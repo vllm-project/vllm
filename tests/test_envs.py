@@ -55,6 +55,23 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, False), ("0", False), ("1", True)],
+)
+def test_v2_compact_prompt_logprobs_env(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+    expected: bool,
+) -> None:
+    if value is None:
+        monkeypatch.delenv("VLLM_USE_V2_COMPACT_PROMPT_LOGPROBS", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_USE_V2_COMPACT_PROMPT_LOGPROBS", value)
+
+    assert envs.VLLM_USE_V2_COMPACT_PROMPT_LOGPROBS is expected
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")

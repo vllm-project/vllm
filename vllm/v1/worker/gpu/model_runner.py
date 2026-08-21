@@ -126,7 +126,11 @@ from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
-from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
+from vllm.v1.worker.gpu.sample.prompt_logprob import (
+    CompactPromptLogprobs,
+    PromptLogprobsWorker,
+    init_compact_prompt_logprobs,
+)
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
@@ -172,6 +176,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.observability_config = vllm_config.observability_config
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
+        self.compact_prompt_logprobs: CompactPromptLogprobs | None = None
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -427,9 +432,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.speculative_config,
                     self.device,
                 )
+            if envs.VLLM_USE_V2_COMPACT_PROMPT_LOGPROBS:
+                self.compact_prompt_logprobs = init_compact_prompt_logprobs(
+                    model=self.model,
+                    hidden_dtype=self.dtype,
+                    logprobs_mode=self.model_config.logprobs_mode,
+                )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
-                self.max_num_reqs,
+                max_num_reqs=self.max_num_reqs,
                 logprobs_mode=self.model_config.logprobs_mode,
+                compact_prompt_logprobs=self.compact_prompt_logprobs,
             )
             self.structured_outputs_worker = StructuredOutputsWorker(
                 max_num_logits=self.max_num_reqs * self.decode_query_len,
