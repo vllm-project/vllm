@@ -317,6 +317,33 @@ def test_dflash2_draft_forces_v2_model_runner():
 
 
 @pytest.mark.parametrize(
+    ("is_cuda", "quantization", "cache_dtype", "expected"),
+    [
+        pytest.param(True, "fp8", "auto", "fp8", id="fp8-model"),
+        pytest.param(True, "modelopt_fp4", "auto", "fp8", id="nvfp4-model"),
+        pytest.param(True, "fp8", "bfloat16", "bfloat16", id="explicit-override"),
+        pytest.param(False, "fp8", "auto", "auto", id="non-nvidia"),
+        pytest.param(True, None, "auto", "auto", id="bf16-model"),
+    ],
+)
+def test_glm52_defaults_to_fp8_kv_cache_on_nvidia(
+    monkeypatch, is_cuda, quantization, cache_dtype, expected
+):
+    from vllm.model_executor.models.config import MODELS_CONFIG_MAP
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(quantization=quantization),
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+    )
+
+    MODELS_CONFIG_MAP["GlmMoeDsaForCausalLM"].verify_and_update_config(config)
+
+    assert config.cache_config.cache_dtype == expected
+
+
+@pytest.mark.parametrize(
     ("use_v2_model_runner", "expected_capture_sizes"),
     [
         (False, [4, 8, 12, 16]),

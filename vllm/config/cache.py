@@ -89,9 +89,9 @@ class CacheConfig:
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc).
-    Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
-    bfloat16 instead, this is an invalid option for models that do not default
-    to fp8.
+    Some models (namely DeepSeekV3.2 and quantized GLM-5.2 models on NVIDIA GPUs)
+    default to fp8. Set to bfloat16 to use bfloat16 instead; this is an invalid
+    option for models that do not default to fp8.
     "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
     scales per 16 values by minimizing squared reconstruction error.
     """
