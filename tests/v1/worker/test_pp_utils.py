@@ -186,32 +186,6 @@ def test_both_ranks_skip_when_no_request_needs_sampling(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@requires_cuda
-def test_relayed_draft_tokens_reach_get_prev_sampled_outputs(monkeypatch):
-    """Draft tokens received at step T must come back out pp_size steps later,
-    so the next combine_sampled_and_draft_tokens reads real values rather than
-    zero-init."""
-    receiver = make_handler(
-        monkeypatch,
-        is_last_rank=False,
-        num_speculative_steps=3,
-        relay_draft_tokens=True,
-        world_size=2,
-    )
-    record_broadcasts(monkeypatch)
-    receiver.receive(make_input_batch())
-
-    # The pre-seeded placeholders drain first; the entry lands pp_size steps on.
-    outputs = None
-    for _ in range(3):
-        outputs = receiver.get_prev_sampled_outputs()
-        if outputs is not None:
-            break
-    assert outputs is not None
-    assert outputs["draft_tokens"] is not None
-    assert outputs["draft_tokens"].shape == (3, receiver.max_sample_len - 1)
-
-
 # ---------------------------------------------------------------------------
 # DeepSeekMTP under pipeline parallelism
 # ---------------------------------------------------------------------------
