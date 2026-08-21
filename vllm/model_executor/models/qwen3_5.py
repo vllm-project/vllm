@@ -522,7 +522,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         )
 
     def _maybe_offload_visual_tower(self, visual: nn.Module) -> nn.Module:
-        """Route the vision tower through the offloader when UVA is active.
+        """Route the vision tower through the UVA offloader.
 
         The vision tower is built directly (not via ``make_layers``), so it
         never reaches ``get_offloader().wrap_modules`` on its own and
@@ -535,14 +535,18 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         (``f".visual." in f".{name}."``); passing the bare tower would expose
         names like ``blocks.0.attn.qkv.weight`` with no ``visual`` segment.
 
-        Only the UVA backend is supported here: ``PrefetchOffloader`` is
-        layer-stack-scoped and its ``wrap_modules`` must be called exactly
-        once, which ``make_layers`` already does.
+        Only the UVA backend with zero-copy enabled is supported here:
+        ``PrefetchOffloader`` is layer-stack-scoped and its ``wrap_modules``
+        must be called exactly once, which ``make_layers`` already does.
+        When UVA is unavailable the functional_call fallback hooks the
+        disposable container rather than the tower, so the tower is left
+        unmodified to avoid a device mismatch at inference time.
         """
-        if isinstance(get_offloader(), UVAOffloader):
+        offloader = get_offloader()
+        if isinstance(offloader, UVAOffloader) and offloader.uva_offloading:
             container = nn.Module()
             container.visual = visual
-            get_offloader().wrap_modules(m for m in [container])
+            offloader.wrap_modules(m for m in [container])
         return visual
 
     def embed_input_ids(

@@ -116,6 +116,45 @@ def test_visual_tower_untouched_with_prefetch_offloader():
         set_offloader(original_offloader)
 
 
+def test_visual_tower_untouched_when_uva_unavailable():
+    """When uva_offloading=False the tower must remain unmodified.
+
+    The functional_call fallback hooks the disposable container (not the
+    tower), so offloading the tower without UVA zero-copy would produce a
+    device mismatch at inference. The tower must be left in place.
+    """
+
+    class _NonUVARecordingOffloader(UVAOffloader):
+        def __init__(self):
+            super().__init__(
+                cpu_offload_max_bytes=1024**3,
+                cpu_offload_params={"visual"},
+            )
+            self.uva_offloading = False
+            self.wrap_modules_called = False
+
+        def wrap_modules(self, modules_generator):
+            self.wrap_modules_called = True
+            return list(modules_generator)
+
+    original_offloader = get_offloader()
+    try:
+        offloader = _NonUVARecordingOffloader()
+        set_offloader(offloader)
+
+        tower = _FakeVisualTower()
+        tower_param = next(tower.parameters())
+
+        model = Qwen3_5ForConditionalGeneration.__new__(Qwen3_5ForConditionalGeneration)
+        result = model._maybe_offload_visual_tower(tower)
+
+        assert not offloader.wrap_modules_called
+        assert result is tower
+        assert next(result.parameters()) is tower_param
+    finally:
+        set_offloader(original_offloader)
+
+
 def test_visual_tower_segment_matching():
     """The "visual" segment must match the tower parameter names.
 
