@@ -40,10 +40,16 @@ using vllm::direct_dcp::multimem_store_release_system;
 using vllm::direct_dcp::wait_for_epoch;
 
 constexpr int kThreads = 256;
+constexpr int kWarpSize = 32;
+constexpr int kReductionWarps = kThreads / kWarpSize;
+constexpr int kReductionResultSlot = kReductionWarps;
 constexpr int kKvLoraDim = 512;
 constexpr int kRopeDim = 64;
 constexpr int kIndexerDim = 128;
 constexpr float kFp8Max = 448.0f;
+
+static_assert(kThreads % kWarpSize == 0);
+static_assert(kReductionWarps <= kWarpSize);
 
 enum class MlaCacheLayout { kStaticE4M3, kFp8DsMla };
 
@@ -147,11 +153,11 @@ __device__ __forceinline__ float block_sum(float value, float* scratch) {
   if (warp == 0) {
     value = warp_sum(value);
     if (lane == 0) {
-      scratch[0] = value;
+      scratch[kReductionResultSlot] = value;
     }
   }
   __syncthreads();
-  return scratch[0];
+  return scratch[kReductionResultSlot];
 }
 
 __device__ __forceinline__ float block_max(float value, float* scratch) {
@@ -166,11 +172,11 @@ __device__ __forceinline__ float block_max(float value, float* scratch) {
   if (warp == 0) {
     value = warp_max(value);
     if (lane == 0) {
-      scratch[0] = value;
+      scratch[kReductionResultSlot] = value;
     }
   }
   __syncthreads();
-  return scratch[0];
+  return scratch[kReductionResultSlot];
 }
 
 __device__ __forceinline__ uint4 pack_fp8_16(const float* values,
@@ -244,7 +250,9 @@ __global__ void fused_norm_rope_pcp_dispatch_kernel(
     uint32_t* __restrict__ completion, int64_t* __restrict__ epoch,
     int32_t* __restrict__ phase, int world_size, int rank, int max_local_tokens,
     int topk, int topk_stride, bool has_indexer) {
-  __shared__ float reduce_scratch[8];
+  // Keep the result separate from the per-warp partials so a subsequent
+  // reduction cannot overwrite it before every warp has consumed it.
+  __shared__ float reduce_scratch[kReductionWarps + 1];
   __shared__ float kv_values[Config::kKvLoraDim];
   __shared__ float k_pe_values[Config::kRopeDim];
   __shared__ float index_values[Config::kIndexerDim];
@@ -321,9 +329,11 @@ __global__ void fused_norm_rope_pcp_dispatch_kernel(
     store_half(output_row + 2 * tid + 1, k_pe_values[2 * tid + 1]);
   }
 
-  // Shared layers skip all indexer reductions below.  Synchronize the KV and
-  // K-pe producers explicitly before either branch packs their shared rows.
-  __syncthreads();
+  // The first indexer reduction synchronizes the KV and K-pe producers.
+  // Shared layers need an explicit barrier before packing those rows.
+  if (!has_indexer) {
+    __syncthreads();
+  }
 
   // Indexer K LayerNorm, interleaved RoPE, and UE8M0 FP8 quantization.
   float index_value = 0.0f;
