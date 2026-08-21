@@ -836,16 +836,98 @@ def test_cooperative_topk_512_tie_workspace_is_per_row() -> None:
     )
 
 
+def _make_candidate_overflow_row(
+    seq_len: int,
+    top_k: int,
+    score_kind: str,
+    candidate_count: int | None,
+) -> torch.Tensor:
+    if score_kind == "fp32_narrow":
+        return 1.0 + torch.arange(seq_len, dtype=torch.float32) * (
+            0.01 / seq_len
+        )
+    if score_kind == "negative_fp32_narrow":
+        return -1.01 + torch.arange(seq_len, dtype=torch.float32) * (
+            0.01 / seq_len
+        )
+    if score_kind == "16bit_grid":
+        return (
+            1.0
+            + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len)
+        ).to(torch.bfloat16).float()
+    if score_kind == "all_equal":
+        return torch.ones(seq_len, dtype=torch.float32)
+    if score_kind == "positive_inf":
+        return torch.full((seq_len,), float("inf"), dtype=torch.float32)
+
+    row = torch.full((seq_len,), -2.0, dtype=torch.float32)
+    if score_kind == "mixed_threshold":
+        num_above = top_k // 4
+        row[:num_above] = 2.0 + torch.arange(
+            num_above, dtype=torch.float32
+        ) * (0.01 / num_above)
+        start = num_above
+    elif score_kind == "capacity_boundary":
+        start = 0
+    else:
+        raise ValueError(f"Unknown overflow score kind: {score_kind}")
+
+    assert candidate_count is not None
+    values = 1.0 + torch.arange(candidate_count, dtype=torch.float32) * (
+        0.01 / candidate_count
+    )
+    row[start : start + candidate_count] = values
+    return row
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @pytest.mark.parametrize(
-    "seq_len",
+    ("seq_len", "stride", "score_kind", "candidate_count"),
     [
-        pytest.param(8 * 1024, id="8k"),
-        pytest.param(32 * 1024, id="32k"),
-        pytest.param(128 * 1024, id="128k"),
-        pytest.param(256 * 1024, id="256k"),
-        pytest.param(512 * 1024, id="512k"),
+        pytest.param(8 * 1024, None, "fp32_narrow", None, id="fp32-8k"),
+        pytest.param(32 * 1024, None, "fp32_narrow", None, id="fp32-32k"),
+        pytest.param(128 * 1024, None, "fp32_narrow", None, id="fp32-128k"),
+        pytest.param(256 * 1024, None, "fp32_narrow", None, id="fp32-256k"),
+        pytest.param(512 * 1024, None, "fp32_narrow", None, id="fp32-512k"),
+        pytest.param(
+            32769,
+            64 * 1024,
+            "fp32_narrow",
+            None,
+            id="padded-invalid-tail",
+        ),
+        pytest.param(32 * 1024, None, "16bit_grid", None, id="16bit-grid"),
+        pytest.param(
+            32 * 1024,
+            None,
+            "negative_fp32_narrow",
+            None,
+            id="negative-fp32",
+        ),
+        pytest.param(
+            32 * 1024,
+            None,
+            "mixed_threshold",
+            4096,
+            id="candidates-above-threshold",
+        ),
+        pytest.param(8 * 1024, None, "all_equal", None, id="all-equal"),
+        pytest.param(8 * 1024, None, "positive_inf", None, id="positive-inf"),
+        pytest.param(
+            8 * 1024,
+            None,
+            "capacity_boundary",
+            0,
+            id="candidate-capacity",
+        ),
+        pytest.param(
+            8 * 1024,
+            None,
+            "capacity_boundary",
+            1,
+            id="candidate-capacity-plus-one",
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -869,14 +951,26 @@ def test_workspace_topk_candidate_overflow(
     backend: str,
     num_rows: int,
     seq_len: int,
+    stride: int | None,
+    score_kind: str,
+    candidate_count: int | None,
     top_k: int,
 ) -> None:
     """TopK remains exact when one coarse bin exceeds candidate capacity."""
     torch.set_default_device("cuda:0")
 
-    # These are unequal FP32 values but all map to the same 12-bit FP16
-    # coarse bin, exceeding the candidate capacity at every tested top-k.
-    row = 1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len)
+    if score_kind == "capacity_boundary":
+        assert candidate_count in (0, 1)
+        capacity = 2048 if backend == "cooperative_topk" else max(top_k, 1024)
+        candidate_count = capacity + candidate_count
+
+    row = _make_candidate_overflow_row(
+        seq_len, top_k, score_kind, candidate_count
+    )
+    if stride is not None:
+        padded = torch.full((stride,), float("inf"), dtype=torch.float32)
+        padded[:seq_len] = row
+        row = padded
     logits = row.expand(num_rows, -1).contiguous()
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32)
     indices = torch.empty((num_rows, top_k), dtype=torch.int32)
@@ -891,8 +985,11 @@ def test_workspace_topk_candidate_overflow(
     )
     torch.accelerator.synchronize()
 
+    assert torch.all((indices >= 0) & (indices < seq_len))
+    sorted_indices = indices.sort(dim=1).values
+    assert torch.all(sorted_indices[:, 1:] != sorted_indices[:, :-1])
     actual = logits.gather(1, indices.to(torch.int64)).sort(dim=1).values
-    expected = logits.topk(top_k, dim=1).values.sort(dim=1).values
+    expected = logits[:, :seq_len].topk(top_k, dim=1).values.sort(dim=1).values
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
