@@ -12,20 +12,20 @@ from vllm.v1.attention.ops.dcp import resolve_dcp_q_replicate
 
 
 @pytest.mark.parametrize(
-    ("override", "backend", "dcp_size", "pcp_size", "expected"),
+    ("override", "configured", "dcp_size", "pcp_size", "expected"),
     [
-        (None, "a2a", 2, 1, True),
-        (None, "all_gather", 2, 1, False),
-        (True, "all_gather", 2, 1, True),
-        (False, "a2a", 2, 1, False),
-        (True, "a2a", 1, 1, False),
-        (True, "a2a", 2, 2, False),
+        (None, True, 2, 1, True),
+        (None, False, 2, 1, False),
+        (True, False, 2, 1, True),
+        (False, True, 2, 1, False),
+        (True, True, 1, 1, False),
+        (True, True, 2, 2, False),
     ],
 )
 def test_resolve_dcp_q_replicate(
     monkeypatch,
     override: bool | None,
-    backend: str,
+    configured: bool,
     dcp_size: int,
     pcp_size: int,
     expected: bool,
@@ -34,7 +34,7 @@ def test_resolve_dcp_q_replicate(
     parallel_config = cast(
         ParallelConfig,
         SimpleNamespace(
-            dcp_comm_backend=backend,
+            dcp_q_replicate=configured,
             decode_context_parallel_size=dcp_size,
             prefill_context_parallel_size=pcp_size,
         ),

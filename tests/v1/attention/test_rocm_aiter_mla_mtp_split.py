@@ -89,6 +89,7 @@ def _builder(
         _verify_row_lens=None,
         _dcp_verify_block_table=None,
         _dcp_verify_qo_indptr=None,
+        _graph_seq_lens=None,
         _kv_cache_dtype_str=kv_cache_dtype,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
@@ -121,6 +122,9 @@ def _builder(
     )
     stub._build_dcp_verify_row_view = (
         AiterMLAMetadataBuilder._build_dcp_verify_row_view.__get__(stub)
+    )
+    stub._fill_dcp_verify_page_table = (
+        AiterMLAMetadataBuilder._fill_dcp_verify_page_table.__get__(stub)
     )
     return stub
 
@@ -296,6 +300,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
     def init_common_builder(self, *args, **kwargs):
         self.num_heads = num_heads
         self.dcp_world_size = 1
+        self.cp_kv_cache_interleave_size = 1
         # Mirror what _init_reorder_batch_threshold would have left behind: the
         # metadata is sized from the routing threshold, so a stub that skips it
         # would size for qlen=1 and hide the very mismatch this test covers.
@@ -608,8 +613,11 @@ def test_persistent_metadata_gate(
     assert metadata.has_persistent_metadata is expect_persistent
     assert get_mla_metadata_v1.called is expect_persistent
     if expect_persistent:
-        assert get_mla_metadata_v1.call_args.kwargs["max_seqlen_qo"] == qo_len
-        assert get_mla_metadata_v1.call_args.kwargs["uni_seqlen_qo"] == qo_len
+        # Uniform qlen 2/3 uses the qlen-4 LSE-capable ASM entry and drops the
+        # leading padding after decode; native qlen values stay unchanged.
+        kernel_qo_len = metadata.kernel_max_qo_len or qo_len
+        assert get_mla_metadata_v1.call_args.kwargs["max_seqlen_qo"] == kernel_qo_len
+        assert get_mla_metadata_v1.call_args.kwargs["uni_seqlen_qo"] == kernel_qo_len
 
 
 @pytest.mark.parametrize(

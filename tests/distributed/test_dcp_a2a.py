@@ -53,7 +53,12 @@ def _packed_a2a_reference(
         .contiguous()
         .float()
     )
-    lses = cp_attn_lse.view(B, world_size, h_per_rank).permute(1, 0, 2).contiguous()
+    lses = (
+        cp_attn_lse.view(B, world_size, h_per_rank)
+        .permute(1, 0, 2)
+        .contiguous()
+        .float()
+    )
     return _lse_weighted_combine(
         outputs,
         lses,
@@ -596,7 +601,7 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
         lses = torch.stack(
             [t[:, rank * h_per_rank : (rank + 1) * h_per_rank] for t in gathered_lse],
             dim=0,
-        )
+        ).float()
         from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
         expected_out, expected_lse = _lse_weighted_combine(
