@@ -5,6 +5,7 @@ import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import pydantic
@@ -19,6 +20,7 @@ from vllm.config import (
     CompilationConfig,
     KernelConfig,
     ModelConfig,
+    ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
     SchedulerConfig,
@@ -82,6 +84,19 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def test_per_request_spec_decode_metrics_requires_spec_decode():
+    # The flag only makes sense with speculative decoding configured; enabling
+    # it without --speculative-config should fail fast rather than silently
+    # produce no metrics.
+    for level in ("summary", "detailed"):
+        with pytest.raises(ValueError, match="speculative"):
+            VllmConfig(
+                observability_config=ObservabilityConfig(
+                    per_request_spec_decode_metrics=level
+                )
+            )
 
 
 def test_compile_config_repr_succeeds():
@@ -261,6 +276,20 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
     SpeculativeConfig.hf_config_override(hf_config)
 
     assert hf_config.architectures == [expected_architecture]
+
+
+def test_v2_model_runner_supports_extract_hidden_states():
+    config = VllmConfig()
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="extract_hidden_states",
+            parallel_drafting=False,
+            enable_adaptive_verification=False,
+        ),
+    )
+
+    assert config._get_v2_model_runner_unsupported_features() == []
 
 
 @pytest.mark.parametrize(
@@ -602,6 +631,45 @@ def test_with_hf_config_leaves_unknown_model_type_without_architectures(
     updated = VllmConfig.with_hf_config(cfg, hf_config)
 
     assert updated.model_config.hf_config.architectures is None
+
+
+@pytest.mark.parametrize(
+    "checkpoint_tensors,tied",
+    [
+        # The checkpoint has an lm_head of its own, so it must win over the config
+        (["model.embed_tokens.weight", "lm_head.weight"], False),
+        (["model.embed_tokens.weight"], True),
+        # Contents unknown (not safetensors), so the config must be left alone
+        ([], True),
+    ],
+)
+def test_maybe_untie_word_embeddings(tmp_path, checkpoint_tensors, tied):
+    import torch
+    from safetensors.torch import save_file
+
+    if checkpoint_tensors:
+        save_file(
+            {name: torch.zeros(2, 2) for name in checkpoint_tensors},
+            tmp_path / "model.safetensors",
+        )
+
+    text_config = SimpleNamespace(tie_word_embeddings=True)
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        revision=None,
+        hf_config=SimpleNamespace(
+            tie_word_embeddings=True,
+            get_text_config=lambda: text_config,
+        ),
+        word_embeddings_untied_by_checkpoint=False,
+    )
+
+    ModelConfig.maybe_untie_word_embeddings(model_config)
+
+    # Both levels must agree, since different callers read different ones
+    assert model_config.hf_config.tie_word_embeddings is tied
+    assert text_config.tie_word_embeddings is tied
+    assert model_config.word_embeddings_untied_by_checkpoint is not tied
 
 
 def test_async_scheduling_with_pipeline_parallelism_is_allowed():
