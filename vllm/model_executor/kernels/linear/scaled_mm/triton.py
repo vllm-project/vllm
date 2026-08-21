@@ -20,6 +20,7 @@ from .BlockScaledMMLinearKernel import (
 )
 from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearLayerConfig,
 )
 
@@ -161,6 +162,19 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def is_supported(cls, compute_capability=None):
         if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
             return False, "only CUDA-alike and XPU devices are supported."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        if (
+            current_platform.is_cuda()
+            and config.weight_quant_key.scale.dtype == torch.float8_e8m0fnu
+        ):
+            return False, "CUDA Triton does not support float8_e8m0fnu weight scales."
         return True, None
 
     def apply_block_scaled_mm(
