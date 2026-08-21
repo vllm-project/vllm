@@ -1326,9 +1326,7 @@ def test_dcp_world_size_for_kv_cache_spec_shards_full_attention_only():
     )
     mla = new_mla_spec()
     mamba = new_mamba_spec()
-    uniform_mla = UniformTypeKVCacheSpecs(
-        block_size=16, kv_cache_specs={"layer": mla}
-    )
+    uniform_mla = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": mla})
     assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(full, dcp) == dcp
     assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(mla, dcp) == dcp
     assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(uniform_mla, dcp) == dcp

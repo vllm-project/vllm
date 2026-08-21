@@ -645,9 +645,7 @@ def hash_block_tokens(
     )
 
 
-def dcp_world_size_for_kv_cache_spec(
-    spec: KVCacheSpec, dcp_world_size: int
-) -> int:
+def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> int:
     """Return the DCP size that owns this group's block geometry.
 
     Full-attention KV (including MLA) is sharded across DCP ranks, so prefix
