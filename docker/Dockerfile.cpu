@@ -127,18 +127,15 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 
 ######################### RUST BUILD IMAGE #########################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the wheel build
-# stage doesn't need the rust toolchain or protoc. This stage runs in parallel
+# stage doesn't need the rust toolchain. This stage runs in parallel
 # with the main vllm-build stage.
 FROM base AS rust-build
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        build-essential unzip python3 python3-pip \
+        build-essential python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
-
-COPY tools/install_protoc.sh /tmp/install_protoc.sh
-RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 WORKDIR /workspace
 

@@ -25,7 +25,6 @@ run_all_patterns:
   - "rust/"
   - "rust-toolchain.toml"
   - "tools/build_rust.py"
-  - "tools/install_protoc.sh"
   - "tools/install_torchcodec_rocm.sh"
   - "tests/vllm_test_utils/"
   - "vllm/envs.py"
