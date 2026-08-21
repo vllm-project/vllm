@@ -51,10 +51,14 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
                 # end token in delta with more tokens,
                 # extract reasoning content and content
                 end_index = delta_text.find(self.end_token)
-                reasoning = delta_text[:end_index]
-                content = delta_text[end_index + len(self.end_token) :]
+                if end_index != -1:
+                    reasoning = delta_text[:end_index]
+                    content = delta_text[end_index + len(self.end_token) :]
+                else:
+                    reasoning = delta_text
+                    content = None
                 return DeltaMessage(
-                    reasoning=reasoning,
+                    reasoning=reasoning if reasoning else None,
                     content=content if content else None,
                 )
             elif self.end_token_id in previous_token_ids:

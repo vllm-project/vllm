@@ -122,10 +122,15 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # start token in previous, end token in delta,
                 # extract reasoning content
                 end_index = delta_text.find(self.end_token)
-                reasoning = delta_text[:end_index]
-                content = delta_text[end_index + len(self.end_token) :]
+                if end_index != -1:
+                    reasoning = delta_text[:end_index]
+                    content = delta_text[end_index + len(self.end_token) :]
+                else:
+                    reasoning = delta_text
+                    content = None
                 return DeltaMessage(
-                    reasoning=reasoning, content=content if content else None
+                    reasoning=reasoning if reasoning else None,
+                    content=content if content else None,
                 )
             elif self.end_token_id in previous_token_ids:
                 # start token in previous, end token in previous,
@@ -141,10 +146,20 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # extract reasoning content
                 start_index = delta_text.find(self.start_token)
                 end_index = delta_text.find(self.end_token)
-                reasoning = delta_text[start_index + len(self.start_token) : end_index]
-                content = delta_text[end_index + len(self.end_token) :]
+                if start_index != -1 and end_index != -1 and end_index >= start_index:
+                    reasoning = delta_text[
+                        start_index + len(self.start_token) : end_index
+                    ]
+                    content = delta_text[end_index + len(self.end_token) :]
+                elif start_index != -1:
+                    reasoning = delta_text[start_index + len(self.start_token) :]
+                    content = None
+                else:
+                    reasoning = delta_text
+                    content = None
                 return DeltaMessage(
-                    reasoning=reasoning, content=content if content else None
+                    reasoning=reasoning if reasoning else None,
+                    content=content if content else None,
                 )
             else:
                 # start token in delta, no end token in delta,
