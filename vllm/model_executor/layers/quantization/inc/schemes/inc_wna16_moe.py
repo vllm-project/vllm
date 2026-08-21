@@ -59,9 +59,23 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             raise ImportError(f"Failed to initialize ARK WNA16 MoE. {reason}")
 
         self.ark = ark
+        self.ark_moe_op = ark.moe
+        self.remap_hidden_states_op = None
+        self.moe_gather_op = None
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.local_to_global_experts: tuple[int, ...] | None = None
         self.group_size: int | None = None
+        self.local_num_experts: int | None = None
+        self.global_num_experts: int | None = None
+        self.expert_map: torch.Tensor | None = None
+        self.w13_weight: torch.Tensor | None = None
+        self.w13_scales: torch.Tensor | None = None
+        self.w2_weight: torch.Tensor | None = None
+        self.w2_scales: torch.Tensor | None = None
+        self.rows_per_expert: torch.Tensor | None = None
+        self.unpermuted_row_to_permuted_row: torch.Tensor | None = None
+        self.apply_router_weight_on_input: bool | None = None
+        self.activation = None
 
         logger.info_once("Using ARK XPU WNA16 MoE kernel.")
 
@@ -100,6 +114,27 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             self.local_to_global_experts = tuple(local_to_global)
 
         self.group_size = layer.group_size
+        self.local_num_experts = num_local_experts
+        self.global_num_experts = layer.global_num_experts
+        self.expert_map = layer.expert_map
+        self.w13_weight = layer.w13_weight
+        self.w13_scales = layer.w13_scales
+        self.w2_weight = layer.w2_weight
+        self.w2_scales = layer.w2_scales
+        self.rows_per_expert = torch.empty(
+            (num_local_experts,),
+            dtype=torch.int32,
+            device=layer.w13_weight.device,
+        )
+        self.unpermuted_row_to_permuted_row = None
+        self.apply_router_weight_on_input = layer.apply_router_weight_on_input
+        if self.apply_router_weight_on_input and layer.top_k != 1:
+            raise NotImplementedError(
+                "apply_router_weight_on_input is only supported for topk=1."
+            )
+        self.activation = layer.activation
+        self.remap_hidden_states_op = torch.ops._moe_C.remap_hidden_states
+        self.moe_gather_op = torch.ops._moe_C.moe_gather
 
     def get_fused_moe_quant_config(
         self,
@@ -120,7 +155,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         num_tokens_per_expert: torch.Tensor,
         group_size: int,
     ) -> torch.Tensor:
-        return self.ark.moe(
+        return self.ark_moe_op(
             activations.contiguous(),
             weights,
             num_tokens_per_expert,
@@ -132,6 +167,44 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             phase="auto",
         )
 
+    def _get_rows_per_expert(
+        self,
+        local_num_experts: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        rows_per_expert = self.rows_per_expert
+        if rows_per_expert is None or rows_per_expert.device != device:
+            rows_per_expert = torch.empty(
+                (local_num_experts,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.rows_per_expert = rows_per_expert
+        rows_per_expert.zero_()
+        return rows_per_expert
+
+    def _get_unpermuted_row_to_permuted_row(
+        self,
+        num_rows: int,
+        topk: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        mapping = self.unpermuted_row_to_permuted_row
+        if (
+            mapping is None
+            or mapping.device != device
+            or mapping.shape[0] < num_rows
+            or mapping.shape[1] != topk
+        ):
+            mapping = torch.empty(
+                (num_rows, topk),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.unpermuted_row_to_permuted_row = mapping
+        return mapping[:num_rows]
+
+
     def apply(
         self,
         layer,
@@ -141,15 +214,9 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         shared_experts,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        del shared_experts, shared_experts_input
+        del layer, shared_experts, shared_experts_input
 
-        assert self.group_size is not None
-
-        if layer.apply_router_weight_on_input:
-            if topk_ids.shape[1] != 1:
-                raise NotImplementedError(
-                    "apply_router_weight_on_input is only supported for topk=1."
-                )
+        if self.apply_router_weight_on_input:
             x = x * topk_weights.to(x.dtype)
             gather_topk_weights = torch.ones_like(topk_weights)
         else:
@@ -163,74 +230,63 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         if num_moe_inputs == 0:
             return output
 
-        expert_map = layer.expert_map
-        local_num_experts = layer.w13_weight.shape[0]
-        total_experts_num = layer.global_num_experts
-
         remapped_hidden_states = torch.empty(
             (num_moe_inputs, hidden_size),
             dtype=x.dtype,
             device=x.device,
         )
-        rows_per_expert = torch.zeros(
-            (local_num_experts,),
-            dtype=torch.int32,
-            device=x.device,
-        )
-        unpermuted_row_to_permuted_row = torch.empty(
-            (num_rows, topk),
-            dtype=torch.int32,
-            device=x.device,
+        rows_per_expert = self._get_rows_per_expert(self.local_num_experts, x.device)
+        unpermuted_row_to_permuted_row = (
+            self._get_unpermuted_row_to_permuted_row(num_rows, topk, x.device)
         )
 
-        torch.ops._moe_C.remap_hidden_states(
+        self.remap_hidden_states_op(
             hidden_states=x,
             hidden_states_scales=None,
             remapped_hidden_states=remapped_hidden_states,
             remapped_hidden_states_scales=None,
-            expert_map=expert_map,
+            expert_map=self.expert_map,
             rows_per_expert=rows_per_expert,
             unpermuted_row_to_permuted_row=unpermuted_row_to_permuted_row,
             topk_ids=topk_ids,
-            total_experts_num=total_experts_num,
-            local_experts_num=local_num_experts,
+            total_experts_num=self.global_num_experts,
+            local_experts_num=self.local_num_experts,
         )
 
         gemm1_output = self._ark_moe(
             remapped_hidden_states,
-            layer.w13_weight,
-            layer.w13_scales,
+            self.w13_weight,
+            self.w13_scales,
             rows_per_expert,
             self.group_size,
         )
 
-        activation = layer.activation
         activated_size = (
             gemm1_output.shape[-1] // 2
-            if activation.is_gated
+            if self.activation.is_gated
             else gemm1_output.shape[-1]
         )
         act_output = gemm1_output.new_empty((gemm1_output.shape[0], activated_size))
         apply_moe_activation(
-            activation,
+            self.activation,
             act_output,
             gemm1_output,
         )
 
         gemm2_output = self._ark_moe(
             act_output,
-            layer.w2_weight,
-            layer.w2_scales,
+            self.w2_weight,
+            self.w2_scales,
             rows_per_expert,
             self.group_size,
         )
 
-        torch.ops._moe_C.moe_gather(
+        self.moe_gather_op(
             output,
             gemm2_output,
             gather_topk_weights,
             unpermuted_row_to_permuted_row,
-            local_num_experts,
+            self.local_num_experts,
         )
         return output
 
