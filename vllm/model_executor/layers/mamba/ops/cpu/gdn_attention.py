@@ -250,16 +250,14 @@ def _cpu_gdn_attention_nonspec(
 
     # C++ conv (conv.cpp) uses VDPBF16PS, not AMX tiles, so it runs on any
     # AVX-512BF16 CPU; weight is VNNI-packed on this same predicate at load time.
-    # Its state interface is SD, while NIXL's direct Mamba transfer uses DS.
-    use_cpp_conv = (
-        torch.cpu._is_avx512_bf16_supported() and not is_conv_state_dim_first()
-    )
+    # The C++ kernel accepts both physical state layouts.  SD is exposed as
+    # the kernel's logical [dim, state_len] view; DS is already in that view.
+    use_cpp_conv = torch.cpu._is_avx512_bf16_supported()
 
     conv_state = layer.kv_cache[0]
     if use_cpp_conv:
-        if is_conv_state_dim_first():
-            raise AssertionError("unreachable: native conv requires SD layout")
-        conv_state = conv_state.transpose(1, 2)
+        if not is_conv_state_dim_first():
+            conv_state = conv_state.transpose(1, 2)
     else:
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
@@ -638,8 +636,7 @@ def _spec_forward(
     silu = layer.activation == "silu"
 
     can_use_native_conv = (
-        torch.cpu._is_amx_tile_supported()
-        and not is_conv_state_dim_first()
+        torch.cpu._is_avx512_bf16_supported()
         and width == 4
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
@@ -770,9 +767,7 @@ def _spec_aware_nonspec(
     assert query_start_loc is not None
     state_indices_tensor = state_indices_tensor.contiguous()
 
-    use_native_conv = (
-        torch.cpu._is_amx_tile_supported() and not is_conv_state_dim_first()
-    )
+    use_native_conv = torch.cpu._is_avx512_bf16_supported()
 
     if not use_native_conv:
         conv_weights = _unpacked_conv_weight(layer)
@@ -978,9 +973,7 @@ def _spec_aware_nonspec_subset(
     prefill_state_indices = prefill_state_indices.contiguous()
     prefill_qsl = prefill_qsl.contiguous()
 
-    use_native_conv = (
-        torch.cpu._is_amx_tile_supported() and not is_conv_state_dim_first()
-    )
+    use_native_conv = torch.cpu._is_avx512_bf16_supported()
 
     if use_native_conv:
         conv_out = ops.causal_conv1d_fwd_cpu(
