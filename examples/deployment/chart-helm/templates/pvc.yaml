@@ -6,7 +6,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   accessModes:
-    - ReadWriteOnce
+    - {{ .Values.extraInit.pvcAccessMode | default "ReadWriteOnce" }}
+  {{- if .Values.extraInit.pvcStorageClassName }}
+  storageClassName: {{ .Values.extraInit.pvcStorageClassName | quote }}
+  {{- end }}
   resources:
     requests:
       storage: {{ .Values.extraInit.pvcStorage }}

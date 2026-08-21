@@ -175,6 +175,20 @@ extraInit:
   s3modelpath: "relative_s3_model_path/opt-125m"
   # -- Storage size for the PVC
   pvcStorage: "1Gi"
+  # -- Access mode for the model-cache PVC. Default ReadWriteOnce works for
+  # a single replica (e.g. plain EBS gp3). For multiple replicas across
+  # different nodes (e.g. behind a KEDA ScaledObject), EBS's RWO can't be
+  # shared -- a volume can only attach to one node at a time, so replica
+  # pods on other nodes would be stuck waiting on an attach that can never
+  # succeed. Set to ReadWriteMany with an RWX-capable storageClassName
+  # (e.g. an EFS-backed StorageClass) to let every replica mount the same
+  # already-downloaded model cache regardless of which node it lands on.
+  pvcAccessMode: "ReadWriteOnce"
+  # -- StorageClassName for the model-cache PVC. Leave unset to use the
+  # cluster's default StorageClass (today's behavior, unchanged). Required
+  # if pvcAccessMode is ReadWriteMany, since the default StorageClass is
+  # typically block storage (e.g. gp3/EBS) which doesn't support it.
+  pvcStorageClassName: ""
   # -- Disable AWS EC2 metadata service
   awsEc2MetadataDisabled: true
 
