@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from pydantic import Field, GetPydanticSchema, ValidationInfo, field_validator
 from pydantic_core import core_schema
@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Static,
 )
 
@@ -33,6 +34,16 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp8": kMxfp8Dynamic,
     "mxfp4": kMxfp4Dynamic,
     "int8_per_channel_static": kInt8StaticChannelSym,
+}
+
+# Ambiguous format names select the appropriate dynamic/static behavior
+# for either activation (dynamic) or weight (static).
+# Explicit ``*_static`` and ``*_dynamic`` names above retain
+# their field-independent meanings.
+# TODO: possibly deprecate the ``*_static`` and ``*_dynamic`` variants.
+_WEIGHT_QUANT_KEY_NAMES: dict[str, QuantKey] = {
+    "mxfp8": kMxfp8Static,
+    "mxfp4": kMxfp4Static,
 }
 
 
@@ -61,20 +72,52 @@ QuantKeyField = Annotated[
     ),
 ]
 
+_UNSET = cast(QuantKey | None, object())
+
 
 @config
 class QuantSpec:
     """Quantization spec for one layer kind (linear or MoE).
 
-    `None` on either side means the method class falls back to its own default
-    (typically inherited from the checkpoint, or unquantized for online).
+    An omitted activation key lets the quantization implementation choose its
+    default. An explicitly configured ``activation: null`` requests no
+    activation quantization; methods that do not support that request raise an
+    error.
     """
 
-    weight: QuantKeyField = None
+    weight: QuantKeyField = _UNSET
     """Weight quantization key, or a name from QUANT_KEY_NAMES."""
 
-    activation: QuantKeyField = None
+    activation: QuantKeyField = _UNSET
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
+
+    _fields_set: frozenset[str] = Field(init=False, repr=False, exclude=True)
+    """Names explicitly provided when constructing this spec."""
+
+    def __post_init__(self) -> None:
+        """
+        We need a way to distinguish cases where `activation` is set by the
+        user or is a default `None`, as `_ONLINE_SHORTHANDS` do not hold the
+        default activation quant key, but may be overridden by users, including
+        to `null`.
+        """
+        fields_set = set()
+        for field_name in ("weight", "activation"):
+            if getattr(self, field_name) is _UNSET:
+                setattr(self, field_name, None)
+            else:
+                fields_set.add(field_name)
+        self._fields_set = frozenset(fields_set)
+
+    @property
+    def fields_set(self) -> frozenset[str]:
+        """Names explicitly provided when constructing this spec."""
+        return self._fields_set
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, QuantSpec):
+            return False
+        return (self.weight, self.activation) == (other.weight, other.activation)
 
 
 @config
@@ -97,8 +140,17 @@ class QuantizationConfigArgs:
     @field_validator("linear", "moe", mode="before")
     @classmethod
     def _coerce_spec(cls, v: Any, info: ValidationInfo) -> Any:
+        # e.g. `--quantization-config.moe '{"weight": "mxfp4", "activation": null}'`
+        if isinstance(v, dict):
+            weight = v.get("weight")
+            if isinstance(weight, str) and weight in _WEIGHT_QUANT_KEY_NAMES:
+                return {**v, "weight": _WEIGHT_QUANT_KEY_NAMES[weight]}
+            return v
+
         if not isinstance(v, str):
             return v
+
+        # e.g. `--quantization-config.moe mxfp4`
         field_name = info.field_name
         assert field_name is not None
         if v in _ONLINE_SHORTHANDS:
@@ -129,14 +181,16 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
         moe=QuantSpec(weight=kFp8StaticChannelSym),
     ),
     "mxfp8": QuantizationConfigArgs(
-        linear=QuantSpec(weight=kMxfp8Dynamic),
-        moe=QuantSpec(weight=kMxfp8Dynamic),
+        linear=QuantSpec(weight=kMxfp8Static),
+        moe=QuantSpec(weight=kMxfp8Static),
     ),
     "mxfp4": QuantizationConfigArgs(
         linear=QuantSpec(weight=kMxfp4Static),
         moe=QuantSpec(weight=kMxfp4Static),
     ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
+    # TODO: this is broken since at least #41566, as Int8OnlineMoEMethod
+    # defaults to activation_quant_key=kInt8DynamicTokenSym.
     "int8_per_channel_weight_only": QuantizationConfigArgs(
         moe=QuantSpec(weight=kInt8StaticChannelSym),
     ),
@@ -187,8 +241,32 @@ def resolve_quantization_config(
     if base is None:
         return quantization_config
 
+    def merge_spec(
+        base_spec: QuantSpec | None,
+        override_spec: QuantSpec | None,
+    ) -> QuantSpec | None:
+        if override_spec is None:
+            return base_spec
+        if base_spec is None:
+            return override_spec
+
+        values = {
+            "weight": (
+                override_spec.weight
+                if "weight" in override_spec.fields_set
+                else base_spec.weight
+            )
+        }
+
+        if "activation" in override_spec.fields_set:
+            values["activation"] = override_spec.activation
+        else:
+            values["activation"] = base_spec.activation
+
+        return QuantSpec(**values)
+
     return QuantizationConfigArgs(
-        linear=quantization_config.linear or base.linear,
-        moe=quantization_config.moe or base.moe,
+        linear=merge_spec(base.linear, quantization_config.linear),
+        moe=merge_spec(base.moe, quantization_config.moe),
         ignore=quantization_config.ignore or base.ignore,
     )

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
@@ -45,13 +44,6 @@ _KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
-
-_LN_2 = math.log(2.0)
-
-
-def log2_lse_to_ln(lse: torch.Tensor) -> torch.Tensor:
-    """Convert a base-2 log-sum-exp tensor to natural-log units."""
-    return lse * _LN_2
 
 
 def compute_mm_prefix_range_tensor(

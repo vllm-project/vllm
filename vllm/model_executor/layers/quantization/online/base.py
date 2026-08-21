@@ -54,21 +54,19 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt8StaticChannelSym,
     kMxfp4Static,
-    kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Static,
 )
 
 logger = init_logger(__name__)
 
 
-# Online dispatch tables, keyed by the QuantSpec.weight QuantKey. The
-# corresponding method class handles the activation choice via its
-# `supported_activation_quant` set.
+# Online dispatch tables, keyed by the QuantSpec.weight QuantKey.
 _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineLinearMethod,
     kFp8Static128BlockSym: Fp8PerBlockOnlineLinearMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
-    kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
+    kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
 }
 
@@ -76,7 +74,7 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineMoEMethod,
     kFp8Static128BlockSym: Fp8PerBlockOnlineMoEMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineMoEMethod,
-    kMxfp8Dynamic: Mxfp8OnlineMoEMethod,
+    kMxfp8Static: Mxfp8OnlineMoEMethod,
     kMxfp4Static: Mxfp4OnlineMoEMethod,
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
     kNvfp4Static: Nvfp4OnlineMoEMethod,
@@ -141,14 +139,6 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"online quantization for {type(layer).__name__} with "
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
-            )
-        # Online method classes pick their own activation format internally.
-        # Per-class activation overrides are not yet wired through; reject
-        # explicit overrides until the relevant method class opts in.
-        if spec.activation is not None:
-            raise ValueError(
-                f"activation override (activation={spec.activation}) is not "
-                f"yet supported for online {cls.__name__}"
             )
         if isinstance(layer, RoutedExperts):
             return cls(layer=layer)

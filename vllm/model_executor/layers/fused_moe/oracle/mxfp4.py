@@ -7,9 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
-from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -28,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
@@ -384,21 +383,15 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     return None  # BF16 activation
 
 
-def _user_moe_activation_override() -> QuantKey | None:
-    """User's MoE activation override from quantization_config, or None."""
-    args = get_current_vllm_config().model_config.quantization_config
-    if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
-        return None
-    return args.moe.activation
-
-
 def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
     """Combine the model-supplied activation key with the user override.
     Raises on conflict (both set and disagreeing)."""
-    user_override = _user_moe_activation_override()
-    if user_override is None:
+    user_override, has_user_override = (
+        MoEKernelOracle.get_user_moe_activation_override()
+    )
+    if not has_user_override:
         return model_activation_key
     if model_activation_key is None or model_activation_key == user_override:
         return user_override
