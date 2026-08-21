@@ -711,14 +711,23 @@ class QuarkConfig(QuantizationConfig):
         weight_quant_key = _WEIGHT_QUANT_KEY_MAP[weight_dtype]
         if input_quant is None:
             act_quant_key = None
-        elif input_quant["dtype"] == "fp8_e4m3":
-            act_quant_key = (
-                kFp8DynamicTensorSym
-                if input_quant.get("is_dynamic")
-                else kFp8StaticTensorSym
+        elif not input_quant.get("is_dynamic"):
+            logger.debug(
+                "Quark model's OCP MX quantization is incompatible with static "
+                "input scales."
             )
+            return QuantKeyMatch(False, None, None)
+        elif input_quant["dtype"] == "fp8_e4m3":
+            act_quant_key = kFp8DynamicTensorSym
         else:
             input_dtype = input_quant["dtype"].replace("fp", "mxfp")
+            if input_dtype not in _ACTIVATION_QUANT_KEY_MAP:
+                raise ValueError(
+                    f"Unsupported input_dtype={input_dtype} in Quark's vLLM "
+                    "integration. Supported activation dtypes are "
+                    f"{_ACTIVATION_QUANT_KEY_MAP.keys()}, or None for "
+                    "weight-only quantization."
+                )
             act_quant_key = _ACTIVATION_QUANT_KEY_MAP[input_dtype]
         return QuantKeyMatch(True, act_quant_key, weight_quant_key)
 
@@ -849,6 +858,16 @@ class QuarkConfig(QuantizationConfig):
         weight_config = self._unwrap_single_quant_config(weight_config)
         input_config = self._unwrap_single_quant_config(input_config)
 
+        if (
+            isinstance(weight_config, dict)
+            and weight_config.get("qscheme") == "per_block"
+            and not weight_config.get("block_size")
+        ):
+            raise ValueError(
+                "Quark W8A8 FP8 per-block weight quantization requires "
+                "`block_size` in the weight quantization config."
+            )
+
         if match := self._is_fp8_w8a8(weight_config, input_config):
             assert weight_config is not None
             if weight_config.get("qscheme") == "per_block":
@@ -901,6 +920,7 @@ class QuarkConfig(QuantizationConfig):
             QuarkW8A8Int8,
             QuarkOCP_MX,
             QuarkNVFP4,
+            QuarkW4A8_MXFP4_FP8,
         ):
             raise AssertionError(f"Unsupported Quark scheme class: {scheme_cls}")
 

@@ -22,7 +22,6 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
     QuarkLinearMethod,
     QuarkW8A8Fp8,
-    QuarkW8A8Fp8PerBlock,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
@@ -174,7 +173,9 @@ def test_quark_w8a8_fp8_per_block_requires_block_size():
     }
 
     with pytest.raises(ValueError, match="requires `block_size`"):
-        QuarkW8A8Fp8PerBlock(weight_config, input_config)
+        QuarkConfig({})._get_scheme_cls_from_config(
+            {"weight": weight_config, "input_tensors": input_config}
+        )
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
