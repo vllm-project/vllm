@@ -61,7 +61,11 @@ def get_assigned_physical_gpu_ids() -> list[int] | None:
 @functools.cache
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in " ".join(platform.uname()).lower()
+    # Inspect only the kernel release/version strings to avoid false positives
+    # from a hostname (uname.node) that happens to contain "microsoft", e.g.
+    # Kubernetes pods named "microsoft-*".
+    uname = platform.uname()
+    return "microsoft" in f"{uname.release} {uname.version}".lower()
 
 
 class PlatformEnum(enum.Enum):
