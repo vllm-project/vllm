@@ -628,6 +628,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        max_decode_query_len: int,
     ) -> AiterMLADecodeMetadata:
         device = self.device
         num_reqs = seq_lens_device.size(0)

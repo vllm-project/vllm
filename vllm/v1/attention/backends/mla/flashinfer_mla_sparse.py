@@ -269,7 +269,12 @@ class FlashInferMLASparseMetadataBuilder(
     """Builder for FlashInfer MLA Sparse attention metadata."""
 
     metadata_cls = FlashInferMLASparseMetadata
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # Decode launches one kernel row per query token (q_len_per_request=1),
+    # each carrying its own top-k index row, and the per-row bounds are all
+    # device-derived from req_id_per_token and the seq_lens the index conversion
+    # returns. No host scalar reaches the decode launch, so varlen decode
+    # batches replay correctly from a capture.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(
         self,
