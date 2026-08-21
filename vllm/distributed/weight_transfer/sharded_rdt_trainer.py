@@ -91,34 +91,41 @@ PRODUCE_METHOD_NAME = "rdt_produce_weights_batched"
 # Cross-deployment serve-slot sharing.
 #
 # Consumers whose ids differ by a multiple of ``workers_per_replica`` are the
-# same worker of different inference deployments: identical parallel config,
-# identical baked plan, identical chunk sequence, byte-identical pack layout. A
-# serve ring per consumer therefore costs one full ring per deployment on the
-# producer's GPU, and repeats the pack once per deployment for identical bytes.
+# same worker of different inference deployments, so they share a baked plan and
+# pull byte-identical chunks. A serve ring each would cost one full ring per
+# deployment of the producer's GPU and repack the same bytes once per deployment.
 #
-# NIXL reads are one-sided and non-destructive, so R readers can read ONE
-# registered slot concurrently. What a producer cannot observe is when a reader
-# has FINISHED, so the release edge comes from the consumer's ISSUE order, which
-# it sends as ``seq``: the pipeline drains pull i before issuing i+K, so slot
-# ``seq % K`` was last packed for ``seq - K``, whose read is over. Under sharing
-# the same holds, because generation ``seq`` is only packed once every live
-# sharer has arrived at it, so each has drained ``seq - K``.
-#
-# Deriving the slot from a per-call counter on THIS side instead (execution
-# order) is wrong: Ray may start a consumer's K concurrent produce calls in any
-# order, so the call that executes K-before another can be a pull that is still
-# being read, and its slot gets repacked underneath the reader. Silent, showing
-# up only as a logprob drift.
+# NIXL reads are one-sided, so R readers can read ONE registered slot; what the
+# producer cannot see is when a reader has FINISHED. The release edge is
+# therefore the consumer's ISSUE order, sent as ``seq``: the pipeline drains pull
+# i before issuing i+K, so slot ``seq % K`` was last packed for ``seq - K``,
+# whose read is over. A counter on THIS side would follow execution order
+# instead, which is wrong -- Ray may start a consumer's K concurrent produce
+# calls in any order, so a call that executes K-before another can be a pull
+# still being read, and its slot gets repacked underneath the reader. Silent,
+# showing up only as a logprob drift.
 #
 # Hence one rendezvous per generation, keyed by ``seq``: the group's live sharers
-# meet there, the LAST to arrive packs, and all of them return that one blob.
-#
-# Sharers that do NOT pull the same chunks would rendezvous on sequences whose
-# bytes differ, so the plan is compared at init instead
-# (``reserve_serve_buffer``'s ``plan_digest``), where it is one error naming both
-# consumers before any byte moves. A sharer that dies mid-sync stalls its group,
-# exactly as a dead consumer already stalls the per-group free barrier; the next
+# meet there, the LAST to arrive packs, and all return that one blob. It carries
+# the release edge too, since ``seq`` is packed only once every live sharer has
+# arrived, so each has drained ``seq - K``. Mismatched plans would rendezvous on
+# differing bytes, so they are rejected at init by ``reserve_serve_buffer``'s
+# ``plan_digest``. A sharer that dies mid-sync stalls its group, exactly as a
+# dead consumer already stalls the per-group free barrier; the next
 # ``begin_sync`` narrows the live set.
+#
+# LIMITATION: the rendezvous synchronizes deployments that a pull-based transfer
+# would otherwise leave independent -- per chunk every sharer waits for the
+# slowest, so skew between their DP pause/resume brackets lands in every
+# deployment's sync time. Nothing about P2P requires this. It is the price of
+# serving out of GPU memory, which is too scarce for a ring per consumer, so
+# slots must be reused, and reuse needs a release edge.
+#
+# TODO: explore staging packed chunks in HOST memory. Host buffers are cheap
+# enough for a ring per consumer, which would drop the rendezvous, the
+# cross-replica coupling and the slot-reuse hazard together. The cost is a D2H
+# bounce on the serve path, which has been the bottleneck before, so it needs
+# measuring rather than assuming.
 
 
 @dataclass
