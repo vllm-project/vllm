@@ -324,7 +324,7 @@ def _fused_norm_rope_kernel(
             # Shared layer: no indexer K to process.
             return
         # Fused: Index K LayerNorm + RoPE + FP8 quant + cache write.
-        # Eliminates the separate indexer-K quant-and-cache kernel launch.
+        # Eliminates the separate indexer_k_quant_and_cache kernel launch.
 
         index_k_block = tl.arange(0, INDEX_K_BLOCK_SIZE)
         index_k_mask = index_k_block < INDEX_K_DIM
@@ -500,22 +500,16 @@ def fused_norm_rope(
             )
         if indexer_k_cache.dtype == torch.uint8:
             indexer_k_cache = indexer_k_cache.view(torch.float8_e4m3fn)
+        # The head tile is a byte count; the kernel indexes the cache in elements.
+        idx_cache_head_tile = (
+            _INDEXER_CACHE_HEAD_TILE_BYTES // indexer_k_cache.element_size()
+        )
     else:
         idx_cache_scale_view = None
         idx_cache_block_size = 1
-        idx_cache_stride = 1
+        idx_cache_stride = 0
         idx_cache_shuffle = False
-        if mla_kv_cache is None:
-            # Pure profiling run (no caches at all): skip all per-token writes.
-            slot_mapping = torch.full(
-                (num_tokens,), -1, dtype=torch.int64, device=device
-            )
-
-    # The head tile is a byte count and the kernel indexes indexer_k_cache in
-    # elements, so convert using the dtype the kernel actually receives.
-    idx_cache_head_tile = (
-        _INDEXER_CACHE_HEAD_TILE_BYTES // indexer_k_cache.element_size()
-    )
+        idx_cache_head_tile = _INDEXER_CACHE_HEAD_TILE_BYTES
 
     # --- MLA KV cache setup ---
     mla_cache_ds_mla = mla_kv_cache_dtype == "fp8_ds_mla"
@@ -565,7 +559,6 @@ def fused_norm_rope(
         assert index_k_out.shape == index_k.shape
         index_k_out_stride = index_k_out.stride(0)
     use_pdl = current_platform.is_arch_support_pdl()
-    
     # `launch_pdl` is a CUDA-only Triton runtime kwarg; ROCm's Triton rejects it
     # even when False, so only pass it when PDL is actually supported.
     pdl_kwargs = {"launch_pdl": True} if use_pdl else {}
