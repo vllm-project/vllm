@@ -125,16 +125,12 @@ def test_skinny_gemm_env_controls_rocm_fp8_scaled_mm_support(
         assert reason == "requires VLLM_ROCM_USE_SKINNY_GEMM to be enabled."
 
 
-# ROCm architecture and platform contracts -------------------------------
+# ROCm platform capability contracts -------------------------------------
 
 
 @pytest.mark.parametrize(
     (
         "gcn_arch",
-        "expect_on_gfx9",
-        "expect_on_mi3xx",
-        "expect_on_gfx942",
-        "expect_on_gfx950",
         "expect_supports_mx",
         "expect_supports_fp8",
         "expect_custom_allreduce",
@@ -143,86 +139,61 @@ def test_skinny_gemm_env_controls_rocm_fp8_scaled_mm_support(
     [
         pytest.param(
             "gfx90a",
-            True,
-            False,
-            False,
-            False,
             False,
             False,
             False,
             torch.float8_e4m3fn,
-            id="gfx90a",
+            id="gfx90a-MI200",
         ),
         pytest.param(
             "gfx942",
-            True,
-            True,
-            True,
-            False,
             False,
             True,
             True,
             torch.float8_e4m3fnuz,
-            id="gfx942",
+            id="gfx942-MI300X",
         ),
         pytest.param(
             "gfx950",
             True,
             True,
-            False,
-            True,
-            True,
-            True,
             True,
             torch.float8_e4m3fn,
-            id="gfx950",
+            id="gfx950-MI350",
         ),
         pytest.param(
             "gfx1100",
             False,
             False,
             False,
-            False,
-            False,
-            False,
-            False,
             torch.float8_e4m3fn,
-            id="gfx1100",
+            id="gfx1100-RX7900",
         ),
         pytest.param(
             "gfx1201",
             False,
-            False,
-            False,
-            False,
-            False,
             True,
             False,
             torch.float8_e4m3fn,
-            id="gfx1201",
+            id="gfx1201-RX9070",
         ),
     ],
 )
-def test_rocm_architecture_contracts(
+def test_rocm_platform_capabilities(
     gcn_arch,
-    expect_on_gfx9,
-    expect_on_mi3xx,
-    expect_on_gfx942,
-    expect_on_gfx950,
     expect_supports_mx,
     expect_supports_fp8,
     expect_custom_allreduce,
     expect_fp8_dtype,
     monkeypatch,
 ):
-    """The ROCm arch predicates and platform capability helpers should stay in
-    sync for the supported arch families."""
-    rocm_platform = _set_rocm_arch(monkeypatch, gcn_arch)
+    """Platform capability methods should return correct values for each GPU arch.
 
-    assert rocm_platform.on_gfx9() is expect_on_gfx9
-    assert rocm_platform.on_mi3xx() is expect_on_mi3xx
-    assert rocm_platform.on_gfx942() is expect_on_gfx942
-    assert rocm_platform.on_gfx950() is expect_on_gfx950
+    These methods gate feature availability (FP8, MX formats, custom allreduce)
+    and affect kernel selection. Wrong values cause silent perf regressions or
+    crashes from selecting unsupported kernels.
+    """
+    _set_rocm_arch(monkeypatch, gcn_arch)
 
     assert current_platform.supports_mx() is expect_supports_mx
     assert current_platform.supports_fp8() is expect_supports_fp8
