@@ -14,7 +14,6 @@ import torch
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 
 if HAS_TRITON:
@@ -82,13 +81,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         **kwargs,
     ):
         self.is_prefill = mapping.is_prefill
-        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
+        token_lora_indices_cpu, sampler_indices_cpu = self._update_base_metadata(
+            mapping, lora_index_to_id, max_loras, vocab_size
+        )
 
-        # TODO avoid gpu<->cpu sync here
-        with gpu_sync_allowed():
-            # Prepare cuda kernel metadata tensors
-            self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
-            self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+        self.token_mapping_meta.prepare_tensors_cpu(token_lora_indices_cpu)
+        self.prompt_mapping_meta.prepare_tensors_cpu(sampler_indices_cpu)
 
     def add_shrink(
         self,

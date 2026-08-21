@@ -182,6 +182,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
             sampler_indices_padded,
             embeddings_indices,
             indices_len,
+            base_indices_cpu,
+            sampler_indices_cpu,
         ) = convert_mapping(
             mapping,
             lora_index_to_id,
@@ -200,6 +202,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         ].copy_(embeddings_indices)
 
         self.indices_len[:] = indices_len
+        return base_indices_cpu, sampler_indices_cpu
 
     def _update_prefill_metadata(self, token_lora_tensor: torch.Tensor) -> None:
         (

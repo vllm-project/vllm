@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 
 import torch
 
+from vllm.utils.torch_utils import PIN_MEMORY
+
 
 @dataclass
 class LoRAKernelMeta:
@@ -105,6 +107,49 @@ class LoRAKernelMeta:
         self.lora_token_start_loc.fill_(0)
         self.no_lora_flag_cpu.fill_(False)
         self.num_active_loras_cpu.fill_(0)
+
+    def prepare_tensors_cpu(self, token_lora_mapping: torch.Tensor) -> None:
+        """Prepare metadata on the CPU and asynchronously copy it to device."""
+        assert token_lora_mapping.is_cpu
+
+        self._reset()
+        num_tokens = token_lora_mapping.size(0)
+        mapping_cpu = token_lora_mapping.to(dtype=torch.int32)
+
+        no_lora = bool(torch.all(mapping_cpu == -1))
+        self.no_lora_flag_cpu[0] = no_lora
+        if no_lora:
+            return
+
+        _, sorted_indices = torch.sort(mapping_cpu, stable=True)
+        lora_ids, counts = torch.unique(
+            mapping_cpu, sorted=True, return_counts=True
+        )
+        num_active_loras = lora_ids.size(0)
+
+        start_locs = torch.cumsum(counts, dim=0)
+        if PIN_MEMORY:
+            mapping_cpu = mapping_cpu.pin_memory()
+            sorted_indices = sorted_indices.pin_memory()
+            lora_ids = lora_ids.pin_memory()
+            counts = counts.pin_memory()
+            start_locs = start_locs.pin_memory()
+
+        self.token_lora_mapping[:num_tokens].copy_(mapping_cpu, non_blocking=True)
+        self.token_indices_sorted_by_lora_ids[:num_tokens].copy_(
+            sorted_indices, non_blocking=True
+        )
+        self.active_lora_ids[:num_active_loras].copy_(lora_ids, non_blocking=True)
+        self.num_tokens_per_lora[:num_active_loras].copy_(counts, non_blocking=True)
+        self.lora_token_start_loc[1 : num_active_loras + 1].copy_(
+            start_locs, non_blocking=True
+        )
+
+        if self.captured_lora_counts:
+            idx = bisect.bisect_left(self.captured_lora_counts, num_active_loras)
+            if idx < len(self.captured_lora_counts):
+                num_active_loras = self.captured_lora_counts[idx]
+        self.num_active_loras_cpu[0] = num_active_loras
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """

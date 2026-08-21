@@ -24,6 +24,61 @@ def _to_ref_device(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.cpu() if _REF_ON_CPU else tensor
 
 
+@pytest.mark.parametrize(
+    "mapping,expected_ids,expected_counts,expected_order",
+    [
+        ([2, -1, 0, 2, 0], [-1, 0, 2], [1, 2, 2], [1, 2, 4, 0, 3]),
+        ([1, 1, 1], [1], [3], [0, 1, 2]),
+    ],
+)
+def test_prepare_lora_metadata_on_cpu(
+    mapping, expected_ids, expected_counts, expected_order
+):
+    meta = LoRAKernelMeta.make(
+        max_loras=4,
+        max_num_tokens=len(mapping),
+        device=DEVICE_TYPE,
+        captured_lora_counts=[1, 2, 4],
+    )
+
+    meta.prepare_tensors_cpu(torch.tensor(mapping, dtype=torch.long))
+
+    num_active = len(expected_ids)
+    torch.testing.assert_close(
+        meta.token_lora_mapping.cpu(), torch.tensor(mapping, dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        meta.token_indices_sorted_by_lora_ids.cpu(),
+        torch.tensor(expected_order, dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        meta.active_lora_ids[:num_active].cpu(),
+        torch.tensor(expected_ids, dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        meta.num_tokens_per_lora[:num_active].cpu(),
+        torch.tensor(expected_counts, dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        meta.lora_token_start_loc[: num_active + 1].cpu(),
+        torch.tensor([0, *expected_counts], dtype=torch.int32).cumsum(0),
+    )
+    expected_specialized_count = 4 if num_active == 3 else num_active
+    assert meta.num_active_loras_cpu.item() == expected_specialized_count
+
+
+def test_prepare_lora_metadata_on_cpu_no_lora():
+    meta = LoRAKernelMeta.make(
+        max_loras=4,
+        max_num_tokens=3,
+        device=DEVICE_TYPE,
+    )
+
+    meta.prepare_tensors_cpu(torch.full((3,), -1, dtype=torch.long))
+
+    assert meta.no_lora_flag_cpu.item()
+
+
 @pytest.fixture(autouse=True)
 def reset_device(reset_default_device):
     pass

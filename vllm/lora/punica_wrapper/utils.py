@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -58,7 +58,15 @@ def convert_mapping(
     vocab_size: int,
     extra_vocab_size: int,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    list[int],
+    torch.Tensor,
+    torch.Tensor,
+]:
     """Converts LoRAMapping to index tensors.
 
     Args:
@@ -87,6 +95,8 @@ def convert_mapping(
             indices_len: List of lengths of the above tensors. It contains
                 (base_indices, sampler_indices, sampler_indices_padded,
                 embeddings_indices).
+            base_indices_cpu: CPU copy of base_indices.
+            sampler_indices_cpu: CPU copy of sampler_indices.
     """
     index_mapping_indices: list[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
@@ -120,9 +130,21 @@ def convert_mapping(
         embedding_indices,
     ]
 
-    indices = async_tensor_h2d(indices_list, dtype=torch.long, device=device)
+    indices_cpu = torch.tensor(
+        indices_list,
+        dtype=torch.long,
+        device="cpu",
+        pin_memory=PIN_MEMORY,
+    )
+    prompt_mapping_cpu = torch.tensor(
+        prompt_mapping,
+        dtype=torch.long,
+        device="cpu",
+        pin_memory=PIN_MEMORY,
+    )
+    indices = async_tensor_h2d(indices_cpu, dtype=torch.long, device=device)
     prompt_mapping_tensor = async_tensor_h2d(
-        prompt_mapping, dtype=torch.long, device=device
+        prompt_mapping_cpu, dtype=torch.long, device=device
     )
     embeddings_indices = torch.stack(
         [
@@ -157,4 +179,6 @@ def convert_mapping(
         sampler_indices_padded,
         embeddings_indices,
         indices_len,
+        indices_cpu[1],
+        prompt_mapping_cpu,
     )
