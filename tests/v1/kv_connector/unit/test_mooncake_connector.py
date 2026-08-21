@@ -25,7 +25,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
-    _filter_dcp_block_ids,
     _get_decode_ranks_for_prefill,
     _get_prefill_ranks_for_decode,
     get_mooncake_bootstrap_addr,
@@ -150,25 +149,26 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
         "p_dcp_size",
         "d_dcp_rank",
         "d_dcp_size",
+        "num_computed_tokens",
         "expected_p_blocks",
         "expected_d_blocks",
     ),
     [
         # P splits a full D block range into finer DCP slices.
-        ([10], list(range(20, 28)), 0, 8, 0, 1, [10], [20]),
-        ([10], list(range(20, 28)), 7, 8, 0, 1, [10], [27]),
+        ([10], list(range(20, 28)), 0, 8, 0, 1, 0, [10], [20]),
+        ([10], list(range(20, 28)), 7, 8, 0, 1, 0, [10], [27]),
         # P keeps full blocks while D asks for one finer DCP slice.
-        (list(range(10, 18)), [20], 0, 1, 4, 8, [14], [20]),
+        (list(range(10, 18)), [20], 0, 1, 4, 8, 0, [14], [20]),
         # Different DCP sizes: match by sequence-block position.
-        ([10, 11, 12, 13], [20, 21], 1, 4, 5, 8, [11, 13], [20, 21]),
-        ([10, 11], [20, 21, 22, 23], 5, 8, 1, 4, [10, 11], [21, 23]),
-        # Partial prefix hit: D only requests the tail sequence span.
-        ([10], [20, 21, 22, 23], 4, 8, 0, 1, [10], [20]),
-        ([10], [20, 21, 22, 23], 0, 8, 0, 1, [], []),
-        # Short P span is clipped to the overlapping sequence-block range.
-        ([10], list(range(20, 30)), 0, 8, 0, 1, [10], [22]),
-        ([10], [20], 1, 4, 1, 8, [], []),
-        ([10], [20], 1, 4, 5, 8, [10], [20]),
+        ([10, 11, 12, 13], [20, 21], 1, 4, 5, 8, 0, [11, 13], [20, 21]),
+        ([10, 11], [20, 21, 22, 23], 5, 8, 1, 4, 0, [10, 11], [21, 23]),
+        # Partial prefix hit: D only requests a non-zero sequence span.
+        ([10], [20, 21, 22, 23], 4, 8, 0, 1, 64, [10], [20]),
+        ([10], [20, 21, 22, 23], 0, 8, 0, 1, 64, [], []),
+        # Full-prefill short spans align from sequence block zero.
+        ([10], list(range(20, 30)), 0, 8, 0, 1, 0, [10], [20]),
+        ([10], [20], 1, 4, 1, 8, 0, [10], [20]),
+        ([10], [20], 1, 4, 5, 8, 0, [], []),
     ],
 )
 def test_filter_dcp_block_ids(
@@ -178,20 +178,23 @@ def test_filter_dcp_block_ids(
     p_dcp_size: int,
     d_dcp_rank: int,
     d_dcp_size: int,
+    num_computed_tokens: int,
     expected_p_blocks: list[int],
     expected_d_blocks: list[int],
 ):
-    actual_p_blocks, actual_d_blocks = _filter_dcp_block_ids(
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.block_size = 16
+    actual_p_blocks, actual_d_blocks = worker._filter_dcp_block_ids(
         p_block_ids=p_block_ids,
         d_block_ids=d_block_ids,
         p_dcp_rank=p_dcp_rank,
         p_dcp_size=p_dcp_size,
         d_dcp_rank=d_dcp_rank,
         d_dcp_size=d_dcp_size,
+        num_computed_tokens=num_computed_tokens,
     )
     assert actual_p_blocks == expected_p_blocks
     assert actual_d_blocks == expected_d_blocks
-
 
 @pytest.mark.asyncio
 async def test_build_transfer_params_filters_dcp_blocks():
@@ -235,7 +238,7 @@ async def test_build_transfer_params_filters_dcp_blocks():
         remote_port=54321,
         remote_tp_size=1,
         remote_tp_rank=0,
-        req_blocks={"d-req-dcp-filter": ("xfer-dcp-filter", [[20, 21, 22, 23]])},
+        req_blocks={"d-req-dcp-filter": ("xfer-dcp-filter", [[20, 21, 22, 23]], 64)},
         kv_caches_base_addr=[0x2000],
         block_lens=[block_len],
         kv_block_lens=[block_len],
@@ -303,7 +306,7 @@ async def test_build_transfer_params_returns_empty_for_unowned_dcp_blocks():
         remote_port=54321,
         remote_tp_size=1,
         remote_tp_rank=0,
-        req_blocks={"d-req-dcp-empty": ("xfer-dcp-empty", [[20, 21, 22, 23]])},
+        req_blocks={"d-req-dcp-empty": ("xfer-dcp-empty", [[20, 21, 22, 23]], 64)},
         kv_caches_base_addr=[0x2000],
         block_lens=[block_len],
         kv_block_lens=[block_len],
@@ -1232,7 +1235,7 @@ async def test_kv_consumuer(monkeypatch):
 
         assert sent_meta.remote_hostname == "127.0.0.1"
         assert sent_meta.remote_port == 54321
-        assert sent_meta.req_blocks["d-req-1"] == ("xfer-req-1", [[100, 101]])
+        assert sent_meta.req_blocks["d-req-1"] == ("xfer-req-1", [[100, 101]], 0)
         assert sent_meta.kv_caches_base_addr == [0x1000]
         assert sent_meta.block_lens == [4096]
         assert sent_meta.registered_layer_names == ["model.layers.0.self_attn"]
