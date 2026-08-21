@@ -174,10 +174,10 @@ def matmul_persistent(
         },
         torch.float32: {
             "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_N": _fp32_block_size_n if N == 1 else 128,
             "BLOCK_SIZE_K": 32,
             "GROUP_SIZE_M": 8,
-            "num_stages": 3,
+            "num_stages": _fp32_num_stages if N == 1 else 3,
             "num_warps": 8,
         },
     }
@@ -687,9 +687,9 @@ def bmm_batch_invariant(a, b, *, out=None):
         },
         torch.float32: {
             "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_N": _fp32_block_size_n if N == 1 else 128,
             "BLOCK_SIZE_K": 32,
-            "num_stages": 3,
+            "num_stages": _fp32_num_stages if N == 1 else 3,
             "num_warps": 8,
         },
     }
@@ -897,11 +897,13 @@ def linear_batch_invariant(input, weight, bias=None):
 _batch_invariant_MODE = False
 _batch_invariant_LIB = None
 _fp16_block_size_n = 256
+_fp32_block_size_n = 128
+_fp32_num_stages = 3
 
 
 def enable_batch_invariant_mode():
     global _batch_invariant_MODE, _batch_invariant_LIB
-    global _fp16_block_size_n
+    global _fp16_block_size_n, _fp32_block_size_n, _fp32_num_stages
 
     if _batch_invariant_MODE:
         return
@@ -926,7 +928,18 @@ def enable_batch_invariant_mode():
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
 
-        _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
+        # Query the shared memory size and set block size
+        # accordingly to avoid triton OutOfResources.
+        if get_max_shared_memory_bytes() > 106496:
+            _fp16_block_size_n = 256
+            _fp32_block_size_n = 128
+            _fp32_num_stages = 3
+        else:
+            _fp16_block_size_n = 128
+            # SM89 N=1 fp32 128/stages=3 compiles to 131072B (>101376).
+            # Only N=1 OORs; keep 128/stages=3 for every other N.
+            _fp32_block_size_n = 32
+            _fp32_num_stages = 2
     elif current_platform.is_xpu():
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
