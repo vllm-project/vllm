@@ -1997,7 +1997,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Defers the MoE top-k reduction into the fused all-reduce + RMSNorm that
     # follows it, instead of letting the MoE kernel finalize its own output.
-   
     "VLLM_ENABLE_MOE_TAIL_FUSION": lambda: bool(
         int(os.getenv("VLLM_ENABLE_MOE_TAIL_FUSION", "0"))
     ),

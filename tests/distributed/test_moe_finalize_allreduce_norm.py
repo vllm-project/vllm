@@ -18,6 +18,9 @@ import torch.multiprocessing as mp
 import vllm.model_executor.layers.fused_moe_finalize_norm as fmfn
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+    destroy_fi_ar_workspace,
+)
 from vllm.distributed.parallel_state import (
     get_tp_group,
     init_distributed_environment,
@@ -34,6 +37,8 @@ HIDDEN_SIZE = 2048
 NUM_TOKENS = 19
 TOP_K = 4
 RMS_EPS = 1e-6
+# The consumer's workspace compiles for a capacity, not for this batch.
+MAX_NUM_TOKENS = 64
 
 
 def _reference_tail(
@@ -101,6 +106,12 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
         group = get_tp_group().device_group
 
         for weight_bias, with_shared in ((0.0, False), (1.0, True)):
+            # The workspace is compiled around weight_bias and whether a shared
+            # expert is folded in, and one process holds one of them -- as a
+            # model does, since its norms and its expert layout do not vary per
+            # layer. Drop it so the next configuration builds its own.
+            destroy_fi_ar_workspace()
+
             gemm2_permuted = torch.randn(num_permuted, HIDDEN_SIZE, dtype=dtype) * 0.1
             expert_weights = torch.rand(NUM_TOKENS, TOP_K, dtype=dtype)
             expanded_idx = torch.randperm(NUM_TOKENS * TOP_K, device=device)[
@@ -133,6 +144,7 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
                 RMS_EPS,
                 weight_bias,
                 1.0,
+                MAX_NUM_TOKENS,
             )
             ref_norm, ref_residual = _reference_tail(
                 gemm2_permuted,
@@ -155,6 +167,7 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
         # The public entry point: a MoEOutput whose routed half is unfinalized,
         # closed out into a model's own Gemma-style norm, with a routed scale to
         # apply.
+        destroy_fi_ar_workspace()
         gemm2_permuted = torch.randn(num_permuted, HIDDEN_SIZE, dtype=dtype) * 0.1
         expert_weights = torch.rand(NUM_TOKENS, TOP_K, dtype=dtype)
         expanded_idx = (
@@ -184,6 +197,7 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
             ),
             shared_output=shared_output,
             routed_scaling_factor=2.0,
+            max_num_tokens=MAX_NUM_TOKENS,
         )
         ref_norm, ref_residual = _reference_tail(
             gemm2_permuted,
@@ -234,9 +248,10 @@ def test_rms_norm_weight_bias(default_vllm_config):
 def test_moe_finalize_allreduce_rms_norm(world_size, monkeypatch):
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"needs {world_size} GPUs")
-    # The fusion is opt-in; without this the workers see a 0 ceiling and skip.
+    # The fusion is opt-in; without this the workers skip. It carries its own
+    # mnnvl CuTe DSL workspace, so VLLM_FLASHINFER_ALLREDUCE_BACKEND is not part
+    # of reaching it.
     monkeypatch.setenv("VLLM_ENABLE_MOE_TAIL_FUSION", "1")
-    monkeypatch.setenv("VLLM_FLASHINFER_ALLREDUCE_BACKEND", "trtllm")
 
     q: mp.Queue = mp.get_context("spawn").Queue()
     mp.spawn(_worker, args=(world_size, q), nprocs=world_size)
