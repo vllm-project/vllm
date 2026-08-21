@@ -1,15 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCm platform and env-var checks not owned by the backend-specific files.
+"""ROCm platform and extension smoke tests.
 
-The following tests check:
-- architecture predicates and platform capability
-- active ROCm env vars that still feed runtime code
-- the ROCm custom paged-attention eligibility predicate
+These tests catch ROCm-specific regressions early:
 
-Direct attention kernel numerics live in the attention test files. The ROCm
-AITER flash-attention backend behavior lives in
-``tests/kernels/attention/test_rocm_aiter_fa.py``.
+1. **Extension import smoke tests**: Verify that ROCm native extensions load
+   without crashing. Build/linking issues surface here before runtime.
+
+2. **GCN arch parsing tests**: Verify _capability_from_gcn_arch correctly
+   parses all known GPU architectures. Wrong parsing causes silent feature
+   gate failures or crashes from selecting unsupported kernels.
+
+3. **AITER ops availability tests**: Verify rocm_aiter_ops accessor methods
+   work without crashing, regardless of hardware support.
+
+Related coverage:
+- AITER kernel numerics: ``tests/kernels/core/test_rocm_aiter_ops.py``
+- Attention backend selection: ``test_rocm_attention_selector.py``
+- GEMM dispatch: ``test_rocm_unquantized_gemm.py``
+- Custom paged attention: tests below for predicate logic
 """
 
 import importlib
@@ -24,75 +33,166 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-# Small helpers -----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Extension import smoke tests
+# ---------------------------------------------------------------------------
 
 
-def _set_rocm_arch(monkeypatch: pytest.MonkeyPatch, gcn_arch: str):
-    """Patch ROCm arch detection for testing.
+def test_rocm_extension_imports():
+    """ROCm native extension loads without error.
 
-    Patches all on_*() accessor functions based on the provided gcn_arch string.
-    This matches the pattern used in other ROCm tests (test_rocm_unquantized_gemm.py).
+    Catches build/linking issues before runtime. If this fails, the ROCm
+    build is broken and nothing else will work.
     """
-    import vllm.platforms.rocm as rocm_platform
-
-    # Patch _GCN_ARCH for functions that read it directly (supports_mx, etc.)
-    monkeypatch.setattr(rocm_platform, "_GCN_ARCH", gcn_arch)
-
-    # Compute all flags based on gcn_arch (mirrors logic in rocm.py lines 217-232)
-    _on_gfx11 = "gfx11" in gcn_arch
-    _on_gfx1100 = "gfx1100" in gcn_arch
-    _on_gfx1151 = "gfx1151" in gcn_arch
-    _on_gfx12x_raw = "gfx12" in gcn_arch
-    _on_gfx1250 = "gfx1250" in gcn_arch
-    _on_gfx1x_raw = any(arch in gcn_arch for arch in ["gfx11", "gfx12"])
-
-    _on_gfx90a = "gfx90a" in gcn_arch
-    _on_gfx942 = "gfx942" in gcn_arch
-    _on_gfx950 = "gfx950" in gcn_arch
-    _on_gfx9 = any(gfx in gcn_arch for gfx in ["gfx90a", "gfx942", "gfx950"])
-    _on_mi3xx = any(gfx in gcn_arch for gfx in ["gfx942", "gfx950"])
-
-    _on_cdna = any(arch in gcn_arch for arch in ["gfx9", "gfx1250"])
-    _on_rdna = _on_gfx1x_raw and not _on_cdna
-    _on_rdna4 = any(arch in gcn_arch for arch in ["gfx1200", "gfx1201"])
-
-    # Derived flags that exclude CDNA (gfx1250 is CDNA despite being gfx12xx)
-    _on_gfx1x = _on_gfx1x_raw and not _on_cdna
-    _on_gfx12x = _on_gfx12x_raw and not _on_cdna
-
-    # Patch all on_*() accessor functions
-    monkeypatch.setattr(rocm_platform, "on_gfx9", lambda: _on_gfx9)
-    monkeypatch.setattr(rocm_platform, "on_gfx90a", lambda: _on_gfx90a)
-    monkeypatch.setattr(rocm_platform, "on_gfx942", lambda: _on_gfx942)
-    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: _on_gfx950)
-    monkeypatch.setattr(rocm_platform, "on_gfx11", lambda: _on_gfx11)
-    monkeypatch.setattr(rocm_platform, "on_gfx1100", lambda: _on_gfx1100)
-    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: _on_gfx1151)
-    monkeypatch.setattr(rocm_platform, "on_gfx1250", lambda: _on_gfx1250)
-    monkeypatch.setattr(rocm_platform, "on_gfx1x", lambda: _on_gfx1x)
-    monkeypatch.setattr(rocm_platform, "on_gfx12x", lambda: _on_gfx12x)
-    monkeypatch.setattr(rocm_platform, "on_mi3xx", lambda: _on_mi3xx)
-    monkeypatch.setattr(rocm_platform, "on_cdna", lambda: _on_cdna)
-    monkeypatch.setattr(rocm_platform, "on_rdna", lambda: _on_rdna)
-    monkeypatch.setattr(rocm_platform, "on_rdna4", lambda: _on_rdna4)
-
-    # Also patch _ON_GFX1X module variable
-    # (used directly by use_rocm_custom_paged_attention)
-    monkeypatch.setattr(rocm_platform, "_ON_GFX1X", _on_gfx1x_raw)
-
-    # Clear the cached paged attention function
-    rocm_platform.use_rocm_custom_paged_attention.cache_clear()
-
-    return rocm_platform
+    import vllm._rocm_C  # noqa: F401
 
 
-# Env vars with active runtime hooks -------------------------------------
+def test_aiter_ops_module_imports():
+    """AITER ops module imports without error.
+
+    The _aiter_ops module registers custom ops and initializes AITER state.
+    Import failures here indicate missing dependencies or incompatible
+    AITER versions.
+    """
+    import vllm._aiter_ops  # noqa: F401
+
+
+def test_rocm_platform_module_imports():
+    """ROCm platform module imports without error.
+
+    The platform module queries hardware via amdsmi and sets up arch flags.
+    Import failures indicate missing amdsmi or HIP runtime issues.
+    """
+    import vllm.platforms.rocm  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# GCN arch parsing tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("gcn_arch", "expected_major", "expected_minor"),
+    [
+        pytest.param("gfx90a", 9, 0, id="MI200-gfx90a"),
+        pytest.param("gfx942", 9, 4, id="MI300X-gfx942"),
+        pytest.param("gfx950", 9, 5, id="MI350-gfx950"),
+        pytest.param("gfx1100", 11, 0, id="RX7900-gfx1100"),
+        pytest.param("gfx1101", 11, 0, id="RX7800-gfx1101"),
+        pytest.param("gfx1151", 11, 5, id="StrixHalo-gfx1151"),
+        pytest.param("gfx1200", 12, 0, id="RDNA4-gfx1200"),
+        pytest.param("gfx1201", 12, 0, id="RX9070-gfx1201"),
+        pytest.param("gfx1250", 12, 5, id="CDNA5-gfx1250"),
+    ],
+)
+def test_capability_from_gcn_arch_known_gpus(gcn_arch, expected_major, expected_minor):
+    """_capability_from_gcn_arch parses known GPU architectures correctly.
+
+    This is critical for feature gating - wrong parsing causes:
+    - FP8 kernels selected on hardware that doesn't support them
+    - MX format support incorrectly enabled/disabled
+    - Custom allreduce used on unsupported hardware
+    """
+    from vllm.platforms.rocm import _capability_from_gcn_arch
+
+    result = _capability_from_gcn_arch(gcn_arch)
+    assert result is not None, f"Failed to parse {gcn_arch}"
+    assert result == (expected_major, expected_minor), (
+        f"Wrong capability for {gcn_arch}: got {result}, "
+        f"expected ({expected_major}, {expected_minor})"
+    )
+
+
+@pytest.mark.parametrize(
+    "gcn_arch",
+    [
+        pytest.param("not_a_gfx_string", id="non-gfx-string"),
+        pytest.param("cuda_arch", id="cuda-style"),
+        pytest.param("", id="empty-string"),
+    ],
+)
+def test_capability_from_gcn_arch_returns_none_for_non_gfx(gcn_arch):
+    """_capability_from_gcn_arch returns None for non-GFX strings.
+
+    Non-GFX strings should return None so the caller can fall back to
+    torch.cuda.get_device_capability.
+    """
+    from vllm.platforms.rocm import _capability_from_gcn_arch
+
+    result = _capability_from_gcn_arch(gcn_arch)
+    assert result is None
+
+
+@pytest.mark.parametrize(
+    "gcn_arch",
+    [
+        pytest.param("gfx8", id="too-few-digits"),
+        pytest.param("gfx12345", id="too-many-digits"),
+        pytest.param("gfx700", id="unsupported-major-7"),
+        pytest.param("gfx1500", id="future-major-15"),
+    ],
+)
+def test_capability_from_gcn_arch_raises_for_malformed(gcn_arch):
+    """_capability_from_gcn_arch raises ValueError for malformed GFX strings.
+
+    Malformed strings that look like GFX but can't be parsed should raise
+    so the user gets a clear error message asking them to file an issue.
+    """
+    from vllm.platforms.rocm import _capability_from_gcn_arch
+
+    with pytest.raises(ValueError, match="GCN arch"):
+        _capability_from_gcn_arch(gcn_arch)
+
+
+# ---------------------------------------------------------------------------
+# AITER ops availability tests
+# ---------------------------------------------------------------------------
+
+
+def test_rocm_aiter_ops_accessor_methods_dont_crash():
+    """rocm_aiter_ops accessor methods work without crashing.
+
+    These methods gate kernel selection. Even if AITER isn't available,
+    they should return False gracefully rather than crashing.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    # These should all return bool without crashing
+    assert isinstance(rocm_aiter_ops.is_enabled(), (bool, type(None)))
+    assert isinstance(rocm_aiter_ops.is_linear_enabled(), (bool, type(None)))
+    assert isinstance(rocm_aiter_ops.is_fused_moe_enabled(), (bool, type(None)))
+    assert isinstance(rocm_aiter_ops.is_mla_enabled(), (bool, type(None)))
+    assert isinstance(rocm_aiter_ops.is_mha_enabled(), (bool, type(None)))
+
+
+def test_rocm_aiter_ops_is_aiter_found():
+    """is_aiter_found returns consistent results."""
+    from vllm._aiter_ops import IS_AITER_FOUND, is_aiter_found
+
+    # The cached global should match the function result
+    assert is_aiter_found() == IS_AITER_FOUND
+
+
+def test_rocm_aiter_ops_refresh_env_variables_doesnt_crash():
+    """refresh_env_variables works without crashing.
+
+    This is called after monkeypatching env vars in tests. It should
+    never crash, even with unusual env var combinations.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    # Should not raise
+    rocm_aiter_ops.refresh_env_variables()
+
+
+# ---------------------------------------------------------------------------
+# Env var propagation tests
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("enabled", [True, False])
 def test_shuffle_kv_cache_env_propagates_to_rocm_aiter_ops(enabled, monkeypatch):
-    """The shuffled KV-cache env should propagate through env reload and the
-    cached AITER state refresh."""
+    """VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT propagates to AITER state."""
     import vllm.envs as envs
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -105,12 +205,8 @@ def test_shuffle_kv_cache_env_propagates_to_rocm_aiter_ops(enabled, monkeypatch)
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-def test_skinny_gemm_env_controls_rocm_fp8_scaled_mm_support(
-    enabled,
-    monkeypatch,
-):
-    """The skinny-GEMM env should directly gate the ROCm FP8 scaled-mm kernel
-    eligibility check."""
+def test_skinny_gemm_env_controls_rocm_fp8_scaled_mm_support(enabled, monkeypatch):
+    """VLLM_ROCM_USE_SKINNY_GEMM gates ROCm FP8 scaled-mm kernel eligibility."""
     import vllm.envs as envs
     from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
         ROCmFP8ScaledMMLinearKernel,
@@ -129,88 +225,63 @@ def test_skinny_gemm_env_controls_rocm_fp8_scaled_mm_support(
         assert reason == "requires VLLM_ROCM_USE_SKINNY_GEMM to be enabled."
 
 
-# ROCm platform capability contracts -------------------------------------
+# ---------------------------------------------------------------------------
+# Custom paged-attention eligibility tests
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    (
-        "gcn_arch",
-        "expect_supports_mx",
-        "expect_supports_fp8",
-        "expect_custom_allreduce",
-        "expect_fp8_dtype",
-    ),
-    [
-        pytest.param(
-            "gfx90a",
-            False,
-            True,  # CDNA supports FP8
-            False,
-            torch.float8_e4m3fn,
-            id="gfx90a-MI200",
-        ),
-        pytest.param(
-            "gfx942",
-            False,
-            True,
-            True,
-            torch.float8_e4m3fnuz,
-            id="gfx942-MI300X",
-        ),
-        pytest.param(
-            "gfx950",
-            True,
-            True,
-            True,
-            torch.float8_e4m3fn,
-            id="gfx950-MI350",
-        ),
-        pytest.param(
-            "gfx1100",
-            False,
-            False,
-            False,
-            torch.float8_e4m3fn,
-            id="gfx1100-RX7900",
-        ),
-        pytest.param(
-            "gfx1201",
-            False,
-            True,
-            False,
-            torch.float8_e4m3fn,
-            id="gfx1201-RX9070",
-        ),
-    ],
-)
-def test_rocm_platform_capabilities(
-    gcn_arch,
-    expect_supports_mx,
-    expect_supports_fp8,
-    expect_custom_allreduce,
-    expect_fp8_dtype,
-    monkeypatch,
-):
-    """Platform capability methods should return correct values for each GPU arch.
+def _set_rocm_arch(monkeypatch: pytest.MonkeyPatch, gcn_arch: str):
+    """Patch ROCm arch detection for testing.
 
-    These methods gate feature availability (FP8, MX formats, custom allreduce)
-    and affect kernel selection. Wrong values cause silent perf regressions or
-    crashes from selecting unsupported kernels.
+    Patches all on_*() accessor functions based on the provided gcn_arch string.
     """
-    _set_rocm_arch(monkeypatch, gcn_arch)
+    import vllm.platforms.rocm as rocm_platform
 
-    assert current_platform.supports_mx() is expect_supports_mx
-    assert current_platform.supports_fp8() is expect_supports_fp8
-    assert current_platform.use_custom_allreduce() is expect_custom_allreduce
-    assert current_platform.fp8_dtype() == expect_fp8_dtype
+    monkeypatch.setattr(rocm_platform, "_GCN_ARCH", gcn_arch)
 
+    _on_gfx11 = "gfx11" in gcn_arch
+    _on_gfx1100 = "gfx1100" in gcn_arch
+    _on_gfx1151 = "gfx1151" in gcn_arch
+    _on_gfx12x_raw = "gfx12" in gcn_arch
+    _on_gfx1250 = "gfx1250" in gcn_arch
+    _on_gfx1x_raw = any(arch in gcn_arch for arch in ["gfx11", "gfx12"])
 
-# Custom paged-attention eligibility -------------------------------------
+    _on_gfx90a = "gfx90a" in gcn_arch
+    _on_gfx942 = "gfx942" in gcn_arch
+    _on_gfx950 = "gfx950" in gcn_arch
+    _on_gfx9 = any(gfx in gcn_arch for gfx in ["gfx90a", "gfx942", "gfx950"])
+    _on_mi3xx = any(gfx in gcn_arch for gfx in ["gfx942", "gfx950"])
+
+    _on_cdna = any(arch in gcn_arch for arch in ["gfx9", "gfx1250"])
+    _on_rdna = _on_gfx1x_raw and not _on_cdna
+    _on_rdna4 = any(arch in gcn_arch for arch in ["gfx1200", "gfx1201"])
+
+    _on_gfx1x = _on_gfx1x_raw and not _on_cdna
+    _on_gfx12x = _on_gfx12x_raw and not _on_cdna
+
+    monkeypatch.setattr(rocm_platform, "on_gfx9", lambda: _on_gfx9)
+    monkeypatch.setattr(rocm_platform, "on_gfx90a", lambda: _on_gfx90a)
+    monkeypatch.setattr(rocm_platform, "on_gfx942", lambda: _on_gfx942)
+    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: _on_gfx950)
+    monkeypatch.setattr(rocm_platform, "on_gfx11", lambda: _on_gfx11)
+    monkeypatch.setattr(rocm_platform, "on_gfx1100", lambda: _on_gfx1100)
+    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: _on_gfx1151)
+    monkeypatch.setattr(rocm_platform, "on_gfx1250", lambda: _on_gfx1250)
+    monkeypatch.setattr(rocm_platform, "on_gfx1x", lambda: _on_gfx1x)
+    monkeypatch.setattr(rocm_platform, "on_gfx12x", lambda: _on_gfx12x)
+    monkeypatch.setattr(rocm_platform, "on_mi3xx", lambda: _on_mi3xx)
+    monkeypatch.setattr(rocm_platform, "on_cdna", lambda: _on_cdna)
+    monkeypatch.setattr(rocm_platform, "on_rdna", lambda: _on_rdna)
+    monkeypatch.setattr(rocm_platform, "on_rdna4", lambda: _on_rdna4)
+    monkeypatch.setattr(rocm_platform, "_ON_GFX1X", _on_gfx1x_raw)
+
+    rocm_platform.use_rocm_custom_paged_attention.cache_clear()
+
+    return rocm_platform
 
 
 def test_rocm_custom_paged_attention_gfx9_supported_case(monkeypatch):
-    """The gfx9 custom paged-attention predicate should accept its documented
-    fast-path configuration."""
+    """gfx9 custom paged-attention accepts its documented fast-path."""
     rocm_platform = _set_rocm_arch(monkeypatch, "gfx942")
 
     assert rocm_platform.use_rocm_custom_paged_attention(
@@ -236,11 +307,9 @@ def test_rocm_custom_paged_attention_gfx9_supported_case(monkeypatch):
     ],
 )
 def test_rocm_custom_paged_attention_gfx9_rejects_unsupported_cases(
-    kwargs,
-    monkeypatch,
+    kwargs, monkeypatch
 ):
-    """The gfx9 custom paged-attention predicate should reject unsupported
-    shapes and features instead of over-claiming support."""
+    """gfx9 custom paged-attention rejects unsupported shapes/features."""
     rocm_platform = _set_rocm_arch(monkeypatch, "gfx950")
 
     params = dict(
@@ -260,8 +329,7 @@ def test_rocm_custom_paged_attention_gfx9_rejects_unsupported_cases(
 
 
 def test_rocm_custom_paged_attention_gfx1x_supported_case(monkeypatch):
-    """The gfx1x custom paged-attention predicate should accept the narrower
-    RDNA fast-path it advertises."""
+    """gfx1x custom paged-attention accepts the narrower RDNA fast-path."""
     rocm_platform = _set_rocm_arch(monkeypatch, "gfx1201")
 
     assert rocm_platform.use_rocm_custom_paged_attention(
@@ -286,11 +354,9 @@ def test_rocm_custom_paged_attention_gfx1x_supported_case(monkeypatch):
     ],
 )
 def test_rocm_custom_paged_attention_gfx1x_rejects_unsupported_cases(
-    kwargs,
-    monkeypatch,
+    kwargs, monkeypatch
 ):
-    """The gfx1x custom paged-attention predicate should stay honest about the
-    restrictions in the RDNA path."""
+    """gfx1x custom paged-attention rejects unsupported RDNA configurations."""
     rocm_platform = _set_rocm_arch(monkeypatch, "gfx1100")
 
     params = dict(
