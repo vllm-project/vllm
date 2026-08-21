@@ -402,6 +402,58 @@ class ConversationMessage(TypedDict, total=False):
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
 
 
+def make_reasoning_parser_chat_template_kwargs(
+    chat_template_kwargs: dict[str, Any],
+    continue_final_message: bool,
+    final_message: ChatCompletionMessageParam | None,
+) -> dict[str, Any]:
+    kwargs = {
+        key: value
+        for key, value in chat_template_kwargs.items()
+        if not key.startswith("_vllm_continue_final_message")
+    }
+    kwargs["_vllm_continue_final_message"] = continue_final_message
+    if not continue_final_message or final_message is None:
+        return kwargs
+
+    content = final_message.get("content")
+    if isinstance(content, str):
+        final_content = content
+    elif isinstance(content, list):
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        reasoning_ended: bool | None = None
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "thinking":
+                thinking = part.get("thinking")
+                if isinstance(thinking, str):
+                    thinking_parts.append(thinking)
+                closed = part.get("closed")
+                if isinstance(closed, bool):
+                    reasoning_ended = closed
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+                if text:
+                    reasoning_ended = True
+        final_content = "\n".join(text_parts)
+        if thinking_parts:
+            kwargs["_vllm_continue_final_message_reasoning"] = "\n".join(thinking_parts)
+        if reasoning_ended is not None:
+            kwargs["_vllm_continue_final_message_reasoning_ended"] = reasoning_ended
+    else:
+        final_content = ""
+
+    kwargs["_vllm_continue_final_message_content"] = final_content
+    reasoning = final_message.get("reasoning")
+    if isinstance(reasoning, str):
+        kwargs["_vllm_continue_final_message_reasoning"] = reasoning
+    return kwargs
+
+
 # Passed in by user
 ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 

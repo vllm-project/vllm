@@ -316,6 +316,7 @@ class ParsableContext(ConversationContext):
         self.response_parser = response_parser or (
             parser_cls(tokenizer, request.tools) if parser_cls is not None else None
         )
+        self.tokenizer = tokenizer
         self.parser_cls = parser_cls
         self.request = request
 

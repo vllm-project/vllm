@@ -119,16 +119,22 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             for messages in request.messages
         ]
 
-        parser: Parser | None = None
+        parser_chat_template_kwargs = [
+            self._reasoning_parser_chat_template_kwargs(single_request)
+            for single_request in single_requests
+        ]
+        parsers: list[Parser | None]
         if self.parser_cls is not None:
-            chat_template_kwargs = self._effective_chat_template_kwargs(
-                single_requests[0]
-            )
-            parser = self.parser_cls(
-                tokenizer,
-                None,  # tools
-                chat_template_kwargs=chat_template_kwargs,
-            )
+            parsers = [
+                self.parser_cls(
+                    tokenizer,
+                    None,  # tools
+                    chat_template_kwargs=chat_template_kwargs,
+                )
+                for chat_template_kwargs in parser_chat_template_kwargs
+            ]
+        else:
+            parsers = [None] * len(single_requests)
 
         render_result = await self.render_batch_chat_request(request)
         if isinstance(render_result, ErrorResponse):
@@ -149,6 +155,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
 
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         for i, engine_prompt in enumerate(engine_prompts):
+            prompt_token_ids = self._extract_prompt_components(engine_prompt).token_ids
             sub_request_id = f"{request_id}_{i}"
             max_tokens = get_max_tokens(
                 max_model_len,
@@ -160,6 +167,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 self.override_max_tokens,
             )
             single_request = single_requests[i]
+            parser = parsers[i]
+            chat_template_kwargs = parser_chat_template_kwargs[i]
             sampling_params = single_request.to_sampling_params(
                 max_tokens, self.default_sampling_params
             )
@@ -175,6 +184,17 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 else await self._get_trace_headers(raw_request.headers)
             )
             session_id = self._get_session_id(single_request, raw_request)
+            if (
+                not single_request.include_reasoning
+                or single_request._grammar_from_parser
+            ):
+                reasoning_ended = True
+            elif parser is not None and parser.reasoning_parser is not None:
+                reasoning_ended = parser.is_reasoning_end_from_prompt(
+                    prompt_token_ids or []
+                )
+            else:
+                reasoning_ended = None
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -185,7 +205,12 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
-                    reasoning_ended=None,
+                    reasoning_ended=reasoning_ended,
+                    reasoning_parser_kwargs={
+                        "chat_template_kwargs": chat_template_kwargs,
+                    }
+                    if parser is not None and parser.reasoning_parser is not None
+                    else None,
                 )
             )
 
@@ -197,7 +222,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             all_conversations,
             tokenizer,
             request_metadata,
-            parser,
+            parsers,
         )
 
     async def chat_completion_full_generator_batch(
@@ -209,7 +234,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         all_conversations: list[list[ConversationMessage]],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        parser: Parser | None = None,
+        parsers: list[Parser | None] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         """Handle batched (non-streaming) chat completions.
 
@@ -233,6 +258,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         total_completion_tokens = 0
 
         for prompt_idx in range(len(generators)):
+            parser = parsers[prompt_idx] if parsers is not None else None
             final_res = final_results.get(prompt_idx)
             if final_res is None:
                 return self.create_error_response(
