@@ -344,7 +344,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 
     def _invoke_kernel(
         self,
-        output: torch.Tensor,
+        output: torch.Tensor | None,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -353,7 +353,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         activation: MoEActivation,
         global_num_experts: int,
         a1q_scale: torch.Tensor,
-    ):
+        defer: bool = False,
+    ) -> UnfinalizedMoEOutput | None:
         import flashinfer
 
         assert self.quant_config.w1_scale is not None
@@ -373,7 +374,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         # Invoke kernel.
-        flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
+        result = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=packed_tensor,
             routing_bias=None,
             hidden_states=hidden_states,
@@ -401,14 +402,27 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=1,  # not used
-            do_finalize=True,
+            do_finalize=not defer,
             activation_type=activation_to_flashinfer_int(activation),
             per_token_scale=per_token_scale,
-            output=output,
+            output=None if defer else output,
             tune_max_num_tokens=min(
                 fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
             ),
         )
+        if defer:
+            # The routed variant hands back [gemm2_output, expert_weights,
+            # expanded_idx_to_permuted_idx] instead of writing `output`. The
+            # permute map comes back flat; the protocol wants [num_tokens,
+            # top_k] so consumers can read top_k off its shape.
+            return UnfinalizedMoEOutput(
+                gemm2_permuted=result[0],
+                expert_weights=result[1],
+                expanded_idx_to_permuted_idx=result[2]
+                .to(torch.int32)
+                .view(hidden_states.shape[0], self.topk),
+            )
+        return None
 
     def apply(
         self,
@@ -427,7 +441,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ):
+    ) -> UnfinalizedMoEOutput | None:
         assert self._supports_activation(activation)
         # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
         assert a1q_scale is not None or self.per_token_activation
@@ -436,7 +450,11 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         chunk_size = self._get_chunk_size()
 
         if chunk_size >= M:
-            self._invoke_kernel(
+            # Deferring is per-kernel-launch: each launch returns its own
+            # permute map over its own permuted buffer, and those cannot be
+            # concatenated, so a chunked run always finalizes.
+            defer = can_defer_moe_finalize(self.moe_config, M)
+            return self._invoke_kernel(
                 output,
                 hidden_states,
                 w1,
@@ -446,6 +464,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                 activation,
                 global_num_experts,
                 a1q_scale,
+                defer=defer,
             )
         else:
             for start in range(0, M, chunk_size):
@@ -461,6 +480,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                     global_num_experts,
                     None if a1q_scale is None else a1q_scale[start:end],
                 )
+        return None
 
 
 class TrtLlmNvFp4ExpertsMonolithic(

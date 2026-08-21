@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
@@ -1291,7 +1292,7 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
         output_alias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
         )
@@ -1339,7 +1340,7 @@ class FusedMoEKernelModularImpl:
         elif use_output_alias:
             fused_out = output_alias
 
-        self.fused_experts.apply(
+        unfinalized = self.fused_experts.apply(
             output=fused_out,
             hidden_states=a1q,
             w1=w1,
@@ -1356,6 +1357,11 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
+
+        # Experts that stopped after GEMM2 wrote nothing into `fused_out`; the
+        # top-k reduction they left open belongs to whoever takes this.
+        if unfinalized is not None:
+            return unfinalized
 
         return fused_out
 
@@ -1510,6 +1516,13 @@ class FusedMoEKernelModularImpl:
 
         if lora_ctx is not None:
             lora_ctx.original_hidden_states = None
+
+        if isinstance(fused_out, UnfinalizedMoEOutput):
+            # Nothing below can run on an unfinalized output: finalize is the
+            # local top-k reduction (and, for DP/EP, the combine) that the
+            # consumer takes over. The producer only gets here when
+            # `use_deferred_moe_finalize` already vetted that.
+            return fused_out
 
         return self._finalize(
             output,

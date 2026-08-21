@@ -91,7 +91,7 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
         torch.manual_seed(1234 + local_rank)
 
         m.setenv("VLLM_ENABLE_MOE_TAIL_FUSION", "1")
-        if fmfn.moe_tail_fusion_max_tokens(HIDDEN_SIZE, dtype) < NUM_TOKENS:
+        if not fmfn.moe_tail_fusion_applies(NUM_TOKENS, HIDDEN_SIZE, dtype):
             q.put("MoE tail fusion is unsupported on this setup.")
             return
 
