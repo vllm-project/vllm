@@ -139,6 +139,17 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     return scheduler
 
 
+def test_write_mode_does_not_reload_remote_kv_after_preemption():
+    scheduler = _write_consumer_scheduler_for_finished_request()
+    request = create_request(request_id=1, num_tokens=32, do_remote_prefill=True)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
+
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["do_remote_prefill"] = False
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
 class FakeMoRIIOWrapper:
     # A fake MoRIIOWrapper for testing purposes
     def __init__(self, *args, **kwargs):
