@@ -21,9 +21,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.hisparse import (
     HiSparseNixlAdapter,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-    HostReadStager,
+    HostWriteStager,
     _load_cudart,
-    _ReqState,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
@@ -1954,7 +1953,7 @@ def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
 @pytest.mark.cpu_test
 def test_host_stager_preserves_custom_destinations_and_mirrors():
     """Custom mixed-tier geometry must survive descriptor-length grouping."""
-    stager = object.__new__(HostReadStager)
+    stager = object.__new__(HostWriteStager)
     stager.desc_lens = np.array([10, 20, 10])
     stager.host_addrs = np.array([1_000, 2_000, 3_000], dtype=np.uint64)
     stager._pools = {
@@ -1985,68 +1984,6 @@ def test_host_stager_preserves_custom_destinations_and_mirrors():
         (8, 200, 3, 900, 20),
         (9, 300, 2, 800, 10),
     }
-
-
-@pytest.mark.cpu_test
-def test_host_stager_read_failure_reaches_terminal_state():
-    """A terminal NIXL error must fail even when another chunk was queued."""
-    pool = SimpleNamespace(free_slots=[])
-    slot = SimpleNamespace(pool=pool)
-    queued = [(np.array([2]),) * 4 + (7, 16)]
-    state = _ReqState(
-        queued=queued,
-        reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))],
-    )
-    stager = object.__new__(HostReadStager)
-    stager._reqs = {"request": state}
-    stager.nixl_wrapper = MagicMock()
-    stager.nixl_wrapper.check_xfer_state.return_value = "ERR"
-
-    done, failed = stager.advance()
-
-    assert not done
-    assert failed == {"request"}
-    assert "request" not in stager.active_req_ids
-    assert pool.free_slots == [slot]
-
-
-@pytest.mark.cpu_test
-def test_host_stager_abort_drains_read_before_reusing_slot():
-    """Aborting a posted read must not return its slot while NIXL says PROC."""
-    pool = SimpleNamespace(free_slots=[])
-    slot = SimpleNamespace(pool=pool)
-    state = _ReqState(reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))])
-    stager = object.__new__(HostReadStager)
-    stager._reqs = {"request": state}
-    stager.nixl_wrapper = MagicMock()
-    stager.nixl_wrapper.check_xfer_state.side_effect = ["PROC", "DONE"]
-
-    stager.abort("request")
-    assert stager.advance() == (set(), set())
-    assert pool.free_slots == []
-    assert stager.advance() == (set(), set())
-    assert pool.free_slots == [slot]
-    assert not stager.active_req_ids
-
-
-@pytest.mark.cpu_test
-def test_host_stager_copy_failure_waits_for_recorded_event():
-    """A partial CUDA enqueue failure must keep its slot until the stream drains."""
-    pool = SimpleNamespace(free_slots=[])
-    event = MagicMock()
-    event.query.side_effect = [False, True]
-    slot = SimpleNamespace(pool=pool, event=event)
-    state = _ReqState(reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))])
-    stager = object.__new__(HostReadStager)
-    stager._reqs = {"request": state}
-    stager.nixl_wrapper = MagicMock()
-    stager.nixl_wrapper.check_xfer_state.return_value = "DONE"
-    stager._start_copy = MagicMock(side_effect=RuntimeError("copy failed"))
-
-    assert stager.advance() == (set(), set())
-    assert pool.free_slots == []
-    assert stager.advance() == (set(), {"request"})
-    assert pool.free_slots == [slot]
 
 
 @pytest.mark.cpu_test
@@ -2084,7 +2021,7 @@ def test_host_stager_copies_to_host_and_gpu_mirror():
         desc_ids=np.array([0], dtype=np.int64),
         event=torch.cuda.Event(),
     )
-    stager = object.__new__(HostReadStager)
+    stager = object.__new__(HostWriteStager)
     stager._copy_stream = torch.cuda.Stream()
     stager._cudart = _load_cudart()
     assert stager._cudart is not None

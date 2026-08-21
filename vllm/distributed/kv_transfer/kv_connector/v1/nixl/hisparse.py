@@ -26,7 +26,7 @@ if TYPE_CHECKING:
         NixlBaseConnectorWorker,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-        HostReadStager,
+        HostWriteStager,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
@@ -44,7 +44,7 @@ class HiSparseNixlAdapter:
         assert host_num_blocks is not None
         self.host_num_blocks = host_num_blocks
         self.host_regions: list[tuple[int, int, int] | None] = []
-        self.host_stager: HostReadStager | None = None
+        self.host_stager: HostWriteStager | None = None
 
     def reset_regions(self) -> None:
         self.host_regions.clear()
@@ -102,11 +102,11 @@ class HiSparseNixlAdapter:
             (host_cache.data_ptr(), host_stride, host_cache.shape[0])
         )
 
-    def get_host_stager(self, worker: NixlBaseConnectorWorker) -> HostReadStager:
+    def get_host_stager(self, worker: NixlBaseConnectorWorker) -> HostWriteStager:
         if self.host_stager is not None:
             return self.host_stager
         from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-            HostReadStager,
+            HostWriteStager,
         )
 
         stage_bytes = envs.VLLM_NIXL_HOST_STAGE_BYTES
@@ -116,7 +116,7 @@ class HiSparseNixlAdapter:
                 "VLLM_NIXL_HOST_STAGE_BYTES > 0"
             )
         lengths = np.asarray(worker.block_len_per_layer, dtype=np.int64)
-        self.host_stager = HostReadStager(
+        self.host_stager = HostWriteStager(
             desc_lens=lengths,
             host_addrs=np.zeros(len(lengths), dtype=np.uint64),
             device=torch.device(f"cuda:{worker.device_id}"),
