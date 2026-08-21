@@ -343,3 +343,20 @@ def test_reasoning_end_matches_reference_over_marker_dense_sequences(seed):
             assert parser.is_reasoning_end_streaming(
                 full, delta
             ) == _reference_is_reasoning_end(full), (head, delta)
+
+
+def test_inferred_think_close_preserves_tools_marker_simple():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    tools_block = (
+        f"{OPEN}tools{SEP}{OPEN}call tool=\"bash\" index=\"1\"{SEP}"
+        f"{OPEN}argument key=\"command\" type=\"string\"{SEP}ls{CLOSE}argument{SEP}"
+        f"{CLOSE}call{SEP}{CLOSE}tools{SEP}"
+    )
+
+    out = f"planning the edit. Applying it now:{CLOSE}response{SEP}{tools_block}{CLOSE}message{SEP}"
+
+    reasoning, rest = parser.extract_reasoning_content(out, request)
+    assert reasoning == "planning the edit. Applying it now:"
+    assert rest is not None and rest.startswith(f"{OPEN}tools{SEP}")

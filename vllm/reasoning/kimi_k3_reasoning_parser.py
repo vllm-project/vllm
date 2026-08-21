@@ -274,10 +274,26 @@ class KimiK3ReasoningParser(ReasoningParser):
         if m_open is None and self._think_close_re.search(model_output) is None:
             return None, self._content_after_reasoning(model_output, request)
 
-        m_close = self._think_close_re.search(model_output, content_start)
-        if m_close is not None:
-            reasoning = model_output[content_start : m_close.start()]
-            rest = model_output[m_close.end() :]
+        # Look for an explicit think-close or an implicit end-of-reasoning
+        # marker (response open / message close). Prefer the earliest marker
+        # after the reasoning start. When the model omits the explicit
+        # think-close, treat later-channel markers as an inferred close but
+        # preserve that marker in `rest` so downstream tool parsing sees it.
+        m_think_close = self._think_close_re.search(model_output, content_start)
+        m_response_open = self._response_open_re.search(model_output, content_start)
+        m_message_close = self._message_close_re.search(model_output, content_start)
+
+        # Choose the earliest match (if any)
+        matches = [m for m in (m_think_close, m_response_open, m_message_close) if m]
+        if matches:
+            m_earliest = min(matches, key=lambda m: m.start())
+            if m_earliest is m_think_close:
+                reasoning = model_output[content_start : m_earliest.start()]
+                rest = model_output[m_earliest.end() :]
+                return (reasoning or None, self._content_after_reasoning(rest, request))
+            # Inferred close: do not consume the marker so downstream sees it
+            reasoning = model_output[content_start : m_earliest.start()]
+            rest = model_output[m_earliest.start() :]
             return (reasoning or None, self._content_after_reasoning(rest, request))
         # think not closed -> still reasoning, no content yet
         return (model_output[content_start:] or None, None)
@@ -387,21 +403,46 @@ class KimiK3ReasoningParser(ReasoningParser):
 
         # the close marker completes within this delta's accumulated text:
         # split the buffer at the close marker into reasoning vs trailing content.
-        m_close = self._think_close_re.search(current_text)
-        if m_close is not None:
-            self._last_streaming_delta_token_ids = tuple(delta_token_ids)
-            self._last_streaming_content_token_ids = self._extract_content_ids(
-                list(current_token_ids)
-            )
+        # Consider explicit think-close or implicit end-of-reasoning markers
+        # (response open / message close). Use the earliest marker in the
+        # accumulated text. When the model omits the explicit think-close treat
+        # those markers as an inferred close and preserve the marker in the
+        # returned content.
+        m_think_close = self._think_close_re.search(current_text)
+        m_response_open = self._response_open_re.search(current_text)
+        m_message_close = self._message_close_re.search(current_text)
+        matches = [m for m in (m_think_close, m_response_open, m_message_close) if m]
+        if matches:
+            m_earliest = min(matches, key=lambda m: m.start())
+            if m_earliest is m_think_close:
+                self._last_streaming_delta_token_ids = tuple(delta_token_ids)
+                self._last_streaming_content_token_ids = self._extract_content_ids(
+                    list(current_token_ids)
+                )
+                m_open = self._think_open_re.search(current_text)
+                r_start = m_open.end() if m_open is not None else 0
+                reasoning = current_text[r_start : m_earliest.start()]
+                already_sent = self._reasoning_text_ready_to_emit(previous_text)
+                if reasoning.startswith(already_sent):
+                    reasoning_delta = reasoning[len(already_sent) :]
+                else:
+                    reasoning_delta = reasoning
+                content = current_text[m_earliest.end() :]
+                return DeltaMessage(
+                    reasoning=reasoning_delta or None,
+                    content=content or None,
+                )
+            # Inferred close via a later-channel marker: preserve the marker
             m_open = self._think_open_re.search(current_text)
             r_start = m_open.end() if m_open is not None else 0
-            reasoning = current_text[r_start : m_close.start()]
+            reasoning = current_text[r_start : m_earliest.start()]
             already_sent = self._reasoning_text_ready_to_emit(previous_text)
             if reasoning.startswith(already_sent):
                 reasoning_delta = reasoning[len(already_sent) :]
             else:
                 reasoning_delta = reasoning
-            content = current_text[m_close.end() :]
+            # Preserve the marker so downstream tool parsing sees structured XTML
+            content = current_text[m_earliest.start() :]
             return DeltaMessage(
                 reasoning=reasoning_delta or None,
                 content=content or None,

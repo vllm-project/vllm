@@ -349,9 +349,14 @@ fn parse_idle_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
 fn parse_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
     alt((
         literal(THINK_CLOSE).value(KimiK3Event::ThinkClose),
-        // `<|end_of_msg|>` can reach the parser under `ignore_eos` or
-        // `include_stop_str_in_output`; never leak it into reasoning.
-        literal(END_OF_MSG).value(KimiK3Event::MessageEnd),
+        // If the model omits the explicit think close, a later channel open
+        // (response / tools) or a message close should implicitly end
+        // reasoning. Accept those markers here so the parser resynchronizes.
+        literal(RESPONSE_OPEN).value(KimiK3Event::ResponseOpen),
+        literal(TOOLS_OPEN).value(KimiK3Event::ToolsOpen),
+        // `<|end_of_msg|>` or an explicit message close also terminates
+        // reasoning.
+        message_end_event,
         safe_reasoning_event,
     ))
     .parse_next(input)
