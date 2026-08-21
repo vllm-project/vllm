@@ -358,12 +358,6 @@ class LlavaOnevisionMultiModalProcessor(
         image_token = processor.image_token
         video_token = processor.video_token
 
-        text_outputs = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **{}),
-            hf_processor_mm_kwargs,
-        )
-
         images = mm_data.pop("images", [])
         assert isinstance(images, list)
         if images:
@@ -393,7 +387,7 @@ class LlavaOnevisionMultiModalProcessor(
         video_outputs = {"pixel_values_videos": pixel_values_videos}
 
         combined_outputs = dict(
-            text_outputs,
+            input_ids=prompt_text,
             **image_outputs,
             **video_outputs,
         )

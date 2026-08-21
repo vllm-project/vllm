@@ -230,10 +230,7 @@ class LlavaNextMultiModalProcessor(BaseLlavaNextMultiModalProcessor[_I]):
 
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(
-                text=prompt_text,
-                **processor_data,
-            ),
+            dict(text=prompt_text, **processor_data),
             hf_processor_mm_kwargs,
         )
         processed_data.update(passthrough_data)
