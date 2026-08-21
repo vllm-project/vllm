@@ -133,8 +133,8 @@ class _ReqState:
     aborted: bool = False
 
 
-class HostReadStager:
-    """Pipelines remote reads for host destinations through device memory."""
+class HostWriteStager:
+    """Pipelines remote reads into host destinations through device memory."""
 
     def __init__(
         self,
@@ -155,7 +155,7 @@ class HostReadStager:
         cudart = _load_cudart()
         if cudart is None:
             raise RuntimeError(
-                "host KV read staging requires libcudart for device-to-host "
+                "host KV write staging requires libcudart for device-to-host "
                 "copies; set VLLM_NIXL_HOST_STAGE_BYTES=0 to disable"
             )
         self._cudart: ctypes.CDLL = cudart
@@ -179,7 +179,7 @@ class HostReadStager:
         self._closed = False
 
         logger.info(
-            "NIXL host read staging enabled: %.2f GiB device staging across "
+            "NIXL host write staging enabled: %.2f GiB device staging across "
             "%d descriptor length(s) %s, %d slots each",
             sum(pool.bytes for pool in self._pools.values()) / 2**30,
             len(lengths),
