@@ -376,8 +376,17 @@ def _get_kv_b_proj_input_dtype(
         return kv_b_proj.params_dtype
     if weight_dtype == torch.uint8:
         return None
-    if weight_dtype == current_platform.fp8_dtype() and not use_fp8_prefill:
-        return None
+    if weight_dtype == current_platform.fp8_dtype():
+        from vllm.model_executor.layers.quantization.modelopt import (
+            ModelOptFp8PbWoLinearMethod,
+        )
+
+        quant_method = getattr(kv_b_proj, "quant_method", None)
+        # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
+        if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
+            return quant_method.input_dtype
+        if not use_fp8_prefill:
+            return None
     return weight_dtype
 
 
