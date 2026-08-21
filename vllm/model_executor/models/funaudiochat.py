@@ -617,10 +617,9 @@ class FunAudioChatMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
-        input_ids = torch.tensor([tokenizer.encode(prompt, **tok_kwargs)])
+        input_ids = torch.tensor([tokenizer.encode(prompt)])
 
         audios = mm_data.get("audios", [])
         if not audios:
@@ -678,15 +677,6 @@ class FunAudioChatMultiModalProcessor(
         }
 
         return BatchFeature({"input_ids": input_ids, **mm_inputs})
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
 
     def _get_mm_fields_config(
         self,
@@ -760,6 +750,8 @@ class FunAudioChatMultiModalProcessor(
     dummy_inputs=FunAudioChatDummyInputsBuilder,
 )
 class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"audio_invert_tower.": None})
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -969,5 +961,5 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_invert_tower."])
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
