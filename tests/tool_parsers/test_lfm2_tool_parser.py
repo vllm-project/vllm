@@ -825,6 +825,28 @@ def test_streaming_unconvertible_value_never_streams_partial_args(
         json.loads(call.function.arguments)
 
 
+def test_streaming_multibyte_string_argument(lfm2_tokenizer: TokenizerLike):
+    """A token boundary that falls inside a multi-byte character must not
+    corrupt the streamed argument: the harness decoded growing token prefixes
+    independently, so the partial bytes of a 3-byte char reached the parser as
+    a replacement char and the streamed value ended as café \ufffd."""
+    import json
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[f(s='café ☕')]{TOOL_CALL_END}"
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=True,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function.name == "f"
+    assert json.loads(tool_calls[0].function.arguments) == {"s": "café ☕"}
+
+
 def test_streaming_implicit_string_concatenation(lfm2_tokenizer: TokenizerLike):
     """Adjacent string literals ('ab' 'cd') are valid Python that concatenates
     to one value. The broken-string guard misread the second opening quote as
