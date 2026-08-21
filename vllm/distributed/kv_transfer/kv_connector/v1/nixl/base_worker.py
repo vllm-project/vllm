@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base worker-side logic for the NIXL connector."""
 
+import contextlib
 import itertools
 import logging
 import os
@@ -90,6 +91,9 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+
+_HOST_STAGING_SHUTDOWN_TIMEOUT_S = 2.0
+_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S = 0.001
 
 
 class NixlBaseConnectorWorker:
@@ -270,6 +274,7 @@ class NixlBaseConnectorWorker:
 
         # Config.
         self.vllm_config = vllm_config
+        self._host_staging_shutdown_thread: threading.Thread | None = None
         # mypy will complain on re-assignment otherwise.
         self.block_size: int = cast(int, vllm_config.cache_config.block_size)
 
@@ -2677,18 +2682,13 @@ class NixlBaseConnectorWorker:
             )
 
     def __del__(self):
-        self.shutdown()
+        with contextlib.suppress(Exception):
+            self.shutdown(drain_timeout=0)
 
-    def shutdown(self):
-        """Shutdown the connector worker."""
-        if not hasattr(self, "_handshake_initiation_executor"):
-            # error happens during init, no need to shutdown
-            return
-        self._handshake_initiation_executor.shutdown(wait=False)
-        for handles in self._recving_transfers.values():
-            for handle in handles:
-                self.nixl_wrapper.release_xfer_handle(handle)
-        self._recving_transfers.clear()
+    def _poll_host_staging_shutdown(self, cancel: bool) -> bool:
+        return self._host_stager is None or self._host_stager.poll_shutdown(cancel)
+
+    def _finish_shutdown(self) -> None:
         for handle in self.src_xfer_handles_by_block_size.values():
             self.nixl_wrapper.release_dlist_handle(handle)
         self.src_xfer_handles_by_block_size.clear()
@@ -2701,3 +2701,49 @@ class NixlBaseConnectorWorker:
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()
+        self._host_staging_shutdown_thread = None
+
+    def _reap_host_staging_shutdown(self) -> None:
+        while not self._poll_host_staging_shutdown(cancel=True):
+            time.sleep(_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S)
+        self._finish_shutdown()
+        logger.info("Deferred NIXL host-staging cleanup completed.")
+
+    def shutdown(self, drain_timeout: float | None = None) -> None:
+        """Stop new work and bound the wait for host-staged reads."""
+        if not hasattr(self, "_handshake_initiation_executor"):
+            return
+        if self._host_staging_shutdown_thread is not None:
+            return
+        if drain_timeout is None:
+            drain_timeout = _HOST_STAGING_SHUTDOWN_TIMEOUT_S
+        self._handshake_initiation_executor.shutdown(wait=False, cancel_futures=True)
+        for handles in self._recving_transfers.values():
+            for handle in handles:
+                self.nixl_wrapper.release_xfer_handle(handle)
+        self._recving_transfers.clear()
+        if self._host_stager is not None:
+            self._host_stager.begin_shutdown()
+
+        deadline = time.monotonic() + drain_timeout
+        drained = self._poll_host_staging_shutdown(cancel=False)
+        while not drained and time.monotonic() < deadline:
+            time.sleep(_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S)
+            drained = self._poll_host_staging_shutdown(cancel=False)
+        if not drained:
+            drained = self._poll_host_staging_shutdown(cancel=True)
+        if drained:
+            self._finish_shutdown()
+            return
+
+        logger.warning(
+            "NIXL host-staging shutdown timed out after %.1fs; retaining "
+            "registered memory until active operations become terminal.",
+            drain_timeout,
+        )
+        self._host_staging_shutdown_thread = threading.Thread(
+            target=self._reap_host_staging_shutdown,
+            name="vllm-nixl-host-staging-shutdown",
+            daemon=True,
+        )
+        self._host_staging_shutdown_thread.start()
