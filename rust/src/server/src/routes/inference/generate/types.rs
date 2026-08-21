@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,7 @@ pub struct GenerateRequest {
     pub ec_transfer_params: Option<HashMap<String, Value>>,
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
+    pub return_token_ids: Option<bool>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
@@ -81,6 +82,8 @@ pub(super) struct GenerateStreamResponse {
     pub request_id: String,
     pub choices: Vec<GenerateResponseStreamChoice>,
     pub usage: Option<Usage>,
+    pub prompt_token_ids: Option<Vec<u32>>,
+    pub mm_placeholders: Option<MultiModalPlaceholders>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.
@@ -89,8 +92,18 @@ pub(super) struct GenerateResponse {
     pub request_id: String,
     pub choices: Vec<GenerateResponseChoice>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
+    pub prompt_token_ids: Option<Vec<u32>>,
+    pub mm_placeholders: Option<MultiModalPlaceholders>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
+}
+
+pub(super) type MultiModalPlaceholders = BTreeMap<String, Vec<PlaceholderRangeInfo>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct PlaceholderRangeInfo {
+    pub offset: usize,
+    pub length: usize,
 }
 
 /// Mirrors the Python vLLM `Logprob` class used in prompt-logprobs payloads.

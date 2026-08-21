@@ -119,6 +119,15 @@ class GenerateRequest(BaseModel):
 
     model: str | None = None
 
+    return_token_ids: bool | None = Field(
+        default=None,
+        description=(
+            "If true, return the final prompt token IDs after multimodal "
+            "placeholder expansion, together with multimodal placeholder ranges. "
+            "In streaming mode, this metadata is included only in the first chunk."
+        ),
+    )
+
     stream: bool | None = False
     stream_options: StreamOptions | None = None
     cache_salt: str | None = Field(
@@ -162,6 +171,9 @@ class GenerateRequest(BaseModel):
     # ``SamplingParams`` instance (e.g. from internal callers that have
     # already resolved values), in which case all fields are considered set.
     _sampling_params_provided_keys: set[str] | None = PrivateAttr(default=None)
+    _response_mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = (
+        PrivateAttr(default=None)
+    )
 
     @model_validator(mode="wrap")
     @classmethod
@@ -240,6 +252,8 @@ class GenerateStreamResponse(BaseModel):
     )
     choices: list[GenerateResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    prompt_token_ids: list[int] | None = None
+    mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -256,6 +270,8 @@ class GenerateResponse(BaseModel):
     choices: list[GenerateResponseChoice]
     usage: UsageInfo | None = Field(default=None)
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+    prompt_token_ids: list[int] | None = None
+    mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,

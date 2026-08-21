@@ -30,6 +30,8 @@ pub(super) struct ResponseOptions {
     pub include_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
+    /// Whether the caller requested final prompt token metadata.
+    pub return_token_ids: bool,
 }
 
 /// Validate and lower one raw generate request into the internal
@@ -56,6 +58,7 @@ pub(super) fn prepare_generate_request(
             .unwrap_or(false);
     let include_logprobs = request.sampling_params.inner.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
+    let return_token_ids = request.return_token_ids.unwrap_or(false);
     let mut sampling_params = request.sampling_params.inner;
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
@@ -92,6 +95,7 @@ pub(super) fn prepare_generate_request(
             include_continuous_usage,
             include_logprobs,
             include_prompt_logprobs,
+            return_token_ids,
         },
     })
 }

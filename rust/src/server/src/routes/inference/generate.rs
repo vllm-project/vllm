@@ -21,6 +21,7 @@ use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
+use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
 use vllm_llm::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
 };
@@ -28,7 +29,7 @@ use vllm_llm::{
 use self::convert::{ResponseOptions, prepare_generate_request};
 use self::types::{
     GenerateLogprob, GenerateResponse, GenerateResponseChoice, GenerateResponseStreamChoice,
-    GenerateStreamResponse,
+    GenerateStreamResponse, MultiModalPlaceholders, PlaceholderRangeInfo,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
@@ -64,6 +65,7 @@ pub async fn generate(
     } else {
         None
     };
+    let mm_placeholders = extract_mm_placeholders(mm_features.as_deref());
 
     let prepared =
         match prepare_generate_request(body, &lora_resolution, request_context, mm_features) {
@@ -98,6 +100,7 @@ pub async fn generate(
             prepared.request_id,
             api_server_options,
             prepared.options,
+            mm_placeholders,
         );
         let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
 
@@ -120,6 +123,7 @@ pub async fn generate(
         prepared.request_id,
         api_server_options,
         prepared.options,
+        mm_placeholders,
     ) {
         Ok(response) => response,
         Err(error) => return error.into_response(),
@@ -143,19 +147,25 @@ async fn generate_chunk_stream(
         include_logprobs,
         // Ignored: raw generate streaming has no prompt-logprobs wire shape.
         include_prompt_logprobs: _,
+        return_token_ids,
     }: ResponseOptions,
+    mm_placeholders: Option<MultiModalPlaceholders>,
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
     let mut prompt_tokens = None;
+    let mut prompt_token_ids = None;
+    let mut prompt_metadata_sent = false;
     let mut usage = TokenUsage::default();
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
-                if prompt_tokens.is_none() {
-                    prompt_tokens =
-                        output.prompt_info.as_ref().map(|info| info.prompt_token_ids.len());
+                if prompt_tokens.is_none()
+                    && let Some(info) = output.prompt_info.as_ref()
+                {
+                    prompt_tokens = Some(info.prompt_token_ids.len());
+                    prompt_token_ids = Some(info.prompt_token_ids.to_vec());
                 }
                 usage.prompt_token_count = prompt_tokens.unwrap_or_default();
                 usage.cached_token_count = usage.cached_token_count.max(output.cached_token_count);
@@ -195,6 +205,8 @@ async fn generate_chunk_stream(
                     None
                 };
 
+                let include_prompt_metadata =
+                    return_token_ids && !prompt_metadata_sent && prompt_token_ids.is_some();
                 y.yield_ok(GenerateStreamResponse {
                     request_id: request_id.clone(),
                     choices: vec![GenerateResponseStreamChoice {
@@ -205,8 +217,15 @@ async fn generate_chunk_stream(
                     }],
                     usage: include_continuous_usage
                         .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+                    prompt_token_ids: include_prompt_metadata
+                        .then(|| prompt_token_ids.clone())
+                        .flatten(),
+                    mm_placeholders: include_prompt_metadata
+                        .then(|| mm_placeholders.clone())
+                        .flatten(),
                 })
                 .await;
+                prompt_metadata_sent |= include_prompt_metadata;
             }
             Err(error) => {
                 error!(
@@ -223,6 +242,8 @@ async fn generate_chunk_stream(
             request_id,
             choices: Vec::new(),
             usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+            prompt_token_ids: None,
+            mm_placeholders: None,
         })
         .await;
     }
@@ -244,7 +265,9 @@ fn collect_generate(
         include_continuous_usage: _,
         include_logprobs,
         include_prompt_logprobs,
+        return_token_ids,
     }: ResponseOptions,
+    mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
     let logprobs = if include_logprobs {
         let logprobs = collected.logprobs.as_ref().ok_or_else(|| {
@@ -292,9 +315,33 @@ fn collect_generate(
             token_ids: collected.token_ids,
         }],
         prompt_logprobs,
+        prompt_token_ids: return_token_ids.then_some(collected.prompt_token_ids),
+        mm_placeholders: return_token_ids.then_some(mm_placeholders).flatten(),
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
     })
+}
+
+fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiModalPlaceholders> {
+    let features = features?;
+    if features.is_empty() {
+        return None;
+    }
+
+    let mut placeholders = MultiModalPlaceholders::new();
+    for feature in features {
+        placeholders
+            .entry(feature.modality.clone())
+            .or_default()
+            .push(PlaceholderRangeInfo {
+                offset: feature.mm_position.offset,
+                length: feature.mm_position.length,
+            });
+    }
+    for ranges in placeholders.values_mut() {
+        ranges.sort_by_key(|range| range.offset);
+    }
+    Some(placeholders)
 }
 
 fn raw_logprobs_to_openai_chat(logprobs: &Logprobs) -> Result<ChatLogProbs, ApiError> {
@@ -417,6 +464,7 @@ mod tests {
     use std::sync::Arc;
 
     use futures::{TryStreamExt as _, stream};
+    use vllm_engine_core_client::protocol::multimodal::PlaceholderRange;
     use vllm_llm::GeneratePromptInfo;
 
     use super::*;
@@ -449,6 +497,13 @@ mod tests {
             }),
         ]);
 
+        let mm_placeholders = MultiModalPlaceholders::from([(
+            "image".to_string(),
+            vec![PlaceholderRangeInfo {
+                offset: 1,
+                length: 4,
+            }],
+        )]);
         let chunks: Vec<_> = generate_chunk_stream(
             stream,
             "raw-stream".to_string(),
@@ -459,14 +514,20 @@ mod tests {
             ResponseOptions {
                 include_usage: true,
                 include_continuous_usage: true,
+                return_token_ids: true,
                 ..Default::default()
             },
+            Some(mm_placeholders.clone()),
         )
         .try_collect()
         .await
         .expect("collect chunks");
 
         assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].prompt_token_ids, Some(vec![11, 22]));
+        assert_eq!(chunks[0].mm_placeholders, Some(mm_placeholders));
+        assert!(chunks[1].prompt_token_ids.is_none());
+        assert!(chunks[1].mm_placeholders.is_none());
         assert_eq!(
             chunks[0].usage.as_ref().expect("chunk usage").prompt_tokens,
             2
@@ -498,6 +559,82 @@ mod tests {
     }
 
     #[test]
+    fn extract_mm_placeholders_groups_ranges_in_prompt_order() {
+        let feature = |modality: &str, offset: usize, length: usize| MmFeatureSpec {
+            data: None,
+            modality: modality.to_string(),
+            identifier: format!("{modality}-{offset}"),
+            mm_position: PlaceholderRange {
+                offset,
+                length,
+                is_embed: None,
+            },
+            mm_hash: None,
+        };
+        let features = vec![
+            feature("image", 8, 2),
+            feature("audio", 4, 3),
+            feature("image", 1, 5),
+        ];
+
+        let placeholders = extract_mm_placeholders(Some(&features)).expect("metadata");
+
+        assert_eq!(
+            placeholders["image"],
+            vec![
+                PlaceholderRangeInfo {
+                    offset: 1,
+                    length: 5,
+                },
+                PlaceholderRangeInfo {
+                    offset: 8,
+                    length: 2,
+                },
+            ]
+        );
+        assert_eq!(
+            placeholders["audio"],
+            vec![PlaceholderRangeInfo {
+                offset: 4,
+                length: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn collect_generate_returns_prompt_token_ids_when_requested() {
+        let output = CollectedGenerateOutput {
+            request_id: "raw-1".to_string(),
+            prompt_logprobs: None,
+            token_ids: vec![30],
+            logprobs: None,
+            finish_reason: FinishReason::stop_eos(),
+            usage: TokenUsage {
+                prompt_token_count: 2,
+                output_token_count: 1,
+                cached_token_count: 0,
+            },
+            kv_transfer_params: None,
+            ec_transfer_params: None,
+            prompt_token_ids: vec![10, 20],
+        };
+
+        let response = collect_generate(
+            output,
+            "raw-1".to_string(),
+            ApiServerOptions::default(),
+            ResponseOptions {
+                return_token_ids: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .expect("response");
+
+        assert_eq!(response.prompt_token_ids, Some(vec![10, 20]));
+    }
+
+    #[test]
     fn collect_generate_maps_prompt_logprobs_for_single_token_prompt() {
         let output_without_payload = |prompt_token_ids: Vec<u32>| CollectedGenerateOutput {
             request_id: "raw-1".to_string(),
@@ -523,6 +660,7 @@ mod tests {
                 include_prompt_logprobs: true,
                 ..Default::default()
             },
+            None,
         )
         .expect("single-token prompt without payload maps to [None]");
         let prompt_logprobs = response.prompt_logprobs.expect("prompt logprobs present");
@@ -537,6 +675,7 @@ mod tests {
                 include_prompt_logprobs: true,
                 ..Default::default()
             },
+            None,
         )
         .expect_err("multi-token prompt without payload is an engine failure");
     }

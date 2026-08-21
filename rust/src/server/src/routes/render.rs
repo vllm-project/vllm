@@ -97,6 +97,7 @@ fn lower_render_request(
         kv_transfer_params: None,
         ec_transfer_params: None,
         content_parts: None,
+        return_token_ids: None,
         other: Default::default(),
     };
     validate_generate_request(&request, &state.served_model_names)?;

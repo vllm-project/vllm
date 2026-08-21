@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
+from typing import cast
 
 import msgspec
 from fastapi import Request
@@ -31,7 +32,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import EngineInput, TokensPrompt, mm_input
+from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
@@ -52,6 +53,7 @@ from .protocol import (
     GenerateResponseChoice,
     GenerateResponseStreamChoice,
     GenerateStreamResponse,
+    PlaceholderRangeInfo,
 )
 
 logger = init_logger(__name__)
@@ -200,6 +202,12 @@ class ServingTokens(GenerateBaseServing):
                 skip_mm_cache=True,
             )
 
+        request._response_mm_placeholders = (
+            self._extract_mm_placeholders(engine_input)
+            if request.return_token_ids
+            else None
+        )
+
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
 
@@ -262,8 +270,28 @@ class ServingTokens(GenerateBaseServing):
             )
 
         return await self.serve_tokens_full_generator(
-            request, result_generator, request_id, model_name, request_metadata
+            request,
+            result_generator,
+            request_id,
+            model_name,
+            request_metadata,
         )
+
+    @staticmethod
+    def _extract_mm_placeholders(
+        engine_input: EngineInput,
+    ) -> dict[str, list[PlaceholderRangeInfo]] | None:
+        if engine_input.get("type") != "multimodal":
+            return None
+
+        multimodal_input = cast(MultiModalInput, engine_input)
+        return {
+            modality: [
+                PlaceholderRangeInfo(offset=p.offset, length=p.length)
+                for p in sorted(ranges, key=lambda p: p.offset)
+            ]
+            for modality, ranges in multimodal_input["mm_placeholders"].items()
+        }
 
     async def serve_tokens_full_generator(
         self,
@@ -352,6 +380,10 @@ class ServingTokens(GenerateBaseServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            prompt_token_ids=(
+                final_res.prompt_token_ids if request.return_token_ids else None
+            ),
+            mm_placeholders=request._response_mm_placeholders,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
@@ -388,6 +420,8 @@ class ServingTokens(GenerateBaseServing):
         num_prompt_tokens = 0
         num_generated_tokens: list[int] = []
         first_iteration = True
+        prompt_token_ids: list[int] | None = None
+        prompt_metadata_sent = False
         num_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
 
@@ -397,9 +431,10 @@ class ServingTokens(GenerateBaseServing):
 
         try:
             async for res in result_generator:
+                if prompt_token_ids is None and res.prompt_token_ids is not None:
+                    prompt_token_ids = res.prompt_token_ids
+                    num_prompt_tokens += len(res.prompt_token_ids)
                 if first_iteration:
-                    if res.prompt_token_ids is not None:
-                        num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
                     num_cached_tokens = res.num_cached_tokens
@@ -434,6 +469,11 @@ class ServingTokens(GenerateBaseServing):
                         else None
                     )
 
+                    include_prompt_metadata = (
+                        bool(request.return_token_ids)
+                        and not prompt_metadata_sent
+                        and prompt_token_ids is not None
+                    )
                     chunk = GenerateStreamResponse(
                         request_id=request_id,
                         choices=[
@@ -445,6 +485,14 @@ class ServingTokens(GenerateBaseServing):
                                 routed_experts=routed_experts_b64,
                             )
                         ],
+                        prompt_token_ids=(
+                            prompt_token_ids if include_prompt_metadata else None
+                        ),
+                        mm_placeholders=(
+                            request._response_mm_placeholders
+                            if include_prompt_metadata
+                            else None
+                        ),
                     )
                     if include_continuous_usage:
                         chunk.usage = UsageInfo(
@@ -454,6 +502,9 @@ class ServingTokens(GenerateBaseServing):
                         )
 
                     yield f"data: {chunk.model_dump_json()}\n\n"
+                    prompt_metadata_sent = (
+                        prompt_metadata_sent or include_prompt_metadata
+                    )
 
             total_completion_tokens = sum(num_generated_tokens)
             final_usage_info = UsageInfo(
