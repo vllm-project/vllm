@@ -232,6 +232,7 @@ pub struct ChatCompletionRequest {
     pub return_token_ids: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
+    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
 
     /// KV transfer parameters for disaggregated serving

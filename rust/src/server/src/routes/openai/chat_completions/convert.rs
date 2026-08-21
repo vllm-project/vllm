@@ -580,6 +580,18 @@ mod tests {
     }
 
     #[test]
+    fn chat_http_request_rejects_empty_cache_salt() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "cache_salt": "",
+        }))
+        .expect("parse cache_salt");
+
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
     fn prepare_chat_request_maps_parallel_tool_calls() {
         let mut request = base_request();
         request.parallel_tool_calls = Some(false);

@@ -199,6 +199,7 @@ fn completion_echo_text(
 mod tests {
     use axum::http::HeaderMap;
     use serde_json::json;
+    use validator::Validate;
     use vllm_text::Prompt;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
@@ -282,6 +283,18 @@ mod tests {
         assert_eq!(request.prompt, Prompt::TokenIds(vec![11, 22, 33]));
         assert_eq!(request.max_tokens, Some(7));
         assert!(request.ignore_eos);
+    }
+
+    #[test]
+    fn completion_http_request_rejects_empty_cache_salt() {
+        let mut value = base_request_json();
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("cache_salt".to_string(), json!(""));
+        let request: CompletionRequest = serde_json::from_value(value).expect("parse cache_salt");
+
+        assert!(request.validate().is_err());
     }
 
     #[test]
