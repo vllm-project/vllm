@@ -1714,7 +1714,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     "There is likely a problem with your "
                     "implementation of merged multi-modal processor for this "
                     "model (usually arising from an inconsistency between "
-                    "`_call_hf_processor` and `_get_mm_fields_config`)."
+                    "`_apply_hf_processor_main` and `_get_mm_fields_config`)."
                 )
 
     def _validate_mm_updates(
@@ -1749,8 +1749,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     f"Expected there to be {item_count} prompt placeholders "
                     f"corresponding to {item_count} {modality} items, but "
                     f"instead found {len(placeholders)} prompt placeholders! "
-                    "Make sure the implementation of `_call_hf_processor` and "
-                    "`_get_mm_fields_config` are consistent with each other."
+                    "Make sure the implementation of `_apply_hf_processor_main` "
+                    "and `_get_mm_fields_config` are consistent with each other."
                 )
 
     def _maybe_apply_prompt_updates(

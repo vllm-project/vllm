@@ -825,7 +825,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 image_size = images.get_image_size(item_idx)
                 # Resolve the effective max_soft_tokens by merging
                 # per-prompt kwargs with the config-level defaults,
-                # consistent with how _call_hf_processor resolves it.
+                # consistent with how _apply_hf_processor_main resolves it.
                 # Without this merge, a missing per-prompt override
                 # would fall back to vision_cfg.default_output_length
                 # instead of the config's mm_processor_kwargs default.

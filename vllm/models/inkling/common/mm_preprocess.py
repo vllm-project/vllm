@@ -135,8 +135,8 @@ class InklingDummyInputsBuilder(BaseDummyInputsBuilder[InklingProcessingInfo]):
         num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
         # Use spellings the renderer would emit; tokenization is bypassed in
-        # _call_hf_processor (we build input_ids directly), so the exact text
-        # only needs to be a stable per-item marker.
+        # _apply_hf_processor_main (we build input_ids directly), so the exact
+        # text only needs to be a stable per-item marker.
         return ("<|content_image|>" * num_images) + (
             "<|content_audio_input|>" * num_audios
         )

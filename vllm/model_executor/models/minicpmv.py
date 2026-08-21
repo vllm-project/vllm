@@ -881,7 +881,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
             image_inputs = {}
         else:
-            image_inputs = self._base_call_hf_processor(
+            image_inputs = self._call_hf_processor_on_prompts(
                 prompts=[self.info.image_pattern] * len(parsed_images),
                 mm_data={"images": [[image] for image in parsed_images]},
                 mm_kwargs=mm_kwargs,
@@ -906,7 +906,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
             video_inputs = {}
         else:
-            video_inputs = self._base_call_hf_processor(
+            video_inputs = self._call_hf_processor_on_prompts(
                 prompts=[
                     self.info.image_pattern * len(video) for video in parsed_videos
                 ],
@@ -983,7 +983,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return new_token_ids, placeholders
 
-    def _base_call_hf_processor(
+    def _call_hf_processor_on_prompts(
         self,
         prompts: list[str],
         mm_data: Mapping[str, Sequence[object]],

@@ -286,7 +286,7 @@ def _validate_video_sources(paths, model_config) -> list[str]:
 #   participates in the standard decode-stage pipeline.
 #
 # * codec backend: NOT a loader. OV2's codec path needs the video path string
-#   to survive into ``_call_hf_processor``, where the HF processor builds the
+#   to survive into ``_apply_hf_processor_main``, where the HF processor builds the
 #   codec canvas + smart_resize + patchify
 #   (pixel_values/image_grid_thw/patch_positions). That transform is
 #   path-level and inseparable; it cannot be reconstructed from pre-decoded
@@ -302,7 +302,7 @@ def prepare_codec_video_input(video_path: str) -> tuple:
 
     Returns ``(dummy_ndarray, metadata)`` where the ndarray satisfies the
     parser's 4-D shape check and the metadata carries the actual path to
-    our ``_call_hf_processor``. Use as::
+    our ``_apply_hf_processor_main``. Use as::
 
         multi_modal_data = {"video": prepare_codec_video_input("foo.mp4")}
 
@@ -1283,7 +1283,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         # ``video_needs_metadata=True`` makes the parser preserve both the
         # ``(frames, metadata)`` tuples from the frame backend and the
         # ``(dummy, {marker: path})`` tuples from prepare_codec_video_input;
-        # both are dispatched by metadata content in ``_call_hf_processor``.
+        # both are dispatched by metadata content in ``_apply_hf_processor_main``.
         return LlavaOnevision2MultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
@@ -1632,7 +1632,7 @@ class LlavaOnevision2MultiModalProcessor(
                 if len(codec_video_paths) > 1
                 else codec_video_paths[0]
             )
-            # Route through the base ``_call_hf_processor`` so float-tensor
+            # Route through ``ctx.call_hf_processor`` so float-tensor
             # dtype postprocessing is applied automatically; inject
             # ``video_backend="codec"`` via mm_kwargs so the wrapped processor
             # dispatches to its codec branch.
@@ -1734,7 +1734,7 @@ class LlavaOnevision2MultiModalProcessor(
             merged_mm_data.pop("videos", None)
             merged_mm_data["images"] = flat_frames
 
-            # Route through the base ``_call_hf_processor`` (applies float-tensor
+            # Route through ``ctx.call_hf_processor`` (applies float-tensor
             # dtype postprocessing automatically). The wrapped processor's image
             # branch ignores video/codec-only kwargs and does not forward extra
             # **kwargs to the image processor, so passing the full merged kwarg
@@ -1804,7 +1804,7 @@ class LlavaOnevision2MultiModalProcessor(
             return processed_data
 
         # ---- Image-only / text-only call --------------------------------
-        # No videos present: delegate to the base ``_call_hf_processor``, which
+        # No videos present: delegate to ``ctx.call_hf_processor``, which
         # runs the wrapped processor over the (possibly empty) image set and
         # applies float-tensor dtype postprocessing automatically.
         processed_data = self.info.ctx.call_hf_processor(
