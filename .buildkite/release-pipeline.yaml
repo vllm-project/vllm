@@ -33,7 +33,7 @@ steps:
         agents:
           queue: arm64_cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -47,7 +47,7 @@ steps:
         agents:
           queue: cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -71,7 +71,7 @@ steps:
         agents:
           queue: arm64_cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64_CU129}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64_CU129}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9-78e737ad29420ffc4800e677c51e2a852caf8359 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -142,7 +142,7 @@ steps:
         agents:
           queue: cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86_CU129}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86_CU129}\" --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9-78e737ad29420ffc4800e677c51e2a852caf8359 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -234,7 +234,7 @@ steps:
               --build-arg CUDA_VERSION=13.0.2 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -260,7 +260,7 @@ steps:
               --build-arg CUDA_VERSION=13.0.2 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -281,7 +281,7 @@ steps:
               --build-arg USE_SCCACHE=1 \
               --build-arg GIT_REPO_CHECK=1 \
               --build-arg CUDA_VERSION=12.9.1 \
-              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9-78e737ad29420ffc4800e677c51e2a852caf8359 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86_CU129}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
               --target vllm-openai \
@@ -307,7 +307,7 @@ steps:
               --build-arg USE_SCCACHE=1 \
               --build-arg GIT_REPO_CHECK=1 \
               --build-arg CUDA_VERSION=12.9.1 \
-              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9-78e737ad29420ffc4800e677c51e2a852caf8359 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64_CU129}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
               --target vllm-openai \
@@ -334,7 +334,7 @@ steps:
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -361,7 +361,7 @@ steps:
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
-              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -382,7 +382,7 @@ steps:
               --build-arg USE_SCCACHE=1 \
               --build-arg GIT_REPO_CHECK=1 \
               --build-arg CUDA_VERSION=12.9.1 \
-              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9-78e737ad29420ffc4800e677c51e2a852caf8359 \
               --build-arg UBUNTU_VERSION=24.04 \
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86_CU129}" \
@@ -409,7 +409,7 @@ steps:
               --build-arg USE_SCCACHE=1 \
               --build-arg GIT_REPO_CHECK=1 \
               --build-arg CUDA_VERSION=12.9.1 \
-              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9-78e737ad29420ffc4800e677c51e2a852caf8359 \
               --build-arg UBUNTU_VERSION=24.04 \
               --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64_CU129}" \
