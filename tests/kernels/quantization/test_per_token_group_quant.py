@@ -18,19 +18,20 @@ from vllm.platforms import current_platform
 @pytest.mark.parametrize("scale_ue8m0", [False, True])
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only test on CUDA/ROCm."
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Only test on CUDA/ROCm/XPU.",
 )
 def test_per_token_group_quant_fp8(
     shape, column_major: bool, tma_aligned: bool, scale_ue8m0: bool, group_size: int
 ):
-    device = "cuda"
+    device = current_platform.device_type
 
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
 
     x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
 
-    # cuda path
+    # native kernel path
     out_q, scale = fp8_utils.per_token_group_quant_fp8(
         x,
         group_size,
@@ -40,7 +41,10 @@ def test_per_token_group_quant_fp8(
     )
 
     # triton ref
-    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
+    with (
+        patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False),
+        patch("vllm.platforms.current_platform.is_xpu", return_value=False),
+    ):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
             x,
             group_size,
