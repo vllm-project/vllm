@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
 
 import pytest
 import ray
@@ -9,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
+from vllm.distributed.device_communicators import custom_all_reduce as car
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 
 from ..utils import (
@@ -21,6 +23,62 @@ random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for _ in range(8)]
 for i, v in enumerate(test_sizes):
     test_sizes[i] -= v % 8
+
+
+@pytest.mark.parametrize(
+    ("major", "local_multicast", "expected"),
+    [
+        (8, True, False),
+        (9, True, False),
+        (10, False, False),
+        (10, True, True),
+    ],
+)
+def test_cross_node_mnnvl_gate_checks_generation_and_multicast(
+    monkeypatch,
+    major,
+    local_multicast,
+    expected,
+):
+    monkeypatch.setattr(
+        car.current_platform,
+        "get_device_capability",
+        lambda: SimpleNamespace(major=major),
+    )
+    monkeypatch.setattr(
+        car,
+        "_has_local_multicast_support",
+        lambda _device: local_multicast,
+    )
+    monkeypatch.setattr(car.dist, "all_reduce", lambda *_args, **_kwargs: None)
+
+    assert car._group_can_attempt_mnnvl(object(), torch.device("cuda:0")) is expected
+
+
+def test_cross_node_mnnvl_gate_requires_support_on_every_rank(monkeypatch):
+    monkeypatch.setattr(
+        car.current_platform,
+        "get_device_capability",
+        lambda: SimpleNamespace(major=10),
+    )
+    monkeypatch.setattr(
+        car,
+        "_has_local_multicast_support",
+        lambda _device: True,
+    )
+
+    def report_unsupported_peer(support, **_kwargs):
+        support.zero_()
+
+    monkeypatch.setattr(car.dist, "all_reduce", report_unsupported_peer)
+
+    assert not car._group_can_attempt_mnnvl(object(), torch.device("cuda:0"))
+
+
+def test_local_multicast_support_rejects_non_cuda(monkeypatch):
+    monkeypatch.setattr(car.current_platform, "is_cuda", lambda: False)
+
+    assert not car._has_local_multicast_support(torch.device("cuda:0"))
 
 
 @ray.remote(num_gpus=1, max_calls=1)
