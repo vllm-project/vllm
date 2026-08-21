@@ -1,0 +1,42 @@
+{{/*
+KEDA-based autoscaling driven by vLLM's own queue-depth metric
+(vllm:num_requests_waiting), instead of the CPU/memory-based
+HorizontalPodAutoscaler in hpa.yaml. This is the correct signal for a
+GPU-bound workload -- CPU/memory usage on the vLLM pod stays roughly flat
+regardless of how saturated the GPU/queue actually is, so plain HPA
+(.Values.autoscaling) is a poor fit here.
+
+Requires the KEDA operator + CRDs to already be installed cluster-wide, and
+a Prometheus instance scraping this pod's /metrics endpoint (see
+.Values.podAnnotations for the scrape annotations, and
+.Values.keda.prometheusServerAddress for where to query).
+
+.Values.autoscaling.enabled (HPA) and .Values.keda.enabled (this) are
+mutually exclusive -- both control the same Deployment's replica count and
+will fight each other if both are enabled simultaneously.
+*/}}
+{{- if .Values.keda.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: "{{ .Release.Name }}-scaledobject"
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "chart.deployment-name" . | quote }}
+  minReplicaCount: {{ .Values.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.keda.maxReplicaCount }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  {{- if .Values.keda.initialCooldownPeriod }}
+  initialCooldownPeriod: {{ .Values.keda.initialCooldownPeriod }}
+  {{- end }}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ required "Value 'keda.prometheusServerAddress' must be defined when keda.enabled=true !" .Values.keda.prometheusServerAddress | quote }}
+        query: {{ .Values.keda.query | quote }}
+        threshold: {{ .Values.keda.threshold | quote }}
+{{- end }}

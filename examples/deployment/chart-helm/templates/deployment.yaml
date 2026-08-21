@@ -16,6 +16,10 @@ spec:
     metadata:
       labels:
         {{- include "chart.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       containers:
         - name: "vllm"
