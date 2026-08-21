@@ -37,7 +37,12 @@ SEQ_THRESHOLD_3D_VALUES = [0, 8]
 
 
 @triton.jit
-def _compute_clamped_mm_tile_bounds(output_ptr, mm_prefix_range_ptr):
+def _compute_clamped_mm_tile_bounds(
+    output_ptr,
+    mm_prefix_range_ptr,
+    USE_CAUSAL: tl.constexpr,
+    USE_PER_SEQ_CAUSAL: tl.constexpr,
+):
     loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
         0,  # context_len
         4096,  # seq_len
@@ -52,8 +57,8 @@ def _compute_clamped_mm_tile_bounds(output_ptr, mm_prefix_range_ptr):
         1024,  # SLIDING_WINDOW
         True,  # USE_MM_PREFIX
         False,  # IS_3D
-        True,  # USE_CAUSAL
-        False,  # USE_PER_SEQ_CAUSAL
+        USE_CAUSAL,
+        USE_PER_SEQ_CAUSAL,
         -1,  # CHUNK_LOOKBACK
         -1,  # CHUNK_SIZE
         False,  # USE_R_SWA
@@ -74,11 +79,40 @@ def test_clamped_mm_prefix_prunes_sliding_window_tiles() -> None:
     )
     bounds = torch.empty(3, dtype=torch.int32, device=DEVICE_TYPE)
 
-    _compute_clamped_mm_tile_bounds[(1,)](bounds, mm_prefix_ranges)
+    _compute_clamped_mm_tile_bounds[(1,)](
+        bounds,
+        mm_prefix_ranges,
+        USE_CAUSAL=True,
+        USE_PER_SEQ_CAUSAL=False,
+    )
 
     # The range is wider than the sliding window, so the upper bound must use
     # its inclusive endpoint rather than query_pos + sliding_window.
     assert bounds.tolist() == [3, 72, 4096]
+
+
+@pytest.mark.parametrize(
+    ("use_causal", "use_per_seq_causal"), [(False, False), (True, True)]
+)
+def test_clamped_mm_prefix_preserves_noncausal_right_window(
+    use_causal: bool, use_per_seq_causal: bool
+) -> None:
+    """Union the non-causal right window with intersecting image ranges."""
+    mm_prefix_ranges = torch.tensor(
+        [[[1024, 1500], [0, 0]]], dtype=torch.int32, device=DEVICE_TYPE
+    )
+    bounds = torch.empty(3, dtype=torch.int32, device=DEVICE_TYPE)
+
+    _compute_clamped_mm_tile_bounds[(1,)](
+        bounds,
+        mm_prefix_ranges,
+        USE_CAUSAL=use_causal,
+        USE_PER_SEQ_CAUSAL=use_per_seq_causal,
+    )
+
+    # q_hi=1127 and window=1024 admit keys through 2150, beyond the image
+    # range endpoint at 1500. Tile 67 must therefore remain in the loop.
+    assert bounds.tolist() == [3, 68, 4096]
 
 
 def ref_paged_attn(

@@ -175,8 +175,8 @@ def compute_tile_loop_bounds(
     2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
        only tiles that can contain an allowed key under SWA. For non-causal
        sequences, the window extends in both directions. For Gemma4's
-       window-clamped multimodal prefix mask, the upper bound extends to the
-       end of each image range intersecting the query block.
+       window-clamped multimodal prefix mask, the upper bound is the union of
+       that right window and each image range intersecting the query block.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
        segment's slice via ``(segm_idx * tiles_per_segment,
        (segm_idx + 1) * tiles_per_segment)``.
@@ -228,10 +228,14 @@ def compute_tile_loop_bounds(
             first_allowed_key = ((q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK) * CHUNK_SIZE
         else:
             first_allowed_key = q_abs - SLIDING_WINDOW + 1
+        if USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
+            # Non-causal: keys can be AHEAD of query within the window
+            last_allowed_key = context_len + qpos_hi + SLIDING_WINDOW - 1
+        else:
+            last_allowed_key = context_len + qpos_hi
         if USE_MM_PREFIX and MM_PREFIX_CLAMP_SW:
             query_abs_lo = context_len + qpos_lo
             query_abs_hi = context_len + qpos_hi
-            last_allowed_key = query_abs_hi
             for i in range(MAX_MM_RANGES):
                 range_start = tl.load(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
@@ -248,15 +252,7 @@ def compute_tile_loop_bounds(
                     last_allowed_key,
                     tl.where(intersects_query_block, range_end, last_allowed_key),
                 )
-            last_allowed_key = tl.minimum(last_allowed_key, seq_len - 1)
-        elif USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
-            # Non-causal: keys can be AHEAD of query within the window
-            last_allowed_key = tl.minimum(
-                context_len + qpos_hi + SLIDING_WINDOW - 1,
-                seq_len - 1,
-            )
-        else:
-            last_allowed_key = context_len + qpos_hi
+        last_allowed_key = tl.minimum(last_allowed_key, seq_len - 1)
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
