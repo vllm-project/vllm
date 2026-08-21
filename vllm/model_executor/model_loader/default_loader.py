@@ -14,6 +14,9 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.expert_substitution import (
+    intercept_expert_substitution_weights,
+)
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
@@ -424,7 +427,13 @@ class DefaultModelLoader(BaseModelLoader):
 
         self._init_ep_weight_filter(model_config)
 
-        loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
+        weights, substitution_params = intercept_expert_substitution_weights(
+            model,
+            self.get_all_weights(model_config, model),
+        )
+        loaded_weights = model.load_weights(weights)
+        if loaded_weights is not None:
+            loaded_weights.update(substitution_params)
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(

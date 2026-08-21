@@ -25,6 +25,9 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
+from vllm.model_executor.layers.fused_moe.expert_substitution import (
+    ConstantExpertSubstitution,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -213,6 +216,61 @@ direct_register_custom_op(
 )
 
 
+def _moe_forward_substituted(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    layer = get_layer_from_name(_resolve_layer_name(layer_name))
+    result = layer._forward_impl(
+        hidden_states,
+        router_logits,
+        shared_experts_input,
+        input_ids,
+    )
+    assert isinstance(result, tuple)
+    if len(result) == 2:
+        fused_output, substitution_output = result
+        return hidden_states.new_empty(0), fused_output, substitution_output
+    return result
+
+
+def _moe_forward_substituted_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    fused_output = _moe_forward_fake(
+        hidden_states,
+        router_logits,
+        shared_experts_input,
+        input_ids,
+        layer_name,
+        hidden_dim_unpadded,
+    )
+    shared_output = (
+        hidden_states.new_empty(0)
+        if shared_experts_input is None
+        else torch.empty_like(shared_experts_input)
+    )
+    return shared_output, fused_output, torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="moe_forward_substituted",
+    op_func=_moe_forward_substituted,
+    mutates_args=["hidden_states"],
+    fake_impl=_moe_forward_substituted_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+
+
 def _unpack(
     result: torch.Tensor
     | UnfinalizedMoEOutput
@@ -260,6 +318,7 @@ class MoERunner(MoERunnerInterface):
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
+        expert_substitution: ConstantExpertSubstitution | None = None,
     ):
         super().__init__()
         self.moe_config = moe_config
@@ -271,6 +330,14 @@ class MoERunner(MoERunnerInterface):
         self.shared_expert_gate = shared_expert_gate
         self.routed_experts = routed_experts
         self.enable_dbo = enable_dbo
+        # RoutedExperts owns and registers this module. Keep a non-registering
+        # reference here because route transformation belongs in the runner.
+        registered_substitution = routed_experts.expert_substitution
+        if expert_substitution is not registered_substitution:
+            raise ValueError(
+                "MoERunner and RoutedExperts must share the same expert substitution"
+            )
+        object.__setattr__(self, "_expert_substitution", registered_substitution)
 
         # When both gates are present and FSE is enabled, fuse their
         # weight matrices into [num_experts + num_shared, hidden] so one
@@ -321,7 +388,12 @@ class MoERunner(MoERunnerInterface):
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
             # Note: CPU doesn't require wrapped _forward_impl.
+            if self._expert_substitution is not None:
+                return _moe_forward_substituted
             return _moe_forward if self._shared_experts is None else _moe_forward_shared
+
+        if self._expert_substitution is not None:
+            return torch.ops.vllm.moe_forward_substituted
 
         return (
             torch.ops.vllm.moe_forward
@@ -407,7 +479,8 @@ class MoERunner(MoERunnerInterface):
         self,
         shared_output: torch.Tensor | None,
         fused_output: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        substitution_output: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor | None]:
         """Apply routed_scaling_factor to the output with FP16 overflow
         protection.
 
@@ -418,9 +491,11 @@ class MoERunner(MoERunnerInterface):
         if self.routed_scaling_factor != 1.0:
             if fused_output.dtype != torch.float16 or shared_output is None:
                 fused_output *= self.routed_scaling_factor
+                if substitution_output is not None:
+                    substitution_output *= self.routed_scaling_factor
             elif shared_output is not None:
                 shared_output *= 1.0 / self.routed_scaling_factor
-        return shared_output, fused_output
+        return shared_output, fused_output, substitution_output
 
     @property
     def _fused_output_is_reduced(self) -> bool:
@@ -596,12 +671,16 @@ class MoERunner(MoERunnerInterface):
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
         shared_experts_overlapping: bool = False,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | UnfinalizedMoEOutput,
+        torch.Tensor | None,
+    ]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
         Orchestrates shared expert execution (before/after), expert selection
         via the router, and the actual fused MoE computation. Returns
-        (shared_expert_output, fused_expert_output).
+        (shared_expert_output, fused_expert_output, substitution_output).
 
         `shared_experts_overlapping` should be True only if using multi-stream
         overlap. Then the shared expert was already launched in a separate
@@ -611,7 +690,12 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
+        substitution_output = None
         if self.routed_experts.quant_method.is_monolithic:
+            if self._expert_substitution is not None:
+                raise NotImplementedError(
+                    "expert substitution requires a decomposed MoE backend"
+                )
             # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
@@ -626,6 +710,18 @@ class MoERunner(MoERunnerInterface):
                 topk_indices_dtype=self._quant_method.topk_indices_dtype,
                 input_ids=input_ids,
             )
+
+            if self._expert_substitution is not None:
+                topk_weights, topk_ids, substitution_output = (
+                    self._expert_substitution.transform_routes(
+                        hidden_states,
+                        topk_weights,
+                        topk_ids,
+                        skip_invalid_routes=(
+                            self.moe_config.skip_invalid_expert_routes
+                        ),
+                    )
+                )
 
             fused_out = self.routed_experts.forward_modular(
                 x=hidden_states,
@@ -642,6 +738,7 @@ class MoERunner(MoERunnerInterface):
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
             fused_out,
+            substitution_output,
         )
 
     def _sequence_parallel_context(self):
@@ -745,12 +842,20 @@ class MoERunner(MoERunnerInterface):
         #  - When False: neither output is reduced yet, so we combine
         #    them first and all-reduce the sum in _maybe_reduce_final_output.
 
-        # Extract outputs from result
-        shared_output, fused_output = _unpack(result)
+        # Extract outputs from the custom-op variant selected at construction.
+        substitution_output = None
+        if self._expert_substitution is not None:
+            shared_output, fused_output, substitution_output = result
+            if shared_output.ndim == 1:
+                shared_output = None
+        else:
+            shared_output, fused_output = _unpack(result)
         fused_output = cast(torch.Tensor, fused_output)
 
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
+            if substitution_output is not None:
+                substitution_output = substitution_output[..., :og_hidden_dim_pre_xform]
 
         fused_output_is_reduced = self._fused_output_is_reduced
 
@@ -769,8 +874,12 @@ class MoERunner(MoERunnerInterface):
             shared_output, fused_output_is_reduced
         )
 
-        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
-            shared_output, fused_output
+        (
+            shared_output,
+            fused_output,
+            substitution_output,
+        ) = self._maybe_apply_routed_scale_to_output(
+            shared_output, fused_output, substitution_output
         )
 
         # Apply output transform (e.g. latent -> full dim)
@@ -784,6 +893,11 @@ class MoERunner(MoERunnerInterface):
         result = self._maybe_reduce_final_output(
             result, og_hidden_dim_post_xform, fused_output_is_reduced
         )
+
+        # Substitution values are replicated across TP ranks, so add them only
+        # after the regular expert output has been reduced.
+        if substitution_output is not None:
+            result.add_(substitution_output[..., : result.shape[-1]])
 
         return self._maybe_add_zero_expert_output(result)
 
@@ -866,6 +980,7 @@ class MoERunner(MoERunnerInterface):
         torch.Tensor
         | UnfinalizedMoEOutput
         | tuple[torch.Tensor, torch.Tensor | UnfinalizedMoEOutput]
+        | tuple[torch.Tensor, torch.Tensor | UnfinalizedMoEOutput, torch.Tensor]
     ):
         """Entry point called by the custom op to run the MoE computation.
 
@@ -910,7 +1025,11 @@ class MoERunner(MoERunnerInterface):
                 router_logits,
             )
 
-            shared_output, hidden_states = self._apply_quant_method(
+            (
+                shared_output,
+                hidden_states,
+                substitution_output,
+            ) = self._apply_quant_method(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
@@ -918,10 +1037,17 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_overlapping=shared_experts_overlapping,
             )
 
-            return self._maybe_combine(
+            combined_output = self._maybe_combine(
                 shared_output,
                 hidden_states,
             )
+            if substitution_output is None:
+                return combined_output
+            if isinstance(combined_output, tuple):
+                combined_shared, combined_routed = combined_output
+                assert combined_shared is not None
+                return combined_shared, combined_routed, substitution_output
+            return combined_output, substitution_output
 
     #########################################################
     #
