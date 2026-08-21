@@ -760,7 +760,8 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal["auto", "triton", "flashkda"] | None = None
+    kda_prefill_backend: Literal["auto", "triton", "flashkda", "helion"] | None = None
+    kda_decode_backend: Literal["auto", "triton", "helion"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1708,9 +1709,16 @@ class EngineArgs:
         parser.add_argument(
             "--kda-prefill-backend",
             dest="kda_prefill_backend",
-            choices=["auto", "triton", "flashkda"],
+            choices=["auto", "triton", "flashkda", "helion"],
             default=None,
             help="Select KDA prefill backend.",
+        )
+        parser.add_argument(
+            "--kda-decode-backend",
+            dest="kda_decode_backend",
+            choices=["auto", "triton", "helion"],
+            default=None,
+            help="Select KDA decode backend.",
         )
         return parser
 
@@ -2510,6 +2518,8 @@ class EngineArgs:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
+        if self.kda_decode_backend is not None:
+            self.additional_config["kda_decode_backend"] = self.kda_decode_backend
 
         config = VllmConfig(
             model_config=model_config,

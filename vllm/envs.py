@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_USE_FASTOKENS: bool = False
+    VLLM_DISABLE_HELION_KDA: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
@@ -731,6 +732,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (`hf`, `deepseek_v32`, `deepseek_v4`, …). The `fastokens`
     # Python package must be installed.
     "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
+    "VLLM_DISABLE_HELION_KDA": lambda: bool(int(os.getenv("VLLM_DISABLE_HELION_KDA", "0"))),
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
