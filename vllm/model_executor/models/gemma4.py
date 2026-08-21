@@ -708,11 +708,14 @@ class Gemma4DecoderLayer(nn.Module):
         )
 
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = hidden_states + residual
-        residual = hidden_states
 
-        # MLP runs unconditionally (same inputs for MoE and non-MoE)
-        hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        # MLP runs unconditionally (same inputs for MoE and non-MoE).
+        # Fuse the post-attention residual add into pre_ff_norm's
+        # add-then-norm path: residual becomes (post_attn_norm out + input),
+        # replacing the standalone add with one fused_add_rms_norm kernel.
+        hidden_states, residual = self.pre_feedforward_layernorm(
+            hidden_states, residual
+        )
         hidden_states = self.mlp(hidden_states)
 
         if self.enable_moe_block:
