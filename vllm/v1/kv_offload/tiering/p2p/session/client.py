@@ -311,10 +311,8 @@ class ClientRole:
         load = st.loads.pop(round_seq, None) if st is not None else None
         if st is not None and load is not None:
             logger.warning(
-                "P2PSession %s: load request %s (job_id=%d) timed out; "
-                "load job completed with failure. If this recurs, ensure all "
-                "nodes use the same prefix-cache hash seed (matching "
-                "PYTHONHASHSEED, if set) and hash algorithm.",
+                "P2PSession %s: load request %s (job_id=%d) "
+                "completed with failure after abort",
                 self._peer_id,
                 kv_request_id,
                 load.job_id,
