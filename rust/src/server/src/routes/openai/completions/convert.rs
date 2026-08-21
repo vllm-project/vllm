@@ -40,7 +40,7 @@ pub(super) struct ResponseOptions {
     /// Prompt text that should be echoed back northbound when `echo=true`.
     pub echo: Option<String>,
     /// Whether the caller requested output logprobs on completion choices.
-    pub requested_logprobs: Option<u32>,
+    pub requested_logprobs: Option<i32>,
     /// Whether the caller requested choice-level prompt logprobs.
     pub include_prompt_logprobs: bool,
     /// Whether to include token IDs alongside generated text.
@@ -69,15 +69,7 @@ pub(super) fn prepare_completion_request(
         .map(|request| request.lora_name.clone())
         .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
 
-    let logprobs = match request.logprobs {
-        Some(logprobs) => Some(i32::try_from(logprobs).map_err(|_| {
-            ApiError::invalid_request(
-                "`logprobs` must fit within a signed 32-bit integer.".to_string(),
-                Some("logprobs"),
-            )
-        })?),
-        None => None,
-    };
+    let logprobs = request.logprobs;
     let prompt_only = request.echo && request.max_tokens == Some(0);
     let prompt_logprobs =
         request.prompt_logprobs.or(if request.echo && (!request.stream || prompt_only) {
@@ -598,6 +590,28 @@ mod tests {
             prepared.text_request.sampling_params.prompt_logprobs,
             Some(2)
         );
+    }
+
+    #[test]
+    fn prepare_completion_request_accepts_full_vocab_logprobs() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "logprobs": -1
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_tokenizer(),
+        )
+        .expect("prepare full-vocabulary logprobs");
+
+        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(-1));
+        assert_eq!(prepared.options.requested_logprobs, Some(-1));
     }
 
     #[test]

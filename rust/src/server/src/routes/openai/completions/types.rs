@@ -50,7 +50,7 @@ pub struct CompletionRequest {
     pub logit_bias: Option<HashMap<String, f32>>,
 
     /// Include the log probabilities on the logprobs most likely tokens
-    pub logprobs: Option<u32>,
+    pub logprobs: Option<i32>,
 
     /// The maximum number of tokens to generate (defaults to 16 when absent,
     /// matching the Python vLLM / OpenAI API convention)

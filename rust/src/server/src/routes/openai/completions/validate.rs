@@ -41,11 +41,12 @@ pub(super) fn validate_request_compat(
     }
 
     if let Some(logprobs) = request.logprobs
-        && logprobs > i32::MAX as u32
+        && logprobs < 0
+        && logprobs != -1
     {
         bail_invalid_request!(
             param = "logprobs",
-            "`logprobs` must fit within a signed 32-bit integer."
+            "`logprobs` must be a non-negative value or -1."
         );
     }
 
@@ -122,6 +123,28 @@ mod tests {
         };
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_full_vocab_logprobs() {
+        let request = CompletionRequest {
+            logprobs: Some(-1),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_other_negative_logprobs() {
+        let request = CompletionRequest {
+            logprobs: Some(-2),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
         );
     }
 
