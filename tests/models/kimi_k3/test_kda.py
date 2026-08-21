@@ -1130,71 +1130,42 @@ def test_flashkda_correctness():
     assert_close("o", expected_out, actual_out, 0.01)
     assert_close("ht", expected_state, actual_state, 0.01)
 
-    split_out = torch.empty_like(v)
-    split_state = torch.empty_like(initial_state)
-    split_checkpoint = torch.empty_like(initial_state)
-    split_cu_seqlens = torch.tensor(
-        [[[0, 16], [0, 1]], [[0, 31], [0, 0]]],
-        dtype=torch.int32,
-        device=DEVICE,
+    checkpoint_out = torch.empty_like(v)
+    checkpoint_final_state = torch.empty_like(initial_state)
+    checkpoint_state = torch.empty_like(initial_state)
+    checkpoint_offsets = torch.tensor([16, 31], dtype=torch.int32, device=DEVICE)
+    _flashkda_prefill(
+        q=q,
+        k=k,
+        v=v,
+        g=raw_g,
+        beta=beta_logits,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        lower_bound=lower_bound,
+        initial_state=initial_state,
+        cu_seqlens=cu_seqlens,
+        out=checkpoint_out,
+        final_state=checkpoint_final_state,
+        workspace=workspace,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )
-    start = 0
-    for seq_idx, (first_len, tail_len) in enumerate(((16, 1), (31, 0))):
-        first_end = start + first_len
-        end = first_end + tail_len
-        first_final_state = (
-            split_checkpoint[seq_idx : seq_idx + 1]
-            if tail_len
-            else split_state[seq_idx : seq_idx + 1]
-        )
-        _flashkda_prefill(
-            q=q[:, start:first_end],
-            k=k[:, start:first_end],
-            v=v[:, start:first_end],
-            g=raw_g[:, start:first_end],
-            beta=beta_logits[:, start:first_end],
-            A_log=A_log,
-            dt_bias=dt_bias,
-            lower_bound=lower_bound,
-            initial_state=initial_state[seq_idx : seq_idx + 1],
-            cu_seqlens=split_cu_seqlens[seq_idx, 0],
-            out=split_out[:, start:first_end],
-            final_state=first_final_state,
-            workspace=workspace,
-        )
-        if tail_len:
-            _flashkda_prefill(
-                q=q[:, first_end:end],
-                k=k[:, first_end:end],
-                v=v[:, first_end:end],
-                g=raw_g[:, first_end:end],
-                beta=beta_logits[:, first_end:end],
-                A_log=A_log,
-                dt_bias=dt_bias,
-                lower_bound=lower_bound,
-                initial_state=split_checkpoint[seq_idx : seq_idx + 1],
-                cu_seqlens=split_cu_seqlens[seq_idx, 1],
-                out=split_out[:, first_end:end],
-                final_state=split_state[seq_idx : seq_idx + 1],
-                workspace=workspace,
-            )
-        start = end
 
-    assert_close("split_o", expected_out, split_out, 0.01)
-    assert_close("split_ht", expected_state, split_state, 0.01)
-    assert_close("checkpoint", expected_checkpoint, split_checkpoint[:1], 0.01)
+    assert_close("checkpoint_o", expected_out, checkpoint_out, 0.01)
+    assert_close("checkpoint_ht", expected_state, checkpoint_final_state, 0.01)
+    assert_close("checkpoint", expected_checkpoint, checkpoint_state[:1], 0.01)
 
     conv_state = torch.zeros(2, H * D, 3, dtype=q.dtype, device=DEVICE)
     recurrent_storage = torch.zeros(2, H * D * D + 8, device=DEVICE)
     recurrent_state = recurrent_storage[:, : H * D * D].view(2, H, D, D)
     conv_input = q[0].flatten(1)
-    checkpoint_offsets = split_cu_seqlens[:, 0, 1]
     checkpoint_state_indices = torch.tensor(
         [1, NULL_BLOCK_ID], dtype=torch.int32, device=DEVICE
     )
     state_len = conv_state.shape[-1]
     width = H * D
-    recurrent_row_size = split_checkpoint[0].numel()
+    recurrent_row_size = checkpoint_state[0].numel()
     block_size = 256
     _store_cache_checkpoints_kernel[
         (
@@ -1204,7 +1175,7 @@ def test_flashkda_correctness():
     ](
         conv_input,
         conv_state,
-        split_checkpoint,
+        checkpoint_state,
         recurrent_state,
         cu_seqlens,
         checkpoint_offsets,
@@ -1214,7 +1185,7 @@ def test_flashkda_correctness():
         conv_state.stride(0),
         conv_state.stride(1),
         conv_state.stride(2),
-        split_checkpoint.stride(0),
+        checkpoint_state.stride(0),
         recurrent_state.stride(0),
         checkpoint_offsets.stride(0),
         state_len,
@@ -1224,4 +1195,4 @@ def test_flashkda_correctness():
         block_size,
     )
     torch.testing.assert_close(conv_state[1], q[0, 13:16].flatten(1).transpose(0, 1))
-    torch.testing.assert_close(recurrent_state[1], split_checkpoint[0])
+    torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])
