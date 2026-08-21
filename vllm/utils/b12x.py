@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Lazy accessors for the optional ``b12x`` package."""
+"""Accessors for the optional ``b12x`` package."""
 
-import functools
 import importlib
 import importlib.util
 from collections.abc import Callable, Hashable, Iterable
@@ -20,20 +19,38 @@ class B12xWarmupUnit:
     compile: Callable[[], None]
 
 
-@functools.cache
-def has_b12x() -> bool:
-    """Return whether the B12X package is installed."""
-    return importlib.util.find_spec("b12x") is not None
+_HAS_B12X = importlib.util.find_spec("b12x") is not None
 
 
-@functools.cache
-def _get_submodule(module_name: str) -> ModuleType | None:
-    if not has_b12x():
+def _import_submodule(module_name: str) -> ModuleType | None:
+    if not _HAS_B12X:
         return None
     try:
         return importlib.import_module(module_name)
     except (ImportError, ModuleNotFoundError):
         return None
+
+
+_B12X_SUBMODULES = {
+    module_name: _import_submodule(module_name)
+    for module_name in (
+        "b12x.gemm.blockscaled",
+        # TODO: Remove once B12X exposes the scale-swizzle API publicly.
+        "b12x._lib.intrinsics",
+        "b12x.gemm.mxfp8_linear",
+        "b12x.gemm.tensor_fp8_linear",
+        "b12x.moe.fused_moe",
+    )
+}
+
+
+def has_b12x() -> bool:
+    """Return whether the B12X package is installed."""
+    return _HAS_B12X
+
+
+def _get_submodule(module_name: str) -> ModuleType | None:
+    return _B12X_SUBMODULES.get(module_name)
 
 
 def get_b12x_blockscaled() -> ModuleType | None:
