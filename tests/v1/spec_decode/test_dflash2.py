@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
@@ -116,3 +117,26 @@ def test_selector_asks_for_fp32_proposal_logits():
 
     assert dtype is torch.float32
     assert fill == float("-inf")
+
+
+def test_dflash_context_rope_cache_matches_k_dtype_and_reuses_storage():
+    """Context RoPE cache conversion is persistent for the fixed K dtype."""
+    model = DFlashQwen3Model.__new__(DFlashQwen3Model)
+    torch.nn.Module.__init__(model)
+    model._rope_cos_sin_cache = torch.randn(16, 8, dtype=torch.float32)
+    k = torch.randn(2, 8, dtype=torch.bfloat16)
+
+    cache = model._get_context_rope_cache(k)
+    assert cache.dtype is torch.bfloat16
+    first_data_ptr = cache.data_ptr()
+
+    assert model._get_context_rope_cache(k).data_ptr() == first_data_ptr
+
+    fp32_model = DFlashQwen3Model.__new__(DFlashQwen3Model)
+    torch.nn.Module.__init__(fp32_model)
+    fp32_model._rope_cos_sin_cache = torch.randn(16, 8, dtype=torch.float32)
+    fp32_k = torch.randn(2, 8, dtype=torch.float32)
+    original_data_ptr = fp32_model._rope_cos_sin_cache.data_ptr()
+    fp32_cache = fp32_model._get_context_rope_cache(fp32_k)
+    assert fp32_cache.dtype is torch.float32
+    assert fp32_cache.data_ptr() == original_data_ptr

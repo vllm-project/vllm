@@ -587,6 +587,19 @@ class DFlashQwen3Model(nn.Module):
         )
         return all_k_normed
 
+    def _get_context_rope_cache(self, k: torch.Tensor) -> torch.Tensor:
+        """Return the context RoPE cache matched to the projected K tensor."""
+        cos_sin_cache = self._rope_cos_sin_cache
+        if (
+            cos_sin_cache.device == k.device
+            and cos_sin_cache.dtype == k.dtype
+        ):
+            return cos_sin_cache
+
+        cos_sin_cache = cos_sin_cache.to(device=k.device, dtype=k.dtype)
+        self._rope_cos_sin_cache = cos_sin_cache
+        return cos_sin_cache
+
     def precompute_and_store_context_kv(
         self,
         context_states: torch.Tensor,
@@ -626,9 +639,7 @@ class DFlashQwen3Model(nn.Module):
         # In-place RoPE: pass K as the "query" arg with key=None.
         all_k_flat = all_k_normed.view(L * num_ctx, kv)
         positions_repeated = context_positions.repeat(L)
-        cos_sin_cache = self._rope_cos_sin_cache
-        if cos_sin_cache.dtype != all_k_flat.dtype:
-            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
+        cos_sin_cache = self._get_context_rope_cache(all_k_flat)
         ops.rotary_embedding(
             positions_repeated,
             all_k_flat,
