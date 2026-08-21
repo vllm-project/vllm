@@ -66,7 +66,7 @@ class StreamedResponseHandler:
 class RequestFuncInput:
     """The input for the request function."""
 
-    prompt: str | list[str] | list[int] | list[dict[str, Any]]
+    prompt: str | list[str] | list[int] | list[list[int]] | list[dict[str, Any]]
     api_url: str
     prompt_len: int
     output_len: int
@@ -620,7 +620,7 @@ async def _run_pooling_request(
 
 
 def _get_num_input_sequences(prompt: Any) -> int:
-    if prompt and isinstance(prompt, list) and isinstance(prompt[0], str):
+    if prompt and isinstance(prompt, list) and isinstance(prompt[0], (str, list)):
         return len(prompt)
     return 1
 
