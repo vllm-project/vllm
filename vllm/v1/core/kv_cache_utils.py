@@ -669,6 +669,11 @@ def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> 
     return 1
 
 
+def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
+    """Return the token span of a cache block under DCP."""
+    return spec.block_size * dcp_world_size_for_kv_cache_spec(spec, dcp_world_size)
+
+
 def resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -696,10 +701,7 @@ def resolve_kv_cache_block_sizes(
         return bs, bs
 
     group_block_sizes = [
-        g.kv_cache_spec.block_size * dcp
-        if isinstance(g.kv_cache_spec, AttentionSpec)
-        else g.kv_cache_spec.block_size
-        for g in groups
+        resolve_dcp_kv_block_size(g.kv_cache_spec, dcp) for g in groups
     ]
     scheduler_block_size = math.lcm(*group_block_sizes)
 
