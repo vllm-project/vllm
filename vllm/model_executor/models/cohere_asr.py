@@ -1936,9 +1936,9 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
 
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         return [0]
 
     def _call_hf_processor(
@@ -1946,7 +1946,6 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ):
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
@@ -1959,7 +1958,6 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
@@ -2014,7 +2012,15 @@ class CohereAsrForConditionalGeneration(
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."}
+        orig_to_new_substr={
+            ".fc1.": ".mlp.fc1.",
+            ".fc2.": ".mlp.fc2.",
+            "model.conv.batch_norm.num_batches_tracked": None,
+        },
+        orig_to_new_prefix={
+            "model.preprocessor.featurizer.fb": None,
+            "model.preprocessor.featurizer.window": None,
+        },
     )
 
     supports_transcription_only = True
@@ -2273,14 +2279,7 @@ class CohereAsrForConditionalGeneration(
 
             return name, loaded_weight
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=[
-                "model.preprocessor.featurizer.fb",
-                "model.preprocessor.featurizer.window",
-            ],
-            skip_substrs=["model.conv.batch_norm.num_batches_tracked"],
-        )
+        loader = AutoWeightsLoader(self)
 
         return loader.load_weights(
             map(transform, weights), mapper=self.hf_to_vllm_mapper
