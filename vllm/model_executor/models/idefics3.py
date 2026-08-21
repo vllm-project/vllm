@@ -239,41 +239,47 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo])
 
 
 class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Text-only input not supported in composite processor
-        if not (images := mm_data.get("images", [])):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
 
         image_processor = self.info.get_hf_processor().image_processor
         if getattr(image_processor, "backend", "pil") == "pil":
-            mm_kwargs = {"input_data_format": "channels_last", **mm_kwargs}
+            hf_processor_mm_kwargs = {
+                "input_data_format": "channels_last",
+                **hf_processor_mm_kwargs,
+            }
 
-        processed_outputs = super()._call_hf_processor(
-            prompt,
+        processed_outputs = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
             mm_data,
-            mm_kwargs,
+            hf_processor_mm_kwargs,
         )
 
+        images = mm_data.get("images", [])
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
         parsed_images = mm_items.get_items("image", ImageProcessorItems)
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
         ]
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         num_patches = [
             self.info.get_num_patches(
                 image_width=size.width,
                 image_height=size.height,
                 processor=hf_processor,
-                mm_kwargs=mm_kwargs,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
             for size in image_sizes
         ]
@@ -283,7 +289,9 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
         processed_outputs["pixel_values"].squeeze_(0)
         processed_outputs["pixel_attention_mask"].squeeze_(0)
 
-        return processed_outputs
+        processed_data = processed_outputs
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

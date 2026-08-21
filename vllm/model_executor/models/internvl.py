@@ -220,27 +220,36 @@ class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
     """Basic image-only MultiModalProcessor for InternVL-style models."""
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        if processor_data:
+            processed_data = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**hf_processor_mm_kwargs),
+                processor_data,
+                hf_processor_mm_kwargs,
+            )
+            processed_data.update(passthrough_data)
+        else:
+            processed_data = BatchFeature(dict(passthrough_data))
+
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token_id = hf_processor.ctx_image_token_id
 
         # Since there may be extra tokens in the feature placeholders,
         # we need to pass the image token ID to the model to select the
         # tokens to merge from the vision encoder outputs
-        processed_outputs["image_token_id"] = torch.tensor(image_token_id)
+        processed_data["image_token_id"] = torch.tensor(image_token_id)
 
-        return processed_outputs
+        return prompt, processed_data
 
     def _get_image_fields_config(self, hf_inputs: BatchFeature):
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
@@ -455,19 +464,23 @@ class InternVLMultiModalProcessor(
 ):
     """InternVL MultiModalProcessor extended for video support"""
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        prompt, mm_processed_data = super()._apply_hf_processor_main(
+            prompt,
+            mm_items,
+            hf_processor_mm_kwargs,
+        )
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         if (video_token_id := hf_processor.ctx_video_token_id) is not None:
-            processed_outputs["video_token_id"] = torch.tensor(video_token_id)
+            mm_processed_data["video_token_id"] = torch.tensor(video_token_id)
 
-        return processed_outputs
+        return prompt, mm_processed_data
 
     def _get_video_fields_config(self, hf_inputs: BatchFeature):
         video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))

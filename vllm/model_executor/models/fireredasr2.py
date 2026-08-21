@@ -228,27 +228,38 @@ class FireRedASR2DummyInputsBuilder(BaseDummyInputsBuilder[FireRedASR2Processing
 class FireRedASR2MultiModalProcessor(
     BaseMultiModalProcessor[FireRedASR2ProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        mm_data = dict(audio=mm_data.pop("audios"))
+        hf_processor_mm_kwargs = dict(
+            **hf_processor_mm_kwargs,
+            sampling_rate=feature_extractor.sampling_rate,
+        )
+        processed_outputs = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
-        return processed_outputs
+        processed_data = processed_outputs
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

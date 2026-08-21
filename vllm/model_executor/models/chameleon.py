@@ -135,34 +135,37 @@ class ChameleonDummyInputsBuilder(BaseDummyInputsBuilder[ChameleonProcessingInfo
 
 
 class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if not mm_data:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
+        if not processor_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        # ChameleonProcessor requires text corresponding to the images
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **processor_data),
+            hf_processor_mm_kwargs,
+        )
+        processed_data.update(passthrough_data)
+
         # HF processor adds sep token for chat mode
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
         sep_token_id = vocab[tokenizer.sep_token]  # type: ignore
 
-        return prompt_tokens + [sep_token_id]
+        return prompt + [sep_token_id], processed_data
 
     def _get_mm_fields_config(
         self,

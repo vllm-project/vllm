@@ -261,16 +261,26 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
 
 
 class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        processed_outputs = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
         )
 
         # HF processor pops the `num_crops` kwarg, which is needed by vLLM
@@ -280,20 +290,22 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
             image_sizes = [
                 parsed_images.get_image_size(i) for i in range(len(parsed_images))
             ]
-            hf_processor = self.info.get_hf_processor(**mm_kwargs)
+            hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
             num_crops = [
                 self.info.get_num_crops(
                     image_width=size.width,
                     image_height=size.height,
                     processor=hf_processor,
-                    mm_kwargs=mm_kwargs,
+                    mm_kwargs=hf_processor_mm_kwargs,
                 )
                 for size in image_sizes
             ]
             processed_outputs["num_patches"] = torch.tensor(num_crops) + 1
 
-        return processed_outputs
+        processed_data = processed_outputs
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

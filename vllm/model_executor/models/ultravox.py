@@ -190,41 +190,41 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
 
 
 class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Text-only input not supported in composite processor
-        if not mm_data.get("audios", []):
-            prompt_ids = self.info.get_tokenizer().encode(
-                prompt, add_special_tokens=False
-            )
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
 
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
         assert isinstance(audios, list)
 
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        mm_kwargs = dict(
-            **mm_kwargs,
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        hf_processor_mm_kwargs = dict(
+            **hf_processor_mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
             include_audio_num_chunks=True,
         )
 
-        item_processor_data = dict(**mm_data, audios=audios)
-
-        output = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=item_processor_data,
-            mm_kwargs=mm_kwargs,
+        output = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(**mm_data, audios=audios),
+            hf_processor_mm_kwargs,
         )
         output["audio_features"] = output.pop("audio_values")
 
-        return output
+        processed_data = output
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

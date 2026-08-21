@@ -868,24 +868,33 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
 
 
 class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if not mm_data:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        sr = self.info.get_feature_extractor(**mm_kwargs).sampling_rate
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        sr = self.info.get_feature_extractor(**hf_processor_mm_kwargs).sampling_rate
         if audio_data := mm_data.get("audios", []):
             mm_data["audios"] = [(data, sr) for data in audio_data]
 
-        processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        processed_outputs = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
+        )
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         num_img_tokens = [
             self.info.get_num_image_tokens(
                 image_width=img_size[0],
@@ -904,7 +913,9 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             audio_features[idx, :size] for idx, size in enumerate(feature_sizes)
         ]
 
-        return processed_outputs
+        processed_data = processed_outputs
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

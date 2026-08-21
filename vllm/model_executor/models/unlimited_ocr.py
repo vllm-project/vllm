@@ -231,7 +231,8 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
         # invariant of how many images are passed per prompt, so we only cache
         # the single-image case and recompute multi-image requests fresh.
         if inputs.mm_data_items.get_count("image", strict=False) > 1:
-            return self._apply_hf_processor(inputs, timing_ctx)
+            prompt_ids, mm_info = self._apply_hf_processor(inputs, timing_ctx)
+            return prompt_ids, mm_info, False
 
         return super()._cached_apply_hf_processor(inputs, timing_ctx)
 

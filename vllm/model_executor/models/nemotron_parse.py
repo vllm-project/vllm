@@ -411,21 +411,28 @@ class NemotronParseMultiModalProcessor(
     ) -> list[int]:
         return [0]
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
-        else:
-            hf_processor = self.info.get_hf_processor()
-            tokenizer = hf_processor.tokenizer
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=False, return_tensors="pt"
-            )
-        return processed_outputs
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        processed_outputs = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            mm_data,
+            hf_processor_mm_kwargs,
+        )
+        processed_data = processed_outputs
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

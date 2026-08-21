@@ -750,13 +750,20 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             chunk_counts.append(min(n_chunks, max_windows))
         return chunk_counts
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: dict[str, object],
-        mm_kwargs: Mapping[str, Any],
-    ) -> BatchFeature:
-        # Normalize input: handle deprecated key and list conversion.
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
         if "audios" in mm_data:
             mm_data["audio"] = mm_data.pop("audios")
 
@@ -764,23 +771,19 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         audio_list = [audio] if audio and not isinstance(audio, list) else audio
 
         # Early return for text-only.
-        if not audio_list:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         # Handle sampling_rate
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        mm_kwargs = dict(
-            **mm_kwargs,
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        hf_processor_mm_kwargs = dict(
+            **hf_processor_mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
         )
 
         # Call parent method
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+        outputs = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            mm_data,
+            hf_processor_mm_kwargs,
         )
 
         # Postprocess: rename mask and add chunk counts
@@ -800,7 +803,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                 outputs["feature_attention_mask"] = mask
 
         # Get processor for chunk counts calculation
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         # Override chunk counts calculation with GLM-ASR specific logic
         chunk_counts = self._calculate_chunk_counts(
@@ -808,7 +811,9 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         )
         outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
 
-        return outputs
+        processed_data = outputs
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

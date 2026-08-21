@@ -43,7 +43,6 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.configs.deepseek_vl2 import (
     DeepseekVLV2Config,
     MlpProjectorConfig,
@@ -236,28 +235,35 @@ class DeepseekVL2DummyInputsBuilder(BaseDummyInputsBuilder[DeepseekVL2Processing
 class DeepseekVL2MultiModalProcessor(
     BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if not mm_data:
-            tokenizer = self.info.get_tokenizer()
-            assert isinstance(tokenizer, HfTokenizer)
-            return tokenizer(prompt, add_special_tokens=True, return_tensors="pt")
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        processed_outputs = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
         )
 
         processed_outputs["num_patches"] = (
             processed_outputs["images_spatial_crop"].prod(-1) + 1
         )
 
-        return processed_outputs
+        processed_data = processed_outputs
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,
@@ -321,7 +327,8 @@ class DeepseekVL2MultiModalProcessor(
         # invariant of how many images are passed per prompt, we only
         # perform caching for the most common case
         if inputs.mm_data_items.get_count("image", strict=False) > 2:
-            return self._apply_hf_processor(inputs, timing_ctx)
+            prompt_ids, mm_info = self._apply_hf_processor(inputs, timing_ctx)
+            return prompt_ids, mm_info, False
 
         return super()._cached_apply_hf_processor(inputs, timing_ctx)
 

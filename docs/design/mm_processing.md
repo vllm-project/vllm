@@ -43,7 +43,7 @@ Moreover, since the tokenized text has not passed through the HF processor, we h
 
 ### Dummy text
 
-We work around the first issue by requiring each model to define how to generate dummy text based on the number of multi-modal inputs, via [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text]. This lets us generate dummy text corresponding to the multi-modal inputs and input them together to obtain the processed multi-modal data.
+Most HF processors can process multi-modal inputs without any text, so we simply call them without passing text. Some processors however throw an error if the text does not contain an input placeholder token per multi-modal input. For those, each model defines how to generate dummy text based on the number of multi-modal inputs, via [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text], which its override of [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main] passes to the HF processor together with the multi-modal inputs to obtain the processed multi-modal data.
 
 ### Automatic prompt updating
 
@@ -60,7 +60,7 @@ Some HF processors, such as the one for Qwen2-VL, are [very slow](https://github
 
 When new data is passed in, we first check which items are in the cache, and which ones are missing. The missing items are passed into the HF processor in a single batch and cached, before being merged with the existing items in the cache.
 
-Since we only process the missing multi-modal data items, the number of input placeholder tokens no longer corresponds to the number of the multi-modal inputs, so they can't be passed alongside the text prompt to HF processor. Therefore, we process the text and multi-modal inputs separately, using [dummy text](#dummy-text) to avoid HF errors. Since this skips HF's prompt updating code, we apply [automatic prompt updating](#automatic-prompt-updating) afterwards to keep the output tokens and multi-modal data consistent with each other.
+Since we only process the missing multi-modal data items, the number of input placeholder tokens no longer corresponds to the number of the multi-modal inputs, so they can't be passed alongside the text prompt to HF processor. Therefore, we process the multi-modal inputs without the text prompt, passing [dummy text](#dummy-text) only if the HF processor requires it. Since this skips HF's prompt updating code, we apply [automatic prompt updating](#automatic-prompt-updating) afterwards to keep the output tokens and multi-modal data consistent with each other.
 
 ## Speeding Up Multi‑Modal Data Processing
 

@@ -731,27 +731,39 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
 
 
 class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         # HunYuanVLProcessor requires image placeholders wrapped with start/end tokens.
-        if mm_data.get("images") is not None and prompt:
+        if mm_data.get("images") is not None and prompt_text:
             img_tok = hf_processor.image_token
             wrapped = (
                 f"{hf_processor.image_start_token}{img_tok}"
                 f"{hf_processor.image_end_token}"
             )
-            if img_tok in prompt and wrapped not in prompt:
-                prompt = prompt.replace(img_tok, wrapped)
-        return self.info.ctx.call_hf_processor(
+            if img_tok in prompt_text and wrapped not in prompt_text:
+                prompt_text = prompt_text.replace(img_tok, wrapped)
+        processed_data = self.info.ctx.call_hf_processor(
             hf_processor,
-            dict(text=prompt, **mm_data),
-            mm_kwargs,
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
         )
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_prompt_updates(
         self,

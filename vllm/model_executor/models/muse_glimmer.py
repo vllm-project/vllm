@@ -262,13 +262,20 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
 class MuseGlimmerMultiModalProcessor(
     BaseMultiModalProcessor[MuseGlimmerProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = processor.tokenizer
         config = self.info.get_hf_config()
         images = mm_data.get("images", ())
@@ -276,7 +283,7 @@ class MuseGlimmerMultiModalProcessor(
         if not isinstance(images, Sequence) or not isinstance(videos, Sequence):
             raise TypeError("MuseGlimmer multi-modal data must be a sequence")
 
-        prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
         image_sentinel_id = tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
         video_sentinel_id = tokenizer.convert_tokens_to_ids(VIDEO_TOKEN)
         if prompt_ids.count(image_sentinel_id) != len(images):
@@ -354,7 +361,9 @@ class MuseGlimmerMultiModalProcessor(
                 video_pixel_values=video_pixels,
                 video_feature_sizes=torch.tensor(video_sizes),
             )
-        return BatchFeature(data=data, tensor_type=None)
+        processed_data = BatchFeature(data=data, tensor_type=None)
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

@@ -235,36 +235,39 @@ class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingIn
 
 
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, Any],
-    ) -> BatchFeature:
-        # NOTE - we rename audios -> audio in mm data because transformers has
-        # deprecated audios for the qwen2audio processor and will remove
-        # support for it in transformers 4.54.
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         audios = mm_data.pop("audios", [])
         if audios:
             mm_data["audio"] = audios
 
-        # Text-only input not supported in composite processor
-        if not mm_data.get("audio", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        mm_kwargs = dict(
-            **mm_kwargs,
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        hf_processor_mm_kwargs = dict(
+            **hf_processor_mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
         )
 
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
         )
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

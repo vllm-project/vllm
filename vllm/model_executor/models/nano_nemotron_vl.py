@@ -361,18 +361,31 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
 class NanoNemotronVLMultiModalProcessor(
     BaseMultiModalProcessor[NanoNemotronVLProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """
-        Bypass `call_hf_processor_mm_only` by no-op overriding`_call_hf_processor`,
-        so it chooses this path:
-        `type(self)._call_hf_processor != BaseMultiModalProcessor._call_hf_processor`
-        """
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        mm_counts = mm_items.get_all_counts()
+
+        valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not processor_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
+
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **processor_data),
+            hf_processor_mm_kwargs,
+        )
+        processed_data.update(passthrough_data)
+        processed_data.pop("input_ids")
+
+        return prompt, processed_data
 
     def _get_image_fields_config(self, hf_inputs: BatchFeature):
         if self.info.is_dynamic_tiler:
@@ -733,11 +746,7 @@ class NanoNemotronVLMultiModalProcessor(
         # Bypass the cached path: the HF processor must receive the
         # prompt (with injected <so_embedding>) and the audio data
         # together so it can perform audio-token replacement natively.
-        (
-            prompt_ids,
-            mm_info,
-            is_update_applied,
-        ) = self._apply_hf_processor(inputs, timing_ctx)
+        prompt_ids, mm_info = self._apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
@@ -745,7 +754,7 @@ class NanoNemotronVLMultiModalProcessor(
                 prompt_ids=prompt_ids,
                 mm_kwargs=mm_info.kwargs,
                 mm_prompt_updates=mm_info.prompt_updates,
-                is_update_applied=is_update_applied,
+                is_update_applied=False,
             )
 
         mm_placeholder_ranges = {

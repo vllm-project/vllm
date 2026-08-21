@@ -1335,23 +1335,33 @@ class MossAudioDummyInputsBuilder(BaseDummyInputsBuilder[MossAudioProcessingInfo
 
 
 class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
         if audios:
             mm_data["audio"] = audios
-        mm_kwargs = dict(mm_kwargs)
-        processor_kwargs = _filter_moss_audio_processor_config(mm_kwargs)
-        return self.info.ctx.call_hf_processor(
+        hf_processor_mm_kwargs = dict(hf_processor_mm_kwargs)
+        processor_kwargs = _filter_moss_audio_processor_config(hf_processor_mm_kwargs)
+        processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**processor_kwargs),
-            dict(text=prompt, **mm_data),
+            mm_data,
             {},
         )
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

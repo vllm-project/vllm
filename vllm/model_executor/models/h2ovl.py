@@ -141,7 +141,8 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
         # invariant of how many images are passed per prompt, we only
         # perform caching for the most common case
         if inputs.mm_data_items.get_count("image", strict=False) > 1:
-            return self._apply_hf_processor(inputs, timing_ctx)
+            prompt_ids, mm_info = self._apply_hf_processor(inputs, timing_ctx)
+            return prompt_ids, mm_info, False
 
         return super()._cached_apply_hf_processor(inputs, timing_ctx)
 

@@ -1547,18 +1547,24 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
 class LlavaOnevision2MultiModalProcessor(
     BaseMultiModalProcessor[LlavaOnevision2ProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # The wrapped OV2 processor is a bare custom class without the standard
-        # ProcessorMixin ``_merge_kwargs`` machinery, so vLLM's default path
-        # fails; overriding this method routes the base class to call us
-        # directly.
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
         merged_kwargs.setdefault("return_tensors", "pt")
         call_kwargs = {
             k: v
@@ -1631,17 +1637,21 @@ class LlavaOnevision2MultiModalProcessor(
             # dtype postprocessing is applied automatically; inject
             # ``video_backend="codec"`` via mm_kwargs so the wrapped processor
             # dispatches to its codec branch.
-            output = super()._call_hf_processor(
-                prompt=prompt,
-                mm_data=mm_data,
-                mm_kwargs={**mm_kwargs, "video_backend": "codec"},
+            output = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(
+                    **{**hf_processor_mm_kwargs, "video_backend": "codec"}
+                ),
+                dict(text=prompt_text, **mm_data),
+                {**hf_processor_mm_kwargs, "video_backend": "codec"},
             )
             data = dict(output)
-            return BatchFeature(
+            processed_data = BatchFeature(
                 self._rename_codec_outputs_to_video(
                     data, codec_video_paths, hf_processor
                 )
             )
+            processed_data.update(passthrough_data)
+            return prompt, processed_data
 
         # ---- Frame backend (registered LlavaOnevision2VideoBackend) ------
         # Every non-codec video reaches here as a ``(frames_ndarray, metadata)``
@@ -1657,7 +1667,9 @@ class LlavaOnevision2MultiModalProcessor(
         # local-file gating is enforced by the connector before decoding.
         if videos_present:
             timestamp_decimals = int(
-                mm_kwargs.get("timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS)
+                hf_processor_mm_kwargs.get(
+                    "timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS
+                )
             )
 
             per_video_frames: list[list[Image.Image]] = []
@@ -1671,7 +1683,7 @@ class LlavaOnevision2MultiModalProcessor(
             # ``<{t} seconds><|vision_start|><|image_pad|><|vision_end|>``
             # blocks (matches the OV2 hf-chat reference exactly).
             new_prompt = _expand_video_markers_in_prompt(
-                prompt,
+                prompt_text,
                 per_video_timestamps,
                 timestamp_decimals=timestamp_decimals,
             )
@@ -1700,7 +1712,7 @@ class LlavaOnevision2MultiModalProcessor(
             row_is_video: list[bool] = []
             vid_idx = 0
             img_idx = 0
-            for marker in marker_pattern.finditer(prompt):
+            for marker in marker_pattern.finditer(prompt_text):
                 if marker.lastgroup == "video":
                     frames = per_video_frames[vid_idx]
                     vid_idx += 1
@@ -1728,10 +1740,10 @@ class LlavaOnevision2MultiModalProcessor(
             # branch ignores video/codec-only kwargs and does not forward extra
             # **kwargs to the image processor, so passing the full merged kwarg
             # set here is a no-op beyond return_tensors/padding.
-            output = super()._call_hf_processor(
-                prompt=new_prompt,
-                mm_data=merged_mm_data,
-                mm_kwargs=mm_kwargs,
+            output = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**hf_processor_mm_kwargs),
+                dict(text=new_prompt, **merged_mm_data),
+                hf_processor_mm_kwargs,
             )
             data = dict(output)
 
@@ -1788,17 +1800,21 @@ class LlavaOnevision2MultiModalProcessor(
                 (len(per_video_timestamps),), dtype=torch.long
             )
 
-            return BatchFeature(data)
+            processed_data = BatchFeature(data)
+            processed_data.update(passthrough_data)
+            return prompt, processed_data
 
         # ---- Image-only / text-only call --------------------------------
         # No videos present: delegate to the base ``_call_hf_processor``, which
         # runs the wrapped processor over the (possibly empty) image set and
         # applies float-tensor dtype postprocessing automatically.
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
         )
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _rename_codec_outputs_to_video(
         self,

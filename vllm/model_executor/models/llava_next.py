@@ -16,7 +16,7 @@ from transformers.models.llava_next.modeling_llava_next import (
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItem
-from vllm.multimodal.parse import ImageSize
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -211,6 +211,36 @@ class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
 
 
 class LlavaNextMultiModalProcessor(BaseLlavaNextMultiModalProcessor[_I]):
+    def _apply_hf_processor_main(
+        self,
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        mm_counts = mm_items.get_all_counts()
+
+        valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not processor_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        # LlavaNextProcessor requires text corresponding to the images
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
+
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(
+                text=prompt_text,
+                **processor_data,
+            ),
+            hf_processor_mm_kwargs,
+        )
+        processed_data.update(passthrough_data)
+        processed_data.pop("input_ids")
+
+        return prompt, processed_data
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

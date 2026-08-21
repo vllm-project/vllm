@@ -560,13 +560,23 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
+        prompt: list[int],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], BatchFeature]:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return prompt, BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
         val, is_top_level_max_soft_tokens = _get_max_soft_tokens(merged_kwargs)
 
         if val is not None and val not in _SUPPORTED_SOFT_TOKENS:
@@ -611,15 +621,15 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 timestamps = [idx / fps for idx in frame_indices]
 
                 # Process frames as images with max_soft_tokens=70
-                video_mm_kwargs = dict(mm_kwargs)
+                video_mm_kwargs = dict(hf_processor_mm_kwargs)
                 video_mm_kwargs["max_soft_tokens"] = _VIDEO_MAX_SOFT_TOKENS
 
                 dummy_prompt = ("\t" + processor.image_token) * len(frames)
 
-                frame_outputs = super()._call_hf_processor(
-                    prompt=dummy_prompt,
-                    mm_data={"images": frames},
-                    mm_kwargs=video_mm_kwargs,
+                frame_outputs = self.info.ctx.call_hf_processor(
+                    self.info.get_hf_processor(**video_mm_kwargs),
+                    dict(text=dummy_prompt, **{"images": frames}),
+                    video_mm_kwargs,
                 )
 
                 # Remap HF key name
@@ -660,7 +670,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             # split-replace bug where replacement text (which itself
             # contains <|video|> tokens) collides with later splits.
             vt = processor.video_token
-            parts = prompt.split(vt, len(video_replacements))
+            parts = prompt_text.split(vt, len(video_replacements))
 
             # NOTE: len(parts) <= len(video_replacements) + 1
             parts_with_repl: list[str] = []
@@ -668,7 +678,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 parts_with_repl.extend([part, repl])
             parts_with_repl.extend(parts[len(video_replacements) :])
 
-            prompt = "".join(parts_with_repl)
+            prompt_text = "".join(parts_with_repl)
 
             video_outputs = {
                 "pixel_values_videos": torch.cat(all_video_pixel_values, dim=0),
@@ -712,13 +722,13 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # NOTE: This requires a corresponding type annotation on the
         # HF side (Gemma4ProcessorKwargs.images_kwargs) so that
         # _merge_kwargs routes max_soft_tokens into images_kwargs.
-        patched_mm_kwargs = dict(mm_kwargs)
+        patched_mm_kwargs = dict(hf_processor_mm_kwargs)
         if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
-        processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
+        processed_outputs = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**patched_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
             patched_mm_kwargs,
         )
 
@@ -750,7 +760,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
         # Merge video outputs into the final result
         combined_outputs = dict(processed_outputs, **video_outputs)
-        return BatchFeature(combined_outputs)
+        processed_data = BatchFeature(combined_outputs)
+        processed_data.update(passthrough_data)
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

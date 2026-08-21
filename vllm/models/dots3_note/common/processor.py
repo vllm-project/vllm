@@ -649,14 +649,6 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
         processor_data["videos"] = raw_videos
         return processor_data, passthrough_data
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
