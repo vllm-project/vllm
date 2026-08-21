@@ -147,11 +147,45 @@ def test_quark_excluded_mla_projection_denies_bmm_requantization(prefix):
     assert not _is_mla_bmm_requantization_allowed(kv_b_proj)
 
 
-def test_quark_dynamic_mla_projection_allows_bmm_requantization(monkeypatch):
+def _quark_config_from_checkpoint(model_type: str, exclude: list[str]) -> QuarkConfig:
+    """Build a QuarkConfig the way vLLM does at config construction time.
+
+    ``maybe_update_config`` is the gate that opts DeepSeek-V3-family fp4
+    checkpoints into dynamic MXFP4 re-quantization of *excluded* attention
+    projections; every other checkpoint keeps the exclusion.
+    """
+    quant_config = {
+        "exclude": exclude,
+        "global_quant_config": {"weight": {"dtype": "fp4"}},
+    }
+    config = QuarkConfig(quant_config)
+    config.maybe_update_config(
+        "dummy-model",
+        hf_config=SimpleNamespace(
+            model_type=model_type, quantization_config=quant_config
+        ),
+    )
+    return config
+
+
+@pytest.mark.parametrize(
+    ("model_type", "allows_requantization"),
+    [
+        # amd/DeepSeek-R1-0528-MXFP4 excludes kv_b_proj on every layer but
+        # deliberately opts into dynamic MXFP4, so re-quantization stays on.
+        pytest.param("deepseek_v3", True, id="deepseek-v3-fp4-opts-in"),
+        # amd/GLM-5.2-MXFP4 excludes kv_b_proj without opting in, so the
+        # checkpoint's exclusion must be honored.
+        pytest.param("glm_moe_dsa", False, id="non-deepseek-honors-exclude"),
+    ],
+)
+def test_dynamic_mxfp4_option_decides_excluded_mla_projection(
+    monkeypatch, model_type, allows_requantization
+):
     prefix = "model.layers.3.self_attn.kv_b_proj"
-    quant_config = QuarkConfig({"exclude": [prefix]})
-    quant_config.dynamic_mxfp4_quant = True
+    quant_config = _quark_config_from_checkpoint(model_type, [prefix])
     monkeypatch.setattr(quant_config, "get_scheme", lambda **_: object())
+
     linear = LinearBase.__new__(LinearBase)
     quant_method = quant_config.get_quant_method(linear, prefix)
     kv_b_proj = SimpleNamespace(
@@ -159,8 +193,11 @@ def test_quark_dynamic_mla_projection_allows_bmm_requantization(monkeypatch):
         quant_method=quant_method,
     )
 
-    assert isinstance(quant_method, QuarkLinearMethod)
-    assert _is_mla_bmm_requantization_allowed(kv_b_proj)
+    expected_cls = (
+        QuarkLinearMethod if allows_requantization else UnquantizedLinearMethod
+    )
+    assert isinstance(quant_method, expected_cls)
+    assert _is_mla_bmm_requantization_allowed(kv_b_proj) is allows_requantization
 
 
 @pytest.mark.cpu_test

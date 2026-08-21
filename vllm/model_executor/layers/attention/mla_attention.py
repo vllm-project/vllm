@@ -629,6 +629,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         allow_bmm_requantization = _is_mla_bmm_requantization_allowed(self.kv_b_proj)
+        if not allow_bmm_requantization and (
+            rocm_aiter_ops.is_fp8bmm_enabled() or rocm_aiter_ops.is_fp4bmm_enabled()
+        ):
+            logger.info_once(
+                "Skipping AITER FP8/FP4 BMM online re-quantization for MLA "
+                "kv_b_proj: the checkpoint's quantization config explicitly "
+                "leaves this projection unquantized."
+            )
         self.is_aiter_triton_fp8_bmm_enabled = (
             rocm_aiter_ops.is_fp8bmm_enabled() and allow_bmm_requantization
         )
@@ -3055,7 +3063,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.supports_quant_query_input = True
-        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        self.is_aiter_triton_fp8_bmm_enabled = (
+            rocm_aiter_ops.is_fp8bmm_enabled()
+            and _is_mla_bmm_requantization_allowed(kv_b_proj)
+        )
 
         # Use flashinfer's optimized concat_mla_k kernel when available.
         # The kernel is optimized for DeepSeek V3 dimensions:
