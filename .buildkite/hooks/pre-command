@@ -1,49 +1,54 @@
 #!/bin/bash
-# Branch-scoped diagnostic: sample host CPU/cgroup/pressure/service/network state
-# during the CPU image build. Samples append to a local file and are shipped
-# server-side via buildkite-agent annotate every 30s, so evidence survives both
-# log-pipe closure after this hook returns and agent loss mid-job. Not for merge.
+# Branch-scoped diagnostic for the CPU image-build heartbeat baseline. Not for merge.
+#
+# Lesson from takes 1-3: the agent reaps the hook's process group when the hook
+# phase ends, so plain background loops die before their first ship. The sampler
+# and shipper are therefore fully detached with setsid, and a FOREGROUND probe
+# runs inside the hook so upload capability (or its failure reason) lands in the
+# job log before the command phase starts.
 if [[ "${BUILDKITE_STEP_KEY:-}" == "image-build" ]]; then
-  SFILE=/tmp/hbsample.log
-  AGENT_CG=$(systemctl show buildkite-agent -p ControlGroup --value 2>/dev/null)
-  BKD_CG=$(systemctl show buildkitd -p ControlGroup --value 2>/dev/null)
-  (
-    trap '' PIPE
-    while true; do
-      {
-        echo "HBSAMPLE t=$(date -u +%FT%TZ) up=$(cut -d' ' -f1 /proc/uptime) load=$(cut -d' ' -f1-3 /proc/loadavg)"
-        echo "HBSAMPLE stat=$(head -1 /proc/stat)"
-        echo "HBSAMPLE cpu_psi=$(tr '\n' ' ' < /proc/pressure/cpu 2>/dev/null)"
-        echo "HBSAMPLE io_psi=$(tr '\n' ' ' < /proc/pressure/io 2>/dev/null)"
-        echo "HBSAMPLE mem_psi=$(tr '\n' ' ' < /proc/pressure/memory 2>/dev/null)"
-        echo "HBSAMPLE agent_svc=$(systemctl show buildkite-agent -p NRestarts,ActiveEnterTimestamp,SubState,Nice,CPUWeight 2>/dev/null | tr '\n' ' ')"
-        echo "HBSAMPLE bkd_svc=$(systemctl show buildkitd -p NRestarts,ActiveEnterTimestamp,SubState,Nice,CPUWeight 2>/dev/null | tr '\n' ' ')"
-        [ -n "$AGENT_CG" ] && echo "HBSAMPLE agent_cpustat=$(tr '\n' ' ' < "/sys/fs/cgroup${AGENT_CG}/cpu.stat" 2>/dev/null) agent_weight=$(cat "/sys/fs/cgroup${AGENT_CG}/cpu.weight" 2>/dev/null)"
-      [ -n "$BKD_CG" ] && echo "HBSAMPLE bkd_cpustat=$(tr '\n' ' ' < "/sys/fs/cgroup${BKD_CG}/cpu.stat" 2>/dev/null) bkd_weight=$(cat "/sys/fs/cgroup${BKD_CG}/cpu.weight" 2>/dev/null)"
-        echo "HBSAMPLE net_http=$(curl -s -o /dev/null -w '%{http_code}:%{time_total}' --max-time 3 https://agent.buildkite.com/v3 2>/dev/null || echo FAIL)"
-        echo "HBSAMPLE net_dev=$(grep -E 'ens|eth' /proc/net/dev 2>/dev/null | head -1 | tr -s ' ')"
-      } >> "$SFILE" 2>/dev/null
-      sleep 10
-    done
-  ) &
-  (
-    trap '' PIPE
-    sleep 25
-    n=0
-    while true; do
-      if [ -s "$SFILE" ]; then
-        n=$((n+1))
-        cp "$SFILE" "/tmp/hbsample-latest.log"
-        (cd /tmp && buildkite-agent artifact upload "hbsample-latest.log" \
-          >> "$SFILE.shiplog" 2>&1) || echo "upload $n failed" >> "$SFILE.shiplog"
-        printf '```\n%s\n```\n' "$(tail -c 60000 "$SFILE")" | \
-          buildkite-agent annotate --context hbsample --style info \
-          >> "$SFILE.shiplog" 2>&1 || echo "annotate $n failed" >> "$SFILE.shiplog"
-        (cd /tmp && cp "$SFILE.shiplog" hbsample-shiplog.log && \
-          buildkite-agent artifact upload "hbsample-shiplog.log" >/dev/null 2>&1)
-      fi
-      sleep 30
-    done
-  ) &
-  echo "HBSAMPLE sampler+annotator started (file $SFILE)"
+  echo "HBSAMPLE hook context: $(which buildkite-agent) | bk env vars: $(env | grep -c '^BUILDKITE')"
+  echo "hb probe $(date -u +%FT%TZ)" > /tmp/hb-probe.log
+  (cd /tmp && buildkite-agent artifact upload hb-probe.log)
+  echo "HBSAMPLE foreground probe upload exit=$?"
+
+  cat > /tmp/hb-sampler.sh <<'INNER'
+#!/bin/bash
+SFILE=/tmp/hbsample.log
+AGENT_CG=$(systemctl show buildkite-agent -p ControlGroup --value 2>/dev/null)
+BKD_CG=$(systemctl show buildkitd -p ControlGroup --value 2>/dev/null)
+sample() {
+  echo "HBSAMPLE t=$(date -u +%FT%TZ) up=$(cut -d' ' -f1 /proc/uptime) load=$(cut -d' ' -f1-3 /proc/loadavg)"
+  echo "HBSAMPLE stat=$(head -1 /proc/stat)"
+  echo "HBSAMPLE cpu_psi=$(tr '\n' ' ' < /proc/pressure/cpu 2>/dev/null)"
+  echo "HBSAMPLE io_psi=$(tr '\n' ' ' < /proc/pressure/io 2>/dev/null)"
+  echo "HBSAMPLE mem_psi=$(tr '\n' ' ' < /proc/pressure/memory 2>/dev/null)"
+  echo "HBSAMPLE agent_svc=$(systemctl show buildkite-agent -p NRestarts,ActiveEnterTimestamp,SubState,Nice,CPUWeight 2>/dev/null | tr '\n' ' ')"
+  echo "HBSAMPLE bkd_svc=$(systemctl show buildkitd -p NRestarts,ActiveEnterTimestamp,SubState,Nice,CPUWeight 2>/dev/null | tr '\n' ' ')"
+  [ -n "$AGENT_CG" ] && echo "HBSAMPLE agent_cpustat=$(tr '\n' ' ' < "/sys/fs/cgroup${AGENT_CG}/cpu.stat" 2>/dev/null) agent_weight=$(cat "/sys/fs/cgroup${AGENT_CG}/cpu.weight" 2>/dev/null)"
+  [ -n "$BKD_CG" ] && echo "HBSAMPLE bkd_cpustat=$(tr '\n' ' ' < "/sys/fs/cgroup${BKD_CG}/cpu.stat" 2>/dev/null) bkd_weight=$(cat "/sys/fs/cgroup${BKD_CG}/cpu.weight" 2>/dev/null)"
+  echo "HBSAMPLE net_http=$(curl -s -o /dev/null -w '%{http_code}:%{time_total}' --max-time 3 https://agent.buildkite.com/v3 2>/dev/null || echo FAIL)"
+  echo "HBSAMPLE net_dev=$(grep -E 'ens|eth' /proc/net/dev 2>/dev/null | head -1 | tr -s ' ')"
+}
+n=0
+while true; do
+  sample >> "$SFILE" 2>/dev/null
+  n=$((n+1))
+  if [ $((n % 3)) -eq 0 ]; then
+    cp "$SFILE" /tmp/hbsample-latest.log
+    (cd /tmp && buildkite-agent artifact upload hbsample-latest.log \
+      >> /tmp/hbship.log 2>&1) || echo "ship $n failed $?" >> /tmp/hbship.log
+    cp /tmp/hbship.log /tmp/hbsample-shiplog.log 2>/dev/null
+    (cd /tmp && buildkite-agent artifact upload hbsample-shiplog.log >/dev/null 2>&1)
+  fi
+  sleep 10
+done
+INNER
+  chmod +x /tmp/hb-sampler.sh
+  setsid nohup env BUILDKITE_AGENT_ACCESS_TOKEN="$BUILDKITE_AGENT_ACCESS_TOKEN" \
+    BUILDKITE_JOB_ID="$BUILDKITE_JOB_ID" \
+    BUILDKITE_AGENT_ENDPOINT="${BUILDKITE_AGENT_ENDPOINT:-}" \
+    /tmp/hb-sampler.sh > /tmp/hb-sampler-out.log 2>&1 < /dev/null &
+  disown
+  echo "HBSAMPLE detached sampler started"
 fi
