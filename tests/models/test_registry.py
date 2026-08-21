@@ -25,7 +25,10 @@ from vllm.model_executor.models.registry import (
 from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test
-from .registry import HF_EXAMPLE_MODELS
+from .registry import (
+    _SPECULATIVE_DECODING_EXAMPLE_MODELS,
+    HF_EXAMPLE_MODELS,
+)
 
 
 @pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
@@ -211,4 +214,17 @@ def test_hf_registry_coverage():
     assert not untested_archs, (
         "Please add the following architectures to "
         f"`tests/models/registry.py`: {untested_archs}"
+    )
+
+
+def test_speculative_registry_methods_are_explicit():
+    missing_methods = {
+        model_arch
+        for model_arch, model_info in _SPECULATIVE_DECODING_EXAMPLE_MODELS.items()
+        if model_info.speculative_model is not None
+        and model_info.speculative_method is None
+    }
+
+    assert not missing_methods, (
+        f"Please set speculative_method for these registry entries: {missing_methods}"
     )

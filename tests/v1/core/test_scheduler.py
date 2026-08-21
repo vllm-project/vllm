@@ -2626,7 +2626,8 @@ def create_scheduler_with_priority(
     speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
         speculative_config = SpeculativeConfig(
-            model="ngram", num_speculative_tokens=num_speculative_tokens
+            method="ngram",
+            num_speculative_tokens=num_speculative_tokens,
         )
 
     ec_transfer_config = (

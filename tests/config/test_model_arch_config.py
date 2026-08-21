@@ -15,6 +15,7 @@ from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.config.model_arch import ModelArchitectureConfig
+from vllm.config.speculative import SpeculativeMethod
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.transformers_utils.model_arch_config_convertor import (
     Gemma4ModelArchConfigConvertor,
@@ -55,13 +56,28 @@ BASE_MODELS_TO_TEST = [
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
 ] + list(BASE_TRUST_REMOTE_CODE_MODELS)
 
-# (target_model, draft_model, trust_remote_code)
+# (target_model, draft_model, method, trust_remote_code)
 SPECULATIVE_MODELS = [
-    ("JackFram/llama-68m", "abhigoyal/vllm-medusa-llama-68m-random", False),
-    ("luccafong/deepseek_mtp_main_random", "luccafong/deepseek_mtp_draft_random", True),
-    ("eagle618/deepseek-v3-random", "eagle618/eagle-deepseek-v3-random", True),
-    ("meta-llama/Meta-Llama-3-8B-Instruct", "yuhuili/EAGLE-LLaMA3-Instruct-8B", True),
-    ("meta-llama/Llama-3.1-8B-Instruct", "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", True),
+    ("JackFram/llama-68m", "abhigoyal/vllm-medusa-llama-68m-random", "medusa", False),
+    (
+        "luccafong/deepseek_mtp_main_random",
+        "luccafong/deepseek_mtp_draft_random",
+        "mtp",
+        True,
+    ),
+    ("eagle618/deepseek-v3-random", "eagle618/eagle-deepseek-v3-random", "eagle", True),
+    (
+        "meta-llama/Meta-Llama-3-8B-Instruct",
+        "yuhuili/EAGLE-LLaMA3-Instruct-8B",
+        "eagle",
+        True,
+    ),
+    (
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+        "eagle3",
+        True,
+    ),
 ]
 
 
@@ -441,10 +457,13 @@ def test_base_model_arch_config(model: str):
 
 
 @pytest.mark.parametrize(
-    "target_model,draft_model,trust_remote_code", SPECULATIVE_MODELS
+    "target_model,draft_model,method,trust_remote_code", SPECULATIVE_MODELS
 )
 def test_draft_model_arch_config(
-    target_model: str, draft_model: str, trust_remote_code: bool
+    target_model: str,
+    draft_model: str,
+    method: SpeculativeMethod,
+    trust_remote_code: bool,
 ):
     """Test model architecture config for draft/speculative models."""
     groundtruth = _load_groundtruth("draft_model_arch_groundtruth.json")
@@ -452,6 +471,7 @@ def test_draft_model_arch_config(
 
     target_model_config = ModelConfig(target_model, trust_remote_code=trust_remote_code)
     speculative_config = SpeculativeConfig(
+        method=method,
         model=draft_model,
         num_speculative_tokens=1,
         target_model_config=target_model_config,

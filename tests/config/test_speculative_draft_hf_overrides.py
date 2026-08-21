@@ -34,15 +34,25 @@ def test_dict_overrides_are_not_forwarded_to_draft():
     """Dict overrides are target-specific key patches; the draft must get
     only the architecture-mapping override."""
     composed = SpeculativeConfig.compose_draft_hf_overrides(
-        {"max_position_embeddings": 1234}
+        {"max_position_embeddings": 1234}, "mtp"
     )
     assert composed is SpeculativeConfig.hf_config_override
 
 
 @pytest.mark.cpu_test
-def test_none_overrides_fall_back_to_arch_mapping():
-    composed = SpeculativeConfig.compose_draft_hf_overrides(None)
-    assert composed is SpeculativeConfig.hf_config_override
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        ("mtp", SpeculativeConfig.hf_config_override),
+        ("dspark", SpeculativeConfig.dspark_hf_config_override),
+        ("eagle", SpeculativeConfig.eagle_hf_config_override),
+        ("eagle3", SpeculativeConfig.hf_config_override),
+        ("dflash", SpeculativeConfig.hf_config_override),
+        ("draft_model", SpeculativeConfig.identity_hf_config_override),
+    ],
+)
+def test_method_selects_draft_override(method, expected):
+    assert SpeculativeConfig.compose_draft_hf_overrides(None, method) is expected
 
 
 @pytest.mark.cpu_test
@@ -54,7 +64,7 @@ def test_callable_overrides_reach_the_draft_config():
         hf_config.num_hidden_layers = 1
         return hf_config
 
-    composed = SpeculativeConfig.compose_draft_hf_overrides(shrink)
+    composed = SpeculativeConfig.compose_draft_hf_overrides(shrink, "mtp")
     assert composed is not SpeculativeConfig.hf_config_override
 
     out = composed(_make_hf_config())
@@ -72,7 +82,7 @@ def test_arch_mapping_applies_before_callable_override():
         seen_architectures.append(hf_config.architectures[0])
         return hf_config
 
-    composed = SpeculativeConfig.compose_draft_hf_overrides(record)
+    composed = SpeculativeConfig.compose_draft_hf_overrides(record, "mtp")
 
     # MiMo is one of the arch-mapped model types: hf_config_override
     # rewrites architectures to ["MiMoMTPModel"].
@@ -127,7 +137,9 @@ def test_composed_override_is_picklable():
     (it raised ``Can't get local object`` on DFlashDraftModel); a
     ``functools.partial`` over a module-referenceable static method is.
     Guard against regressing to a closure."""
-    composed = SpeculativeConfig.compose_draft_hf_overrides(_module_level_shrink)
+    composed = SpeculativeConfig.compose_draft_hf_overrides(
+        _module_level_shrink, "dflash"
+    )
 
     assert isinstance(composed, functools.partial)
     assert composed.func is SpeculativeConfig._apply_composed_hf_override

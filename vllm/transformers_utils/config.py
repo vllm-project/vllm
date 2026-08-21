@@ -28,6 +28,7 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import (
+    is_cloud_storage,
     parse_safetensors_file_metadata,
     without_trust_remote_code,
 )
@@ -664,7 +665,11 @@ def maybe_override_with_speculators(
     speculators_config = config_dict.get("speculators_config")
 
     if speculators_config is None:
-        # No speculators config found, return original values
+        # The target is not a speculators checkpoint, but the draft model
+        # named in the speculative config may still declare its settings.
+        vllm_speculative_config = _maybe_adopt_spec_model_declaration(
+            vllm_speculative_config, hf_token=hf_token, **kwargs
+        )
         return model, tokenizer, vllm_speculative_config
 
     # Speculators format detected - process overrides
@@ -673,15 +678,60 @@ def maybe_override_with_speculators(
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict
     )
-
-    # Set the draft model to the speculators model
     speculative_config["model"] = model
+    if vllm_speculative_config is not None:
+        # Explicit settings take precedence over checkpoint-declared defaults.
+        speculative_config.update(vllm_speculative_config)
 
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
     model = tokenizer = verifier_model
 
     return model, tokenizer, speculative_config
+
+
+def _maybe_adopt_spec_model_declaration(
+    vllm_speculative_config: dict[str, Any] | None,
+    hf_token: bool | str | None = None,
+    **kwargs,
+) -> dict[str, Any] | None:
+    """Populate missing speculative settings from a method declaration in the
+    draft checkpoint named by ``model`` (e.g. speculators-format).
+
+    Explicit settings take precedence over checkpoint-declared defaults.
+    """
+    if not vllm_speculative_config:
+        return vllm_speculative_config
+    draft_model = vllm_speculative_config.get("model")
+    if not isinstance(draft_model, str) or is_cloud_storage(draft_model):
+        return vllm_speculative_config
+
+    try:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            draft_model,
+            revision=vllm_speculative_config.get("revision"),
+            token=hf_token,
+            **without_trust_remote_code(kwargs),
+        )
+    except Exception:
+        # Keep downstream validation as the actionable error.
+        logger.debug(
+            "Could not read the draft model config from %s while resolving "
+            "the speculative settings.",
+            draft_model,
+            exc_info=True,
+        )
+        return vllm_speculative_config
+    if config_dict.get("speculators_config") is None:
+        return vllm_speculative_config
+
+    from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
+
+    declared = SpeculatorsConfig.extract_vllm_speculative_config(
+        config_dict=config_dict
+    )
+    declared.update(vllm_speculative_config)
+    return declared
 
 
 def get_config(
