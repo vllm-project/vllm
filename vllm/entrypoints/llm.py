@@ -828,8 +828,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def release_kv_cache_memory(self) -> None:
         """Release the GPU physical memory backing the KV cache.
 
-        Requires a completed pause (``sleep(level=0)`` today; RFC #51476);
-        raises otherwise. Restore with ``wake_up(tags=["kv_cache"])``.
+        Requires a completed pause (``sleep(level=0)`` today); raises otherwise.
+        Restore with ``wake_up(tags=["kv_cache"])``.
         """
         self.llm_engine.release_kv_cache_memory()
 

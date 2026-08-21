@@ -922,7 +922,7 @@ class EngineCore:
 
     def release_kv_cache_memory(self) -> None:
         """Discard KV cache physical memory. Requires a completed pause:
-        request fate and quiescence belong to pause_scheduler (RFC #51476).
+        request fate and quiescence belong to pause_scheduler.
         """
         if not (
             self.is_scheduler_paused()

@@ -371,15 +371,15 @@ class Executor(ABC):
             self.sleeping_tags.clear()
 
     def discard(self, tags: tuple[str, ...]) -> None:
-        todo = set(tags) - self.sleeping_tags
-        if not todo:
+        tags_to_discard = set(tags) - self.sleeping_tags
+        if not tags_to_discard:
             logger.warning("Tags %s are already sleeping.", tags)
             return
         time_before_discard = time.perf_counter()
         try:
-            self.collective_rpc("discard", args=(tuple(todo),))
+            self.collective_rpc("discard", args=(tuple(tags_to_discard),))
         finally:
-            self.sleeping_tags |= todo
+            self.sleeping_tags |= tags_to_discard
         time_after_discard = time.perf_counter()
         logger.info(
             "It took %.6f seconds to discard tags %s.",
