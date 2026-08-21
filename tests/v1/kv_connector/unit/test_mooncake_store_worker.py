@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.distributed.kv_events import MEDIUM_CPU, MEDIUM_STORAGE
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     rdma_utils,
 )
@@ -111,6 +112,7 @@ def _make_store_recving_thread(
     *,
     tp_rank: int = 0,
     disk_offload_buffer_budget_bytes: int | None = None,
+    enable_kv_event: bool = False,
 ) -> mooncake_store_worker.KVCacheStoreRecvingThread:
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
@@ -133,6 +135,7 @@ def _make_store_recving_thread(
         ready_event=threading.Event(),
         coord=coord,
         disk_offload_buffer_budget_bytes=disk_offload_buffer_budget_bytes,
+        enable_kv_event=enable_kv_event,
     )
     thread.request_queue.task_done = MagicMock()
     return thread
@@ -1087,6 +1090,17 @@ def test_store_worker_get_block_ids_with_load_errors_delegates_to_recv_thread():
     recv_thread.get_and_clear_block_ids_with_load_errors.assert_called_once_with()
 
 
+def test_store_worker_get_kv_events_includes_receive_events():
+    recv_thread = MagicMock()
+    recv_thread.get_kv_events.return_value = ["loaded-event"]
+    w = _make_bare_worker(kv_role="kv_consumer")
+    w.enable_kv_events = True
+    w.kv_recv_threads = [recv_thread]
+
+    assert w.get_kv_events() == ["loaded-event"]
+    recv_thread.get_kv_events.assert_called_once_with()
+
+
 def test_store_sending_thread_passes_replicate_config_when_preferred_segment_set():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
@@ -1470,6 +1484,101 @@ def test_recv_thread_logs_tier_summary_when_enabled(monkeypatch, caplog_vllm):
         and "bytes_by_tier={'memory': 256, 'disk': 256, 'unknown': 0}" in message
         for message in messages
     )
+
+
+def test_recv_thread_emits_tiered_events_after_rotation_and_split(monkeypatch):
+    monkeypatch.delenv("VLLM_MOONCAKE_STORE_TIER_LOG", raising=False)
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.side_effect = [[256, 256], [256]]
+    thread = _make_store_recving_thread(
+        store,
+        tp_rank=1,
+        disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT,
+        enable_kv_event=True,
+    )
+    req = _make_load_req("req-a", [b"a0", b"a1", b"a2"], token_len=48)
+    tier_by_key = {
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130": "memory",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131": "disk",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132": "memory",
+    }
+    store.batch_get_replica_desc.side_effect = lambda keys: {
+        key: [_ReplicaDesc(tier_by_key[key])] for key in keys
+    }
+
+    thread._handle_request(req)
+
+    assert [
+        call.args[0] for call in store.batch_get_replica_desc.call_args_list
+    ] == [
+        [
+            "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
+            "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+        ],
+        ["test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130"],
+    ]
+    events = thread.get_kv_events()
+    assert [event.medium for event in events] == [
+        MEDIUM_STORAGE,
+        MEDIUM_CPU,
+        MEDIUM_CPU,
+    ]
+    assert [event.block_hashes[0] for event in events] == [
+        maybe_convert_block_hash(BlockHash(b"a1")),
+        maybe_convert_block_hash(BlockHash(b"a2")),
+        maybe_convert_block_hash(BlockHash(b"a0")),
+    ]
+
+
+def test_recv_thread_emits_unknown_tier_with_no_medium(monkeypatch):
+    monkeypatch.delenv("VLLM_MOONCAKE_STORE_TIER_LOG", raising=False)
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256]
+    thread = _make_store_recving_thread(
+        store, disk_offload_buffer_budget_bytes=None, enable_kv_event=True
+    )
+    key = "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130"
+    store.batch_get_replica_desc.return_value = {key: []}
+
+    thread._handle_request(_make_load_req("req-a", [b"a0"], token_len=16))
+
+    assert thread.get_kv_events()[0].medium is None
+
+
+def test_recv_thread_does_not_emit_event_for_failed_load(monkeypatch):
+    monkeypatch.delenv("VLLM_MOONCAKE_STORE_TIER_LOG", raising=False)
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, -10]
+    thread = _make_store_recving_thread(
+        store, disk_offload_buffer_budget_bytes=None, enable_kv_event=True
+    )
+    keys = [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
+    ]
+    store.batch_get_replica_desc.return_value = {
+        key: [_ReplicaDesc("memory")] for key in keys
+    }
+
+    thread._handle_request(_make_load_req("req-a", [b"a0", b"a1"], token_len=32))
+
+    events = thread.get_kv_events()
+    assert [event.block_hashes[0] for event in events] == [
+        maybe_convert_block_hash(BlockHash(b"a0"))
+    ]
+    assert [event.medium for event in events] == [MEDIUM_CPU]
+
+
+def test_recv_thread_skips_tier_lookup_when_events_and_logging_disabled(monkeypatch):
+    monkeypatch.delenv("VLLM_MOONCAKE_STORE_TIER_LOG", raising=False)
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256]
+    thread = _make_store_recving_thread(store, disk_offload_buffer_budget_bytes=None)
+
+    thread._handle_request(_make_load_req("req-a", [b"a0"], token_len=16))
+
+    assert thread.get_kv_events() == []
+    store.batch_get_replica_desc.assert_not_called()
 
 
 def test_recv_thread_records_partial_failure_metrics(monkeypatch):
@@ -2204,7 +2313,6 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
 
 
 def test_store_sending_thread_kv_events_use_group_chunk_metadata():
-    from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
         KVCacheGroupSpec,
