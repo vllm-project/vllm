@@ -2197,14 +2197,11 @@ class Scheduler(SchedulerInterface):
     def _reap_expired_streaming_requests(self) -> None:
         """Abort WAITING_FOR_STREAMING_REQ requests past their deadline.
 
-        Runs unconditionally at the top of schedule(), before the
-        num_running >= max_num_running_reqs capacity gate in the waiting
-        loop below. A request parked in this status only leaves it via an
-        external add_request()/finish_requests() call; if the capacity
-        gate is what's saturated (e.g. every slot held by a vanished
-        client), the waiting loop breaks before it ever reaches a request
-        to check its deadline against, and the timeout would never fire.
-        Reaping here first guarantees it always does (see GH issue #53130).
+        Must run before the capacity gate in the waiting loop below. A
+        request only leaves this status through add_request() or
+        finish_requests(); if the capacity gate is what's saturated (every
+        slot held by a vanished client), the waiting loop never reaches it
+        to check the deadline, and the timeout never fires. See #53130.
         """
         if not self.skipped_waiting:
             return

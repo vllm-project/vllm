@@ -1786,11 +1786,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "5")
     ),
-    # Timeout in seconds for a resumable (session-based streaming input)
-    # request parked in WAITING_FOR_STREAMING_REQ. If the client's next
-    # chunk (or an explicit abort) never arrives before this elapses, the
-    # scheduler aborts the request itself rather than block admission
-    # capacity forever -- see GH issue #53130.
+    # Timeout in seconds for a request parked in WAITING_FOR_STREAMING_REQ.
+    # If no chunk or abort arrives before this elapses, the scheduler
+    # aborts it so it stops holding an admission slot. See #53130.
     "VLLM_STREAMING_REQUEST_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_STREAMING_REQUEST_TIMEOUT_SECONDS", "600")
     ),

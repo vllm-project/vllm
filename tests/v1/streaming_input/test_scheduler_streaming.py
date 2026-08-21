@@ -311,10 +311,10 @@ class TestStreamingScheduler(unittest.TestCase):
         The capacity gate in the waiting loop (num_running >=
         max_num_running_reqs: break) runs before that loop ever looks at
         an individual request's deadline. If every slot is held by
-        vanished-client sessions, the old per-request check inside the
-        loop would never be reached at all -- the exact deadlock GH issue
-        #53130 describes. Timed-out reaping must happen unconditionally,
-        not gated by capacity.
+        vanished-client sessions, a per-request check inside the loop
+        would never be reached, which is the deadlock #53130 describes.
+        Timed-out reaping must happen unconditionally, not gated by
+        capacity.
         """
         scheduler = create_scheduler()
         scheduler.max_num_running_reqs = 1
