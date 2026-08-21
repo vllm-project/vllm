@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -771,6 +772,32 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
+                # A request parked in WAITING_FOR_STREAMING_REQ only leaves
+                # that status via an external add_request()/finish_requests()
+                # call (the next chunk, or an explicit abort) -- there is no
+                # other promotion path, unlike WAITING_FOR_REMOTE_KVS and
+                # WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR below. If the client
+                # (or a proxy in front of it) drops the connection without
+                # that signal ever reaching us, the request -- and the
+                # capacity slot num_waiting_for_streaming_input holds for it
+                # -- would otherwise be stuck forever, eventually wedging
+                # admission for the whole engine even with free KV cache
+                # (see GH issue #53130). Abort it once its deadline passes.
+                if (
+                    request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+                    and request.streaming_wait_deadline is not None
+                    and time.time() > request.streaming_wait_deadline
+                ):
+                    request_queue.pop_request()
+                    logger.warning(
+                        "%s timed out waiting for streaming input after %ds; "
+                        "aborting to free its admission slot.",
+                        request_id,
+                        envs.VLLM_STREAMING_REQUEST_TIMEOUT_SECONDS,
+                    )
+                    self.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+                    continue
+
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
@@ -1475,6 +1502,7 @@ class Scheduler(SchedulerInterface):
         session.sampling_params = update.sampling_params
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
+            session.streaming_wait_deadline = None
         session.status = RequestStatus.WAITING
 
         if self.log_stats:
@@ -2204,6 +2232,9 @@ class Scheduler(SchedulerInterface):
             self._update_request_as_session(request, update)
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+            request.streaming_wait_deadline = (
+                time.time() + envs.VLLM_STREAMING_REQUEST_TIMEOUT_SECONDS
+            )
             self.num_waiting_for_streaming_input += 1
 
         self._enqueue_waiting_request(request)

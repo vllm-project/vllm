@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 import unittest
 from unittest.mock import MagicMock
 
@@ -239,6 +240,69 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.status == RequestStatus.FINISHED_ABORTED
         # The session should be removed from the scheduler
         assert session.request_id not in scheduler.requests
+
+    def test_streaming_request_timeout_aborts(self):
+        """A session parked in WAITING_FOR_STREAMING_REQ past its deadline
+        is aborted instead of blocking admission forever (GH issue #53130).
+
+        WAITING_FOR_STREAMING_REQ only leaves that status via an external
+        add_request()/finish_requests() call for the same request id. If a
+        client (or a proxy in front of it) drops the connection without
+        that signal ever reaching the scheduler, the request previously had
+        no way out and would hold its num_waiting_for_streaming_input slot
+        forever.
+        """
+        scheduler = create_scheduler()
+
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[1, 2, 3],
+            resumable=True,
+        )
+        scheduler.add_request(session)
+        session.num_computed_tokens = len(session.prompt_token_ids)
+
+        # Drive the real transition into WAITING_FOR_STREAMING_REQ (this is
+        # what sets the deadline), rather than assigning status directly.
+        finished = scheduler._handle_stopped_request(session)
+        assert not finished
+        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        assert session.streaming_wait_deadline is not None
+        assert scheduler.num_waiting_for_streaming_input == 1
+
+        # Not yet past the deadline: schedule() must leave it alone.
+        scheduler.schedule()
+        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        assert "session" in scheduler.requests
+        assert scheduler.num_waiting_for_streaming_input == 1
+
+        # Force the deadline into the past, as if the client vanished.
+        session.streaming_wait_deadline = time.time() - 1
+
+        scheduler.schedule()
+
+        assert session.status == RequestStatus.FINISHED_ABORTED
+        assert "session" not in scheduler.requests
+        assert scheduler.num_waiting_for_streaming_input == 0
+
+    def test_streaming_request_no_timeout_before_deadline(self):
+        """A session still within its timeout window is left waiting, not
+        aborted."""
+        scheduler = create_scheduler()
+
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[1, 2, 3],
+            resumable=True,
+        )
+        scheduler.add_request(session)
+        session.num_computed_tokens = len(session.prompt_token_ids)
+        scheduler._handle_stopped_request(session)
+
+        scheduler.schedule()
+
+        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        assert "session" in scheduler.requests
 
     def test_streaming_request_session_update(self):
         """Test that a resumable request updates a waiting session directly.
