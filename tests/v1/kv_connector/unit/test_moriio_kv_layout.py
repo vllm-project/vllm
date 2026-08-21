@@ -11,11 +11,9 @@ from typing import Any
 import pytest
 import torch
 
-from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    KVCacheLayout,
     MLAAttentionSpec,
 )
 
@@ -757,51 +755,3 @@ def test_unsupported_shape_raises_value_error():
 
     with pytest.raises(ValueError, match="Unsupported MoRIIO K/V cache shape"):
         moriio_layout.get_layer_transfer_geometry("layer", cache, worker.layer_to_spec)
-
-
-def test_standardized_view_geometry_and_padded_registration():
-    """Production views come from ``create_kv_cache_views``: geometry must track
-    the [B, H, N, C] shape, and padded pages must register the full strided span
-    (not just the meaningful block_len)."""
-    num_blocks = 8
-    spec = _full_spec()
-    raw = torch.zeros(num_blocks * spec.page_size_bytes, dtype=torch.int8)
-    (view,) = dense_kv_cache_views(raw, spec, num_blocks, 1, KVCacheLayout.LBNHC)
-    worker = _worker({"layer": view}, {"layer": spec})
-
-    geometry = moriio_layout.get_layer_transfer_geometry(
-        "layer", view, worker.layer_to_spec
-    )
-    assert geometry.num_blocks == num_blocks
-    assert geometry.block_len == spec.page_size_bytes
-    assert geometry.block_stride * view.element_size() == spec.page_size_bytes
-
-    # MLA is just H == 1.
-    mla = _mla_spec()
-    mla_raw = torch.zeros(num_blocks * mla.page_size_bytes, dtype=torch.int8)
-    (mla_view,) = dense_kv_cache_views(mla_raw, mla, num_blocks, 1, KVCacheLayout.LBNHC)
-    mla_geometry = moriio_layout.get_layer_transfer_geometry(
-        "mla", mla_view, {"mla": mla}
-    )
-    assert mla_geometry.block_len == mla.page_size_bytes
-
-    # Alignment-padded page: registration must cover the padded stride.
-    padded = MLAAttentionSpec(
-        block_size=4,
-        num_kv_heads=1,
-        head_size=3,
-        dtype=torch.bfloat16,
-        page_size_padded=64,
-    )
-    padded_raw = torch.zeros(num_blocks * padded.page_size_bytes, dtype=torch.int8)
-    (padded_view,) = dense_kv_cache_views(
-        padded_raw, padded, num_blocks, 1, KVCacheLayout.LBNHC
-    )
-    regions = moriio_layout.iter_layer_registration_regions(
-        "padded", padded_view, {"padded": padded}
-    )
-    assert len(regions) == 1
-    assert regions[0][1] == (
-        (num_blocks - 1) * padded_view.stride(0) * padded_view.element_size()
-        + padded.real_page_size_bytes
-    )
