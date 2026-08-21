@@ -2105,7 +2105,8 @@ def test_two_dense_groups_agree_still_detects_genuine_sparse_lag():
     )
 
 
-def test_connector_fast_path_trims_the_deeper_dense_group():
+@pytest.mark.parametrize("mamba_num_blocks", [3, 2])
+def test_connector_fast_path_trims_the_deeper_dense_group(mamba_num_blocks):
     """The connector fast path must trim its block lists, not just lower the
     length it reports.
 
@@ -2157,12 +2158,12 @@ def test_connector_fast_path_trims_the_deeper_dense_group():
         block_size=coarse_block_size,
         kv_cache_group_id=1,
     )
-    mamba_blocks = pool.get_new_blocks(3)
+    mamba_blocks = pool.get_new_blocks(mamba_num_blocks)
     pool.cache_full_blocks(
         request=req,
         blocks=mamba_blocks,
         num_cached_blocks=0,
-        num_full_blocks=3,
+        num_full_blocks=mamba_num_blocks,
         block_size=block_size,
         kv_cache_group_id=2,
     )
@@ -2175,6 +2176,20 @@ def test_connector_fast_path_trims_the_deeper_dense_group():
         f"expected the reported hit to be min over the dense groups (8), "
         f"got {num_local}"
     )
+    if mamba_num_blocks == 3:
+        expected, expected_local, expected_boundary = manager.get_computed_blocks(req)
+        assert num_local == expected_local
+        assert _boundary == expected_boundary
+        assert _diverged is False
+        assert [[block.block_id for block in group] for group in blocks.blocks] == [
+            [block.block_id for block in group] for group in expected.blocks
+        ]
+        assert all(
+            block.is_null for block in blocks.blocks[2][num_local // block_size :]
+        )
+        return
+
+    assert _diverged is False
     # Asserted over the full-attention groups only. A block count is the right
     # invariant for them because their lists are dense and downward-closed, so
     # a prefix of the list is exactly what a shorter lookup returns. It is the

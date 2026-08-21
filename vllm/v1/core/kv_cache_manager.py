@@ -336,24 +336,19 @@ class KVCacheManager:
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, request.num_tokens - 1
         )
-        # Two questions, so two reductions over the dense groups. Both
-        # reduce to the single-group behaviour when there is only one.
+        # Report the shortest dense hit, then reconcile deeper sparse hits.
         dense_hits = [
             per_group_hits[group_id]
             for group_id in coordinator.full_attention_group_ids
         ]
-        if any(hit > max(dense_hits) for hit in per_group_hits):
-            # Eviction test: a group deeper than *every* dense group means the
-            # dense blocks were evicted. Comparing against one arbitrary dense
-            # group instead would read a finer-grained sibling as eviction and
-            # give up the fast path on most hits.
+        num_local = min(dense_hits)
+        if any(
+            hit > num_local
+            and not coordinator.single_type_managers[group_id].is_downward_closed
+            for group_id, hit in enumerate(per_group_hits)
+        ):
             return *self.get_computed_blocks(request), False
 
-        # Reported length: the blocks below come from the per-group lookup at
-        # each group's own hit, not from a reconciled one, so this must be a
-        # length every dense group's list actually covers. The max would name a
-        # boundary the coarser group's blocks fall short of.
-        num_local = min(dense_hits)
         # Reducing the reported length is not enough on its own: a dense group
         # that hit deeper keeps a block list longer than `num_local` covers,
         # and the pair is handed straight to `add_local_computed_blocks`. Trim
