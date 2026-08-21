@@ -40,20 +40,47 @@ def test_get_draft_quant_config_populates_packed_modules():
         mock_configure.assert_called_once_with(mock_quant_config, mock_draft_cls)
 
 
-def test_dflash_build_context_kv_buffers_raises_on_quantized_dtype():
-    """Verify mismatched dtype between norm and weight raises clean error."""
-    model = DFlashQwen3Model.__new__(DFlashQwen3Model)
-    nn.Module.__init__(model)
-    model.hidden_norm = nn.Module()
-    model.hidden_norm.weight = nn.Parameter(torch.ones(16, dtype=torch.bfloat16))
+def test_dflash_dequant_kv_slice_raises_value_error_without_scale():
+    """Verify that _dequant_kv_slice raises a ValueError if dtypes mismatch
+    and no scale exists."""
 
-    mock_layer_attn = MagicMock()
-    mock_layer_attn.qkv_proj.weight = nn.Parameter(
-        torch.ones(16, 16, dtype=torch.float8_e4m3fn)
-    )
+    class MockQKV(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.randn(10, 10, dtype=torch.float16)
 
-    with pytest.raises(
-        NotImplementedError,
-        match="DFlash's fused context-KV projection reads qkv_proj.weight",
-    ):
-        model._build_context_kv_buffers([mock_layer_attn], has_bias=False)
+    class MockAttn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.qkv_proj = MockQKV()
+            self.q_size = 5
+
+    attn = MockAttn()
+
+    # Passing bfloat16 as the target act_dtype while the weight is float16
+    with pytest.raises(ValueError, match="exposes no weight_scale"):
+        DFlashQwen3Model._dequant_kv_slice(attn, act_dtype=torch.bfloat16)
+
+
+def test_dflash_dequant_kv_slice_returns_untouched_on_match():
+    """Verify that _dequant_kv_slice returns the tensor directly if dtypes match."""
+
+    class MockQKV(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.ones(10, 10, dtype=torch.bfloat16)
+
+    class MockAttn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.qkv_proj = MockQKV()
+            self.q_size = 5
+
+    attn = MockAttn()
+
+    # Target act_dtype matches the weight dtype exactly
+    result = DFlashQwen3Model._dequant_kv_slice(attn, act_dtype=torch.bfloat16)
+
+    # Should slice correctly [5:] and return
+    assert result.shape == (5, 10)
+    assert result.dtype == torch.bfloat16

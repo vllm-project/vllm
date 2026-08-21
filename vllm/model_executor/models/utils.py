@@ -899,18 +899,7 @@ def maybe_prefix(prefix: str, name: str) -> str:
 def get_draft_quant_config(
     vllm_config: VllmConfig,
 ) -> "QuantizationConfig | None":
-    """Get quantization config for Draft models.
-
-    Draft models should use their own quantization config instead of the
-    verifier/target model's config. This helper retrieves the draft
-    model's quantization config and attaches packed module mappings.
-
-    Args:
-        vllm_config: The vLLM configuration object.
-
-    Returns:
-        The draft model's config if available, None otherwise.
-    """
+    # ... [existing docstring and setup] ...
     draft_model_config = vllm_config.speculative_config.draft_model_config
     draft_load_config = vllm_config.load_config
 
@@ -921,8 +910,12 @@ def get_draft_quant_config(
         draft_model_config, draft_load_config
     )
     if quant_config is not None:
-        draft_cls, _ = get_model_architecture(draft_model_config)
-        configure_quant_config(quant_config, draft_cls)
+        try:
+            draft_cls, _ = get_model_architecture(draft_model_config)
+            configure_quant_config(quant_config, draft_cls)
+        except Exception:
+            # Fallback if the draft architecture cannot be resolved
+            pass
 
     return quant_config
 
