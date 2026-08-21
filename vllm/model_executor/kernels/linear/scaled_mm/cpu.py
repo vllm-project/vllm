@@ -241,6 +241,9 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def can_implement(
         cls, config: FP8ScaledMMLinearLayerConfig
     ) -> tuple[bool, str | None]:
+        if config.weight_quant_key.scale.dtype == torch.float8_e8m0fnu:
+            return False, "does not support float8_e8m0fnu weight scales."
+
         # Validate weight block shape
         weight_gs = config.weight_quant_key.scale.group_shape
         if weight_gs.col <= 0 or weight_gs.col != 128:
