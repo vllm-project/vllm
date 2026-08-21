@@ -839,6 +839,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if can_use_xqa_or_trtllm_gen_decode
             else None
         )
+        # The dedicated FlashInfer XQA API accepts head dimensions in
+        # [16, 256] that are divisible by 16. Some hybrid-attention models
+        # (for example Gemma 4) use XQA-compatible sliding-attention groups
+        # alongside global-attention groups with head_dim=512. Resolve the
+        # backend per KV-cache group so the eligible groups still use XQA and
+        # the wider groups fall back to native FlashInfer decode.
+        if (
+            self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
+            and not (16 <= self.head_dim <= 256 and self.head_dim % 16 == 0)
+        ):
+            logger.warning_once(
+                "FlashInfer XQA decode does not support head_dim=%d; "
+                "reverting this KV-cache group to native FlashInfer decode.",
+                self.head_dim,
+            )
+            self.use_trtllm_decode_attention = False
+            self.flashinfer_trtllm_api_decode_kernel = None
         if (
             self.use_dcp
             and self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
