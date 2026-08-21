@@ -517,7 +517,7 @@ def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
     assert mamba_blocks[3].block_id == running_block_id
 
 
-def test_internal_checkpoint_requires_block_aligned_start():
+def test_internal_checkpoint_requires_aligned_relative_offset():
     hash_block_size = 2
     mamba_block_size = 16
     manager = make_full_mamba_manager(
@@ -528,6 +528,10 @@ def test_internal_checkpoint_requires_block_aligned_start():
         num_prefill_checkpoint_blocks=1,
     )
     request = make_request("producer", list(range(50)), hash_block_size, sha256)
+
+    # Compute token 0 first, so the next query starts at token 1. Its checkpoint
+    # boundary is token 48 and its relative offset is 47, which is not aligned
+    # to the Mamba block size.
     assert manager.allocate_slots(request, 1) is not None
     request.num_computed_tokens = 1
     manager.new_step_starts()
