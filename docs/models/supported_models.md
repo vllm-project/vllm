@@ -289,6 +289,21 @@ os.environ["http_proxy"] = "http://your.proxy.server:port"
 os.environ["https_proxy"] = "http://your.proxy.server:port"
 ```
 
+### MatrixHub
+
+[MatrixHub](https://github.com/matrixhub-ai/matrixhub) is a self-hosted model registry and distribution layer that caches models from upstream hubs and serves them over a Hugging Face-compatible API inside your own network.
+
+Since the API is Hugging Face-compatible, you only need to point `HF_ENDPOINT` at your MatrixHub instance:
+
+```shell
+export HF_ENDPOINT="http://<your-matrixhub-address>"
+vllm serve Qwen/Qwen3-0.6B
+```
+
+vLLM then downloads model weights from MatrixHub over the internal network instead of the public Hugging Face Hub, which is useful for air-gapped clusters and for avoiding repeated downloads across nodes.
+
+See the [MatrixHub guide for vLLM](https://matrixhub.ai/docs/guides/use-with-vllm/) for an end-to-end walkthrough, including Docker and Kubernetes deployment examples.
+
 ### ModelScope
 
 To use models from [ModelScope](https://www.modelscope.cn) instead of Hugging Face Hub, set an environment variable:
@@ -390,10 +405,10 @@ th {
 | `GraniteMoeForCausalLM` | Granite 3.0 MoE, PowerMoE | `ibm-granite/granite-3.0-1b-a400m-base`, `ibm-granite/granite-3.0-3b-a800m-instruct`, `ibm/PowerMoE-3b`, etc. | ✅︎ | ✅︎ |
 | `GraniteMoeHybridForCausalLM` | Granite 4.0 MoE Hybrid | `ibm-granite/granite-4.0-tiny-preview`, etc. | ✅︎ | ✅︎ |
 | `GraniteMoeSharedForCausalLM` | Granite MoE Shared | `ibm-research/moe-7b-1b-active-shared-experts` (test model) | ✅︎ | ✅︎ |
+| `GraniteMoeSWAForCausalLM` | Granite MoE SWA | `ibm-granite/granite-swash-3b-a600m` | ✅︎ | ✅︎ |
+| `GraniteSWAForCausalLM` | Granite SWA | `ibm-granite/granite-swash-2b` | ✅︎ | ✅︎ |
 | `GritLM` | GritLM | `parasail-ai/GritLM-7B-vllm`. | ✅︎ | ✅︎ |
 | `HrmTextForCausalLM` | HRM-Text | `sapientinc/HRM-Text-1B`, etc. | | |
-| `HunYuanDenseV1ForCausalLM` | Hunyuan Dense | `tencent/Hunyuan-7B-Instruct` | ✅︎ | ✅︎ |
-| `HunYuanMoEV1ForCausalLM` | Hunyuan-A13B | `tencent/Hunyuan-A13B-Instruct`, `tencent/Hunyuan-A13B-Pretrain`, `tencent/Hunyuan-A13B-Instruct-FP8`, etc. | ✅︎ | ✅︎ |
 | `HYV3ForCausalLM` | HY3 | `tencent/Hy3-preview-Base`, `tencent/Hy3-preview` | ✅︎ | ✅︎ |
 | `HyperCLOVAXForCausalLM` | HyperCLOVAX-SEED-Think-14B | `naver-hyperclovax/HyperCLOVAX-SEED-Think-14B` | ✅︎ | ✅︎ |
 | `InternLM2ForCausalLM` | InternLM2 | `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc. | ✅︎ | ✅︎ |
@@ -461,6 +476,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `GPTBigCodeForCausalLM` | StarCoder, SantaCoder, WizardCoder | `bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, `WizardLM/WizardCoder-15B-V1.0`, etc. | ✅︎ | |
+| `HunYuanDenseV1ForCausalLM` | Hunyuan Dense | `tencent/Hunyuan-7B-Instruct` | ✅︎ | ✅︎ |
+| `HunYuanMoEV1ForCausalLM` | Hunyuan-A13B | `tencent/Hunyuan-A13B-Instruct`, `tencent/Hunyuan-A13B-Pretrain`, `tencent/Hunyuan-A13B-Instruct-FP8`, etc. | ✅︎ | ✅︎ |
 | `OlmoForCausalLM` | OLMo | `allenai/OLMo-1B-hf`, `allenai/OLMo-7B-hf`, etc. | ✅︎ | ✅︎ |
 | `Olmo2ForCausalLM` | OLMo2 | `allenai/OLMo-2-0425-1B`, etc. | ✅︎ | ✅︎ |
 | `SmolLM3ForCausalLM` | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` | ✅︎ | ✅︎ |
@@ -535,7 +552,6 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `HCXVisionForCausalLM` | HyperCLOVAX-SEED-Vision-Instruct-3B | T + I<sup>+</sup> + V<sup>+</sup> | `naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B` | | |
 | `HCXVisionV2ForCausalLM` | HyperCLOVAX-SEED-Think-32B | T + I<sup>+</sup> + V<sup>+</sup> | `naver-hyperclovax/HyperCLOVAX-SEED-Think-32B` | | |
 | `H2OVLChatModel` | H2OVL | T + I<sup>E+</sup> | `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc. | ✅︎ | ✅︎ |
-| `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
 | `Idefics3ForConditionalGeneration` | Idefics3 | T + I | `HuggingFaceM4/Idefics3-8B-Llama3`, etc. | ✅︎ | |
 | `IsaacForConditionalGeneration` | Isaac | T + I<sup>+</sup> | `PerceptronAI/Isaac-0.1` | ✅︎ | ✅︎ |
 | `InternS1ForConditionalGeneration` | Intern-S1 | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1`, `internlm/Intern-S1-mini`, etc. | ✅︎ | ✅︎ |
@@ -556,7 +572,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `Llama4ForConditionalGeneration` | Llama 4 | T + I<sup>+</sup> | `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc. | ✅︎ | ✅︎ |
 | `Llama_Nemotron_Nano_VL` | Llama Nemotron Nano VL | T + I<sup>E+</sup> | `nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1` | ✅︎ | ✅︎ |
 | `LlavaForConditionalGeneration` | LLaVA-1.5, Pixtral (HF Transformers) | T + I<sup>E+</sup> | `llava-hf/llava-1.5-7b-hf`, `mistral-community/pixtral-12b`, etc. | ✅︎ | ✅︎ |
-| `LlavaNextForConditionalGeneration` | LLaVA-NeXT, Granite Vision | T + I<sup>E+</sup> | `llava-hf/llava-v1.6-mistral-7b-hf`, `llava-hf/llava-v1.6-vicuna-7b-hf`, `ibm-granite/granite-vision-3.3-2b`, etc. | | ✅︎ |
+| `LlavaNextForConditionalGeneration` | LLaVA-NeXT, Granite Vision | T + I<sup>E+</sup> | `llava-hf/llava-v1.6-mistral-7b-hf`, `llava-hf/llava-v1.6-vicuna-7b-hf`, `ibm-granite/granite-vision-3.3-2b`, etc. | ✅︎ | ✅︎ |
 | `LlavaNextVideoForConditionalGeneration` | LLaVA-NeXT-Video | T + V | `llava-hf/LLaVA-NeXT-Video-7B-hf`, etc. | ✅︎ | ✅︎ |
 | `LlavaOnevision2ForConditionalGeneration` | LLaVA-OneVision-2 | T + I<sup>+</sup> + V<sup>+</sup> | `lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct` | | |
 | `LlavaOnevisionForConditionalGeneration` | LLaVA-Onevision | T + I<sup>+</sup> + V<sup>+</sup> | `llava-hf/llava-onevision-qwen2-7b-ov-hf`, `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc. | | ✅︎ |
@@ -612,6 +628,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
 | `Emu3ForConditionalGeneration` | Emu3 | T + I<sup>+</sup> | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ |
+| `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | T + A<sup>+</sup> | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
 
 <sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.</br>

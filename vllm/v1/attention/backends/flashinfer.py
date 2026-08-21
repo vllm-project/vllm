@@ -46,6 +46,7 @@ from vllm.utils.flashinfer import (
     supports_trtllm_attention,
     use_trtllm_attention,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
@@ -72,10 +73,13 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
+    log2_lse_to_ln,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp import (
+    cp_lse_ag_out_rs,
+    dcp_a2a_lse_reduce,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -367,7 +371,7 @@ class BatchDCPPrefillWrapper:
             get_dcp_group(),
             return_lse=True,
         )
-        lse_context = lse_context.transpose(0, 1).contiguous()
+        lse_context = log2_lse_to_ln(lse_context.transpose(0, 1).contiguous())
 
         output_query, lse_query = self._new_tokens.run(
             prefill_query,
@@ -375,7 +379,7 @@ class BatchDCPPrefillWrapper:
             value,
             return_lse=True,
         )
-        lse_query = lse_query.transpose(0, 1).contiguous()
+        lse_query = log2_lse_to_ln(lse_query.transpose(0, 1).contiguous())
 
         merge_attn_states(
             out,
@@ -1408,13 +1412,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # seq_lens_cpu is not needed since TRTLLM paths use GPU tensors
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
-        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
-        num_blocks_np = (
-            (seq_lens_np + (page_size - 1)) // page_size
-            if seq_lens_np is not None
-            else None
-        )
+        if needs_seq_lens_cpu:
+            with gpu_sync_allowed():
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            seq_lens_np = seq_lens_cpu.numpy()
+            num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
+        else:
+            seq_lens_cpu = None
+            seq_lens_np = None
+            num_blocks_np = None
 
         # Adjust seq_lens_cpu for DCP
         if self.use_dcp:

@@ -66,14 +66,12 @@ else:
 
 logger = init_logger(__name__)
 
-MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES = frozenset(
-    {"DeepseekV4ForCausalLM"}
-)
-
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
+        "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
+        "GlmMoeDsaForCausalLM",
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
@@ -83,11 +81,50 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     }
 )
 
+DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
+    {
+        "DeepseekV32MTPModel",
+        "DeepseekV32ForCausalLM",
+        "DeepseekV4ForCausalLM",
+        "DeepSeekV4MTPModel",
+        "GlmMoeDsaForCausalLM",
+        "InklingForCausalLM",
+        "InklingForConditionalGeneration",
+        "KimiK3ForConditionalGeneration",
+        "KimiK3MTPModel",
+        "KimiLinearForCausalLM",
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
+    }
+)
+
 
 @lru_cache
 def default_v2_model_runner_architectures() -> frozenset[str]:
     """Architectures defaulting to the V2 model runner on this platform."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        # TODO(rocm): These models are either unsupported by MRV2 or slower with
+        # MRV2 on AMD GPUs.
+        return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES - {
+            "DeepseekV32ForCausalLM",
+            "DeepseekV4ForCausalLM",
+        }
     return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
+
+
+@lru_cache
+def default_breakable_cudagraph_architectures() -> frozenset[str]:
+    """Architectures defaulting to breakable CUDA graphs on this platform."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES - {
+            "DeepseekV32ForCausalLM",
+            "DeepseekV32MTPModel",
+        }
+    return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
 class OptimizationLevel(IntEnum):
@@ -633,6 +670,12 @@ class VllmConfig:
         if self._dflash_needs_multi_kv_group():
             return True
 
+        # The DFlash2 candidate selector exists only in the V2 speculator. On V1
+        # the same checkpoint drafts through DFlashProposer, which never calls
+        # it, so the draft degrades to DFlash1 silently. Force V2 as for dspark.
+        if self._is_dflash2_draft():
+            return True
+
         if self.model_config is not None and self.model_config.is_diffusion:
             return True
 
@@ -656,6 +699,17 @@ class VllmConfig:
 
         return True
 
+    def _is_dflash2_draft(self) -> bool:
+        """Whether the DFlash draft is a DFlash2 one, by the architecture the
+        speculator selects on (v1/worker/gpu/spec_decode/__init__.py)."""
+        spec = self.speculative_config
+        if spec is None or spec.method != "dflash":
+            return False
+        draft_config = getattr(spec, "draft_model_config", None)
+        if draft_config is None:
+            return False
+        return "DFlash2DraftModel" in (draft_config.architectures or [])
+
     def _dflash_needs_multi_kv_group(self) -> bool:
         """Whether a DFlash draft mixes sliding-window and full attention."""
         spec = self.speculative_config
@@ -673,9 +727,6 @@ class VllmConfig:
         if model_config is None:
             return False
 
-        if model_config.runner_type != "generate":
-            return False
-
         architectures = getattr(model_config, "architectures", [])
         default_architectures = default_v2_model_runner_architectures()
         is_default_v2_architecture = any(
@@ -691,24 +742,33 @@ class VllmConfig:
             return False
         return is_default_v2_architecture or not model_config.is_moe
 
-    def _validate_mrv1_piecewise_cudagraph(self) -> None:
-        if self.use_v2_model_runner:
-            return
+    def _uses_breakable_cudagraph_by_default(self) -> bool:
         model_config = self.model_config
         if model_config is None:
-            return
-        if not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs():
-            return
-        architectures = getattr(model_config, "architectures", [])
-        if any(
-            arch in MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES
-            for arch in architectures
+            return False
+
+        architectures = set(model_config.architectures)
+        return bool(architectures & default_breakable_cudagraph_architectures())
+
+    def _maybe_enable_breakable_cudagraph(self) -> bool:
+        if (
+            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
+            and self._uses_breakable_cudagraph_by_default()
         ):
-            raise ValueError(
-                "DeepSeek V4 does not support PIECEWISE CUDA graphs with "
-                "Model Runner V1. Use Model Runner V2 or disable PIECEWISE "
-                "CUDA graphs."
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            logger.info_once(
+                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
+                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
+
+        from vllm.compilation.breakable_cudagraph import (
+            is_breakable_cudagraph_enabled,
+        )
+
+        enabled = is_breakable_cudagraph_enabled()
+        if enabled:
+            self.compilation_config.mode = CompilationMode.NONE
+        return enabled
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -1048,6 +1108,13 @@ class VllmConfig:
                 "are normalized over the same nucleus as the sampling mask"
             )
 
+    def _verify_trace_replay_config(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.enable_trace_replay:
+            return
+        if not self.use_v2_model_runner:
+            raise ValueError("trace replay requires Model Runner V2")
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1058,6 +1125,10 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+
+        # Models may have supplied their own DCP defaults above; anything still
+        # unset falls back to the stock ones.
+        self.parallel_config.set_dcp_defaults()
 
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -1097,7 +1168,21 @@ class VllmConfig:
                     "connectors (PD disaggregation, KV cache offload)."
                 )
 
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.language_model_only
+            and self.compilation_config.cudagraph_mm_encoder
+        ):
+            raise ValueError(
+                "--language-model-only is incompatible with "
+                "cudagraph_mm_encoder=True, since it disables all multimodal "
+                "inputs and the multimodal encoder is never run. Please "
+                "disable one of them."
+            )
+
         self._verify_sampling_replay_config()
+        self._verify_trace_replay_config()
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
@@ -1118,6 +1203,16 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
             )
+
+        # "dummy" reads no weights at all, and the sharded formats read a vLLM
+        # state dict, which stores tied word embeddings under the lm_head only.
+        # Neither can tell us what the original checkpoint contained.
+        if self.model_config is not None and self.load_config.load_format not in (
+            "dummy",
+            "sharded_state",
+            "runai_streamer_sharded",
+        ):
+            self.model_config.maybe_untie_word_embeddings()
 
         if (
             self.quant_config is not None
@@ -1258,6 +1353,15 @@ class VllmConfig:
             self.model_config.disable_cascade_attn = True
 
         if (
+            self.observability_config.per_request_spec_decode_metrics != "none"
+            and self.speculative_config is None
+        ):
+            raise ValueError(
+                "--per-request-spec-decode-metrics requires speculative decoding "
+                "to be enabled (via --speculative-config)."
+            )
+
+        if (
             self.model_config is not None
             and self.model_config.multimodal_config is not None
             and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
@@ -1307,41 +1411,7 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # For model classes don't carry @support_torch_compile —
-        # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
-        # it unless the user has explicitly opted out via the env var.
-        if (
-            self.model_config is not None
-            and "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and any(
-                a
-                in (
-                    "DeepseekV4ForCausalLM",
-                    "DeepSeekV4MTPModel",
-                    "InklingForCausalLM",
-                    "InklingForConditionalGeneration",
-                    "KimiK3ForConditionalGeneration",
-                    "KimiK3MTPModel",
-                    "KimiLinearForCausalLM",
-                    "MiniMaxM3SparseForCausalLM",
-                    "MiniMaxM3SparseForConditionalGeneration",
-                )
-                for a in self.model_config.architectures
-            )
-        ):
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-            logger.info_once(
-                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
-                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
-            )
-
-        from vllm.compilation.breakable_cudagraph import (
-            is_breakable_cudagraph_enabled,
-        )
-
-        breakable_cudagraph_enabled = is_breakable_cudagraph_enabled()
-        if breakable_cudagraph_enabled:
-            self.compilation_config.mode = CompilationMode.NONE
+        breakable_cudagraph_enabled = self._maybe_enable_breakable_cudagraph()
 
         if not breakable_cudagraph_enabled and (
             self.compilation_config.backend == "eager"
@@ -1593,7 +1663,7 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        self._resolve_mm_embeds_from_ec_connector()
+        self._resolve_allow_missing_mm_embeddings()
         self._resolve_mm_processor_device()
         self._validate_mm_processor_device()
 
@@ -1643,8 +1713,6 @@ class VllmConfig:
                         "this will likely lead to an error.",
                         "pipeline parallelism",
                     )
-
-        self._validate_mrv1_piecewise_cudagraph()
 
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():
@@ -2272,14 +2340,13 @@ class VllmConfig:
             f"kernel_config={self.kernel_config!r}"
         )
 
-    def _resolve_mm_embeds_from_ec_connector(self) -> None:
-        """Allow `*_embeds` to be omitted only where the connector supplies them.
+    def _resolve_allow_missing_mm_embeddings(self) -> None:
+        """Allow `*_embeds` tensors to be omitted on disaggregated consumers.
 
-        That is exactly an EC consumer: the encoder instance publishes the
-        embeddings through the EC connector, so the request only has to carry
-        the grid metadata that sizes the placeholder range. On every other
-        deployment a missing `*_embeds` is a client error and must keep failing
-        fast in the frontend.
+        An EC consumer loads embeddings from its connector. A KV consumer
+        receives the prompt KV produced from those embeddings, so it does not
+        need the tensors either. On every other deployment a missing tensor is
+        a client error and must keep failing fast in the frontend.
         """
         model_config = self.model_config
         if model_config is None:
@@ -2289,15 +2356,16 @@ class VllmConfig:
             return
 
         ec_config = self.ec_transfer_config
+        kv_config = self.kv_transfer_config
         # Derived, so overwrite unconditionally rather than honouring a value
         # that was set by hand.
-        mm_config.mm_embeds_from_ec_connector = (
+        mm_config.allow_missing_mm_embeddings = (
             ec_config is not None and ec_config.is_ec_consumer
-        )
-        if mm_config.mm_embeds_from_ec_connector:
+        ) or (kv_config is not None and kv_config.is_kv_consumer)
+        if mm_config.allow_missing_mm_embeddings:
             logger.info_once(
-                "EC consumer: pre-computed-embedding inputs may omit the "
-                "embedding tensor; embeddings are loaded from the EC connector."
+                "EC/KV consumer: pre-computed-embedding inputs may "
+                "omit the embedding tensor."
             )
 
     def _resolve_mm_processor_device(self) -> None:
@@ -2404,6 +2472,7 @@ class VllmConfig:
                 "mtp",
                 "dflash",
                 "dspark",
+                "extract_hidden_states",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
@@ -2460,9 +2529,6 @@ class VllmConfig:
             model_config.logits_processors or has_logitsproc_plugins
         ):
             unsupported.append("custom logits processors")
-
-        if model_config is not None and model_config.enable_prompt_embeds:
-            unsupported.append("prompt embeds")
 
         if self.cache_config.kv_sharing_fast_prefill:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
@@ -2552,22 +2618,47 @@ class VllmConfig:
     @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
+            self.cache_config.use_kda_recoverssm = False
             return self
-        # ReplaySSM adds a 3-tensor ring to the mamba state; only models that
-        # opt in (supports_replayssm) build a consistent shape on both the layer
-        # and config paths. Reject others so the mamba page size cannot desync.
+        self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
+
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
-                "--use-replayssm is only supported for Nemotron-H models "
-                f"(got architecture {self.model_config.architecture!r})"
+                "--use-replayssm is not supported for architecture "
+                f"{self.model_config.architecture!r}"
             )
-        if self.cache_config.mamba_cache_mode == "all":
+        if self.cache_config.use_kda_recoverssm:
+            if self.model_config is not None and self.model_config.architecture not in (
+                "KimiLinearForCausalLM",
+                "KimiK3ForConditionalGeneration",
+            ):
+                raise ValueError("RecoverSSM is only supported for Kimi-K3 KDA")
+            if self.mamba_config.enable_stochastic_rounding:
+                raise ValueError(
+                    "RecoverSSM supports bfloat16/float32 "
+                    "SSM state caches, not --enable-mamba-cache-stochastic-"
+                    "rounding, which requires an explicit float16 cache"
+                )
+            if self.cache_config.mamba_cache_mode not in ("none", "align"):
+                raise ValueError(
+                    "RecoverSSM supports only none and align Mamba cache modes"
+                )
+            if (
+                self.cache_config.mamba_cache_mode == "align"
+                and not self.use_v2_model_runner
+            ):
+                raise ValueError(
+                    "RecoverSSM with align mode requires VLLM_USE_V2_MODEL_RUNNER=1"
+                )
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "RecoverSSM currently requires pipeline_parallel_size=1"
+                )
+        elif self.cache_config.mamba_cache_mode == "all":
             raise ValueError(
                 "--use-replayssm supports prefix caching only in align mode; "
                 "pass --mamba-cache-mode align"
             )
-        if self.num_speculative_tokens > 0:
-            raise ValueError("--use-replayssm does not support speculative decoding")
         if self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError("--use-replayssm requires --mamba-backend triton")
         if (
