@@ -259,8 +259,7 @@ class KDARecoverSSMCommitMetadata:
 
 @dataclass
 class KDACheckpointMetadata:
-    splits: tuple[tuple[int, int], ...]
-    cu_seqlens: torch.Tensor
+    checkpoint_offsets: torch.Tensor
     state_indices: torch.Tensor
 
 
@@ -593,8 +592,8 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 checkpoint_splits.append((first_len, query_len - first_len))
                 checkpoint_cols.append(seq_len // block_size - 1 if valid else -1)
             if any(tail for _, tail in checkpoint_splits):
-                checkpoint_cu_seqlens = async_tensor_h2d(
-                    [((0, first), (0, tail)) for first, tail in checkpoint_splits],
+                checkpoint_offsets_tensor = async_tensor_h2d(
+                    [first if tail else 0 for first, tail in checkpoint_splits],
                     dtype=torch.int32,
                     device=query_start_loc.device,
                 )
@@ -613,8 +612,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     NULL_BLOCK_ID,
                 )
                 checkpoint = KDACheckpointMetadata(
-                    tuple(checkpoint_splits),
-                    checkpoint_cu_seqlens,
+                    checkpoint_offsets_tensor,
                     checkpoint_state_indices,
                 )
 

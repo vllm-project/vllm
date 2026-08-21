@@ -864,11 +864,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     if checkpoint is not None:
                         assert non_spec_query_start_loc is not None
                         num_sequences = initial_state.shape[0]
-                        assert len(checkpoint.splits) == num_sequences
-                        assert checkpoint.cu_seqlens.shape == (num_sequences, 2, 2)
+                        assert checkpoint.checkpoint_offsets.shape == (num_sequences,)
                         final_state = final_state[:num_sequences]
                         checkpoint_state = checkpoint_state[:num_sequences]
-                        checkpoint_offsets = checkpoint.cu_seqlens[:, 0, 1]
+                        checkpoint_offsets = checkpoint.checkpoint_offsets
                         _flashkda_prefill(
                             q=q_ns,
                             k=k_ns,

@@ -144,14 +144,9 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary():
         actual.checkpoint.state_indices,
         torch.tensor([2, NULL_BLOCK_ID], dtype=torch.int32, device=device),
     )
-    assert actual.checkpoint.splits == ((48, 2), (16, 0))
     torch.testing.assert_close(
-        actual.checkpoint.cu_seqlens,
-        torch.tensor(
-            [[[0, 48], [0, 2]], [[0, 16], [0, 0]]],
-            dtype=torch.int32,
-            device=device,
-        ),
+        actual.checkpoint.checkpoint_offsets,
+        torch.tensor([48, 0], dtype=torch.int32, device=device),
     )
 
 
