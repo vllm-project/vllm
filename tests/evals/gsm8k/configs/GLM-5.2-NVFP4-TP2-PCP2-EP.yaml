@@ -7,6 +7,7 @@ server_args: >-
   --enforce-eager
   --max-model-len 4096
   --max-num-batched-tokens 32768
+  --kernel-config.enable_flashinfer_autotune=False
   --safetensors-load-strategy prefetch
   --moe-backend flashinfer_cutlass
   --tensor-parallel-size 2
