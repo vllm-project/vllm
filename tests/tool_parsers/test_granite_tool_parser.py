@@ -159,3 +159,16 @@ def test_streaming_parallel_calls_batched_deltas(granite_tokenizer, chunk_size):
     assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
         "city": "Tokyo"
     }
+
+
+def test_empty_tool_call_array_keeps_content(granite_tokenizer):
+    """An empty array parses cleanly but is not a tool call, so the output has
+    to survive as content."""
+    parser = GraniteToolParser(granite_tokenizer)
+    model_output = "<|tool_call|> []"
+
+    extracted = parser.extract_tool_calls(model_output, None)  # type: ignore[arg-type]
+
+    assert extracted.tools_called is False
+    assert extracted.tool_calls == []
+    assert extracted.content == model_output

@@ -100,6 +100,13 @@ class Ernie45ToolParser(ToolParser):
                         )
                     )
 
+                if not tool_calls:
+                    # Nothing parsed out of the block, so keep the output as
+                    # content instead of claiming a tool call that is not there.
+                    return ExtractedToolCallInformation(
+                        tools_called=False, tool_calls=[], content=model_output
+                    )
+
                 content = model_output[
                     : model_output.find(self.tool_calls_start_token)
                 ].rstrip("\n")
