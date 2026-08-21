@@ -1552,16 +1552,13 @@ class LlavaOnevision2MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # The wrapped OV2 processor is a bare custom class without the standard
         # ProcessorMixin ``_merge_kwargs`` machinery, so vLLM's default path
         # fails; overriding this method routes the base class to call us
         # directly.
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
-            dict(**mm_kwargs, **tok_kwargs)
-        )
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
         merged_kwargs.setdefault("return_tensors", "pt")
         call_kwargs = {
             k: v
@@ -1638,7 +1635,6 @@ class LlavaOnevision2MultiModalProcessor(
                 prompt=prompt,
                 mm_data=mm_data,
                 mm_kwargs={**mm_kwargs, "video_backend": "codec"},
-                tok_kwargs=tok_kwargs,
             )
             data = dict(output)
             return BatchFeature(
@@ -1736,7 +1732,6 @@ class LlavaOnevision2MultiModalProcessor(
                 prompt=new_prompt,
                 mm_data=merged_mm_data,
                 mm_kwargs=mm_kwargs,
-                tok_kwargs=tok_kwargs,
             )
             data = dict(output)
 
@@ -1803,7 +1798,6 @@ class LlavaOnevision2MultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
     def _rename_codec_outputs_to_video(

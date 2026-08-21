@@ -1159,11 +1159,10 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Override to use the text path instead of token path to use the
         # video-specific logic in processing_qwen2_5_vl.py
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
 
     def _get_prompt_updates(
         self,

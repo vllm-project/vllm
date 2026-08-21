@@ -145,10 +145,10 @@ def get_transformers_backend_model_ids_to_test():
     )
 
 
-def get_text_token_prompts(
+def get_token_prompt(
     processor: BaseMultiModalProcessor,
     mm_data: MultiModalDataDict,
-):
+) -> list[int]:
     dummy_inputs = processor.dummy_inputs
     tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
@@ -178,21 +178,10 @@ def get_text_token_prompts(
             mm_options={},
         )
 
-    text_prompt: str | None
-    token_prompt: list[int]
-    if isinstance(inputs.prompt, list):
-        text_prompt = None
-        token_prompt = inputs.prompt
-    elif isinstance(inputs.prompt, str):
-        text_prompt = inputs.prompt
-        token_prompt = tokenizer.encode(
-            text_prompt,
-            **processor.info.get_default_tok_params().get_encode_kwargs(),
-        )
-    else:
+    if not isinstance(inputs.prompt, list):
         raise TypeError(type(inputs.prompt))
 
-    return text_prompt, token_prompt
+    return inputs.prompt
 
 
 def random_vision_chunk(
@@ -358,7 +347,7 @@ def _test_processing_correctness_one(
 ):
     model_type = model_config.hf_config.model_type
 
-    text_prompt, token_prompt = get_text_token_prompts(baseline_processor, mm_data)
+    token_prompt = get_token_prompt(baseline_processor, mm_data)
     mm_items = baseline_processor.info.parse_mm_data(mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
@@ -381,54 +370,9 @@ def _test_processing_correctness_one(
         msg=(
             f"Failed ({batch_idx=}, {hit_rate=}, "
             f"{num_batches=}, {simplify_rate=}, "
-            f"{text_prompt=}, {token_prompt=}, {mm_data=})"
+            f"{token_prompt=}, {mm_data=})"
         ),
     )
-
-    if text_prompt is not None:
-        baseline_text_result = baseline_processor(
-            text_prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs={},
-        )
-        cached_text_result = cached_processor(
-            text_prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs={},
-        )
-
-        _assert_inputs_equal(
-            baseline_text_result,
-            cached_text_result,
-            ignore_mm_keys=ignore_mm_keys,
-            msg=(
-                f"Failed ({batch_idx=}, {hit_rate=}, "
-                f"{num_batches=}, {simplify_rate=}, "
-                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
-            ),
-        )
-
-        _assert_inputs_equal(
-            baseline_text_result,
-            baseline_tokenized_result,
-            ignore_mm_keys=ignore_mm_keys,
-            msg=(
-                f"Failed ({batch_idx=}, {hit_rate=}, "
-                f"{num_batches=}, {simplify_rate=}, "
-                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
-            ),
-        )
-
-        _assert_inputs_equal(
-            cached_text_result,
-            cached_tokenized_result,
-            ignore_mm_keys=ignore_mm_keys,
-            msg=(
-                f"Failed ({batch_idx=}, {hit_rate=}, "
-                f"{num_batches=}, {simplify_rate=}, "
-                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
-            ),
-        )
 
 
 @pytest.mark.parametrize("model_id", get_model_ids_to_test())

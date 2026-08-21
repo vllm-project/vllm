@@ -466,32 +466,19 @@ class MossTranscribeDiarizeMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
         audios = _get_audios_from_mm_data(mm_data)
         if not audios:
-            input_ids = tokenizer.encode(
-                prompt,
-                add_special_tokens=tok_kwargs.get("add_special_tokens", False),
-            )
+            input_ids = tokenizer.encode(prompt, add_special_tokens=False)
             return BatchFeature({"input_ids": [input_ids]}, tensor_type="pt")
 
         processed = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, audio=audios),
-            dict(**mm_kwargs, **tok_kwargs),
+            mm_kwargs,
         )
         return _add_vllm_audio_metadata(processed, len(audios))
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return mm_items.get_count("audio", strict=False) > 0
 
     def _get_mm_fields_config(
         self,

@@ -240,7 +240,6 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # NOTE - we rename audios -> audio in mm data because transformers has
         # deprecated audios for the qwen2audio processor and will remove
@@ -265,7 +264,6 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
     def _get_mm_fields_config(

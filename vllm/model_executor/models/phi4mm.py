@@ -873,7 +873,6 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             prompt_ids = self.info.get_tokenizer().encode(prompt)
@@ -884,9 +883,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         if audio_data := mm_data.get("audios", []):
             mm_data["audios"] = [(data, sr) for data in audio_data]
 
-        processed_outputs = super()._call_hf_processor(
-            prompt, mm_data, mm_kwargs, tok_kwargs
-        )
+        processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         num_img_tokens = [

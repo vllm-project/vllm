@@ -617,10 +617,9 @@ class FunAudioChatMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
-        input_ids = torch.tensor([tokenizer.encode(prompt, **tok_kwargs)])
+        input_ids = torch.tensor([tokenizer.encode(prompt)])
 
         audios = mm_data.get("audios", [])
         if not audios:
@@ -678,15 +677,6 @@ class FunAudioChatMultiModalProcessor(
         }
 
         return BatchFeature({"input_ids": input_ids, **mm_inputs})
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
 
     def _get_mm_fields_config(
         self,

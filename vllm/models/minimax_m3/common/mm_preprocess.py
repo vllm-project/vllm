@@ -311,7 +311,6 @@ class MiniMaxM3VLMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         # With ``video_needs_metadata=True`` each video arrives as a
@@ -341,7 +340,7 @@ class MiniMaxM3VLMultiModalProcessor(
 
         # Override the video processor's default do_resize=False (set for a
         # pre-resized pipeline) to True for vLLM's raw-frame inputs.
-        merged = dict(do_resize=True, **mm_kwargs, **tok_kwargs)
+        merged = dict(do_resize=True, **mm_kwargs)
         data = dict(text=prompt, **mm_data)
         if video_metadata is not None:
             data["video_metadata"] = video_metadata

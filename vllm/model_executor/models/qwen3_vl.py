@@ -1285,7 +1285,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
 
@@ -1370,7 +1369,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     prompt="<|vision_start|><|video_pad|><|vision_end|>",
                     mm_data=video_mm_data,
                     mm_kwargs=video_mm_kwargs,
-                    tok_kwargs=tok_kwargs,
                 )
 
                 # Discard HF output input_ids — we use get_video_repl below
@@ -1432,7 +1430,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=non_video_mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         # Replace each placeholder with pre-computed video tokens.

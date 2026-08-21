@@ -35,12 +35,10 @@ from vllm.sequence import IntermediateTensors
 
 
 class _Tokenizer:
-    def encode(self, text, add_special_tokens=False):
-        del add_special_tokens
+    def encode(self, text, **kwargs):
         return [ord(char) for char in text]
 
     def decode(self, token_ids, **kwargs):
-        del kwargs
         return "".join(chr(token_id) for token_id in token_ids)
 
     def batch_decode(self, batch_token_ids, **kwargs):

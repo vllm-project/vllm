@@ -159,14 +159,12 @@ class ColModernVBertMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
         assert isinstance(tokenizer, HfTokenizer)
         text_encoding = tokenizer(
             prompt,
             return_tensors="pt",
-            **tok_kwargs,
         )
         result = BatchFeature(data=dict(text_encoding))
 
@@ -186,15 +184,6 @@ class ColModernVBertMultiModalProcessor(
             result.update(image_outputs)
 
         return result
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
 
     def _get_mm_fields_config(
         self,

@@ -346,7 +346,6 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             # Avoid warning from HF logger for text-only input
@@ -358,7 +357,6 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         hf_processor = self.info.get_hf_processor()

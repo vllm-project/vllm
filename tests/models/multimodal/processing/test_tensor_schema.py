@@ -37,7 +37,7 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
-from .test_common import get_model_ids_to_test, get_text_token_prompts
+from .test_common import get_model_ids_to_test, get_token_prompt
 
 ImageInput = list[Image.Image]
 VideoInput: TypeAlias = (
@@ -107,10 +107,10 @@ def create_batched_mm_kwargs(
     }
 
     # video metadata will be added back to the resized video data here.
-    text_prompt, token_prompt = get_text_token_prompts(processor, resized_mm_data)
+    token_prompt = get_token_prompt(processor, resized_mm_data)
 
     mm_kwargs = processor(
-        prompt=token_prompt if text_prompt is None else text_prompt,
+        prompt=token_prompt,
         mm_items=processor.info.parse_mm_data(resized_mm_data),
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
     )["mm_kwargs"].require_data()
