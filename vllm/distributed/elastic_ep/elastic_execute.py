@@ -17,6 +17,7 @@ from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import (
     CompilationMode,
+    CUDAGraphMode,
     set_current_vllm_config,
 )
 from vllm.distributed import (
@@ -264,7 +265,9 @@ class ElasticEPScalingExecutor:
         self._prepare_eplb_communicator(get_standby_eplb_group())
         if new_dp_size > old_dp_size:
             self.transfer_weights(old_dp_size, new_dp_size)
-        self._warm_target_groups(get_standby_dp_group(), get_standby_ep_group())
+        self._maybe_warm_target_groups_during_prepare(
+            get_standby_dp_group(), get_standby_ep_group()
+        )
 
     def _prepare_eplb_communicator(self, eplb_group) -> None:
         assert eplb_group is not None
@@ -321,20 +324,27 @@ class ElasticEPScalingExecutor:
             )
         torch.accelerator.synchronize()
 
-    def _warm_target_groups(self, dp_group, ep_group) -> None:
-        assert dp_group is not None and ep_group is not None
-
+    def _should_defer_target_group_warmup(self) -> bool:
         from vllm.platforms import current_platform
 
-        if current_platform.is_rocm() and not self.worker.model_config.enforce_eager:
-            return
+        return (
+            current_platform.is_rocm()
+            and self.worker.vllm_config.compilation_config.cudagraph_mode
+            != CUDAGraphMode.NONE
+        )
 
+    def _warm_dp_ep_device_groups(self, dp_group, ep_group) -> None:
+        assert dp_group is not None and ep_group is not None
         stream = torch.Stream(device=dp_group.device)
         with stream:
             tensor = torch.zeros(1, dtype=torch.int32, device=dp_group.device)
             for group in (dp_group, ep_group):
                 torch.distributed.all_reduce(tensor, group=group.device_group)
                 stream.synchronize()
+
+    def _maybe_warm_target_groups_during_prepare(self, dp_group, ep_group) -> None:
+        if not self._should_defer_target_group_warmup():
+            self._warm_dp_ep_device_groups(dp_group, ep_group)
 
     def broadcast_expert_mapping(self) -> None:
         standby_dp_group = get_standby_dp_group()
@@ -682,7 +692,7 @@ class ElasticEPScalingExecutor:
             expert_weights=expert_weights,
         )
         torch.accelerator.synchronize()
-        self._warm_target_groups(get_dp_group(), get_ep_group())
+        self._maybe_warm_target_groups_during_prepare(get_dp_group(), get_ep_group())
 
     def receive_expert_mapping(self) -> torch.Tensor:
         dp_group = get_dp_group()
@@ -715,9 +725,8 @@ class ElasticEPScalingExecutor:
             kernel_warmup(self.worker, process_local_only=True)
 
     def warm_and_capture(self) -> None:
-        # Must run on every DP sibling in lockstep: _dummy_run calls
-        # coordinate_batch_across_dp whenever data_parallel_size > 1
-        # (gpu_model_runner.py:3663), which deadlocks if any rank skips it.
+        # Must run on every target rank in lockstep: deferred DP/EP warmup and
+        # _dummy_run's DP coordination deadlock if any group member skips it.
 
         # Save and clear block tables so the dummy MoE forward doesn't
         # write dummy slot mappings into real KV-cache blocks.
@@ -733,6 +742,9 @@ class ElasticEPScalingExecutor:
         # any captured CUDA graph with a stale data pointer; drop graphs
         # before re-warm so captures realign with the resized buffer.
         self._release_cuda_graphs()
+        if self._should_defer_target_group_warmup():
+            # Initialize deferred RCCL communicators after graph replay is quiesced.
+            self._warm_dp_ep_device_groups(get_dp_group(), get_ep_group())
         unlock_workspace()
 
         # Grow the MoE workspace at max_num_tokens. compile_or_warm_up_model
