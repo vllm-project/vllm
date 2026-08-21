@@ -2116,6 +2116,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force N-contiguous weight layout for all XPU unquantized linears.
     "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
         int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
+    ),
     # Kernel backend for INC weight-only intN (WNA16) linear layers on XPU.
     # "auto" keeps the default preference order (ARK when importable, else the
     # oneDNN w4a16 path). "ark" forces the auto_round_kernel backend, "w4a16"
