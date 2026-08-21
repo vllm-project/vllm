@@ -6,7 +6,7 @@ import gc
 import os
 import time
 from collections.abc import Callable
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
 from typing import TYPE_CHECKING, Any
@@ -19,7 +19,6 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
-from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -81,7 +80,10 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import (
+    is_residual_scattered_for_sp,
+    maybe_get_memory_pool_context,
+)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -264,29 +266,6 @@ class Worker(WorkerBase):
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
 
-    def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
-        if (
-            current_platform.is_cuda_alike()
-            and not self.vllm_config.model_config.enable_cumem_allocator
-        ):
-            return nullcontext()
-
-        if (
-            current_platform.is_xpu()
-            and not self.vllm_config.model_config.enable_sleep_mode
-        ):
-            return nullcontext()
-
-        if current_platform.is_cpu():
-            return nullcontext()
-
-        allocator = get_mem_allocator_instance()
-        if tag == "weights":
-            assert allocator.get_current_usage() == 0, (
-                "CuMem allocator can only be used for one instance per process."
-            )
-        return allocator.use_memory_pool(tag=tag)
-
     @contextmanager
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
         """Temporarily set max_split_size_mb to reduce allocator fragmentation at the
@@ -449,7 +428,7 @@ class Worker(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         with (
-            self._maybe_get_memory_pool_context(tag="weights"),
+            maybe_get_memory_pool_context(self.vllm_config, tag="weights"),
             set_current_vllm_config(self.vllm_config),
             # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
             self._scoped_allocator_max_split(max_split_size_mb=20),
@@ -676,8 +655,11 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        with self._maybe_get_memory_pool_context(tag="kv_cache"):
+        if self.use_v2_model_runner:
             self.model_runner.initialize_kv_cache(kv_cache_config)
+        else:
+            with maybe_get_memory_pool_context(self.vllm_config, tag="kv_cache"):
+                self.model_runner.initialize_kv_cache(kv_cache_config)
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
