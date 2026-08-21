@@ -191,7 +191,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         # selector-time resolution (e.g. ROCM_ATTN's head groups force LHBNC).
         layout = KVCacheLayout.LBNHC
         supported = self.attn_backend.supported_kv_cache_layouts()
-        if supported is not None and len(supported) == 1:
+        if supported:
             layout = supported[0]
 
         raw_tensor = torch.zeros(

@@ -801,4 +801,7 @@ def test_standardized_view_geometry_and_padded_registration():
         "padded", padded_view, {"padded": padded}
     )
     assert len(regions) == 1
-    assert regions[0][1] == num_blocks * padded.page_size_bytes
+    assert regions[0][1] == (
+        (num_blocks - 1) * padded_view.stride(0) * padded_view.element_size()
+        + padded.real_page_size_bytes
+    )
