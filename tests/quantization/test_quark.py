@@ -10,6 +10,7 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 import importlib.metadata
 from dataclasses import dataclass
 from importlib.util import find_spec
+from types import SimpleNamespace
 
 import huggingface_hub
 import lm_eval
@@ -18,21 +19,62 @@ import torch
 from packaging import version
 
 from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
+)
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
     QuarkLinearMethod,
+    QuarkNVFP4,
+    QuarkOCP_MX,
     QuarkW8A8Fp8,
+    QuarkW8A8Fp8PerBlock,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkMoEMethod,
     QuarkW4A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
 )
+from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.quark.utils import QuarkQTensorHint
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     is_layer_skipped,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockE8M0Sym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+    kInt4W4A8StaticChannelSym,
+    kInt8DynamicTensorAsym,
+    kInt8DynamicTensorSym,
+    kInt8DynamicTokenAsym,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorAsym,
+    kInt8StaticTensorSym,
+    kMxfp4Dynamic,
+    kMxfp4Static,
+    kMxfp6E2M3Dynamic,
+    kMxfp6E2M3Static,
+    kMxfp6E3M2Dynamic,
+    kMxfp6E3M2Static,
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
@@ -60,6 +102,522 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
 AITER_AVAILABLE = is_aiter_found_and_supported()
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@dataclass(frozen=True)
+class QTensorConfig:
+    name: str
+    weight: QuarkQTensorHint
+    input_tensors: QuarkQTensorHint
+    weight_quant_key: QuantKey
+    act_quant_key: QuantKey | None
+    dispatch_cls: type[QuarkScheme] | type[QuarkMoEMethod]
+
+
+QTENSOR_CONFIGS = [
+    QTensorConfig(
+        name="fp8_w8a8_static_tensor",
+        weight={"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False},
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+        },
+        weight_quant_key=kFp8StaticTensorSym,
+        act_quant_key=kFp8StaticTensorSym,
+        dispatch_cls=QuarkW8A8Fp8,
+    ),
+    QTensorConfig(
+        name="fp8_w8a8_static_tensor_single_entry_lists",
+        weight=[
+            {
+                "dtype": "fp8_e4m3",
+                "qscheme": "per_tensor",
+                "is_dynamic": False,
+            }
+        ],
+        input_tensors=[
+            {
+                "dtype": "fp8_e4m3",
+                "qscheme": "per_tensor",
+                "is_dynamic": False,
+            }
+        ],
+        weight_quant_key=kFp8StaticTensorSym,
+        act_quant_key=kFp8StaticTensorSym,
+        dispatch_cls=QuarkW8A8Fp8,
+    ),
+    QTensorConfig(
+        name="fp8_w8a8_dynamic_tensor",
+        weight={"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False},
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_tensor",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kFp8StaticTensorSym,
+        act_quant_key=kFp8DynamicTensorSym,
+        dispatch_cls=QuarkW8A8Fp8,
+    ),
+    QTensorConfig(
+        name="fp8_w8a8_dynamic_token",
+        weight={"dtype": "fp8_e4m3", "qscheme": "per_channel", "is_dynamic": False},
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_channel",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kFp8StaticChannelSym,
+        act_quant_key=kFp8DynamicTokenSym,
+        dispatch_cls=QuarkW8A8Fp8,
+    ),
+    QTensorConfig(
+        name="fp8_w8a8_channel_static_tensor",
+        weight={"dtype": "fp8_e4m3", "qscheme": "per_channel", "is_dynamic": False},
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+        },
+        weight_quant_key=kFp8StaticChannelSym,
+        act_quant_key=kFp8StaticTensorSym,
+        dispatch_cls=QuarkW8A8Fp8,
+    ),
+    QTensorConfig(
+        name="fp8_w8a8_tensor_dynamic_token",
+        weight={"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False},
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_channel",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kFp8StaticTensorSym,
+        act_quant_key=kFp8DynamicTokenSym,
+        dispatch_cls=QuarkW8A8Fp8,
+    ),
+    QTensorConfig(
+        name="fp8_w8a8_dynamic_block_fp32",
+        weight={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "is_dynamic": False,
+            "block_size": [128, 128],
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "is_dynamic": True,
+            "group_size": 128,
+            "symmetric": True,
+        },
+        weight_quant_key=kFp8Static128BlockSym,
+        act_quant_key=kFp8Dynamic128Sym,
+        dispatch_cls=QuarkW8A8Fp8PerBlock,
+    ),
+    QTensorConfig(
+        name="fp8_w8a8_dynamic_block_e8m0",
+        weight={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "is_dynamic": False,
+            "block_size": [128, 128],
+            "symmetric": True,
+            "scale_type": "float8_e8m0fnu",
+        },
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "is_dynamic": True,
+            "group_size": 128,
+            "symmetric": True,
+        },
+        weight_quant_key=kFp8Static128BlockE8M0Sym,
+        act_quant_key=kFp8Dynamic128Sym,
+        dispatch_cls=QuarkW8A8Fp8PerBlock,
+    ),
+    QTensorConfig(
+        name="int8_w8a8_static_symmetric",
+        weight={
+            "dtype": "int8",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "int8",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        weight_quant_key=kInt8StaticTensorSym,
+        act_quant_key=kInt8StaticTensorSym,
+        dispatch_cls=QuarkW8A8Int8,
+    ),
+    QTensorConfig(
+        name="int8_w8a8_static_asymmetric",
+        weight={
+            "dtype": "int8",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "int8",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+            "symmetric": False,
+        },
+        weight_quant_key=kInt8StaticTensorSym,
+        act_quant_key=kInt8StaticTensorAsym,
+        dispatch_cls=QuarkW8A8Int8,
+    ),
+    QTensorConfig(
+        name="int8_w8a8_channel_static_symmetric",
+        weight={
+            "dtype": "int8",
+            "qscheme": "per_channel",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "int8",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        weight_quant_key=kInt8StaticChannelSym,
+        act_quant_key=kInt8StaticTensorSym,
+        dispatch_cls=QuarkW8A8Int8,
+    ),
+    QTensorConfig(
+        name="int8_w8a8_channel_static_asymmetric",
+        weight={
+            "dtype": "int8",
+            "qscheme": "per_channel",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "int8",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+            "symmetric": False,
+        },
+        weight_quant_key=kInt8StaticChannelSym,
+        act_quant_key=kInt8StaticTensorAsym,
+        dispatch_cls=QuarkW8A8Int8,
+    ),
+    QTensorConfig(
+        name="int8_w8a8_dynamic_tensor_symmetric",
+        weight={
+            "dtype": "int8",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "int8",
+            "qscheme": "per_channel",
+            "is_dynamic": True,
+            "symmetric": True,
+        },
+        weight_quant_key=kInt8StaticTensorSym,
+        act_quant_key=kInt8DynamicTensorSym,
+        dispatch_cls=QuarkW8A8Int8,
+    ),
+    QTensorConfig(
+        name="int8_w8a8_dynamic_tensor_asymmetric",
+        weight={
+            "dtype": "int8",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "int8",
+            "qscheme": "per_channel",
+            "is_dynamic": True,
+            "symmetric": False,
+        },
+        weight_quant_key=kInt8StaticTensorSym,
+        act_quant_key=kInt8DynamicTensorAsym,
+        dispatch_cls=QuarkW8A8Int8,
+    ),
+    QTensorConfig(
+        name="int8_w8a8_dynamic_token",
+        weight={
+            "dtype": "int8",
+            "qscheme": "per_channel",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "int8",
+            "qscheme": "per_channel",
+            "is_dynamic": True,
+            "symmetric": True,
+        },
+        weight_quant_key=kInt8StaticChannelSym,
+        act_quant_key=kInt8DynamicTokenSym,
+        dispatch_cls=QuarkW8A8Int8,
+    ),
+    QTensorConfig(
+        name="int8_w8a8_dynamic_token_asymmetric",
+        weight={
+            "dtype": "int8",
+            "qscheme": "per_channel",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "int8",
+            "qscheme": "per_channel",
+            "is_dynamic": True,
+            "symmetric": False,
+        },
+        weight_quant_key=kInt8StaticChannelSym,
+        act_quant_key=kInt8DynamicTokenAsym,
+        dispatch_cls=QuarkW8A8Int8,
+    ),
+    QTensorConfig(
+        name="ocp_mx_mxfp4_weight_only",
+        weight={
+            "dtype": "fp4",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        input_tensors=None,
+        weight_quant_key=kMxfp4Static,
+        act_quant_key=None,
+        dispatch_cls=QuarkOCP_MX,
+    ),
+    QTensorConfig(
+        name="ocp_mx_mxfp4_activation",
+        weight={
+            "dtype": "fp4",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        input_tensors={
+            "dtype": "fp4",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kMxfp4Static,
+        act_quant_key=kMxfp4Dynamic,
+        dispatch_cls=QuarkOCP_MX,
+    ),
+    QTensorConfig(
+        name="ocp_mx_mxfp6_e3m2",
+        weight={
+            "dtype": "fp6_e3m2",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        input_tensors={
+            "dtype": "fp6_e3m2",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kMxfp6E3M2Static,
+        act_quant_key=kMxfp6E3M2Dynamic,
+        dispatch_cls=QuarkOCP_MX,
+    ),
+    QTensorConfig(
+        name="ocp_mx_mxfp4_mxfp6_e3m2_activation",
+        weight={
+            "dtype": "fp4",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        input_tensors={
+            "dtype": "fp6_e3m2",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kMxfp4Static,
+        act_quant_key=kMxfp6E3M2Dynamic,
+        dispatch_cls=QuarkOCP_MX,
+    ),
+    QTensorConfig(
+        name="ocp_mx_mxfp4_mxfp6_e2m3_activation",
+        weight={
+            "dtype": "fp4",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        input_tensors={
+            "dtype": "fp6_e2m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kMxfp4Static,
+        act_quant_key=kMxfp6E2M3Dynamic,
+        dispatch_cls=QuarkOCP_MX,
+    ),
+    QTensorConfig(
+        name="ocp_mx_mxfp6_e2m3",
+        weight={
+            "dtype": "fp6_e2m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        input_tensors={
+            "dtype": "fp6_e2m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kMxfp6E2M3Static,
+        act_quant_key=kMxfp6E2M3Dynamic,
+        dispatch_cls=QuarkOCP_MX,
+    ),
+    QTensorConfig(
+        name="nvfp4",
+        weight=[
+            {
+                "dtype": "fp4",
+                "qscheme": "per_group",
+                "group_size": 16,
+                "is_dynamic": False,
+            },
+            {"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False},
+        ],
+        input_tensors=[
+            {
+                "dtype": "fp4",
+                "qscheme": "per_group",
+                "group_size": 16,
+                "is_dynamic": True,
+            },
+            {"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False},
+        ],
+        weight_quant_key=kNvfp4Static,
+        act_quant_key=kNvfp4Dynamic,
+        dispatch_cls=QuarkNVFP4,
+    ),
+    QTensorConfig(
+        name="w4a8_fp8_static",
+        weight=[
+            {"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False},
+            {
+                "dtype": "int4",
+                "qscheme": "per_channel",
+                "is_dynamic": False,
+                "symmetric": True,
+                "ch_axis": 0,
+            },
+        ],
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+        },
+        weight_quant_key=kInt4W4A8StaticChannelSym,
+        act_quant_key=kFp8StaticTensorSym,
+        dispatch_cls=QuarkW4A8Fp8MoEMethod,
+    ),
+    QTensorConfig(
+        name="w4a8_fp8_dynamic",
+        weight=[
+            {"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False},
+            {
+                "dtype": "int4",
+                "qscheme": "per_channel",
+                "is_dynamic": False,
+                "symmetric": True,
+                "ch_axis": 0,
+            },
+        ],
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_channel",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kInt4W4A8StaticChannelSym,
+        act_quant_key=kFp8DynamicTokenSym,
+        dispatch_cls=QuarkW4A8Fp8MoEMethod,
+    ),
+    QTensorConfig(
+        name="w4a8_fp8_static_single_entry_input",
+        weight=[
+            {"dtype": "fp8_e4m3", "qscheme": "per_tensor", "is_dynamic": False},
+            {
+                "dtype": "int4",
+                "qscheme": "per_channel",
+                "is_dynamic": False,
+                "symmetric": True,
+                "ch_axis": 0,
+            },
+        ],
+        input_tensors=[
+            {
+                "dtype": "fp8_e4m3",
+                "qscheme": "per_tensor",
+                "is_dynamic": False,
+            }
+        ],
+        weight_quant_key=kInt4W4A8StaticChannelSym,
+        act_quant_key=kFp8StaticTensorSym,
+        dispatch_cls=QuarkW4A8Fp8MoEMethod,
+    ),
+]
+
+
+def _make_qtensor_config(
+    weight: QuarkQTensorHint,
+    input_tensors: QuarkQTensorHint,
+    exclude: list[str] | None = None,
+) -> QuarkConfig:
+    return QuarkConfig(
+        {
+            "global_quant_config": {
+                "weight": weight,
+                "input_tensors": input_tensors,
+            },
+            "layer_type_quant_config": {},
+            "exclude": exclude or [],
+        }
+    )
+
+
+def _make_test_moe_config() -> FusedMoEConfig:
+    return FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+        num_local_experts=8,
+        num_logical_experts=8,
+        activation=MoEActivation.SILU,
+        device=current_platform.device_type,
+        routing_method=RoutingMethodType.Renormalize,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+    )
+
 
 if QUARK_MXFP4_AVAILABLE:
     from quark.torch.export.nn.modules.realquantizer import StaticScaledRealQuantizer
@@ -95,6 +653,189 @@ def test_quark_config_preserves_existing_packed_modules_mapping():
     config = CustomQuarkConfig({})
 
     assert config.packed_modules_mapping["custom_proj"] == ["a", "b"]
+
+
+def test_quant_method_dispatch_ignored(default_vllm_config):
+    config = _make_qtensor_config(None, None, exclude=["linear", "experts"])
+
+    class TestLinear(LinearBase):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+
+    class TestRoutedExperts(RoutedExperts):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+            self.moe_config = _make_test_moe_config()
+
+    assert config.get_quant_method_target("linear", LinearBase) == (
+        None,
+        None,
+        UnquantizedLinearMethod,
+    )
+    assert isinstance(
+        config.get_quant_method(TestLinear(), "linear"), UnquantizedLinearMethod
+    )
+
+    assert config.get_quant_method_target("experts", RoutedExperts) == (
+        None,
+        None,
+        UnquantizedFusedMoEMethod,
+    )
+    assert isinstance(
+        config.get_quant_method(TestRoutedExperts(), "experts"),
+        UnquantizedFusedMoEMethod,
+    )
+
+    dynamic_mxfp4_config = _make_qtensor_config(
+        {
+            "dtype": "fp4",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        None,
+        exclude=["self_attn.q_proj", "mlp.down_proj"],
+    )
+    dynamic_mxfp4_config.dynamic_mxfp4_quant = True
+
+    assert dynamic_mxfp4_config.get_quant_method_target(
+        "self_attn.q_proj", LinearBase
+    ) == (kMxfp4Static, None, QuarkLinearMethod)
+    attention_proj = TestLinear()
+    assert isinstance(
+        dynamic_mxfp4_config.get_quant_method(attention_proj, "self_attn.q_proj"),
+        QuarkLinearMethod,
+    )
+    assert isinstance(attention_proj.scheme, QuarkOCP_MX)
+    assert attention_proj.scheme.dynamic_mxfp4_quant
+
+    assert dynamic_mxfp4_config.get_quant_method_target(
+        "mlp.down_proj", LinearBase
+    ) == (None, None, UnquantizedLinearMethod)
+    assert isinstance(
+        dynamic_mxfp4_config.get_quant_method(TestLinear(), "mlp.down_proj"),
+        UnquantizedLinearMethod,
+    )
+
+
+@pytest.mark.parametrize("case", QTENSOR_CONFIGS, ids=lambda case: case.name)
+def test_quant_method_dispatch_target(case):
+    config = _make_qtensor_config(case.weight, case.input_tensors)
+    is_linear = issubclass(case.dispatch_cls, QuarkScheme)
+
+    weight_quant_key, act_quant_key, method_cls = config.get_quant_method_target(
+        "linear" if is_linear else "experts",
+        LinearBase if is_linear else RoutedExperts,
+    )
+
+    assert weight_quant_key == case.weight_quant_key
+    assert act_quant_key == case.act_quant_key
+    assert method_cls is (QuarkLinearMethod if is_linear else case.dispatch_cls)
+
+
+@pytest.mark.parametrize(
+    ("weight", "input_tensors"),
+    [
+        pytest.param(
+            {
+                "dtype": "int8",
+                "qscheme": "per_group",
+                "is_dynamic": False,
+                "symmetric": True,
+            },
+            {
+                "dtype": "int8",
+                "qscheme": "per_tensor",
+                "is_dynamic": False,
+                "symmetric": True,
+            },
+            id="single_entry",
+        ),
+        pytest.param(
+            [
+                {"dtype": "int8", "qscheme": "per_tensor"},
+                {"dtype": "int8", "qscheme": "per_tensor"},
+            ],
+            [
+                {"dtype": "int8", "qscheme": "per_tensor"},
+                {"dtype": "int8", "qscheme": "per_tensor"},
+            ],
+            id="multi_entry",
+        ),
+    ],
+)
+def test_quant_method_dispatch_unsupported(weight, input_tensors):
+    config = _make_qtensor_config(weight, input_tensors)
+
+    class TestRoutedExperts(RoutedExperts):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+
+    with pytest.raises(RuntimeError, match="^Unsupported FusedMoe scheme$"):
+        config.get_quant_method_target("experts", RoutedExperts)
+
+    with pytest.raises(RuntimeError, match="^Unsupported FusedMoe scheme$"):
+        config.get_quant_method(TestRoutedExperts(), "experts")
+
+
+@pytest.mark.parametrize("case", QTENSOR_CONFIGS, ids=lambda case: case.name)
+def test_quant_method_dispatch_instantiation(case, monkeypatch):
+    config = _make_qtensor_config(case.weight, case.input_tensors)
+    if issubclass(case.dispatch_cls, QuarkScheme):
+
+        class TestLinear(LinearBase):
+            def __init__(self):
+                torch.nn.Module.__init__(self)
+
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.quantization.quark.schemes."
+            "quark_w8a8_fp8.get_current_vllm_config",
+            lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
+        )
+        layer = TestLinear()
+        method = config.get_quant_method(layer, "linear")
+
+        assert isinstance(method, QuarkLinearMethod)
+        assert isinstance(layer.scheme, case.dispatch_cls)
+        if case.weight_quant_key == kFp8Static128BlockE8M0Sym:
+            # TODO: Remove once E8M0 quant key is properly handled in oracle
+            assert layer.scheme.weight_quant_key == kFp8Static128BlockSym
+        else:
+            assert layer.scheme.weight_quant_key == case.weight_quant_key
+        assert layer.scheme.activation_quant_key == case.act_quant_key
+    else:
+
+        class TestRoutedExperts(RoutedExperts):
+            def __init__(self):
+                torch.nn.Module.__init__(self)
+                self.moe_config = object()
+
+        calls = []
+        expected_method = object()
+
+        def get_moe_method(*args, **kwargs):
+            calls.append((args, kwargs))
+            return expected_method
+
+        monkeypatch.setattr(
+            QuarkMoEMethod, "get_moe_method", staticmethod(get_moe_method)
+        )
+        layer = TestRoutedExperts()
+        method = config.get_quant_method(layer, "experts")
+
+        assert method is expected_method
+        assert calls == [
+            (
+                (config,),
+                {
+                    "module": layer,
+                    "method_cls": case.dispatch_cls,
+                    "weight_quant_key": case.weight_quant_key,
+                    "act_quant_key": case.act_quant_key,
+                },
+            )
+        ]
 
 
 def test_quark_fp8_w8a8_detects_per_block_config():
