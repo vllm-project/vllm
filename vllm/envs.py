@@ -180,6 +180,8 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
+    VLLM_NIXL_HOST_STAGE_BYTES: int = 1073741824
+    VLLM_NIXL_HOST_STAGE_SLOTS: int = 4
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_RAY_DP_PLACEMENT_NODE_IPS: str = ""
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
@@ -1462,6 +1464,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: (
         os.environ.get("VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0") == "1"
+    ),
+    # Device staging budget for NIXL reads whose local KV destination is host
+    # memory. UCX has no efficient same-node remote-device to local-host path
+    # and falls back to TCP loopback; staging through device memory composes
+    # two fast legs instead. Set to 0 to disable and read into host directly.
+    "VLLM_NIXL_HOST_STAGE_BYTES": lambda: int(
+        os.getenv("VLLM_NIXL_HOST_STAGE_BYTES", str(1024 * 1024 * 1024))
+    ),
+    "VLLM_NIXL_HOST_STAGE_SLOTS": lambda: int(
+        os.getenv("VLLM_NIXL_HOST_STAGE_SLOTS", "4")
     ),
     # Strategy to pack the data parallel ranks for Ray.
     # Available options:

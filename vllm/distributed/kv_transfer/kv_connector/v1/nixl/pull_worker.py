@@ -209,6 +209,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
                 remote_request_id=meta.remote.request_id,
+                remote_host=meta.remote.host,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
             )
@@ -228,6 +229,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         dst_engine_id: str,
         request_id: str,
         remote_request_id: str,
+        remote_host: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
     ):
@@ -319,6 +321,21 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Prepare transfer with Nixl.
         handle = None
         try:
+            if host_stager := self._maybe_init_host_stager(remote_host):
+                # Same-host destination is host memory: read into device staging
+                # and copy down, instead of letting UCX use TCP loopback.
+                # Notify the remote only once every chunk has landed, which the
+                # stager reports through _advance_host_staging.
+                self._pending_recv_notifs.setdefault(request_id, []).append(
+                    (self._remote_agents[dst_engine_id][(0, remote_rank)], notif_id)
+                )
+                host_stager.submit(
+                    request_id,
+                    remote_block_descs_ids,
+                    local_block_descs_ids,
+                    remote_xfer_side_handle,
+                )
+                return True
             handle = self.nixl_wrapper.make_prepped_xfer(
                 "READ",
                 local_xfer_side_handle,
