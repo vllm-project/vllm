@@ -44,25 +44,26 @@ logger = init_logger(__name__)
 
 
 class QuarkW8A8Fp8(QuarkScheme):
+    supported_activation_quant_keys: list[QuantKey | None] = [
+        kFp8DynamicTensorSym,
+        kFp8DynamicTokenSym,
+        kFp8StaticTensorSym,
+    ]
+    supported_weight_quant_keys: list[QuantKey] = [
+        kFp8StaticChannelSym,
+        kFp8StaticTensorSym,
+    ]
+
     def __init__(
         self,
         weight_quant_key: QuantKey,
-        act_quant_key: QuantKey | None,
+        activation_quant_key: QuantKey | None,
     ):
-        if act_quant_key not in {
-            kFp8DynamicTensorSym,
-            kFp8DynamicTokenSym,
-            kFp8StaticTensorSym,
-        }:
-            raise ValueError(f"Unsupported activation quant key: {act_quant_key}")
-        if weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
-            raise ValueError(f"Unsupported weight quant key: {weight_quant_key}")
+        super().__init__(weight_quant_key, activation_quant_key)
         self.weight_qscheme = (
             "per_channel" if weight_quant_key == kFp8StaticChannelSym else "per_tensor"
         )
-        self.is_static_input_scheme = act_quant_key == kFp8StaticTensorSym
-        self.weight_quant_key = weight_quant_key
-        self.activation_quant_key = act_quant_key
+        self.is_static_input_scheme = activation_quant_key == kFp8StaticTensorSym
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
@@ -113,6 +114,8 @@ class QuarkW8A8Fp8(QuarkScheme):
                     layer.input_scale = Parameter(input_scale, requires_grad=False)
             else:
                 weight_scale = layer.weight_scale.data
+
+            assert self.activation_quant_key is not None
             if self.activation_quant_key.scale.group_shape == GroupShape.PER_TOKEN:
                 weight_scale = weight_scale.view(-1, 1)
             layer.weight = Parameter(weight.t(), requires_grad=False)
@@ -182,6 +185,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
+        assert self.activation_quant_key is not None
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
@@ -201,25 +205,23 @@ class QuarkW8A8Fp8(QuarkScheme):
 
 
 class QuarkW8A8Fp8PerBlock(QuarkScheme):
+    supported_activation_quant_keys = [kFp8Dynamic128Sym]
+    supported_weight_quant_keys = [
+        kFp8Static128BlockSym,
+        kFp8Static128BlockE8M0Sym,
+    ]
+
     def __init__(
         self,
         weight_quant_key: QuantKey,
-        act_quant_key: QuantKey | None,
+        activation_quant_key: QuantKey | None,
     ):
-        if act_quant_key != kFp8Dynamic128Sym:
-            raise ValueError(f"Unsupported activation quant key: {act_quant_key}")
-        if weight_quant_key not in {
-            kFp8Static128BlockSym,
-            kFp8Static128BlockE8M0Sym,
-        }:
-            raise ValueError(f"Unsupported weight quant key: {weight_quant_key}")
+        super().__init__(weight_quant_key, activation_quant_key)
         self.weight_scale_dtype = weight_quant_key.scale.dtype
-        if weight_quant_key == kFp8Static128BlockE8M0Sym:
+        if self.weight_quant_key == kFp8Static128BlockE8M0Sym:
             # TODO: oracle needs to support kFp8Static128BlockE8M0Sym.
-            weight_quant_key = kFp8Static128BlockSym
+            self.weight_quant_key = kFp8Static128BlockSym
         self.weight_block_size = list(weight_quant_key.scale.group_shape)
-        self.weight_quant_key = weight_quant_key
-        self.activation_quant_key = act_quant_key
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
@@ -281,6 +283,7 @@ class QuarkW8A8Fp8PerBlock(QuarkScheme):
         # DeepSeek V4 weight mappers route checkpoint ".scale" tensors here.
         layer.register_parameter("weight_scale_inv", weight_scale)
 
+        assert self.activation_quant_key is not None
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,

@@ -41,7 +41,6 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkMoEMethod,
-    QuarkOCP_MX_MoEMethod,
     QuarkW4A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
 )
@@ -416,25 +415,6 @@ QTENSOR_CONFIGS = [
         dispatch_cls=QuarkOCP_MX,
     ),
     QTensorConfig(
-        name="ocp_mx_mxfp4_static_fp8_moe",
-        weight={
-            "dtype": "fp4",
-            "qscheme": "per_group",
-            "group_size": 32,
-            "scale_format": "e8m0",
-            "is_dynamic": False,
-        },
-        input_tensors={
-            "dtype": "fp8_e4m3",
-            "qscheme": "per_tensor",
-            "is_dynamic": False,
-            "symmetric": True,
-        },
-        weight_quant_key=kMxfp4Static,
-        act_quant_key=kFp8StaticTensorSym,
-        dispatch_cls=QuarkOCP_MX_MoEMethod,
-    ),
-    QTensorConfig(
         name="ocp_mx_mxfp6_e3m2",
         weight={
             "dtype": "fp6_e3m2",
@@ -800,7 +780,7 @@ def test_quant_method_dispatch_unsupported(weight, input_tensors):
 
 
 @pytest.mark.parametrize("case", QTENSOR_CONFIGS, ids=lambda case: case.name)
-def test_quant_method_dispatch_instantiation(case, monkeypatch):
+def test_quant_method_dispatch_instantiation(case, monkeypatch, default_vllm_config):
     config = _make_qtensor_config(case.weight, case.input_tensors)
     if issubclass(case.dispatch_cls, QuarkScheme):
 
@@ -829,33 +809,31 @@ def test_quant_method_dispatch_instantiation(case, monkeypatch):
         class TestRoutedExperts(RoutedExperts):
             def __init__(self):
                 torch.nn.Module.__init__(self)
-                self.moe_config = object()
+                self.moe_config = _make_test_moe_config()
 
-        calls = []
-        expected_method = object()
+        for target in (
+            "select_fp8_moe_backend",
+            "select_int8_moe_backend",
+            "select_mxfp4_moe_backend",
+            "backend_to_kernel_cls",
+            "select_nvfp4_moe_backend",
+        ):
+            monkeypatch.setattr(
+                f"vllm.model_executor.layers.quantization.quark.quark_moe.{target}",
+                lambda *args, **kwargs: (object(), object()),
+            )
 
-        def get_moe_method(*args, **kwargs):
-            calls.append((args, kwargs))
-            return expected_method
-
+        # AssertionError: W4A8 FP8 MoE requires ROCm AITER fused MoE support
         monkeypatch.setattr(
-            QuarkMoEMethod, "get_moe_method", staticmethod(get_moe_method)
+            "vllm.model_executor.layers.quantization.quark.quark_moe."
+            "rocm_aiter_ops.is_fused_moe_enabled",
+            lambda: True,
         )
+
         layer = TestRoutedExperts()
         method = config.get_quant_method(layer, "experts")
 
-        assert method is expected_method
-        assert calls == [
-            (
-                (config,),
-                {
-                    "module": layer,
-                    "method_cls": case.dispatch_cls,
-                    "weight_quant_key": case.weight_quant_key,
-                    "act_quant_key": case.act_quant_key,
-                },
-            )
-        ]
+        assert isinstance(method, case.dispatch_cls)
 
 
 def test_quark_fp8_w8a8_detects_per_block_config():

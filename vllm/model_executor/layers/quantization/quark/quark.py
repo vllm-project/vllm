@@ -83,7 +83,7 @@ _DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
 
 class QuantKeyMatch(NamedTuple):
     matches: bool
-    act_quant_key: QuantKey | None
+    activation_quant_key: QuantKey | None
     weight_quant_key: QuantKey | None
 
     def __bool__(self) -> bool:
@@ -190,8 +190,8 @@ class QuarkConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        weight_quant_key, act_quant_key, method_cls = self.get_quant_method_target(
-            prefix, type(layer)
+        weight_quant_key, activation_quant_key, method_cls = (
+            self.get_quant_method_target(prefix, type(layer))
         )
 
         exclude_layers = cast(list[str], self.quant_config.get("exclude"))
@@ -214,7 +214,7 @@ class QuarkConfig(QuantizationConfig):
             scheme = self.init_scheme(
                 scheme_cls,
                 weight_quant_key=weight_quant_key,
-                act_quant_key=act_quant_key,
+                activation_quant_key=activation_quant_key,
                 dynamic_mxfp4_quant=dynamic_mxfp4_quant,
             )
             layer.scheme = scheme
@@ -227,7 +227,7 @@ class QuarkConfig(QuantizationConfig):
                 module=layer,
                 method_cls=method_cls,
                 weight_quant_key=weight_quant_key,
-                act_quant_key=act_quant_key,
+                activation_quant_key=activation_quant_key,
             )
 
         return None
@@ -278,12 +278,12 @@ class QuarkConfig(QuantizationConfig):
         if issubclass(layer_type, Attention):
             return None, None, QuarkKVCacheMethod
         if is_routed_experts:
-            weight_quant_key, act_quant_key, quant_method_cls = (
+            weight_quant_key, activation_quant_key, quant_method_cls = (
                 QuarkMoEMethod.get_moe_method_target(self, layer_type, prefix)
             )
             if quant_method_cls is None:
                 return None, None, None
-            return weight_quant_key, act_quant_key, quant_method_cls
+            return weight_quant_key, activation_quant_key, quant_method_cls
         return None, None, None
 
     @classmethod
@@ -486,7 +486,7 @@ class QuarkConfig(QuantizationConfig):
         # Dynamic quantization is always supported if tensor/channel weights
         # are supported.
         if input_quant.get("is_dynamic"):
-            act_quant_key = (
+            activation_quant_key = (
                 kFp8DynamicTokenSym
                 if input_quant.get("qscheme") == "per_channel"
                 else kFp8DynamicTensorSym
@@ -496,7 +496,7 @@ class QuarkConfig(QuantizationConfig):
                 if weight_quant.get("qscheme") == "per_channel"
                 else kFp8StaticTensorSym
             )
-            return QuantKeyMatch(True, act_quant_key, weight_quant_key)
+            return QuantKeyMatch(True, activation_quant_key, weight_quant_key)
 
         # Confirm activation scheme is supported.
         is_per_tensor_activation = input_quant.get("qscheme") == "per_tensor"
@@ -554,24 +554,24 @@ class QuarkConfig(QuantizationConfig):
             else kInt8StaticTensorSym
         )
         if is_static_input:
-            act_quant_key = (
+            activation_quant_key = (
                 kInt8StaticTensorSym
                 if input_quant.get("symmetric") is True
                 else kInt8StaticTensorAsym
             )
         elif weight_quant.get("qscheme") == "per_channel":
-            act_quant_key = (
+            activation_quant_key = (
                 kInt8DynamicTokenSym
                 if input_quant.get("symmetric") is True
                 else kInt8DynamicTokenAsym
             )
         else:
-            act_quant_key = (
+            activation_quant_key = (
                 kInt8DynamicTensorSym
                 if input_quant.get("symmetric") is True
                 else kInt8DynamicTensorAsym
             )
-        return QuantKeyMatch(True, act_quant_key, weight_quant_key)
+        return QuantKeyMatch(True, activation_quant_key, weight_quant_key)
 
     def _is_w4a8_mxfp4_fp8(
         self,
@@ -711,7 +711,7 @@ class QuarkConfig(QuantizationConfig):
         weight_dtype = weight_quant["dtype"].replace("fp", "mxfp")
         weight_quant_key = _WEIGHT_QUANT_KEY_MAP[weight_dtype]
         if input_quant is None:
-            act_quant_key = None
+            activation_quant_key = None
         elif not input_quant.get("is_dynamic"):
             if (
                 allow_static_fp8
@@ -719,7 +719,7 @@ class QuarkConfig(QuantizationConfig):
                 and input_quant.get("qscheme") == "per_tensor"
                 and input_quant.get("symmetric") is True
             ):
-                act_quant_key = kFp8StaticTensorSym
+                activation_quant_key = kFp8StaticTensorSym
             else:
                 logger.debug(
                     "Quark model's OCP MX quantization is incompatible with static "
@@ -727,7 +727,7 @@ class QuarkConfig(QuantizationConfig):
                 )
                 return QuantKeyMatch(False, None, None)
         elif input_quant["dtype"] == "fp8_e4m3":
-            act_quant_key = kFp8DynamicTensorSym
+            activation_quant_key = kFp8DynamicTensorSym
         else:
             input_dtype = input_quant["dtype"].replace("fp", "mxfp")
             if input_dtype not in _ACTIVATION_QUANT_KEY_MAP:
@@ -737,8 +737,8 @@ class QuarkConfig(QuantizationConfig):
                     f"{_ACTIVATION_QUANT_KEY_MAP.keys()}, or None for "
                     "weight-only quantization."
                 )
-            act_quant_key = _ACTIVATION_QUANT_KEY_MAP[input_dtype]
-        return QuantKeyMatch(True, act_quant_key, weight_quant_key)
+            activation_quant_key = _ACTIVATION_QUANT_KEY_MAP[input_dtype]
+        return QuantKeyMatch(True, activation_quant_key, weight_quant_key)
 
     @staticmethod
     def _unwrap_single_quant_config(
@@ -855,7 +855,7 @@ class QuarkConfig(QuantizationConfig):
             if match := self._is_nvfp4(weight_config, input_config):
                 return (
                     match.weight_quant_key,
-                    match.act_quant_key,
+                    match.activation_quant_key,
                     QuarkNVFP4,
                 )
 
@@ -882,24 +882,24 @@ class QuarkConfig(QuantizationConfig):
             if weight_config.get("qscheme") == "per_block":
                 return (
                     match.weight_quant_key,
-                    match.act_quant_key,
+                    match.activation_quant_key,
                     QuarkW8A8Fp8PerBlock,
                 )
-            return match.weight_quant_key, match.act_quant_key, QuarkW8A8Fp8
+            return match.weight_quant_key, match.activation_quant_key, QuarkW8A8Fp8
         elif match := self._is_w8a8_int8(weight_config, input_config):
             return (
                 match.weight_quant_key,
-                match.act_quant_key,
+                match.activation_quant_key,
                 QuarkW8A8Int8,
             )
         elif match := self._is_w4a8_mxfp4_fp8(weight_config, input_config):
             return (
                 match.weight_quant_key,
-                match.act_quant_key,
+                match.activation_quant_key,
                 QuarkW4A8_MXFP4_FP8,
             )
         elif match := self._is_w_ocp_mx_a_x(weight_config, input_config):
-            return match.weight_quant_key, match.act_quant_key, QuarkOCP_MX
+            return match.weight_quant_key, match.activation_quant_key, QuarkOCP_MX
 
         raise NotImplementedError(
             "No quark compatible scheme was found. "
@@ -919,7 +919,7 @@ class QuarkConfig(QuantizationConfig):
         self,
         scheme_cls: type["QuarkScheme"],
         weight_quant_key: QuantKey | None,
-        act_quant_key: QuantKey | None,
+        activation_quant_key: QuantKey | None,
         dynamic_mxfp4_quant: bool = False,
     ) -> "QuarkScheme":
         """Construct a Quark scheme selected by get_scheme_cls."""
@@ -933,7 +933,7 @@ class QuarkConfig(QuantizationConfig):
         ):
             raise AssertionError(f"Unsupported Quark scheme class: {scheme_cls}")
 
-        kwargs: dict[str, Any] = {"act_quant_key": act_quant_key}
+        kwargs: dict[str, Any] = {"activation_quant_key": activation_quant_key}
 
         # These classes handle different possible `weight_quant_key`.
         if scheme_cls in (

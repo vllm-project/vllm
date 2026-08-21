@@ -31,29 +31,32 @@ logger = init_logger(__name__)
 
 
 class QuarkW8A8Int8(QuarkScheme):
+    supported_activation_quant_keys = [
+        kInt8StaticTensorSym,
+        kInt8StaticTensorAsym,
+        kInt8DynamicTensorSym,
+        kInt8DynamicTensorAsym,
+        kInt8DynamicTokenSym,
+        kInt8DynamicTokenAsym,
+    ]
+    supported_weight_quant_keys = [
+        kInt8StaticChannelSym,
+        kInt8StaticTensorSym,
+    ]
+
     def __init__(
         self,
         weight_quant_key: QuantKey,
-        act_quant_key: QuantKey | None,
+        activation_quant_key: QuantKey | None,
     ):
-        if act_quant_key not in {
-            kInt8StaticTensorSym,
-            kInt8StaticTensorAsym,
-            kInt8DynamicTensorSym,
-            kInt8DynamicTensorAsym,
-            kInt8DynamicTokenSym,
-            kInt8DynamicTokenAsym,
-        }:
-            raise ValueError(f"Unsupported activation quant key: {act_quant_key}")
-        if weight_quant_key not in {kInt8StaticChannelSym, kInt8StaticTensorSym}:
-            raise ValueError(f"Unsupported weight quant key: {weight_quant_key}")
+        super().__init__(weight_quant_key, activation_quant_key)
         self.qscheme = (
             "per_channel" if weight_quant_key == kInt8StaticChannelSym else "per_tensor"
         )
-        self.is_static_input_scheme = act_quant_key.scale.static
-        self.input_symmetric = act_quant_key.symmetric
-        self.weight_quant_key = weight_quant_key
-        self.activation_quant_key = act_quant_key
+
+        assert activation_quant_key is not None
+        self.is_static_input_scheme = activation_quant_key.scale.static
+        self.input_symmetric = activation_quant_key.symmetric
 
     @classmethod
     def get_min_capability(cls) -> int:

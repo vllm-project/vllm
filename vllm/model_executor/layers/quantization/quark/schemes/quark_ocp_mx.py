@@ -39,18 +39,17 @@ logger = init_logger(__name__)
 
 class QuarkOCP_MX(QuarkScheme):
     ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel
+    supported_activation_quant_keys = [*_ACTIVATION_QUANT_KEY_MAP.values(), None]
+    supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
 
     def __init__(
         self,
         weight_quant_key: QuantKey,
-        act_quant_key: QuantKey | None,
+        activation_quant_key: QuantKey | None,
         dynamic_mxfp4_quant: bool = False,
     ):
+        super().__init__(weight_quant_key, activation_quant_key)
         self.dynamic_mxfp4_quant = dynamic_mxfp4_quant
-        if act_quant_key not in {*_ACTIVATION_QUANT_KEY_MAP.values(), None}:
-            raise ValueError(f"Unsupported activation quant key: {act_quant_key}")
-        if weight_quant_key not in _WEIGHT_QUANT_KEY_MAP.values():
-            raise ValueError(f"Unsupported weight quant key: {weight_quant_key}")
         self.weight_dtype = next(
             dtype
             for dtype, quant_key in _WEIGHT_QUANT_KEY_MAP.items()
@@ -60,13 +59,11 @@ class QuarkOCP_MX(QuarkScheme):
             next(
                 dtype
                 for dtype, quant_key in _ACTIVATION_QUANT_KEY_MAP.items()
-                if quant_key == act_quant_key
+                if quant_key == activation_quant_key
             )
-            if act_quant_key is not None
+            if activation_quant_key is not None
             else None
         )
-        self.weight_quant_key = weight_quant_key
-        self.activation_quant_key = act_quant_key
 
         if self.weight_dtype == "mxfp4":
             self.packed_factor: int | Fraction = 2

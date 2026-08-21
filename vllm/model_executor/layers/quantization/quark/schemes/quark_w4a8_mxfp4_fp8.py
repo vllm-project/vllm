@@ -40,15 +40,15 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
     Uses the AITER Triton kernel and falls back to emulation if AITER not available.
     """
 
+    supported_activation_quant_keys = [kFp8StaticTensorSym]
+    supported_weight_quant_keys = [kMxfp4Static]
+
     def __init__(
         self,
-        act_quant_key: QuantKey | None,
+        activation_quant_key: QuantKey | None,
     ):
+        super().__init__(kMxfp4Static, activation_quant_key)
         self.out_dtype = None
-        if act_quant_key != kFp8StaticTensorSym:
-            raise ValueError(f"Unsupported activation quant key: {act_quant_key}")
-        self.weight_quant_key = kMxfp4Static
-        self.activation_quant_key = act_quant_key
 
         self.weight_dtype = "mxfp4"
         self.packed_factor: Fraction = Fraction(2, 1)  # 2 FP4 values per byte
