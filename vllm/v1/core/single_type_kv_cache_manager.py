@@ -1338,11 +1338,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # into a private cow_block; we record that block for connector
             # offload (see _pending_partial_tail_offloads).
             self._producer_partial_tail_reqs: dict[str, int] = {}
-            # Mapping from request ID to the token count the most recently
-            # scheduled forward leaves the recurrent state at. This is the
-            # position the state written into `last_state_block_idx + 1`
-            # describes, and it is what decides whether that block may be
-            # keyed under a block-boundary hash.
+            # Pending state-write positions, in scheduling order.
             self._state_write_tokens: dict[str, deque[int]] = {}
 
     @classmethod
@@ -1555,11 +1551,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 apply_admission_cap=apply_admission_cap,
             )
         else:
-            # We don't allocate blocks for lookahead tokens in align mode, because if
-            # x * block_size tokens are scheduled, num_tokens is
-            # x * block_size + num_lookahead_tokens and breaks the alignment.
-            # We can ignore lookahead tokens because current draft models don't have
-            # mamba layers.
+            # Align mode ignores lookahead tokens; draft models have no Mamba layers.
             num_tokens = num_tokens_main_model
 
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
@@ -1809,27 +1801,9 @@ class MambaManager(SingleTypeKVCacheManager):
         start_block: int,
         end_block: int,
     ) -> list[bool] | None:
-        """Admit only a state block that holds the state at its own boundary.
+        """Admit committed state writes that land on block boundaries.
 
-        A cached block ``j`` is keyed under the hash of the prefix ending at
-        ``(j + 1) * block_size`` and registered with that many hash tokens, so
-        a request restoring from it resumes as if exactly that many tokens had
-        been consumed. In "align" mode the recurrent state saved in block ``j``
-        is instead whatever the forward left after the tokens that step
-        scheduled, which only coincides with the boundary when the step happens
-        to end on it. Prefill chunks are clipped to end on one; decode steps are
-        not, and a step that speculates also runs over draft tokens that may be
-        rejected afterwards.
-
-        Admit the single block that this step's write lands on, and only when
-        that landing is both exactly on the boundary and entirely made of
-        committed tokens. Everything else is withheld, including blocks written
-        by an earlier step: those were offered under this same rule when they
-        were written, so a second look can only re-offer a state the rule has
-        already rejected.
-
-        Returns ``None`` in non-align mode, where the state block is not
-        snapshotted per block and dense caching is correct.
+        Non-align mode uses dense caching and has no boundary mask.
         """
         if self.mamba_cache_mode != "align":
             return None

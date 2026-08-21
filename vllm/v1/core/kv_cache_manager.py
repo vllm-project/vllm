@@ -349,23 +349,18 @@ class KVCacheManager:
         ):
             return *self.get_computed_blocks(request), False
 
-        # Reducing the reported length is not enough on its own: a dense group
-        # that hit deeper keeps a block list longer than `num_local` covers,
-        # and the pair is handed straight to `add_local_computed_blocks`. Trim
-        # for the same reason the reconciling path does, at each group's own
-        # block size.
+        # Trim deeper downward-closed block lists to the reported length.
         hit_blocks = [list(blocks) for blocks in computed]
         truncate_downward_closed_groups(
             ((g.spec, g.group_ids) for g in coordinator.attention_groups),
             num_local,
             hit_blocks,
-            # A copy on purpose: only the trimmed blocks are wanted here, and
-            # the caller-visible flag below reports on the pre-trim hits.
+            # Keep the divergence flag based on the original hit lengths.
             list(per_group_hits),
             lambda gid: coordinator.single_type_managers[gid].block_size,
         )
         blocks = self.create_kv_cache_blocks(tuple(hit_blocks))
-        # Per-group lookups do not detect an uncached shared prefix (boundary 0).
+        # Per-group lookups do not detect an uncached shared prefix.
         return blocks, num_local, 0, min(per_group_hits) < num_local
 
     def allocate_slots(

@@ -1704,11 +1704,7 @@ def test_dcp_partial_hit_with_eagle_rewinds_one_hash_unit():
 
 
 def test_hybrid_sliding_window_group_keeps_block_aligned_hits():
-    """A sliding-window group makes the whole model fall back to
-    block-aligned hits. ``SlidingWindowManager.find_longest_cache_hit``
-    indexes ``block_hashes`` in whole blocks, so a hash-granularity alignment
-    would read the wrong entries; it asserts instead, which used to abort the
-    engine on the first request of a mamba-"align" + SWA model."""
+    """Sliding-window groups force block-aligned hybrid cache hits."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -1769,13 +1765,7 @@ def test_hybrid_sliding_window_group_keeps_block_aligned_hits():
 
 
 def test_hybrid_without_block_aligned_group_keeps_fine_grained_hits():
-    """The control for the fallback above.
-
-    The gate is a conjunction, so it can only ever over-fire. Without a
-    block-aligned-only group the mamba-"align" model must still get its
-    fine-grained partial hits, at a hit length that is not a multiple of the
-    physical block size.
-    """
+    """Without a block-aligned group, fine-grained Mamba hits remain available."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
