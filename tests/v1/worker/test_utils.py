@@ -7,12 +7,27 @@ from unittest.mock import MagicMock
 import torch
 
 import vllm.v1.kv_offload.sparse.hisparse_runtime as hisparse_runtime_module
+import vllm.v1.kv_offload.sparse.hisparse_worker as hisparse_worker_module
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_offload.sparse.base import SparseKVPageTransfer
 from vllm.v1.kv_offload.sparse.hisparse_worker import (
     HiSparseWorker,
 )
+from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
+
+
+def test_hisparse_worker_finish_step_counts_each_index_group_once():
+    worker = object.__new__(HiSparseWorker)
+    worker._metrics_calls = hisparse_worker_module._METRICS_INTERVAL - 1
+    worker._metrics_last = HiSparseStats()
+    group = SimpleNamespace(
+        swap_stats=torch.tensor([7, 3]),
+        stats_row_bytes=16,
+    )
+    worker.leader_runtimes = [SimpleNamespace(index_group=group)]
+
+    assert worker.finish_step() == HiSparseStats(7, 3, 48)
 
 
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():

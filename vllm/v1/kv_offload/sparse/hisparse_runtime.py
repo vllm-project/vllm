@@ -355,6 +355,8 @@ class HiSparseIndexGroup:
         self.plan = _create_group_plan(device, max_swap_rows, top_k)
         self.copy_stream = _create_copy_stream(device)
         self.followers: list[HiSparseRuntime] = []
+        self.swap_stats = torch.zeros(2, dtype=torch.uint64, device=device)
+        self.stats_row_bytes = 0
 
 
 class HiSparseRuntime:
@@ -418,6 +420,7 @@ class HiSparseRuntime:
         else:
             index_group.followers.append(self)
         self.index_group = index_group
+        index_group.stats_row_bytes += row_bytes
 
         self.eager_host_mirror = False
         self.resident_source_index = -1
@@ -620,6 +623,7 @@ class HiSparseRuntime:
             request_state_indices,
             self.region_stride,
             None,
+            group.swap_stats,
             attention_indices,
             hot.attention_block_stride,
             req_id_per_token[:num_tokens].contiguous(),
