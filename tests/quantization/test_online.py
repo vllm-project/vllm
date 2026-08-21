@@ -154,6 +154,20 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
         ),
+        (
+            "mxfp4",
+            {"moe": {"weight": "mxfp4", "activation": "mxfp8"}},
+            Mxfp4OnlineLinearMethod,
+            Mxfp4OnlineMoEMethod,
+        ),
+    ],
+    ids=[
+        "fp8_per_tensor",
+        "fp8_per_block",
+        "per_layer_kind_overrides",
+        "ignore",
+        "mxfp4",
+        "mxfp4_activation_override",
     ],
 )
 @pytest.mark.parametrize(
@@ -219,6 +233,14 @@ def test_online_quantization(
             assert isinstance(o_proj.quant_method, expected_linear_cls)
             if moe is not None:
                 assert isinstance(moe._quant_method, expected_moe_cls)
+                if (
+                    isinstance(online_quant_args, dict)
+                    and online_quant_args.get("moe", {}).get("activation") == "mxfp8"
+                ):
+                    assert (
+                        moe._quant_method.activation_quant_key
+                        == quant_utils.kMxfp8Dynamic
+                    )
 
             if quant_scheme == "mxfp4":
                 # Packed e2m1 values, two per byte.

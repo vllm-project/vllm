@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
+from vllm.model_executor.layers.quantization.online.utils import (
+    get_moe_activation_quant_key,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     FLOAT4_E2M1_MAX,
 )
@@ -84,6 +87,8 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
     (SM100) only.
     """
 
+    default_activation_quant_key = kNvfp4Dynamic
+
     def __init__(
         self,
         *,
@@ -97,7 +102,9 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            activation_key=get_moe_activation_quant_key(
+                self.default_activation_quant_key
+            ),
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
