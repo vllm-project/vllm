@@ -32,6 +32,9 @@ logger = init_logger(__name__)
 
 _R = TypeVar("_R")
 
+# Memory-pool tags managed by sleep/wake_up/discard.
+SLEEP_TAGS = frozenset(("weights", "kv_cache"))
+
 FailureCallback = Callable[[], None]
 
 
@@ -108,7 +111,6 @@ class Executor(ABC):
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
         self._init_executor()
-        self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
         self.ec_output_aggregator: ECOutputAggregator | None = None
@@ -326,15 +328,19 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
+    @property
+    def is_sleeping(self) -> bool:
+        return bool(self.sleeping_tags)
+
     def sleep(self, level: int = 1):
-        if self.is_sleeping and self.sleeping_tags != {"kv_cache"}:
+        remaining = SLEEP_TAGS - self.sleeping_tags
+        if not remaining:
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
-        self.sleeping_tags = {"weights", "kv_cache"}
-        self.is_sleeping = True
+        self.sleeping_tags |= remaining
         logger.info(
             "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
         )
@@ -363,19 +369,17 @@ class Executor(ABC):
                 self.sleeping_tags.remove(tag)
         else:
             self.sleeping_tags.clear()
-        if not self.sleeping_tags:
-            self.is_sleeping = False
 
     def discard(self, tags: tuple[str, ...]) -> None:
-        if set(tags).issubset(self.sleeping_tags):
+        todo = set(tags) - self.sleeping_tags
+        if not todo:
             logger.warning("Tags %s are already sleeping.", tags)
             return
         time_before_discard = time.perf_counter()
         try:
-            self.collective_rpc("discard", args=(tags,))
+            self.collective_rpc("discard", args=(tuple(todo),))
         finally:
-            self.sleeping_tags.update(tags)
-            self.is_sleeping = True
+            self.sleeping_tags |= todo
         time_after_discard = time.perf_counter()
         logger.info(
             "It took %.6f seconds to discard tags %s.",

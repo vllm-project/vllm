@@ -91,6 +91,7 @@ def test_release_kv_cache_memory_then_sleep():
     expected = llm.generate(prompt, sampling_params)[0].outputs[0].text
 
     free_bytes = current_platform.mem_get_info()[0]
+    llm.sleep(level=0)
     llm.release_kv_cache_memory()
     free_bytes_after_release = current_platform.mem_get_info()[0]
     assert free_bytes_after_release - free_bytes >= kv_cache_memory_bytes * 0.99

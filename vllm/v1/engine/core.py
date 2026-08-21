@@ -920,28 +920,20 @@ class EngineCore:
         if not self.model_executor.is_sleeping:
             self.resume_scheduler()
 
-    def release_kv_cache_memory(self, mode: PauseMode = "abort") -> None | Future:
-        """Discard KV cache physical memory and pause until its explicit wake."""
-        pause_future = self.pause_scheduler(mode=mode, clear_cache=True)
-
-        if pause_future is None:
-            self.model_executor.discard(("kv_cache",))
-            return None
-
-        future: Future[None] = Future()
-
-        def pause_complete(f: Future) -> None:
-            try:
-                f.result()
-                self.model_executor.discard(("kv_cache",))
-            except Exception as e:
-                future.set_exception(e)
-            else:
-                future.set_result(None)
-
-        logger.info("Waiting for in-flight requests to complete before release...")
-        pause_future.add_done_callback(pause_complete)
-        return future
+    def release_kv_cache_memory(self) -> None:
+        """Discard KV cache physical memory. Requires a completed pause:
+        request fate and quiescence belong to pause_scheduler (RFC #51476).
+        """
+        if not (
+            self.is_scheduler_paused()
+            and not self.scheduler.has_requests()
+            and not self.batch_queue
+        ):
+            raise RuntimeError(
+                "release_kv_cache_memory() requires a completed pause first"
+            )
+        self._reset_caches()
+        self.model_executor.discard(("kv_cache",))
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
