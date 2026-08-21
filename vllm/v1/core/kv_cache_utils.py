@@ -109,7 +109,7 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
             "fixed value for reproducibility."
         )
 
-    if hash_seed is None:
+    if not hash_seed:
         NONE_HASH = BlockHash(os.urandom(32))
     else:
         NONE_HASH = BlockHash(hash_fn(hash_seed))
