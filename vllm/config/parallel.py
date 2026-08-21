@@ -351,12 +351,26 @@ class ParallelConfig:
     and will be deprecated when PCP is fully supported.
 
     """
-    dcp_comm_backend: DCPCommBackend = "ag_rs"
+    dcp_comm_backend: DCPCommBackend | None = None
     """Communication backend for Decode Context Parallel (DCP).
-    - "ag_rs": AllGather + ReduceScatter (default, existing behavior)
+    - "ag_rs": AllGather + ReduceScatter (existing behavior)
     - "a2a": All-to-All exchange of partial outputs + LSE, then
       combine with Triton kernel. Reduces NCCL calls from 3 to 2
       per layer for MLA models.
+
+    `None` selects the model default, which is "ag_rs" unless the model
+    overrides it via [`set_dcp_defaults`][vllm.config.ParallelConfig.set_dcp_defaults].
+    """
+
+    dcp_q_replicate: bool | None = None
+    """Replicate the MLA query projection within each DCP group so decode can skip the
+    query all-gather.
+
+    With DCP the KV cache is sharded across the group, so the standard MLA decode path
+    all-gathers the query every step. Replicating the (small) query projection at load
+    time lets each rank materialize the full group-local head set and skip that 
+    collective, at the cost of computing the projection redundantly on every rank 
+    in the group.
     """
 
     cp_kv_cache_interleave_size: int = 1
@@ -538,12 +552,22 @@ class ParallelConfig:
                 f"{sorted({1, pcp, tp * pcp})}."
             )
 
-        if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
-            raise ValueError(
-                "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
-            )
-
         return self
+
+    def set_dcp_defaults(
+        self,
+        comm_backend: DCPCommBackend = "ag_rs",
+        q_replicate: bool = False,
+    ) -> None:
+        """Fill in the DCP options the user left unset.
+
+        Models can set their preferred DCP settings by calling this from their
+        `verify_and_update_config` hook.
+        """
+        if self.dcp_comm_backend is None:
+            self.dcp_comm_backend = comm_backend
+        if self.dcp_q_replicate is None:
+            self.dcp_q_replicate = q_replicate
 
     @property
     def world_size_across_dp(self) -> int:
