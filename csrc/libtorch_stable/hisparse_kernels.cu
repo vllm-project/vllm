@@ -232,7 +232,7 @@ __device__ __forceinline__ void store_hot_index(
 //   s_lru_out[hot_size]      int16, compacted slots: [hits fwd | evict bwd]
 //   s_hash_vals[hash_size]   int16 hash values (top-k index)
 // Valid global ids must be unique within each row.
-__global__ void hisparse_swap_in_kernel(
+__global__ __launch_bounds__(1024) void hisparse_swap_in_kernel(
     const char* __restrict__ host_cache,          // [host_rows, row_bytes]
     char* __restrict__ hot_cache,                 // packed HMA pages
     const int32_t* __restrict__ hot_block_table,  // [max_rows, hot_blocks]
