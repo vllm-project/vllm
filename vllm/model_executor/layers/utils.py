@@ -83,12 +83,89 @@ def apply_penalties(
     return logits
 
 
+_flashinfer_bf16_gemm_supported: bool | None = None
+
+
+# ``functools.cache`` here would defeat ``assume_constant_result``: Dynamo
+# traces through the cache wrapper and trips over the device-capability query.
+@torch.compiler.assume_constant_result
+def _flashinfer_bf16_gemm_available() -> bool:
+    global _flashinfer_bf16_gemm_supported
+    if _flashinfer_bf16_gemm_supported is None:
+        from vllm.utils.flashinfer import has_flashinfer_mm_bf16
+
+        # FlashInfer's BF16 GEMM backends (cuDNN/cuBLASLt at the low end) start
+        # at SM80; below that every backend is filtered out and the call would
+        # raise.
+        _flashinfer_bf16_gemm_supported = (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability(80)
+            and has_flashinfer_mm_bf16()
+        )
+    return _flashinfer_bf16_gemm_supported
+
+
+def _flashinfer_bf16_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    from vllm.utils.flashinfer import flashinfer_mm_bf16
+
+    x_2d = x.reshape(-1, x.shape[-1])
+    # ``weight`` is (N, K) row-major, so ``weight.t()`` is the (K, N)
+    # column-major operand mm_bf16 expects.
+    try:
+        out = flashinfer_mm_bf16(x_2d, weight.t(), bias=bias, backend="auto")
+    except Exception as exc:
+        logger.warning_once(
+            "FlashInfer mm_bf16 failed (%s); falling back to torch.nn.functional"
+            ".linear for unquantized BF16 GEMMs of this shape.",
+            exc,
+        )
+        return torch.nn.functional.linear(x, weight, bias)
+    return out.view(*x.shape[:-1], weight.shape[0])
+
+
+def _flashinfer_bf16_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
+direct_register_custom_op(
+    op_name="flashinfer_bf16_gemm",
+    op_func=_flashinfer_bf16_gemm_impl,
+    fake_impl=_flashinfer_bf16_gemm_fake,
+)
+
+
+def _use_flashinfer_bf16_gemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    return (
+        x.dtype == torch.bfloat16
+        and weight.dtype == torch.bfloat16
+        and weight.dim() == 2
+        and weight.is_contiguous()
+        and (bias is None or bias.dtype == torch.bfloat16)
+        and not envs.VLLM_BATCH_INVARIANT
+        and _flashinfer_bf16_gemm_available()
+    )
+
+
 def default_unquantized_gemm(
     layer: torch.nn.Module,
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
+    if _use_flashinfer_bf16_gemm(x, weight, bias):
+        return torch.ops.vllm.flashinfer_bf16_gemm(x, weight, bias)
     return torch.nn.functional.linear(x, weight, bias)
 
 
