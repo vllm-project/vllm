@@ -1436,6 +1436,173 @@ def test_hisparse_uses_graph_stable_request_state_mapping():
 
 
 @requires_hisparse_ops
+def test_hisparse_masks_topk_indices_outside_request_block_table():
+    """Out-of-range candidates must not read beyond the request block table."""
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_width = 64, 8
+    runtime = _make_hisparse_runtime(
+        top_k=4,
+        device_buffer_size=5,
+        max_num_reqs=1,
+        row_width=row_width,
+        block_size=block_size,
+    )
+    source = torch.randn(2, block_size, row_width).pin_memory()
+    runtime.bind_source_cache(source)
+
+    # Keep an accessible canary immediately beyond the logical table bounds.
+    block_table_backing = torch.tensor([[0, 1]], dtype=torch.int32, device=device)
+    block_table = block_table_backing[:, :1]
+    topk = torch.tensor(
+        [[0, block_size - 1, block_size, -1]], dtype=torch.int32, device=device
+    )
+
+    cache, indices, valid_counts = runtime.swap_in(
+        req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
+        block_table=block_table,
+        topk_indices=topk,
+        block_size=block_size,
+        return_valid_counts=True,
+    )
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(
+        valid_counts, torch.tensor([2], dtype=torch.int32, device=device)
+    )
+    torch.testing.assert_close(
+        indices[0, 2:], torch.full((2,), -1, dtype=torch.int32, device=device)
+    )
+    torch.testing.assert_close(
+        cache.view(-1, row_width)[indices[0, :2].to(torch.long)],
+        source.view(-1, row_width)[[0, block_size - 1]].to(device),
+    )
+
+
+@requires_hisparse_ops
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="Cooperative TopK requires SM90 or newer",
+)
+def test_hisparse_handles_cooperative_topk_unwritten_tail():
+    """An unwritten cooperative-TopK tail must stay safe through HiSparse.
+
+    A large tie at the cutoff can leave output slots untouched. The normal
+    pre-cleared sentinel and an in-range stale value must both avoid invalid
+    memory access in HiSparse.
+    """
+    device = torch.device(DEVICE_TYPE)
+    num_rows, seq_len, top_k = 5, 20_000, 2_048
+    logits = torch.zeros((num_rows, seq_len), dtype=torch.float32, device=device)
+    logits[:, :2_000] = 1.0
+    logits[:, 2_500:3_000] = 2.0
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device=device)
+    workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device=device)
+
+    def run_topk(output: torch.Tensor) -> torch.Tensor:
+        torch.ops._C.cooperative_topk(
+            logits, lengths, output, workspace, top_k, seq_len
+        )
+        torch.accelerator.synchronize()
+        return output
+
+    stale_seed = torch.arange(
+        10_000, 10_000 + top_k, dtype=torch.int32, device=device
+    ).repeat(num_rows, 1)
+    stale_output = run_topk(stale_seed.clone())
+    cleared_output = run_topk(
+        torch.full((num_rows, top_k), -1, dtype=torch.int32, device=device)
+    )
+    unwritten = cleared_output.eq(-1)
+    unwritten_counts = unwritten.sum(dim=1, dtype=torch.int32)
+    if not unwritten_counts.any():
+        pytest.skip("Cooperative TopK no longer leaves an unwritten tie tail")
+    assert (unwritten_counts > 0).all()
+    torch.testing.assert_close(stale_output[unwritten], stale_seed[unwritten])
+
+    block_size, row_width = 64, 656
+    num_blocks = cdiv(seq_len, block_size)
+    device_buffer_size = 2 * top_k
+    runtime = HiSparseRuntime(
+        config=ResolvedHiSparseConfig(
+            top_k=top_k,
+            device_buffer_size=device_buffer_size,
+            host_pool_gib=1.0,
+        ),
+        max_num_reqs=num_rows,
+        row_width=row_width,
+        kv_dtype=torch.uint8,
+        device=DEVICE_TYPE,
+    )
+    hot_blocks_per_request = device_buffer_size // block_size
+    hot_raw = torch.zeros(
+        num_rows * device_buffer_size * row_width,
+        dtype=torch.uint8,
+        device=device,
+    )
+    runtime.bind_hot_cache(
+        hot_raw,
+        byte_offset=0,
+        block_stride=block_size * row_width,
+        num_blocks=num_rows * hot_blocks_per_request,
+        block_size=block_size,
+        block_table=torch.arange(
+            num_rows * hot_blocks_per_request,
+            dtype=torch.int32,
+            device=device,
+        ).view(num_rows, hot_blocks_per_request),
+    )
+    runtime.request_state_indices = torch.arange(
+        num_rows, dtype=torch.int32, device=device
+    )
+    source = torch.zeros(
+        num_blocks, block_size, row_width, dtype=torch.uint8
+    ).pin_memory()
+    source[..., 512:528].view(torch.float32).fill_(1.0)
+    runtime.bind_source_cache(source)
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).repeat(
+        num_rows, 1
+    )
+    request_ids = torch.arange(num_rows, dtype=torch.int32, device=device)
+
+    _, attention_indices, cleared_counts = runtime.swap_in(
+        req_id_per_token=request_ids,
+        block_table=block_table,
+        topk_indices=cleared_output,
+        block_size=block_size,
+        return_valid_counts=True,
+    )
+    torch.accelerator.synchronize()
+    cleared_counts = cleared_counts.clone()
+    cached_after_clear = int(
+        (runtime.index_group.device_global_indices[0] >= 0).sum().item()
+    )
+    assert (attention_indices[unwritten] == -1).all()
+
+    _, stale_attention_indices, stale_counts = runtime.swap_in(
+        req_id_per_token=request_ids,
+        block_table=block_table,
+        topk_indices=stale_output,
+        block_size=block_size,
+        return_valid_counts=True,
+    )
+    torch.accelerator.synchronize()
+    cached_after_stale = int(
+        (runtime.index_group.device_global_indices[0] >= 0).sum().item()
+    )
+    assert (stale_attention_indices >= 0).all()
+
+    torch.testing.assert_close(
+        cleared_counts,
+        top_k - unwritten_counts,
+    )
+    torch.testing.assert_close(
+        stale_counts,
+        torch.full((num_rows,), top_k, dtype=torch.int32, device=device),
+    )
+    assert cached_after_stale - cached_after_clear == int(unwritten_counts[0].item())
+
+
+@requires_hisparse_ops
 def test_hisparse_resident_rows_bypass_hot_lru():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 64, 8
