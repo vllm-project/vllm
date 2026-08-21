@@ -1335,11 +1335,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if processor_data:
-            processor_data = dict(processor_data)
-
             prompt_text = self._get_hf_processor_text(mm_items.get_all_counts())
             if prompt_text is not None:
-                processor_data["text"] = prompt_text
+                processor_data = dict(text=prompt_text, **processor_data)
 
             processed_data = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**hf_processor_mm_kwargs),
@@ -1348,7 +1346,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             )
             processed_data.update(passthrough_data)
         else:
-            processed_data = cast("BatchFeature", dict(passthrough_data))
+            processed_data = BatchFeature(dict(passthrough_data))
 
         return prompt, processed_data
 
