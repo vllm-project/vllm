@@ -670,6 +670,12 @@ class VllmConfig:
         if self._dflash_needs_multi_kv_group():
             return True
 
+        # The DFlash2 candidate selector exists only in the V2 speculator. On V1
+        # the same checkpoint drafts through DFlashProposer, which never calls
+        # it, so the draft degrades to DFlash1 silently. Force V2 as for dspark.
+        if self._is_dflash2_draft():
+            return True
+
         if self.model_config is not None and self.model_config.is_diffusion:
             return True
 
@@ -692,6 +698,17 @@ class VllmConfig:
             return False
 
         return True
+
+    def _is_dflash2_draft(self) -> bool:
+        """Whether the DFlash draft is a DFlash2 one, by the architecture the
+        speculator selects on (v1/worker/gpu/spec_decode/__init__.py)."""
+        spec = self.speculative_config
+        if spec is None or spec.method != "dflash":
+            return False
+        draft_config = getattr(spec, "draft_model_config", None)
+        if draft_config is None:
+            return False
+        return "DFlash2DraftModel" in (draft_config.architectures or [])
 
     def _dflash_needs_multi_kv_group(self) -> bool:
         """Whether a DFlash draft mixes sliding-window and full attention."""
@@ -1091,6 +1108,13 @@ class VllmConfig:
                 "are normalized over the same nucleus as the sampling mask"
             )
 
+    def _verify_trace_replay_config(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.enable_trace_replay:
+            return
+        if not self.use_v2_model_runner:
+            raise ValueError("trace replay requires Model Runner V2")
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1140,7 +1164,21 @@ class VllmConfig:
                     "connectors (PD disaggregation, KV cache offload)."
                 )
 
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.language_model_only
+            and self.compilation_config.cudagraph_mm_encoder
+        ):
+            raise ValueError(
+                "--language-model-only is incompatible with "
+                "cudagraph_mm_encoder=True, since it disables all multimodal "
+                "inputs and the multimodal encoder is never run. Please "
+                "disable one of them."
+            )
+
         self._verify_sampling_replay_config()
+        self._verify_trace_replay_config()
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
@@ -1161,6 +1199,16 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
             )
+
+        # "dummy" reads no weights at all, and the sharded formats read a vLLM
+        # state dict, which stores tied word embeddings under the lm_head only.
+        # Neither can tell us what the original checkpoint contained.
+        if self.model_config is not None and self.load_config.load_format not in (
+            "dummy",
+            "sharded_state",
+            "runai_streamer_sharded",
+        ):
+            self.model_config.maybe_untie_word_embeddings()
 
         if (
             self.quant_config is not None
@@ -1299,6 +1347,15 @@ class VllmConfig:
                 "async speculative decoding).",
             )
             self.model_config.disable_cascade_attn = True
+
+        if (
+            self.observability_config.per_request_spec_decode_metrics != "none"
+            and self.speculative_config is None
+        ):
+            raise ValueError(
+                "--per-request-spec-decode-metrics requires speculative decoding "
+                "to be enabled (via --speculative-config)."
+            )
 
         if (
             self.model_config is not None
@@ -2411,6 +2468,7 @@ class VllmConfig:
                 "mtp",
                 "dflash",
                 "dspark",
+                "extract_hidden_states",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
