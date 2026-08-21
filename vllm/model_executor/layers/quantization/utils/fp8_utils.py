@@ -920,11 +920,12 @@ def w8a8_triton_block_scaled_mm(
     # Triton cannot currently bind E8M0 scale tensors directly. On ROCm,
     # DeepSeek-V4 checkpoints store block scales in exponent-only E8M0 format,
     # so decode them to fp32 before launching the kernel.
-    if current_platform.is_rocm() or current_platform.is_xpu():
-        if As.dtype == torch.float8_e8m0fnu:
-            As = _upcast_e8m0_to_fp32(As).contiguous()
-        if Bs.dtype == torch.float8_e8m0fnu:
-            Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
+    # [SM89_ADA_PATCH] unconditional: Triton cannot bind E8M0 on any platform.
+    # Routed through the identity cache added by the [SM89_E8M0_CACHE] patch.
+    if As.dtype == torch.float8_e8m0fnu:
+        As = _sm89_upcast_e8m0_cached(As)
+    if Bs.dtype == torch.float8_e8m0fnu:
+        Bs = _sm89_upcast_e8m0_cached(Bs)
 
     assert A.shape[-1] == B.shape[-1]
     assert A.shape[:-1] == As.shape[:-1] and A.is_contiguous()
@@ -947,13 +948,26 @@ def w8a8_triton_block_scaled_mm(
         # Default config
         # Block-wise quant: BLOCK_SIZE_N must be divisible by block_size[0]
         # BLOCK_SIZE_K must be divisible by block_size[1]
+        # [SM89_ADA_PATCH] M-aware default GEMM config.  Upstream hardcodes
+        # BLOCK_SIZE_M=64 here, so the launch grid is
+        #     cdiv(M, 64) * cdiv(N, BLOCK_SIZE_N)
+        # and every decode step (M <= 32) collapses to a single M-block.  With
+        # the real DeepSeek shapes (N=7168 -> 56 N-blocks) that leaves well over
+        # half of an Ada part's 128 SMs idle.  Measured on 8xRTX4090 with CUDA
+        # graph replay: BLOCK_SIZE_M=16 + num_stages=3 is 2-3x faster for every
+        # M in [1, 32] across K in {512, 1024, 2048, 4096}, while BLOCK_SIZE_M=64
+        # stays best for prefill (M=2048).  End to end this is -23% C1 TPOT.
+        # Triton itself is not implicated: 3.6.0 and 3.7.1 time identically at a
+        # fixed config.  Set SM89_BLOCK_M_LOW_LIMIT=0 to restore upstream behaviour.
+        _sm89_low_m = int(os.environ.get("SM89_BLOCK_M_LOW_LIMIT", "32"))
+        _sm89_bm, _sm89_stages = (16, 3) if M <= _sm89_low_m else (64, 2)
         config = {
-            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_M": _sm89_bm,
             "BLOCK_SIZE_N": block_size[0],
             "BLOCK_SIZE_K": block_size[1],
             "GROUP_SIZE_M": 32,
             "num_warps": 4,
-            "num_stages": 2,
+            "num_stages": _sm89_stages,
         }
 
     def grid(META):
@@ -1046,6 +1060,26 @@ def requant_weight_ue8m0_inplace(
         # Write back the results in-place.
         w_q.copy_(w_requant)
         s_old.copy_(s_requant)
+
+
+# [SM89_ADA_PATCH][SM89_E8M0_CACHE] The unconditional upcast launches two extra
+# kernels (unary + contiguous) on EVERY block-scaled GEMM call.  Weight scales
+# are constant, so cache by tensor identity.  The source tensor is kept alive in
+# the cache, so its data_ptr cannot be recycled under us.  Measured on 8xRTX4090:
+# C1 TPOT 16.31 -> 15.68 ms, TTFT 288.41 -> 274.65 ms.
+_SM89_E8M0_UPCAST_CACHE: dict = {}
+
+
+def _sm89_upcast_e8m0_cached(t):
+    key = (t.data_ptr(), tuple(t.shape), tuple(t.stride()))
+    hit = _SM89_E8M0_UPCAST_CACHE.get(key)
+    if hit is not None and hit[0] is t:
+        return hit[1]
+    out = _upcast_e8m0_to_fp32(t).contiguous()
+    if len(_SM89_E8M0_UPCAST_CACHE) > 4096:
+        _SM89_E8M0_UPCAST_CACHE.clear()
+    _SM89_E8M0_UPCAST_CACHE[key] = (t, out)
+    return out
 
 
 def _upcast_e8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:

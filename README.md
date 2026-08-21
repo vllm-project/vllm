@@ -1,3 +1,10 @@
+> **This is a fork.** It adds DeepSeek-V4-Flash support for **SM89 / Ada (RTX 4090)** on top of
+> upstream vLLM `017e9f4448` (`0.27.2rc1.dev163`). The adaptation lives on the `sm89` branch as a
+> single commit — see **[README.SM89.md](README.SM89.md)** for what changed, how to deploy it,
+> measured numbers, and the hard `TP <= 4` constraint. Everything below is upstream's own README.
+
+---
+
 <!-- markdownlint-disable MD001 MD041 -->
 <p align="center">
   <picture>

@@ -348,7 +348,12 @@ def mhc_pre_broadcast_tilelang(
     residual_flat = residual
     num_tokens = residual.shape[0]
 
-    n_splits = compute_num_split(64, hidden_size, cdiv(num_tokens, 64))
+    # [SM89_ADA_PATCH] n_splits must be 1 off the DeepGEMM path — the
+    # TileLang kernel asserts (x.shape[1] // n_splits) % 512 == 0, and the
+    # two guarded call sites in this file already do exactly this.
+    from vllm.utils.deep_gemm import is_deep_gemm_supported as _sm89_dg
+
+    n_splits = compute_num_split(64, hidden_size, cdiv(num_tokens, 64)) if _sm89_dg() else 1
 
     residual_out = torch.empty(
         num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=residual.device
@@ -369,15 +374,32 @@ def mhc_pre_broadcast_tilelang(
         n_splits, num_tokens, dtype=torch.float32, device=residual.device
     )
 
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    # [SM89_ADA_PATCH] upstream gap: this call site lacks the
+    # `use_deep_gemm` guard that mhc_pre_tilelang and
+    # mhc_fused_post_pre_tilelang both have, so it calls DeepGEMM
+    # unconditionally and asserts on any arch DeepGEMM does not support
+    # (csrc/apis/hyperconnection.hpp). Fall back to upstream's own TileLang
+    # kernel, exactly as the two guarded sites do.
+    from vllm.utils.deep_gemm import is_deep_gemm_supported, tf32_hc_prenorm_gemm
 
-    tf32_hc_prenorm_gemm(
-        residual_flat,
-        fn_broadcast,
-        gemm_out_mul,
-        gemm_out_sqrsum,
-        n_splits,
-    )
+    if is_deep_gemm_supported():
+        tf32_hc_prenorm_gemm(
+            residual_flat,
+            fn_broadcast,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            n_splits,
+        )
+    else:
+        _tilelang_hc_prenorm_gemm(
+            residual_flat,
+            fn_broadcast,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            hidden_size,
+            1,
+            n_splits=n_splits,
+        )
     mhc_pre_big_fuse_broadcast_with_norm_tilelang(
         gemm_out_mul,
         gemm_out_sqrsum,
