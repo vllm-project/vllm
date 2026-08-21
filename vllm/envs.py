@@ -314,6 +314,7 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
+    VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
@@ -2115,6 +2116,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force N-contiguous weight layout for all XPU unquantized linears.
     "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
         int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
+    # Kernel backend for INC weight-only intN (WNA16) linear layers on XPU.
+    # "auto" keeps the default preference order (ARK when importable, else the
+    # oneDNN w4a16 path). "ark" forces the auto_round_kernel backend, "w4a16"
+    # forces oneDNN int4_gemm_w4a16, and "w4a8" additionally quantizes
+    # activations to per-token int8 (int4_gemm_w4a8) for large token counts.
+    # The two oneDNN backends are int4-only; ARK also serves int2.
+    # Which one is fastest is device-dependent, so this is left as an opt-in.
+    "VLLM_XPU_INC_WNA16_BACKEND": env_with_choices(
+        "VLLM_XPU_INC_WNA16_BACKEND", "auto", ["auto", "ark", "w4a16", "w4a8"]
     ),
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
