@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import cache
-from typing import TYPE_CHECKING, NamedTuple, cast, get_args
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import torch
 
@@ -118,10 +118,14 @@ def get_attn_backend(
     """Selects which attention backend to use and lazily imports it."""
 
     if kv_cache_dtype is not None:
-        valid_cache_dtypes = get_args(CacheDType)
-        assert kv_cache_dtype in valid_cache_dtypes, (
+        from vllm.config.cache import (
+            KV_CACHE_DTYPES,
+            is_known_kv_cache_dtype,
+        )
+
+        assert is_known_kv_cache_dtype(kv_cache_dtype), (
             f"Invalid kv_cache_dtype: {kv_cache_dtype}. "
-            f"Valid values are: {valid_cache_dtypes}"
+            f"Valid values are: {KV_CACHE_DTYPES}"
         )
 
     from vllm.config import get_current_vllm_config

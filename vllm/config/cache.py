@@ -3,16 +3,19 @@
 
 from collections.abc import Callable
 from dataclasses import field
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Protocol, get_args, runtime_checkable
 
+import torch
 from pydantic import Field, field_validator, model_validator
 
 from vllm.config.utils import config, get_from_deprecated_env_if_set
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
     is_quantized_kv_cache,
     kv_cache_uses_per_token_head_scales,
 )
+from vllm.v1.kv_cache_interface import KVQuantMode
 
 logger = init_logger(__name__)
 
@@ -35,6 +38,117 @@ CacheDType = Literal[
     "nvfp4",
     "nvfp4_4over6",
 ]
+
+# Mutable mirror of the CacheDType Literal. Custom dtypes registered by
+# platform backends are appended here at registration time. Never snapshot
+# this list (no list(...), tuple(...), or import-time key capture) —
+# later-registered entries must stay visible to all consumers.
+KV_CACHE_DTYPES: list[str] = list(get_args(CacheDType))
+
+
+@runtime_checkable
+class KVCacheDTypeHandler(Protocol):
+    """Contract for a custom ``--kv-cache-dtype`` value.
+
+    A platform backend implements this protocol to answer the questions vLLM
+    currently answers with closed tables (``STR_DTYPE_TO_TORCH_DTYPE`` /
+    ``get_kv_quant_mode`` / ``is_quantized_kv_cache``). A single handler may
+    be device-aware (e.g., resolving different torch dtypes per device
+    generation).
+    """
+
+    name: str
+
+    def torch_dtype(self) -> torch.dtype:
+        """Storage dtype for KV cache tensors.
+
+        Called once at registration time; the result is injected into the
+        shared ``STR_DTYPE_TO_TORCH_DTYPE`` dict so existing consumers need no
+        changes. The device must already be resolvable (registration runs at
+        platform activation time).
+        """
+        ...
+
+    def is_quantized(self) -> bool:
+        """True if the cache is stored in a quantized (non-native) format."""
+        ...
+
+    def quant_mode(self) -> KVQuantMode:
+        """The :class:`KVQuantMode` used by generic kernels.
+
+        Return an existing mode to reuse generic kernel paths, or
+        ``KVQuantMode.BACKEND`` when the backend fully self-manages kernel
+        dispatch.
+        """
+        ...
+
+
+# Custom dtype handlers: name -> handler instance. Defined after
+# KVCacheDTypeHandler so the annotation resolves at module load time.
+_KV_CACHE_DTYPE_HANDLERS: dict[str, KVCacheDTypeHandler] = {}
+
+
+def register_kv_cache_dtype(name: str):
+    """Register a custom ``--kv-cache-dtype`` value (eager decorator).
+
+    Runs at platform activation time (first ``current_platform`` access),
+    which is after ``--help`` exits and before any KV cache tensor is
+    allocated. During decoration the handler will:
+
+    - append ``name`` to the mutable ``KV_CACHE_DTYPES`` list (driving
+      Pydantic + CLI validation);
+    - resolve ``torch_dtype()`` once and inject it into
+      ``STR_DTYPE_TO_TORCH_DTYPE``, so all existing ``dict[name]`` /
+      ``name in dict`` sites need zero changes;
+    - be stored for later ``quant_mode()`` / ``is_quantized()`` queries.
+
+    Examples:
+        >>> @register_kv_cache_dtype("int8")
+        ... class Int8Handler:
+        ...     name = "int8"
+        ...
+        ...     def torch_dtype(self):
+        ...         return torch.int8
+        ...
+        ...     def is_quantized(self):
+        ...         return True
+        ...
+        ...     def quant_mode(self):
+        ...         return KVQuantMode.BACKEND
+    """
+
+    def _decorate(cls):
+        if name in KV_CACHE_DTYPES:
+            logger.warning(
+                "The kv-cache-dtype '%s' already exists and will be "
+                "overwritten by handler %s.",
+                name,
+                cls,
+            )
+        else:
+            KV_CACHE_DTYPES.append(name)
+        inst = cls()
+        # Inject into the shared dtype dict in-place so every existing
+        # direct [] / `in` access site sees the new entry.
+        STR_DTYPE_TO_TORCH_DTYPE[name] = inst.torch_dtype()
+        _KV_CACHE_DTYPE_HANDLERS[name] = inst
+        return cls
+
+    return _decorate
+
+
+def get_kv_cache_dtype_handler(name: str) -> KVCacheDTypeHandler | None:
+    """Return the handler for ``name``.
+
+    Returns None for upstream dtypes that have no handler (the dtype table
+    already covers these).
+    """
+    return _KV_CACHE_DTYPE_HANDLERS.get(name)
+
+
+def is_known_kv_cache_dtype(name: str) -> bool:
+    """Whether ``name`` is a valid ``--kv-cache-dtype`` value."""
+    return name in KV_CACHE_DTYPES
 
 
 def _get_prefix_cache_retention_interval() -> int | None:
@@ -85,8 +199,10 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance."""
-    cache_dtype: CacheDType = "auto"
+    cache_dtype: CacheDType | str = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
+    Custom dtypes can registered by platform backends via
+    ``register_kv_cache_dtype`` are accepted (see vllm.config.cache).
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc).
     Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
@@ -292,7 +408,19 @@ class CacheConfig:
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
-    def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
+    def _validate_cache_dtype(cls, cache_dtype: CacheDType | str) -> CacheDType | str:
+        from vllm.platforms import current_platform
+
+        # Accessing current_platform triggers platform activation, which
+        # lets out-of-tree backends register their custom dtypes (via
+        # @register_kv_cache_dtype in their Platform.__init__) before
+        # membership is checked.
+        _ = current_platform
+        if not is_known_kv_cache_dtype(cache_dtype):
+            raise ValueError(
+                f"Invalid kv_cache_dtype: {cache_dtype!r}. "
+                f"Valid values are: {KV_CACHE_DTYPES}"
+            )
         if kv_cache_uses_per_token_head_scales(cache_dtype):
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "

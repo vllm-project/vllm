@@ -72,7 +72,7 @@ class AttentionConfig:
     """Deprecated alias for `indexer_kv_dtype`; use that instead. True maps to
     `mxfp4`, False is a no-op (it selected the model default already)."""
 
-    indexer_kv_dtype: IndexerKVDType = "auto"
+    indexer_kv_dtype: IndexerKVDType | str = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
