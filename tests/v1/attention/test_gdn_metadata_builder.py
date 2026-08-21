@@ -21,10 +21,32 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
+
+
+@pytest.mark.parametrize(
+    "query_start_loc, expected_batch, expected_offset",
+    [
+        ([0, 1, 9, 26], [0, 1, 2, 2, 2], [0, 0, 0, 1, 2]),
+        ([0, 0, 8, 24], [1, 2, 2], [0, 0, 1]),
+    ],
+)
+def test_causal_conv1d_metadata_indices(
+    query_start_loc: list[int],
+    expected_batch: list[int],
+    expected_offset: list[int],
+):
+    """Vectorized program indices preserve the per-sequence ordering."""
+    metadata, _, _ = compute_causal_conv1d_metadata(
+        torch.tensor(query_start_loc, dtype=torch.int32), device=DEVICE
+    )
+
+    assert metadata[8]["mlist"].tolist() == expected_batch
+    assert metadata[8]["offsetlist"].tolist() == expected_offset
 
 
 @dataclass
