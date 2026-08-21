@@ -352,6 +352,57 @@ class TestLSEWeightedCombine:
         assert _dcp_a2a_lse_pack_dim(torch.float32) == 1
 
 
+class TestDCPA2ABufferPool:
+    def test_smaller_batch_reuses_persistent_storage(self):
+        from vllm.v1.attention.ops.dcp import _DCPA2ABufferPool
+
+        pool = _DCPA2ABufferPool()
+        large_send, large_recv = pool.get(
+            (8, 96, 2, 130), torch.device("cpu"), torch.bfloat16
+        )
+        small_send, small_recv = pool.get(
+            (8, 16, 2, 130), torch.device("cpu"), torch.bfloat16
+        )
+
+        assert small_send.shape == (8, 16, 2, 130)
+        assert small_recv.shape == (8, 16, 2, 130)
+        assert small_send.data_ptr() == large_send.data_ptr()
+        assert small_recv.data_ptr() == large_recv.data_ptr()
+
+    def test_growth_preserves_old_generation(self):
+        from vllm.v1.attention.ops.dcp import _DCPA2ABufferPool
+
+        pool = _DCPA2ABufferPool()
+        old_send, old_recv = pool.get(
+            (8, 16, 2, 130), torch.device("cpu"), torch.bfloat16
+        )
+        old_ptrs = old_send.data_ptr(), old_recv.data_ptr()
+
+        large_send, large_recv = pool.get(
+            (8, 96, 2, 130), torch.device("cpu"), torch.bfloat16
+        )
+        reused_send, reused_recv = pool.get(
+            (8, 8, 2, 130), torch.device("cpu"), torch.bfloat16
+        )
+
+        assert large_send.data_ptr() != old_ptrs[0]
+        assert large_recv.data_ptr() != old_ptrs[1]
+        assert reused_send.data_ptr() == large_send.data_ptr()
+        assert reused_recv.data_ptr() == large_recv.data_ptr()
+        # The caller may release its views while an older graph still embeds
+        # their addresses; the pool must continue to own that generation.
+        assert pool._generations
+        retained = next(iter(pool._generations.values()))
+        assert [generation[1].data_ptr() for generation in retained] == [
+            old_ptrs[0],
+            large_send.data_ptr(),
+        ]
+        assert [generation[2].data_ptr() for generation in retained] == [
+            old_ptrs[1],
+            large_recv.data_ptr(),
+        ]
+
+
 class TestPackedA2AKernels:
     @pytest.mark.skipif(
         torch.accelerator.device_count() < 1, reason="CUDA is required."

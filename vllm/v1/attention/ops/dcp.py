@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable
+from math import prod
+from threading import Lock
 from typing import TYPE_CHECKING, Protocol
 
 import torch
@@ -433,21 +435,57 @@ def _dcp_a2a_lse_pack_dim(output_dtype: torch.dtype) -> int:
     raise ValueError(f"Cannot pack fp32 LSE into output dtype {output_dtype}.")
 
 
+class _DCPA2ABufferPool:
+    """Keep packed A2A buffers alive for the lifetime of captured graphs."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._generations: dict[
+            tuple[torch.device, torch.dtype, tuple[int, ...]],
+            list[tuple[int, torch.Tensor, torch.Tensor]],
+        ] = {}
+
+    def get(
+        self,
+        shape: tuple[int, ...],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert len(shape) == 4
+        batch_size = shape[1]
+        key = (device, dtype, shape[:1] + shape[2:])
+
+        with self._lock:
+            generations = self._generations.setdefault(key, [])
+            for capacity, send, recv in reversed(generations):
+                if capacity >= batch_size:
+                    numel = prod(shape)
+                    return send[:numel].view(shape), recv[:numel].view(shape)
+
+            # Retain older generations: their addresses may be embedded in
+            # graphs captured before this larger allocation was requested.
+            send = torch.empty(prod(shape), device=device, dtype=dtype)
+            recv = torch.empty(prod(shape), device=device, dtype=dtype)
+            generations.append((batch_size, send, recv))
+            return send.view(shape), recv.view(shape)
+
+
+_DCP_A2A_BUFFER_POOL = _DCPA2ABufferPool()
+
+
 def _dcp_a2a_send_recv_buffers(
     shape: tuple[int, ...],
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # Don't use the shared WorkspaceManager here. A FULL cudagraph bakes in the
-    # buffer address at capture, but the workspace is growable and sized only to
-    # the largest *captured* batch (the cudagraph capture cap). Any eager a2a
-    # with a bigger batch regrows it, freeing that address and poisoning every
-    # captured graph -> illegal memory access on replay. This bites the very
-    # first request: the post-capture warmup runs an eager decode at
-    # max_num_seqs (> the cap), so the graphs are already dangling before the
-    # server is ready. torch.empty buffers instead live in the graph's private
-    # pool and stay valid for its lifetime (as _dcp_a2a_unpack_combine and the
-    # AG+RS combine path already rely on).
+    # RCCL records these addresses in a FULL graph. On ROCm, function-local
+    # torch.empty tensors can be released after capture even though replay still
+    # references them, causing a memory aperture violation. Retain capture-only
+    # buffers for process lifetime; eager calls remain temporary so a large
+    # warmup batch cannot permanently consume the graph memory budget.
+    if device.type == "cuda" and torch.accelerator.current_stream().is_capturing():
+        return _DCP_A2A_BUFFER_POOL.get(shape, device, dtype)
+
     return (
         torch.empty(shape, device=device, dtype=dtype),
         torch.empty(shape, device=device, dtype=dtype),
