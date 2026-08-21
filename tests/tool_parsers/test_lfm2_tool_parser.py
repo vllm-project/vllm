@@ -792,6 +792,25 @@ def test_streaming_bad_bracket_after_a_streamed_prefix_reported_once(
     assert logged_warning.call_count == 1
 
 
+def test_streaming_implicit_string_concatenation(lfm2_tokenizer: TokenizerLike):
+    """Adjacent string literals ('ab' 'cd') are valid Python that concatenates
+    to one value. The broken-string guard misread the second opening quote as
+    an unclosable string and withheld every later delta — including the final,
+    fully parseable text — so the client was left with a truncated argument."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[f(s='ab' 'cd')]{TOOL_CALL_END}"
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=True,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == FunctionCall(name="f", arguments='{"s": "abcd"}')
+
+
 def test_streaming_positional_call_logged_once_not_per_chunk(
     lfm2_tokenizer: TokenizerLike,
 ):

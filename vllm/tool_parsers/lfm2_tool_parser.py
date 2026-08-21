@@ -381,8 +381,15 @@ class Lfm2ToolParser(ToolParser):
             # partial parse an implicit-concatenation misreading whose
             # streamed prefix could never be retracted. Withhold deltas
             # until the requote recovery above has produced sane text.
+            # Text that already parses has no broken string to wait for:
+            # adjacent literals ('ab' 'cd') are valid implicit concatenation
+            # the heuristic misreads, and withholding them would stall the
+            # stream on a value that is already correct.
             if contains_broken_string_literal(tool_text):
-                return _content_only_or_none()
+                try:
+                    ast.parse(tool_text)
+                except (SyntaxError, ValueError):
+                    return _content_only_or_none()
 
             try:
                 valid_and_added_text = make_valid_python(tool_text)
