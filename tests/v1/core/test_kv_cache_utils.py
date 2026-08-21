@@ -2200,13 +2200,14 @@ def new_mla_spec(cache_dtype_str=None, block_size=16):
     )
 
 
-def new_swa_mla_spec(head_size=576, sliding_window=128):
+def new_swa_mla_spec(head_size=576, sliding_window=128, model_version=None):
     return SlidingWindowMLASpec(
         block_size=16,
         num_kv_heads=1,
         head_size=head_size,
         dtype=torch.float32,
         sliding_window=sliding_window,
+        model_version=model_version,
     )
 
 
@@ -3266,3 +3267,45 @@ def test_no_warning_when_draft_group_is_identified(caplog_vllm):
     )
 
     assert "could be identified as the draft model's" not in caplog_vllm.text
+
+
+def _deepseek_v4_specs(model_version="deepseek_v4"):
+    """DeepseekV4-shaped specs: full MLA layers plus sliding-window MLA layers
+    at differing page sizes, with the MTP draft layer registered last."""
+    return {
+        "model.layers.0.self_attn.attn": new_mla_spec(),
+        "model.layers.1.self_attn.attn": new_mla_spec(),
+        "model.layers.2.self_attn.attn": new_swa_mla_spec(
+            head_size=1024, model_version=model_version
+        ),
+        # The MTP block registers last, and its sliding-window size differs, so
+        # it lands in a group of its own.
+        "model.layers.3.self_attn.attn": new_swa_mla_spec(
+            head_size=1024, sliding_window=256, model_version=model_version
+        ),
+    }
+
+
+def test_deepseek_v4_draft_group_annotated_on_group_and_unify_path():
+    # DeepseekV4's MTP block reuses the target's decoder layer, so its spec
+    # carries no draft marker and only the positional rule can find it. This
+    # pins the pre-existing behaviour that the unified annotator must preserve.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp"), _deepseek_v4_specs()
+    )
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
+
+
+def test_deepseek_v4_annotation_requires_model_version():
+    # The positional rule is only sound for DeepseekV4, where the draft layer
+    # is known to be registered last. Without that model gate nothing may be
+    # flagged, however the grouping happens to fall out.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp"),
+        _deepseek_v4_specs(model_version=None),
+    )
+
+    assert not any(g.is_eagle_group for g in groups)
