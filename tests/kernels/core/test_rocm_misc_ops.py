@@ -14,11 +14,14 @@ These tests catch ROCm-specific regressions early:
 3. **AITER ops availability tests**: Verify rocm_aiter_ops accessor methods
    work without crashing, regardless of hardware support.
 
+4. **Env var propagation tests**: Verify ROCm-specific env vars correctly
+   gate their respective features (e.g., shuffle KV cache, skinny GEMM).
+
 Related coverage:
 - AITER kernel numerics: ``tests/kernels/core/test_rocm_aiter_ops.py``
-- Attention backend selection: ``test_rocm_attention_selector.py``
-- GEMM dispatch: ``test_rocm_unquantized_gemm.py``
-"""
+- Attention backend selection: ``tests/v1/attention/test_rocm_attention_backends_selection.py``
+- GEMM dispatch: ``tests/model_executor/layers/test_rocm_unquantized_gemm.py``
+"""  # noqa: E501
 
 import importlib
 
