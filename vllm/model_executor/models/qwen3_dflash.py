@@ -479,6 +479,78 @@ class DFlashQwen3Model(nn.Module):
             embeds = torch.where(is_mask, self.mask_embedding.to(embeds.dtype), embeds)
         return embeds
 
+    @staticmethod
+    def _dequant_kv_slice(attn: nn.Module, act_dtype: torch.dtype) -> torch.Tensor:
+        """The layer's K/V rows in `act_dtype`, dequantizing if stored quantized.
+
+        `_project_context_kv` runs ONE fused `F.linear` over every layer's K/V
+        weights, bypassing `quant_method.apply()`. Dequantizing here keeps that
+        cross-layer fusion; going through `apply()` per layer would give it up.
+
+        This runs at the end of `load_weights()`, before
+        `process_weights_after_loading`, so the weights are still in checkpoint
+        layout — no kernel-specific repack or transposition to undo.
+        """
+        qkv = attn.qkv_proj
+        w = getattr(qkv, "weight", None)
+
+        if w is None or w.dim() != 2:
+            # compressed-tensors pack-quantized (W4A16 / W8A16): there is no plain
+            # `weight`; values are packed into int32 with group-wise scales.
+            from compressed_tensors.compressors.pack_quantized.base import (
+                unpack_from_int32,
+            )
+
+            packed, group_scale = qkv.weight_packed, qkv.weight_scale
+            out_f, in_f = int(packed.shape[0]), int(qkv.input_size)
+            bits = 32 * packed.shape[1] // in_f
+            q = unpack_from_int32(
+                packed.data, bits, torch.Size([out_f, in_f]), packed_dim=1
+            )
+            group = in_f // group_scale.shape[1]
+            dense = (
+                q.to(torch.float32).reshape(out_f, in_f // group, group)
+                * group_scale.to(torch.float32)[..., None]
+            ).reshape(out_f, in_f)
+            return dense.to(act_dtype)[attn.q_size :]
+
+        kv = w[attn.q_size :]
+        if kv.dtype == act_dtype:
+            return kv
+
+        # Plain quantized weight (e.g. compressed-tensors FP8) + a weight_scale.
+        scale = getattr(qkv, "weight_scale", None)
+        if scale is None:
+            raise ValueError(
+                f"DFlash context-KV precompute needs to dequantize {kv.dtype} "
+                f"weights, but {type(qkv).__name__} exposes no weight_scale."
+            )
+        s = scale.data if hasattr(scale, "data") else scale
+        out = kv.to(act_dtype)
+        if s.numel() == 1:
+            return out * s.to(act_dtype).reshape(())
+        s = s.reshape(-1)
+
+        # One scalar per fused shard: a per-tensor scheme on a merged layer stores
+        # `weight_scale` as (num_shards,) — (3,) for q/k/v — not one entry per row.
+        # Expand each shard's scalar over the rows it owns before slicing.
+        sizes = getattr(qkv, "output_partition_sizes", None) or getattr(
+            qkv, "output_sizes", None
+        )
+        if sizes is not None and s.numel() == len(sizes) and sum(sizes) == w.shape[0]:
+            s = torch.cat(
+                [s[i].expand(int(n)) for i, n in enumerate(sizes)]
+            )
+
+        if s.numel() == w.shape[0]:
+            s = s[attn.q_size :]
+        if s.numel() != out.shape[0]:
+            raise ValueError(
+                f"DFlash context-KV precompute cannot map a weight_scale of "
+                f"{tuple(scale.shape)} onto a K/V slice of {tuple(out.shape)}."
+            )
+        return out * s.to(act_dtype).reshape(-1, 1)
+
     def _build_context_kv_buffers(
         self,
         layers_attn: list[nn.Module],
@@ -487,7 +559,10 @@ class DFlashQwen3Model(nn.Module):
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+        kv_weights = [
+            self._dequant_kv_slice(a, self._hidden_norm_weight.dtype)
+            for a in layers_attn
+        ]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
