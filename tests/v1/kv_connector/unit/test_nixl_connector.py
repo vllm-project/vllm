@@ -574,6 +574,8 @@ class TestNixlHandshake:
         self, default_vllm_config, dist_init, pcp_rank
     ):
         """Only PCP rank zero publishes and reports sending completion."""
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
         vllm_config = create_vllm_config(kv_role="kv_producer")
         vllm_config.parallel_config.prefill_context_parallel_size = 2
         with (
