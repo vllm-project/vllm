@@ -72,7 +72,11 @@ def test_selector_edges_match_sequential_reference():
 
 
 def _stub_base(monkeypatch, draft_logits):
-    """A DFlashSpeculator.__init__ that allocates only what the base class would."""
+    """A DFlashSpeculator.__init__ that allocates only what the base class would.
+
+    The real base class fills draft_logits from draft_logits_spec, so callers
+    pass a tensor already in that state.
+    """
 
     def init_base(self, _vllm_config, device):
         self.draft_model_config = SimpleNamespace(
@@ -99,20 +103,6 @@ def test_selector_leaves_greedy_drafting_without_proposal_logits(monkeypatch):
     speculator = DFlash2Speculator(None, torch.device("cpu"))
 
     assert speculator.draft_logits is None
-
-
-def test_selector_fills_probabilistic_proposal_logits(monkeypatch):
-    """Every column the cache kernel does not write must read as impossible.
-
-    The kernel writes only the K candidates per step, so the rest of the row has
-    to be -inf before the walk ever reads it.
-    """
-    allocated = torch.zeros((2, 4, 17), dtype=torch.float32)
-    _stub_base(monkeypatch, allocated)
-    speculator = DFlash2Speculator(None, torch.device("cpu"))
-
-    assert speculator.draft_logits is allocated
-    assert torch.isneginf(speculator.draft_logits).all()
 
 
 def test_selector_asks_for_fp32_proposal_logits():

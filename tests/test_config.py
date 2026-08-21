@@ -185,6 +185,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ),
     )
     config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash2_draft = lambda: False
     config._is_default_v2_model_runner_model = lambda: (
         VllmConfig._is_default_v2_model_runner_model(config)
     )
