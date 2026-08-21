@@ -35,8 +35,10 @@ from vllm.entrypoints.cohere.protocol import (
 from vllm.entrypoints.cohere.serving import CohereServingChatV2
 from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
-from vllm.entrypoints.serve.utils.server_utils import (
+from vllm.entrypoints.serve.exception_handling.handlers.http import (
     http_exception_handler,
+)
+from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 from vllm.sampling_params import SamplingParams

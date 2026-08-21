@@ -115,6 +115,7 @@ from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
+from ...utils.gpu_sync_debug import gpu_sync_allowed
 from ...utils.torch_utils import async_tensor_h2d
 from .interfaces import (
     MultiModalEmbeddings,
@@ -909,7 +910,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def _get_vision_info(
@@ -1284,7 +1285,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
 
@@ -1369,7 +1369,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     prompt="<|vision_start|><|video_pad|><|vision_end|>",
                     mm_data=video_mm_data,
                     mm_kwargs=video_mm_kwargs,
-                    tok_kwargs=tok_kwargs,
                 )
 
                 # Discard HF output input_ids — we use get_video_repl below
@@ -1431,7 +1430,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=non_video_mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         # Replace each placeholder with pre-computed video tokens.
@@ -2368,19 +2366,17 @@ class Qwen3VLForConditionalGeneration(
                     spatial_merge_size=self.visual.spatial_merge_size,
                     q=self.video_pruning_rate,
                 )
-                # Apply retention mask.
-                emb = emb[retention_mask]
 
-                # Calculate the actual number of retained tokens per frame.
-                num_frames, rows, cols = (
-                    t,
-                    h // merge_size,
-                    w // merge_size,
-                )
-                retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
-                num_tokens_per_frame = (
-                    retention_mask_thw.sum(dim=(1, 2)).long().tolist()
-                )
+                with gpu_sync_allowed():
+                    # Apply retention mask.
+                    emb = emb[retention_mask]
+
+                    # Calculate the actual number of retained tokens per frame.
+                    num_frames, rows, cols = t, h // merge_size, w // merge_size
+                    retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
+                    num_tokens_per_frame = (
+                        retention_mask_thw.sum(dim=(1, 2)).long().tolist()
+                    )
             else:
                 feature_size = emb.shape[0] // num_frames
                 num_tokens_per_frame = [feature_size] * num_frames
@@ -2548,10 +2544,14 @@ class Qwen3VLForConditionalGeneration(
             .permute(1, 0)
         )
         full_is_video_embed = unpruned_token_ids_tensor == embed_token_id
-        expanded_positions[is_video_embed, :3] = original_mrope[full_is_video_embed][
-            retention_mask
-        ]
-        expanded_positions[~is_video_embed, :3] = original_mrope[~full_is_video_embed]
+
+        with gpu_sync_allowed():
+            expanded_positions[is_video_embed, :3] = original_mrope[
+                full_is_video_embed
+            ][retention_mask]
+            expanded_positions[~is_video_embed, :3] = original_mrope[
+                ~full_is_video_embed
+            ]
         expanded_positions[..., 3] = is_vision_start
         expanded_positions[..., 4] = is_video_embed
 
@@ -2814,15 +2814,16 @@ class Qwen3VLForConditionalGeneration(
                     torch.empty(5, 0, device=device, dtype=torch.long)
                 )
 
-        positions, mrope_positions_delta = recompute_mrope_positions(
-            input_ids_t,
-            mm_embeddings_pos,
-            mrope_positions,
-            num_computed_tokens,
-            vision_start_token_id,
-            image_token_id,
-            video_token_id,
-        )
+        with gpu_sync_allowed():
+            positions, mrope_positions_delta = recompute_mrope_positions(
+                input_ids_t,
+                mm_embeddings_pos,
+                mrope_positions,
+                num_computed_tokens,
+                vision_start_token_id,
+                image_token_id,
+                video_token_id,
+            )
 
         return mm_embeddings_out, positions, mrope_positions_delta
 

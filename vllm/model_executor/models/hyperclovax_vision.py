@@ -195,7 +195,6 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         for video_idx, video_arr in enumerate(mm_data.get("videos", [])):
             if video_arr.dtype != np.uint8:
@@ -263,15 +262,6 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
 
         return processed_outputs
 
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -324,10 +314,14 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
     ) -> Mapping[str, MultiModalFieldConfig]:
         fields = dict(
             pixel_values_images=MultiModalFieldConfig.batched("image"),
-            image_sizes_images=MultiModalFieldConfig.batched("image"),
-            vision_query_lengths_images=MultiModalFieldConfig.batched("image"),
+            image_sizes_images=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            vision_query_lengths_images=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             pixel_values_videos=MultiModalFieldConfig.batched("video"),
-            vision_query_lengths_videos=MultiModalFieldConfig.batched("video"),
+            vision_query_lengths_videos=MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            ),
         )
 
         return fields
