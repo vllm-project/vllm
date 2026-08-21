@@ -18,14 +18,12 @@ from .common import (
 from .models import (
     FLASHINFER_ATTN,
     FLASHINFER_MLA_ATTN,
-    FLASHMLA_SPARSE_ATTN,
     ROCM_AITER_UNIFIED_ATTN,
     ROCM_ATTN,
     TRITON_ATTN,
     deepseek_coder_v2_lite_fp8,
     deepseek_r1_fp4,
     deepseek_v3_fp8,
-    deepseek_v32_fp4,
     gpt_oss_20b,
     llama3_8b,
     llama3_8b_fp4,
@@ -84,6 +82,7 @@ def test_tp2_ar_rms_fp8_fusions(
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
     model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["disable_custom_all_reduce"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -119,11 +118,11 @@ def test_tp2_ar_rms_fp8_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_fp4, llama4_scout_fp4, deepseek_r1_fp4, deepseek_v32_fp4],
+    [llama3_8b_fp4, llama4_scout_fp4, deepseek_r1_fp4],
 )
 @pytest.mark.parametrize(
     "attn_backend",
-    [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN, FLASHMLA_SPARSE_ATTN],
+    [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN],
 )
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
@@ -149,6 +148,7 @@ def test_tp2_ar_rms_fp4_fusions(
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
     model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["disable_custom_all_reduce"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -179,8 +179,13 @@ def test_tp2_ar_rms_fp4_fusions(
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b, qwen3_a3b, gpt_oss_20b],
+    "model_name, matches_fn, model_kwargs, hf_overrides, model_impl",
+    [
+        (*llama3_8b, "auto"),
+        (*llama3_8b, "transformers"),
+        (*qwen3_a3b, "auto"),
+        (*gpt_oss_20b, "auto"),
+    ],
 )
 @pytest.mark.parametrize(
     "attn_backend",
@@ -200,19 +205,29 @@ def test_tp2_ar_rms_fusions(
     matches_fn: Callable[[int], Matches],
     model_kwargs: dict,
     hf_overrides: Callable[[int], dict],
+    model_impl: str,
     attn_backend: AttentionBackendCase,
     n_layers: int,
     custom_ops: str,
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
 ):
+    if model_impl == "transformers" and not current_platform.is_rocm():
+        pytest.skip("Transformers 3D AR+RMS regression is ROCm-only")
+
     matches = matches_fn(n_layers)
+    if model_impl == "transformers":
+        # Transformers add+RMSNorm canonicalization exposes every generic
+        # AR+RMS fusion site, including the final norm.
+        matches = matches._replace(aiter_ar_rms_fusion=matches.ar_rms_fusion)
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
+    model_kwargs["model_impl"] = model_impl
     model_kwargs["max_model_len"] = 1024
     model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["disable_custom_all_reduce"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -225,8 +240,12 @@ def test_tp2_ar_rms_fusions(
 
     matches_check = [
         "norm_rope_fusion",
-        "ar_rms_fusion",
     ]
+
+    if current_platform.is_rocm():
+        matches_check.append("aiter_ar_rms_fusion")
+    else:
+        matches_check.append("ar_rms_fusion")
 
     run_e2e_fusion_test(
         model_name,

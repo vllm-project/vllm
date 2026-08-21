@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# Test that the interaction between EPLB and FusedMoE Layer is okay
+# Test that the interaction between EPLB and FusedMoEFactory Layer is okay
 
 from dataclasses import dataclass
 
@@ -9,12 +9,14 @@ import pytest
 import torch
 
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
+    get_eplb_group,
     get_tp_group,
 )
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, MoERunner
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
@@ -67,17 +69,17 @@ def make_fused_moe_layer(
     rank: int,
     layer_idx: int,
     test_config: TestConfig,
-) -> FusedMoE:
-    fml = FusedMoE(
+) -> MoERunner:
+    fml = FusedMoEFactory(
         num_experts=test_config.num_experts,
         top_k=test_config.num_topk,
         hidden_size=test_config.hidden_size,
         intermediate_size=test_config.intermediate_size,
         prefix=f"dummy_layer_{layer_idx}",
         activation="silu",
-        is_act_and_mul=True,
         params_dtype=test_config.weight_dtype,
     )
+    re = fml.routed_experts
 
     device = torch.device(f"cuda:{rank}")
 
@@ -90,12 +92,12 @@ def make_fused_moe_layer(
         tensor_device=device,
     )
 
-    assert isinstance(fml.w13_weight.data, torch.Tensor)
-    assert isinstance(fml.w2_weight.data, torch.Tensor)
-    fml.w13_weight.data = fml.w13_weight.data.to(device=device)
-    fml.w2_weight.data = fml.w2_weight.data.to(device=device)
-    w13_weight = fml.w13_weight.data
-    w2_weight = fml.w2_weight.data
+    assert isinstance(re.w13_weight.data, torch.Tensor)
+    assert isinstance(re.w2_weight.data, torch.Tensor)
+    re.w13_weight.data = re.w13_weight.data.to(device=device)
+    re.w2_weight.data = re.w2_weight.data.to(device=device)
+    w13_weight = re.w13_weight.data
+    w2_weight = re.w2_weight.data
     assert w13_weight.size(0) == test_config.num_local_experts
     for i in range(test_config.num_local_experts):
         g_i = rank * test_config.num_local_experts + i
@@ -170,10 +172,10 @@ def make_fused_moe_layer(
         assert not w2_weight_scale_inv.is_contiguous()
 
     # Add scales to the parameter list
-    fml.w13_weight_scale_inv = torch.nn.Parameter(
+    re.w13_weight_scale_inv = torch.nn.Parameter(
         w13_weight_scale_inv, requires_grad=False
     )
-    fml.w2_weight_scale_inv = torch.nn.Parameter(
+    re.w2_weight_scale_inv = torch.nn.Parameter(
         w2_weight_scale_inv, requires_grad=False
     )
 
@@ -213,12 +215,20 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         for lidx in range(test_config.num_layers):
             shuffled_indices[lidx] = torch.randperm(test_config.num_experts)
 
+        expert_buffer = [torch.empty_like(w) for w in rank_expert_weights[0]]
+        communicator = create_eplb_communicator(
+            group_coordinator=get_eplb_group(),
+            backend="torch_nccl",
+            expert_weights=rank_expert_weights,
+            expert_buffer=expert_buffer,
+        )
         rearrange_expert_weights_inplace(
             indices,
             shuffled_indices,
             rank_expert_weights,
+            expert_buffer,
             ep_group,
-            is_profile=False,
+            communicator,
         )
 
         num_local_experts = test_config.num_local_experts

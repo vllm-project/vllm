@@ -72,6 +72,13 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
     )
 
 
+def _missing_sparse_mla(*_: Any, **__: Any) -> NoReturn:
+    raise RuntimeError(
+        "FlashInfer sparse MLA decode APIs are not available. "
+        "Install a FlashInfer build that includes sparse MLA decode support."
+    )
+
+
 def _get_submodule(module_name: str) -> Any | None:
     """Safely import a submodule and return it, or None if not available."""
     try:
@@ -119,6 +126,7 @@ flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
     "flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"
 )
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+flashinfer_mxfp4_quantize = _lazy_import_wrapper("flashinfer", "mxfp4_quantize")
 nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
 silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
     "flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"
@@ -141,6 +149,22 @@ flashinfer_b12x_fused_moe = _lazy_import_wrapper(
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
+flashinfer_trtllm_batch_decode_with_kv_cache_mla = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "trtllm_batch_decode_with_kv_cache_mla",
+    fallback_fn=_missing_sparse_mla,
+)
+flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "trtllm_batch_decode_sparse_mla_dsv4",
+    fallback_fn=_missing_sparse_mla,
+)
+flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "xqa_batch_decode_with_kv_cache",
+)
+
+
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",
@@ -191,6 +215,42 @@ def has_flashinfer_moe() -> bool:
         has_flashinfer()
         and importlib.util.find_spec("flashinfer.fused_moe") is not None
     )
+
+
+@functools.cache
+def has_flashinfer_sparse_mla_sm120() -> bool:
+    """Return ``True`` if FlashInfer sparse MLA decode support is available."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.autotuner import autotune
+        from flashinfer.decode import (
+            trtllm_batch_decode_sparse_mla_dsv4,
+            trtllm_batch_decode_with_kv_cache_mla,
+        )
+    except ImportError:
+        return False
+    return (
+        callable(trtllm_batch_decode_sparse_mla_dsv4)
+        and callable(trtllm_batch_decode_with_kv_cache_mla)
+        and callable(autotune)
+    )
+
+
+@functools.cache
+def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool:
+    """Return whether FlashInfer ships an SM120 DSV4 decode specialization.
+
+    The public sparse MLA API predates some DSV4 shapes, so checking only that
+    the callable exists can select a package that later aborts or rejects a
+    valid vLLM configuration. Inspect FlashInfer's dispatch table until it
+    exposes a public capability query.
+    """
+    if not has_flashinfer_sparse_mla_sm120():
+        return False
+    mod = _get_submodule("flashinfer.mla._sparse_mla_sm120")
+    dispatch = getattr(mod, "_DECODE_DSV4_DISPATCH", None) if mod else None
+    return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
 
 
 @functools.cache
@@ -332,19 +392,29 @@ def has_nvidia_artifactory() -> bool:
 
 
 @functools.cache
-def supports_trtllm_attention() -> bool:
-    """
-    TRTLLM attention is supported if the platform is SM100,
-    NVIDIA artifactory is accessible, and batch-invariant mode is not enabled.
+def supports_trtllm_attention(is_prefill: bool = False) -> bool:
+    """Return whether TRTLLM attention is available on the current platform
+    for the given attention phase.
+
+    SM90 (Hopper) and SM12x support the XQA decode kernel but not TRTLLM
+    prefill. SM100+ supports TRTLLM for both phases. All others are unsupported.
     """
     # Batch-invariant mode disables TRTLLM attention
     if envs.VLLM_BATCH_INVARIANT:
         return False
 
-    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    return (
-        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
-    )
+    # Requires NVIDIA artifactory to be accessible to download cubins
+    if not has_nvidia_artifactory():
+        return False
+
+    # SM90 and SM12x have XQA decode only.
+    if current_platform.is_device_capability(
+        90
+    ) or current_platform.is_device_capability_family(120):
+        return not is_prefill
+
+    # SM100/SM103 has both prefill and decode TRTLLM kernels.
+    return current_platform.is_device_capability_family(100)
 
 
 def force_use_trtllm_attention() -> bool | None:
@@ -361,12 +431,15 @@ def force_use_trtllm_attention() -> bool | None:
     return vllm_config.attention_config.use_trtllm_attention
 
 
-def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
+def can_use_trtllm_attention(
+    num_qo_heads: int, num_kv_heads: int, is_prefill: bool = False
+) -> bool:
     """Check if the current configuration supports TRTLLM attention."""
     if force_use_trtllm_attention() is False:
         return False
-    has_trtllm = supports_trtllm_attention()
-    return has_trtllm and (num_qo_heads % num_kv_heads == 0)
+    return supports_trtllm_attention(is_prefill=is_prefill) and (
+        num_qo_heads % num_kv_heads == 0
+    )
 
 
 def use_trtllm_attention(
@@ -389,20 +462,23 @@ def use_trtllm_attention(
     if force_use_trtllm is not None and not force_use_trtllm:
         return False
 
-    # Decode context parallel is not supported
+    # TRTLLM prefill attends only the DCP-local KV shard and has no
+    # cross-rank LSE combine, so it cannot be used with DCP; fall back to
+    # FlashInfer's DCP prefill path. TRTLLM decode under DCP is selected
+    # separately (all-gathered query heads + LSE combine in forward).
     if dcp_world_size > 1:
         logger.warning_once(
-            "Trtllm does not support returning LSE and as a result "
-            "does not support DCP, reverting to FlashInfer"
+            "TRTLLM prefill does not support DCP, reverting to FlashInfer"
         )
         return False
 
     # The platform is not supported
-    if not supports_trtllm_attention():
+    if not supports_trtllm_attention(is_prefill=is_prefill):
         if force_use_trtllm:
             logger.warning_once(
-                "TRTLLM attention is not supported on this platform, "
-                "but --attention-config.use_trtllm_attention is set to 1"
+                "TRTLLM attention is not supported on this platform for %s, "
+                "but --attention-config.use_trtllm_attention is set to 1",
+                "prefill" if is_prefill else "decode",
             )
         return False
 
@@ -437,13 +513,20 @@ def use_trtllm_attention(
         if is_prefill:
             # Prefill auto-detection
             use_trtllm = kv_cache_dtype == "auto"
-            if use_trtllm:
-                logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
+        elif (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(120)
+        ) and kv_cache_dtype.startswith("fp8"):
+            # SM90/SM12x + FP8 KV cache: prefer the XQA decode kernel.
+            use_trtllm = True
         else:
             # Decode auto-detection
             use_trtllm = num_tokens <= 256 and kv_cache_dtype == "auto"
-            if use_trtllm:
-                logger.warning_once("Using TRTLLM decode attention (auto-detected).")
+        if use_trtllm:
+            logger.warning_once(
+                "Using TRTLLM %s attention (auto-detected).",
+                "prefill" if is_prefill else "decode",
+            )
         return use_trtllm
 
     # CLI argument is set to 1 - respect it
@@ -558,14 +641,16 @@ if has_flashinfer():
     )
     def flashinfer_mxfp4_quantize(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer import mxfp4_quantize as _mxfp4_quantize
 
-        return _mxfp4_quantize(a)
+        return _mxfp4_quantize(a, backend=backend)
 
     @torch.library.register_fake("vllm::flashinfer_mxfp4_quantize")
     def flashinfer_mxfp4_quantize_fake(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         m, k = a.shape
         sf_vec_size = 32
@@ -642,6 +727,36 @@ if has_flashinfer():
         )
 
     @torch.library.custom_op(
+        "vllm::flashinfer_mxfp8_quantize_8x4",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_mxfp8_quantize_8x4(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer import SfLayout
+        from flashinfer import mxfp8_quantize as mxfp8_quantize_
+
+        return mxfp8_quantize_(
+            a,
+            backend="cuda",
+            sf_swizzle_layout=SfLayout.layout_8x4,
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_mxfp8_quantize_8x4",
+    )
+    def flashinfer_mxfp8_quantize_8x4_fake(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        m, k = a.shape
+        scale_size = cdiv(m, 8) * 8 * cdiv(k // 32, 4) * 4
+        return (
+            torch.empty(m, k, dtype=torch.float8_e4m3fn, device=a.device),
+            torch.empty(scale_size, dtype=torch.uint8, device=a.device),
+        )
+
+    @torch.library.custom_op(
         "vllm::mm_mxfp8",
         mutates_args=[],
         device_types="cuda",
@@ -653,6 +768,7 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         out_dtype: torch.dtype,
         backend: str = "cutlass",
+        use_8x4_sf_layout: bool = False,
     ) -> torch.Tensor:
         from flashinfer import mm_mxfp8 as mm_mxfp8_
 
@@ -664,6 +780,7 @@ if has_flashinfer():
             out=None,
             out_dtype=out_dtype,
             backend=backend,
+            use_8x4_sf_layout=use_8x4_sf_layout,
         )
 
     @torch.library.register_fake(
@@ -676,6 +793,7 @@ if has_flashinfer():
         B_scale: torch.Tensor,
         out_dtype: torch.dtype,
         backend: str = "cutlass",
+        use_8x4_sf_layout: bool = False,
     ) -> torch.Tensor:
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
@@ -918,20 +1036,27 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
     return should_use_flashinfer
 
 
-_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 attention
+_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 ViT attention
 
 
 @functools.cache
 def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
     """Check if FP8 ViT attention is supported on this platform.
 
-    Requires native FP8 hardware support, the FlashInfer cuDNN backend,
+    Requires Blackwell (SM 100) or newer, the FlashInfer cuDNN backend,
     and cuDNN >= 9.17.1.
+
+    cuDNN's FP8 SDPA forward path with bf16/fp16 output (used by
+    ``MMEncoderAttention._forward_flashinfer``) gates internally on
+    ``prop.major >= 10``; on Hopper it raises a misleading
+    ``cudnnGraphNotSupportedError: ... cuDNN version 9.13.0 and newer``
+    even when the installed cuDNN is new enough. See PR #38065 for the
+    original Blackwell-only design intent.
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-    # cuDNN SDPA FP8 requires Hopper (SM 90) or newer.
-    if not current_platform.has_device_capability(90):
+    # cuDNN SDPA FP8 with bf16/fp16 output requires Blackwell (SM 100) or newer.
+    if not current_platform.has_device_capability(100):
         return False
 
     try:
@@ -965,6 +1090,9 @@ __all__ = [
     "flashinfer_b12x_fused_moe",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
+    "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
+    "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
+    "flashinfer_xqa_batch_decode_with_kv_cache",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",

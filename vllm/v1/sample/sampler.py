@@ -6,7 +6,8 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
@@ -58,11 +59,16 @@ class Sampler(nn.Module):
     9. Return the final `SamplerOutput`.
     """
 
-    def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs"):
+    def __init__(
+        self,
+        logprobs_mode: LogprobsMode = "raw_logprobs",
+        use_fp64_gumbel: bool = False,
+    ):
         super().__init__()
-        self.topk_topp_sampler = TopKTopPSampler(logprobs_mode)
-        self.pin_memory = is_pin_memory_available()
+        self.topk_topp_sampler = TopKTopPSampler(logprobs_mode, use_fp64_gumbel)
+        self.pin_memory = PIN_MEMORY
         self.logprobs_mode = logprobs_mode
+        self.use_fp64_gumbel = use_fp64_gumbel
 
     def forward(
         self,
@@ -337,9 +343,10 @@ class Sampler(nn.Module):
         # of the compiled batched_count_greater_than. mark_unbacked makes
         # the size fully symbolic so dynamo doesn't specialize when
         # batch_size transitions from 1 to >=2.
-        torch._dynamo.decorators.mark_unbacked(logprobs, 0)
-        torch._dynamo.decorators.mark_unbacked(token_logprobs, 0)
-        token_ranks = batched_count_greater_than(logprobs, token_logprobs)
+        with gpu_sync_allowed(first_only=True):
+            torch._dynamo.decorators.mark_unbacked(logprobs, 0)
+            torch._dynamo.decorators.mark_unbacked(token_logprobs, 0)
+            token_ranks = batched_count_greater_than(logprobs, token_logprobs)
 
         # Concatenate together with the topk.
         indices = torch.cat((token_ids, topk_indices), dim=1)
@@ -373,13 +380,8 @@ class Sampler(nn.Module):
         any_penalties_or_bad_words = (
             bool(bad_words_token_ids) or not sampling_metadata.no_penalties
         )
-        holder = sampling_metadata.thinking_budget_state_holder
-        needs_thinking_combine = holder is not None and holder.has_tracked_requests()
-
         output_token_ids = sampling_metadata.output_token_ids
-        if predict_bonus_token and (
-            any_penalties_or_bad_words or needs_thinking_combine
-        ):
+        if predict_bonus_token and any_penalties_or_bad_words:
             # Combine base outputs with spec tokens when speculative decoding
             # is enabled.
             output_token_ids = self._combine_outputs_with_spec_tokens(
@@ -401,9 +403,11 @@ class Sampler(nn.Module):
 
         # Apply penalties (e.g., freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
+        holder = sampling_metadata.thinking_budget_state_holder
         if holder is not None and holder.has_tracked_requests():
+            # Committed outputs only; spec drafts live in ``spec_token_ids``.
             holder.update_state(
-                output_token_ids,
+                sampling_metadata.output_token_ids,
                 sampling_metadata.spec_token_ids,
                 repeat_indices=None,
             )

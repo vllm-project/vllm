@@ -60,6 +60,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -239,7 +240,6 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # NOTE - we rename audios -> audio in mm data because transformers has
         # deprecated audios for the qwen2audio processor and will remove
@@ -264,7 +264,6 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
     def _get_mm_fields_config(
@@ -444,12 +443,15 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
             )
             < audio_output_lengths
         )
-        masked_audio_features = audio_features[audio_features_mask].view(-1, embed_dim)
+        with gpu_sync_allowed():
+            masked_audio_features = audio_features[audio_features_mask].view(
+                -1, embed_dim
+            )
 
-        # Split to tuple of embeddings for individual audio input.
-        return torch.split(
-            masked_audio_features, audio_output_lengths.flatten().tolist()
-        )
+            # Split to tuple of embeddings for individual audio input.
+            return torch.split(
+                masked_audio_features, audio_output_lengths.flatten().tolist()
+            )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)

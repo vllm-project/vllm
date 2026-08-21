@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from pydantic import ValidationError
 
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+)
+from vllm.exceptions import VLLMValidationError
 
 SAMPLE_TOOL = {
     "type": "function",
@@ -55,13 +58,13 @@ def test_responses_request_required_without_tools(tools):
     if tools is not None:
         kwargs["tools"] = tools
     with pytest.raises(
-        ValidationError, match="Tool choice 'required' must be specified"
+        VLLMValidationError, match="Tool choice 'required' must be specified"
     ):
         ResponsesRequest.model_validate(kwargs)
 
 
 def test_responses_request_named_tool_choice_without_tools():
-    with pytest.raises(ValidationError, match="not found in 'tools' parameter"):
+    with pytest.raises(VLLMValidationError, match="not found in 'tools' parameter"):
         ResponsesRequest.model_validate(
             {
                 "input": "Hello",
@@ -104,7 +107,7 @@ def test_responses_request_named_tool_choice_matching():
 
 
 def test_responses_request_named_tool_choice_not_matching():
-    with pytest.raises(ValidationError, match="not found in 'tools' parameter"):
+    with pytest.raises(VLLMValidationError, match="not found in 'tools' parameter"):
         ResponsesRequest.model_validate(
             {
                 "input": "Hello",
@@ -161,7 +164,7 @@ def test_responses_request_empty_tools_tool_choice_auto():
     ],
 )
 def test_responses_request_named_tool_choice_missing_name(tool_choice):
-    with pytest.raises(ValidationError, match="not found in 'tools' parameter"):
+    with pytest.raises(VLLMValidationError, match="not found in 'tools' parameter"):
         ResponsesRequest.model_validate(
             {
                 "input": "Hello",
@@ -173,7 +176,7 @@ def test_responses_request_named_tool_choice_missing_name(tool_choice):
 
 
 def test_responses_request_empty_tools_named_tool_choice():
-    with pytest.raises(ValidationError, match="not found in 'tools' parameter"):
+    with pytest.raises(VLLMValidationError, match="not found in 'tools' parameter"):
         ResponsesRequest.model_validate(
             {
                 "input": "Hello",
@@ -182,3 +185,42 @@ def test_responses_request_empty_tools_named_tool_choice():
                 "tool_choice": NAMED_TOOL_CHOICE,
             }
         )
+
+
+# Regression tests for parallel_tool_calls=null crash in Responses API
+# (from_request() passed None to ResponsesResponse.parallel_tool_calls,
+#  a non-optional bool field, causing a Pydantic ValidationError during
+#  response construction)
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (True, True),
+        (False, False),
+        (None, True),  # null must resolve to the documented default (true)
+    ],
+)
+def test_responses_response_parallel_tool_calls_null_resolves_to_default(
+    value, expected
+):
+    request = ResponsesRequest.model_validate(
+        {"input": "Hello", "model": "test-model", "parallel_tool_calls": value}
+    )
+    sampling_params = request.to_sampling_params(default_max_tokens=16)
+    r = ResponsesResponse.from_request(
+        request=request,
+        sampling_params=sampling_params,
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="completed",
+        usage=None,
+    )
+    assert r.parallel_tool_calls == expected
+
+
+def test_responses_request_parallel_tool_calls_null_accepted():
+    """Client sending null must be accepted at request validation time."""
+    req = ResponsesRequest.model_validate(
+        {"input": "Hello", "model": "test-model", "parallel_tool_calls": None}
+    )
+    assert req.parallel_tool_calls is None

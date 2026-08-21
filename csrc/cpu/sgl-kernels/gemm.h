@@ -4,9 +4,12 @@
 // clang-format off
 
 #pragma once
-#include <ATen/native/CPUBlas.h>
-
 #include "common.h"
+#include "blas_gemm.h"
+
+#if defined(__AVX512F__) && defined(__AVX512BF16__) && defined(__AMX_BF16__)
+#define CPU_CAPABILITY_AVX512
+#endif
 
 // amx-bf16
 #define TILE_M 16
@@ -21,31 +24,44 @@ constexpr int block_size_n() {
   return 2 * TILE_N;
 }
 
+constexpr bool brgemm_supported() {
+#if defined(CPU_CAPABILITY_AVX512)
+  return true;
+#else
+  return false;
+#endif
+}
+
 // define threshold using brgemm (intel AMX)
 template <typename T>
 inline bool can_use_brgemm(int M);
 template <>
 inline bool can_use_brgemm<at::BFloat16>(int M) {
-  return M > 4;
+  return brgemm_supported() && M > 4;
 }
 template <>
 inline bool can_use_brgemm<at::Half>(int M) {
-  return true;
+  return brgemm_supported();
 }
 // this requires PyTorch 2.7 or above
 template <>
 inline bool can_use_brgemm<int8_t>(int M) {
-  return M > 4;
+  return brgemm_supported() && M > 4;
 }
 
 template <>
 inline bool can_use_brgemm<uint8_t>(int M) {
-  return M > 4;
+  return brgemm_supported() && M > 4;
 }
 
 template <>
 inline bool can_use_brgemm<at::Float8_e4m3fn>(int M) {
-  return M > 4;
+  return brgemm_supported() && M > 4;
+}
+
+template <typename T>
+inline bool can_use_brgemm(int M, int N) {
+  return brgemm_supported() && (can_use_brgemm<T>(M) || N != block_size_n());
 }
 
 // work around compiler internal error
@@ -72,15 +88,11 @@ inline int64_t get_row_size(int64_t K, bool use_int8_w8a8) {
   return use_int8_w8a8 ? K + sizeof(int32_t) : K;
 }
 
-enum class CPUAcTMethod : int { silu_and_mul = 0, swiglu = 1 };
-
-constexpr bool operator==(CPUAcTMethod a, int b) {
-  return static_cast<int>(a) == b;
-}
-
-constexpr bool operator==(int a, CPUAcTMethod b) {
-  return a == static_cast<int>(b);
-}
+enum class CPUActMethod : int {
+  silu_and_mul = 0,
+  swiglu = 1,
+  gelu_and_mul = 2,
+};
 
 enum class CPUQuantMethod : int64_t { BF16 = 0, INT8_W8A8 = 1, FP8_W8A16 = 2, INT4_W4A8 = 3, MXFP4 = 4 };
 
@@ -100,6 +112,17 @@ constexpr bool operator==(CPUQuantAlgo a, int64_t b) {
 
 constexpr bool operator==(int64_t a, CPUQuantAlgo b) {
   return a == static_cast<int64_t>(b);
+}
+
+inline int64_t get_row_size(CPUQuantMethod quant, int64_t K) {
+  switch (quant) {
+    case CPUQuantMethod::INT8_W8A8:
+      return K + sizeof(int32_t);
+    case CPUQuantMethod::MXFP4:
+      return K >> 1;
+    default:
+      return K;
+  }
 }
 
 inline int64_t get_4bit_block_k_size(int64_t group_size) {
@@ -173,7 +196,7 @@ void fused_experts_fp_kernel_impl(
     int64_t num_tokens_post_pad,
     float alpha,
     float limit,
-    CPUAcTMethod act_func,
+    CPUActMethod act_func,
     bool with_bias);
 
 // shared expert implementation for int8 w8a8

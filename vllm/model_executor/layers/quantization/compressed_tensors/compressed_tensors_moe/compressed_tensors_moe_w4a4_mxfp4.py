@@ -21,10 +21,15 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+    XPUExpertsMxFp4,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    B12X_BACKENDS,
     Mxfp4MoeBackend,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
+    select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
@@ -33,6 +38,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -42,12 +48,23 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.group_size = 32
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
-        # use cutlass if supported, otherwise fallback to marlin for weight-only FP4
+        # Backend selection must match the weight preparation below: CUTLASS
+        # swizzles scales, b12x and XPU consume checkpoint packing, and Marlin
+        # repacks weights and scales.
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
         self.experts_cls: type[mk.FusedMoEExperts]
-        if self.use_cutlass_mxfp4:
+        if moe.moe_backend == "b12x":
+            self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
+            assert experts_cls is not None
+            self.experts_cls = experts_cls
+            self.use_cutlass_mxfp4 = False
+        elif self.use_cutlass_mxfp4:
             logger.info_once("Using CutlassExpertsMxfp4 for MXFP4 MoE")
             self.experts_cls = CutlassExpertsMxfp4
+        elif current_platform.is_xpu():
+            self.mxfp4_backend = Mxfp4MoeBackend.XPU
+            self.experts_cls = XPUExpertsMxFp4
+            logger.info_once("Using XPUExpertsMxFp4 for MXFP4 MoE on XPU platform")
         else:
             logger.info_once("Using MarlinExperts for MXFP4 MoE")
             self.experts_cls = MarlinExperts
@@ -67,7 +84,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // 2,
                 requires_grad=False,
@@ -94,7 +111,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         w13_weight_scale = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // self.group_size,
                 dtype=torch.uint8,
@@ -130,11 +147,12 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 w2_scale=layer.w2_weight_scale,
             )
         else:
-            # W4A16: weight-only via Marlin
+            # b12x selects W4A8 or W4A16; XPU uses W4A4; Marlin uses W4A16.
             return make_mxfp4_moe_quant_config(
                 mxfp4_backend=self.mxfp4_backend,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                layer=layer,
             )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -179,6 +197,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale = torch.nn.Parameter(
                 torch.stack(swizzled_w2), requires_grad=False
             )
+        elif self.mxfp4_backend in B12X_BACKENDS or current_platform.is_xpu():
+            pass
         else:
             logger.warning_once(
                 "Your GPU does not have native support for FP4 computation "
@@ -197,6 +217,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 mxfp4_backend=self.mxfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def apply(
         self,

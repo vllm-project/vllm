@@ -81,6 +81,14 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   set_property(GLOBAL APPEND PROPERTY VLLM_HIPIFY_ALL_SRCS ${SRCS})
   set_property(GLOBAL APPEND PROPERTY VLLM_HIPIFY_ALL_BYPRODUCTS ${HIP_SRCS})
 
+  # Chain hipify targets so they run sequentially. Parallel hipify
+  # invocations race on shutil.copytree, overwriting .hip files
+  # produced by another target back to .cu originals.
+  if (DEFINED _VLLM_LAST_HIPIFY_TARGET)
+    add_dependencies(hipify${NAME} ${_VLLM_LAST_HIPIFY_TARGET})
+  endif()
+  set(_VLLM_LAST_HIPIFY_TARGET "hipify${NAME}" PARENT_SCOPE)
+
   # Swap out original extension sources with hipified sources.
   list(APPEND HIP_SRCS ${CXX_SRCS})
   set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)
@@ -212,11 +220,11 @@ endmacro()
 #
 # Example:
 #   CMAKE_CUDA_FLAGS="-Wall -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75"
-#   clear_cuda_arches(CUDA_ARCH_FLAGS)
+#   clear_cuda_gencode_flags(CUDA_ARCH_FLAGS)
 #   CUDA_ARCH_FLAGS="-gencode arch=compute_70,code=sm_70;-gencode arch=compute_75,code=sm_75"
 #   CMAKE_CUDA_FLAGS="-Wall"
 #
-macro(clear_cuda_arches CUDA_ARCH_FLAGS)
+macro(clear_cuda_gencode_flags CUDA_ARCH_FLAGS)
     # Extract all `-gencode` flags from `CMAKE_CUDA_FLAGS`
     string(REGEX MATCHALL "-gencode arch=[^ ]+" CUDA_ARCH_FLAGS
       ${CMAKE_CUDA_FLAGS})
@@ -228,19 +236,40 @@ macro(clear_cuda_arches CUDA_ARCH_FLAGS)
 endmacro()
 
 #
+# Warn when a caller requested PTX code generation through global CUDA arch
+# flags. vLLM removes those flags and reapplies per-source gencode flags, so the
+# user's global PTX request will not be preserved.
+#
+function(warn_if_ptx_arch_requested CUDA_ARCH_FLAGS)
+  foreach(_ARCH_FLAG ${CUDA_ARCH_FLAGS})
+    if(_ARCH_FLAG MATCHES "code=.*compute_[0-9]+[af]?")
+      message(WARNING
+        "PTX code generation requested in CUDA architecture flags "
+        "(${_ARCH_FLAG}), but vLLM does not preserve global PTX requests "
+        "when normalizing per-source CUDA architectures. Remove '+PTX' from "
+        "TORCH_CUDA_ARCH_LIST or rely on vLLM's built-in per-kernel PTX "
+        "selection.")
+      return()
+    endif()
+  endforeach()
+endfunction()
+
+
+#
 # Extract unique CUDA architectures from a list of compute capabilities codes in 
 # the form `<major><minor>[<letter>]`, convert them to the form sort 
 # `<major>.<minor>`, dedupes them and then sorts them in ascending order and 
 # stores them in `OUT_ARCHES`.
 #
-# Example:
-#   CUDA_ARCH_FLAGS="-gencode arch=compute_75,code=sm_75;...;-gencode arch=compute_90a,code=sm_90a" 
-#   extract_unique_cuda_archs_ascending(OUT_ARCHES CUDA_ARCH_FLAGS)
-#   OUT_ARCHES="7.5;...;9.0"
+# Prefer `code=sm_*`; fall back to `arch=compute_*` for PTX-only flags.
+# This handles mismatches such as `arch=compute_20,code=sm_121`.
 function(extract_unique_cuda_archs_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
   set(_CUDA_ARCHES)
   foreach(_ARCH ${CUDA_ARCH_FLAGS})
-    string(REGEX MATCH "arch=compute_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    string(REGEX MATCH "code=sm_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    if (NOT _COMPUTE)
+      string(REGEX MATCH "arch=compute_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    endif()
     if (_COMPUTE)
       set(_COMPUTE ${CMAKE_MATCH_1})
     endif()
@@ -388,14 +417,24 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   # match — e.g. SRC="12.0f" matches TGT="12.1a" since SM121 is in the SM12x
   # family. The output uses TGT's value to preserve the user's compilation flags.
   set(_CUDA_ARCHS)
+  # Resolve exact base matches before family fallbacks so a generic entry such
+  # as 10.0f cannot consume a 10.7 target that has a 10.7f source entry.
+  foreach(_arch ${_SRC_CUDA_ARCHS})
+    if(_arch MATCHES "[af]$")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
+      if("${_base}" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(APPEND _CUDA_ARCHS "${_arch}")
+      endif()
+    endif()
+  endforeach()
+
   foreach(_arch ${_SRC_CUDA_ARCHS})
     if(_arch MATCHES "[af]$")
       list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
-      if ("${_base}" IN_LIST TGT_CUDA_ARCHS)
-        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
-        list(APPEND _CUDA_ARCHS "${_arch}")
-      elseif("${_base}a" IN_LIST _TGT_CUDA_ARCHS)
+      if("${_base}a" IN_LIST _TGT_CUDA_ARCHS)
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}a")
         list(APPEND _CUDA_ARCHS "${_base}a")
       elseif("${_base}f" IN_LIST _TGT_CUDA_ARCHS)
@@ -474,6 +513,16 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   set(_CUDA_ARCHS ${_FINAL_ARCHS})
 
   set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
+endfunction()
+
+
+function(cuda_archs_sm90plus OUT_CUDA_ARCHS TGT_CUDA_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(_archs "9.0a;10.0f;10.7f;11.0f;12.0f" "${TGT_CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(_archs "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${TGT_CUDA_ARCHS}")
+  endif()
+  set(${OUT_CUDA_ARCHS} ${_archs} PARENT_SCOPE)
 endfunction()
 
 #

@@ -23,9 +23,10 @@ from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.model_executor.models.parakeet import ParakeetExtractor
-from vllm.multimodal.evs import compute_retained_tokens_count
 from vllm.multimodal.inputs import AudioItem
 from vllm.multimodal.processing.processor import PromptUpdateDetails
+from vllm.multimodal.video_prune.evs import compute_retained_tokens_count
+from vllm.platforms import current_platform
 from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import calculate_internvl_targets, get_internvl_target_ratios
@@ -44,12 +45,6 @@ AUDIO_CONTEXT = "<so_embedding>"
 # MAX_FRAMES = 16
 DEFAULT_NUM_TILES = 12
 
-# Configure PIL to handle large images without warnings
-# This prevents DecompressionBombWarning for legitimate large images
-Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
-# Alternative: Set a specific higher limit
-# Image.MAX_IMAGE_PIXELS = 300000000  # ~300M pixels
-
 
 def calculate_timestamps(
     indices: list[int] | torch.Tensor,
@@ -62,7 +57,7 @@ def calculate_timestamps(
     return timestamps
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _bicubic_resize_and_normalize(
     tensor: torch.Tensor,
     size: tuple[int, int] | None = None,

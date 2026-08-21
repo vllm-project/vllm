@@ -229,10 +229,10 @@ class DashengAttention(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None):
-        B, N, C = x.shape
+        B, N, _ = x.shape
 
         qkv, _ = self.qkv(x)
-        qkv = qkv.reshape(B, N, 3, self.num_heads, C // self.num_heads)
+        qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
 
@@ -243,7 +243,7 @@ class DashengAttention(nn.Module):
             attn_mask=mask[:, None, None, :] if mask is not None else None,
         )
 
-        x = x.transpose(1, 2).reshape(B, N, C)
+        x = x.transpose(1, 2).reshape(B, N, self.q_size)
         x, _ = self.proj(x)
         return x
 
@@ -588,7 +588,6 @@ class MiDashengLMMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         audios = mm_data.pop("audios", [])
 
@@ -622,7 +621,6 @@ class MiDashengLMMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
     def _get_mm_fields_config(

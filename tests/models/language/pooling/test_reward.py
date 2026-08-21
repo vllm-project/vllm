@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from transformers import AutoModel
 
 from vllm.platforms import current_platform
+from vllm.utils.mem_constants import MiB_bytes
 
 from ....conftest import HfRunner
 from ....utils import VLLM_PATH
@@ -97,6 +98,7 @@ def test_prm_models(
     hf_runner,
     vllm_runner,
     math_step_prompts,
+    monkeypatch,
     model: str,
     dtype: str,
 ) -> None:
@@ -106,8 +108,15 @@ def test_prm_models(
     if current_platform.is_cpu():
         pytest.skip("CPU only supports V1")
 
-    with vllm_runner(model, max_model_len=1024, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.reward(math_step_prompts)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        model,
+        max_model_len=1024,
+        dtype=dtype,
+        kv_cache_memory_bytes=64 * MiB_bytes,
+    ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+        vllm_outputs = vllm_model.token_classify(math_step_prompts)
 
     with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
         hf_model = step_reward_patch_hf_model(hf_model)
@@ -139,14 +148,26 @@ def test_prm_models(
 def test_prm_models_with_golden_outputs(
     vllm_runner,
     math_step_prompts,
+    monkeypatch,
     model: str,
     dtype: str,
 ) -> None:
     if not FIXTURE_REWARD_RESULT.get(model):
         pytest.skip(f"No available golden outputs for {model}.")
 
-    with vllm_runner(model, max_model_len=1024, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.reward(math_step_prompts)
+    use_v2_model_runner = not current_platform.is_cpu()
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_model_runner else "0")
+    with vllm_runner(
+        model,
+        max_model_len=1024,
+        dtype=dtype,
+        kv_cache_memory_bytes=64 * MiB_bytes,
+    ) as vllm_model:
+        assert (
+            vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+            is use_v2_model_runner
+        )
+        vllm_outputs = vllm_model.token_classify(math_step_prompts)
 
     golden_outputs = load_reward_outputs(FIXTURE_REWARD_RESULT[model])
 

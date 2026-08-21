@@ -14,7 +14,7 @@ jobs:
     steps:
       - name: Label issues based on keywords
         id: label-step
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
             // Configuration: Add new labels and keywords here
@@ -128,6 +128,219 @@ jobs:
                     term: "IBM Z",
                     searchIn: "title"
                   },
+                ],
+              },
+              kimi: {
+                keywords: [
+                  { term: "Kimi",     searchIn: "both" },
+                  { term: "Moonshot", searchIn: "both" },
+                ],
+                substrings: [
+                  { term: "moonshotai/", searchIn: "both" },
+                  { term: "kimi",        searchIn: "title" },
+                ],
+              },
+              k3: {
+                keywords: [
+                  { term: "Kimi K3", searchIn: "both" },
+                  { term: "K3",      searchIn: "title" },
+                ],
+                substrings: [
+                  { term: "moonshotai/kimi-k3", searchIn: "both" },
+                ],
+              },
+              quantization: {
+                keywords: [
+                  {
+                    term: "quantization",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "quantized",
+                    searchIn: "both"
+                  },
+                ],
+              },
+              "intel-gpu": {
+                // Keyword search - matches whole words only (with word boundaries)
+                keywords: [
+                  {
+                    term: "B50",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "B60",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "B70",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "intel gpu",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "Arc GPU",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "BMG",
+                    searchIn: "both"
+                  },
+                ],
+              },
+              // Model labels. Title-only by design: issue bodies carry pasted
+              // collect_env output, tracebacks and configs that name unrelated
+              // models, hardware and libraries.
+              deepseek: {
+                keywords: [{ term: "DeepSeek", searchIn: "title" }],
+              },
+              DSv4: {
+                keywords: [{ term: "DSv4", searchIn: "title" }],
+                substrings: [{ term: "deepseek-v4", searchIn: "title" }],
+              },
+              llama: {
+                keywords: [{ term: "Llama", searchIn: "title" }],
+              },
+              mistral: {
+                keywords: [
+                  { term: "Mistral",   searchIn: "title" },
+                  { term: "Ministral", searchIn: "title" },
+                  { term: "Voxtral",   searchIn: "title" },
+                  { term: "Mixtral",   searchIn: "title" },
+                  { term: "Pixtral",   searchIn: "title" },
+                ],
+              },
+              qwen: {
+                keywords: [{ term: "Qwen", searchIn: "title" }],
+              },
+              "gpt-oss": {
+                keywords: [{ term: "harmony", searchIn: "title" }],
+                substrings: [{ term: "gpt-oss", searchIn: "title" }],
+              },
+              glm: {
+                keywords: [
+                  { term: "GLM",     searchIn: "title" },
+                  { term: "ChatGLM", searchIn: "title" },
+                ],
+              },
+              minimax: {
+                substrings: [{ term: "minimax", searchIn: "title" }],
+              },
+              inkling: {
+                keywords: [{ term: "Inkling", searchIn: "title" }],
+              },
+              // Hardware backends, mirroring the cpu/rocm/intel-gpu rules above.
+              nvidia: {
+                keywords: [
+                  { term: "NVIDIA",  searchIn: "title" },
+                  { term: "CUTLASS", searchIn: "title" },
+                ],
+              },
+              tpu: {
+                keywords: [
+                  { term: "TPU", searchIn: "title" },
+                  { term: "XLA", searchIn: "title" },
+                ],
+              },
+              // Subsystems.
+              //
+              // Single distinctive words go in `keywords` so the word-boundary
+              // match keeps them from firing inside longer words. Multi-word
+              // phrases go in `substrings`: they are specific enough on their
+              // own, and a boundary match would miss ordinary variations --
+              // "structured outputs", "tool parsers", "prefix caching".
+              "speculative-decoding": {
+                keywords: [
+                  { term: "eagle",  searchIn: "title" },
+                  { term: "medusa", searchIn: "title" },
+                ],
+                substrings: [
+                  { term: "speculative decoding", searchIn: "title" },
+                  { term: "speculative decode",   searchIn: "title" },
+                  { term: "draft model",          searchIn: "title" },
+                ],
+              },
+              "structured-output": {
+                substrings: [
+                  { term: "structured output", searchIn: "title" },
+                  { term: "guided decoding",   searchIn: "title" },
+                  { term: "JSON schema",       searchIn: "title" },
+                ],
+              },
+              "tool-calling": {
+                substrings: [
+                  { term: "tool calling",     searchIn: "title" },
+                  { term: "tool parser",      searchIn: "title" },
+                  { term: "function calling", searchIn: "title" },
+                ],
+              },
+              "kv-connector": {
+                keywords: [
+                  { term: "NIXL",    searchIn: "title" },
+                  { term: "LMCache", searchIn: "title" },
+                ],
+                substrings: [
+                  { term: "KV transfer",  searchIn: "title" },
+                  { term: "disaggregat",  searchIn: "title" },
+                ],
+              },
+              scheduler: {
+                keywords: [{ term: "scheduler", searchIn: "title" }],
+              },
+              "kv-cache-manager": {
+                substrings: [
+                  { term: "kv cache manager", searchIn: "title" },
+                  { term: "block manager",    searchIn: "title" },
+                  { term: "prefix cache",     searchIn: "title" },
+                  { term: "prefix caching",   searchIn: "title" },
+                ],
+              },
+              "torch.compile": {
+                substrings: [{ term: "torch.compile", searchIn: "title" }],
+              },
+              "multi-modality": {
+                keywords: [
+                  { term: "multimodal",  searchIn: "title" },
+                  { term: "multi-modal", searchIn: "title" },
+                ],
+                substrings: [
+                  { term: "image input", searchIn: "title" },
+                  { term: "audio input", searchIn: "title" },
+                ],
+              },
+              "ci-failure": {
+                keywords: [{ term: "flaky", searchIn: "title" }],
+                substrings: [
+                  { term: "CI failure",   searchIn: "title" },
+                  { term: "test failure", searchIn: "title" },
+                ],
+              },
+              rl: {
+                keywords: [{ term: "RLHF", searchIn: "title" }],
+                substrings: [
+                  { term: "reinforcement learning", searchIn: "title" },
+                  { term: "weight update",          searchIn: "title" },
+                ],
+              },
+              ray: {
+                substrings: [
+                  { term: "Ray cluster",     searchIn: "title" },
+                  { term: "Ray executor",    searchIn: "title" },
+                  { term: "placement group", searchIn: "title" },
+                ],
+              },
+              "vllm-ir": {
+                substrings: [
+                  { term: "vllm-ir", searchIn: "title" },
+                  { term: "vllm ir", searchIn: "title" },
+                ],
+              },
+              rust: {
+                keywords: [
+                  { term: "Rust", searchIn: "title" },
+                  { term: "PyO3", searchIn: "title" },
                 ],
               },
               // Add more label configurations here as needed
@@ -315,7 +528,7 @@ jobs:
 
       - name: CC users for labeled issues
         if: steps.label-step.outputs.labels_added != '[]'
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
             // Configuration: Map labels to GitHub users to CC
@@ -323,11 +536,15 @@ jobs:
             // {users} will be replaced with @mentions
             const ccConfig = {
               rocm: {
-                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],
+                users: ['hongxiayang', 'tjtanaa', 'vllmellm', 'giuseppegrossi'],
                 message: 'CC {users} for ROCm-related issue',
               },
+              cohere: {
+                users: ['walterbm', 'ekagra-ranjan', 'andrewbcohere', 'jasonozuzu-cohere'],
+                message: 'CC {users} for Cohere-related issue',
+              },
               mistral: {
-                users: ['patrickvonplaten', 'juliendenize', 'andylolu2'],
+                users: ['patrickvonplaten', 'juliendenize', 'andylolu2', 'NickLucche'],
                 message: 'CC {users} for Mistral-related issue',
               },
               // Add more label -> user mappings here
@@ -392,7 +609,7 @@ jobs:
 
       - name: Request missing ROCm info from issue author
         if: contains(steps.label-step.outputs.labels_added, 'rocm') && contains(toJSON(github.event.issue.labels.*.name), 'bug')
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
             const body = (context.payload.issue.body || '').toLowerCase();

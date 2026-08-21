@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::net::TcpListener;
 use std::time::Duration;
 
@@ -5,9 +8,9 @@ use anyhow::Result;
 use futures::StreamExt as _;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreRequest, EngineCoreSamplingParams,
-};
+use vllm_engine_core_client::protocol::output::EngineCoreFinishReason;
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::test_utils::IpcNamespace;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 
@@ -87,8 +90,8 @@ async fn shutdown_mock(
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<Result<()>>,
 ) {
-    client.shutdown().await.expect("client shutdown");
     shutdown.cancel();
+    client.shutdown().await.expect("client shutdown");
     task.await.expect("mock join").expect("mock run");
 }
 
@@ -98,7 +101,8 @@ async fn mock_engine_connects_over_tcp() {
     let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 1).await;
     assert_eq!(client.engine_count(), 1);
     assert_eq!(client.engine_identities()[0], &[0, 0]);
-    assert_eq!(client.max_model_len(), Some(1024 * 1024));
+    assert_eq!(client.max_model_len(), 1024 * 1024);
+    assert_eq!(client.vllm_version(), "test-vllm-version");
     shutdown_mock(client, shutdown, task).await;
 }
 

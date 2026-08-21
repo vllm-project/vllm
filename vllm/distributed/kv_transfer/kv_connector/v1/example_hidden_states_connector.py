@@ -19,10 +19,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.forward_context import get_forward_context
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -76,43 +76,20 @@ def cleanup_hidden_states(path: str, keep_hidden_states: bool = False) -> None:
 
 
 @dataclass
-class ReqMeta:
-    # Request ID
+class PendingSave:
     req_id: str
-    # Request filename
     filename: str
-    # Request tokens
     token_ids: torch.Tensor
-    # Whether this request is a new request or partially computed already
-    new_req: bool
-
-    @staticmethod
-    def make_meta(
-        req_id: str,
-        filename: str,
-        token_ids: list[int],
-        new_req: bool,
-    ) -> "ReqMeta":
-        return ReqMeta(
-            req_id=req_id,
-            filename=filename,
-            token_ids=torch.tensor(token_ids),
-            new_req=new_req,
-        )
+    block_ids: list[int]
 
 
 @dataclass
 class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
-    requests: list[ReqMeta] = field(default_factory=list)
-
-    def add_request(
-        self,
-        req_id: str,
-        filename: str,
-        token_ids: list[int],
-        new_req: bool = True,
-    ) -> None:
-        self.requests.append(ReqMeta.make_meta(req_id, filename, token_ids, new_req))
+    pending_saves: list[PendingSave] = field(default_factory=list)
+    # req_id → filename for newly scheduled requests — the worker pre-creates
+    # lock files for these so the lock exists before the client receives the
+    # output path.
+    new_req_filenames: dict[str, str] = field(default_factory=dict)
 
 
 class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
@@ -132,6 +109,49 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # Must be False so that drafter kv cache isn't merged with verifier's
         return False
 
+    @classmethod
+    def _find_cache_kv_group_id(cls, kv_cache_config: "KVCacheConfig | None") -> int:
+        """Index of the KV cache group holding the extracted hidden states.
+
+        Located by spec type so it resolves on both scheduler and worker side.
+        """
+        if kv_cache_config is None:
+            return 0
+
+        from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+
+        groups = kv_cache_config.kv_cache_groups
+        group_ids = [
+            gid
+            for gid, group in enumerate(groups)
+            if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+        ]
+        if len(group_ids) == 1:
+            return group_ids[0]
+        if not group_ids and len(groups) == 1:
+            return 0
+        raise ValueError(
+            "Could not uniquely identify the extract-hidden-states KV cache "
+            f"group among {len(groups)} groups; the hidden-states layer must be "
+            "isolated in its own group (MLA verifiers are unsupported)."
+        )
+
+    @staticmethod
+    def _get_cache_block_size(
+        vllm_config: "VllmConfig",
+        kv_cache_config: "KVCacheConfig | None",
+        cache_kv_group_id: int,
+    ) -> int:
+        """Block size of the hidden-states group, read from its own spec.
+
+        cache_config.block_size is bumped to a common multiple for hybrid
+        verifiers; the page-aligned hidden-states group keeps a smaller one.
+        """
+        if kv_cache_config is None:
+            return vllm_config.cache_config.block_size
+        cache_group = kv_cache_config.kv_cache_groups[cache_kv_group_id]
+        return cache_group.kv_cache_spec.block_size
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -143,7 +163,12 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             role=role,
             kv_cache_config=kv_cache_config,
         )
-        self._block_size = vllm_config.cache_config.block_size
+        # Read the hidden-states group and its block size from the group spec;
+        # cache_config.block_size is bumped (wrong) for hybrid verifiers.
+        self._cache_kv_group_id = self._find_cache_kv_group_id(kv_cache_config)
+        self._block_size = self._get_cache_block_size(
+            vllm_config, kv_cache_config, self._cache_kv_group_id
+        )
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
@@ -167,9 +192,16 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             getattr(spec_config, "eagle_aux_hidden_state_layer_ids", [])
         )
 
+        # Scheduler-side state
+        self._pending_saves: dict[str, PendingSave] = {}
         self._request_filenames: dict[str, str] = {}
-        self._active_requests: dict[str, NewRequestData] = {}
-        self._req_blocks: dict[str, list[int]] = {}
+
+        # Worker-side state (set by register_kv_caches).
+        self._kv_cache: torch.Tensor | None = None
+
+        # Only TP rank 0 writes hidden states to disk; other TP ranks no-op.
+        # Set in register_kv_caches (after distributed init).
+        self._is_tp_rank_zero: bool = True
 
         # Async write infrastructure (worker-side).
         # Dedicated CUDA stream for DtoH copies so they don't block
@@ -184,14 +216,23 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # Whether to use a filesystem lock when writing files to shared storage.
         # This is necessary for online transfer clients to avoid incomplete reads,
         # but can be disabled for offline tasks that run tasks in batches to completion
+        self.allow_custom_save_path = self._kv_transfer_config.get_from_extra_config(
+            "allow_custom_save_path", False
+        )
+        if self.allow_custom_save_path:
+            logger.warning(
+                "allow_custom_save_path is enabled. API clients can write "
+                "hidden states to arbitrary paths on the server filesystem. "
+                "Only enable this with trusted clients."
+            )
         self.use_lock = self._kv_transfer_config.get_from_extra_config(
             "use_synchronization_lock", True
         )
-        # (tensors_dict, copy_done_event, filename, req_id) queued by
-        # save_kv_layer, submitted to thread pool by wait_for_save.
-        self._pending_copies: list[
-            tuple[dict[str, torch.Tensor], torch.cuda.Event, str, str]
-        ] = []
+        # req_id → open fd on the .lock file with LOCK_EX held.
+        # Pre-created in wait_for_save when a request first arrives,
+        # consumed by _submit_async_write which passes the fd to the
+        # thread pool worker for release after writing.
+        self._lock_fds: dict[str, int] = {}
         # req_id → in-flight disk-write Future for that req_id.
         self._req_futures: dict[str, Future] = {}
         # req_id → CUDA event marking completion of the DtoH copy. Once
@@ -218,42 +259,28 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass  # Store-only connector — nothing to load
 
-    def wait_for_save(self):
-        """Submit pending async copies to the thread pool for disk write.
+    def wait_for_save(self) -> None:
+        """Pre-create lock files for newly arrived requests.
 
-        For each pending write we acquire an exclusive flock on a
-        companion ``.lock`` file **before** submitting to the thread pool.
-        The thread worker releases the lock after the data file is fully
-        written.  Clients call :func:`load_hidden_states` which takes a
-        shared flock — the kernel sleeps the client until the writer is
-        done.  Because ``wait_for_save`` runs before the worker returns
-        output to the scheduler, the lock file is guaranteed to exist
-        (and be held) by the time the client receives the path.
-
-        The lock can be disabled via the "use_synchronization_lock" extra config.
+        This runs on the worker BEFORE the scheduler returns the output
+        path to the client, guaranteeing that the lock file exists (and
+        LOCK_EX is held) by the time the client tries to open it.
         """
-        for tensors, event, filename, req_id in self._pending_copies:
-            prior = self._req_futures.get(req_id)
-            assert prior is None, "Found another KV transfer request with same req_id!"
-
-            lock_fd = None
-            if self.use_lock:
-                # Create/open the lock file and acquire an exclusive lock.
-                # The lock is held by this fd; the thread worker will close
-                # the fd after writing, which releases the lock.
-                lock_path = filename + ".lock"
-                lock_fd = os.open(
-                    lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644
-                )
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
-
-            future = self._executor.submit(
-                self._write_tensors, tensors, event, filename, lock_fd
-            )
-            self._req_copy_events[req_id] = event
-            self._req_futures[req_id] = future
-            future.add_done_callback(partial(self._on_write_done, req_id))
-        self._pending_copies.clear()
+        if not self._is_tp_rank_zero:
+            return
+        if not self.use_lock or not self.has_connector_metadata():
+            return
+        metadata = self._get_connector_metadata()
+        if not isinstance(metadata, ExampleHiddenStatesConnectorMetadata):
+            return
+        for req_id, filename in metadata.new_req_filenames.items():
+            if req_id in self._lock_fds:
+                continue
+            lock_path = filename + ".lock"
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            self._lock_fds[req_id] = lock_fd
 
     def _on_write_done(self, req_id: str, future: Future) -> None:
         """Surface any exception from the disk-write thread and drop the
@@ -264,6 +291,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             logger.error("Hidden-states write failed for req_id=%s: %r", req_id, exc)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        # Delay tp rank0 initialization until after distributed init
+        self._is_tp_rank_zero = get_tensor_model_parallel_rank() == 0
+
         from vllm.model_executor.models.extract_hidden_states import (
             CacheOnlyAttentionLayer,
         )
@@ -276,6 +306,16 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         assert len(self.cache_layers) == 1, (
             f"Expected 1 CacheOnlyAttentionLayer, got {len(self.cache_layers)}"
         )
+        self._kv_cache = kv_caches[self.cache_layers[0]]
+
+        # Block size must match the indexed buffer, else reads hit the wrong
+        # slots. Raise (not assert) so the check survives `python -O`.
+        if self._block_size != self._kv_cache.shape[1]:
+            raise ValueError(
+                f"Hidden-states block-size mismatch: derived {self._block_size} "
+                f"but buffer block size is {self._kv_cache.shape[1]}; read slots "
+                "would be wrong (likely a hybrid block-size resolution bug)."
+            )
 
     @staticmethod
     def _write_tensors(
@@ -304,35 +344,33 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
-        """Start saving the KV cache of the layer from vLLM's paged buffer
-        to the connector.
+        # Hidden states are already cached by CacheOnlyAttentionLayer during
+        # forward. Extraction happens in get_finished once all tokens are done.
+        pass
 
-        Launches an async DtoH copy on a dedicated CUDA stream.  The
-        actual disk write is deferred to wait_for_save() which submits
-        it to a thread pool.
+    def _submit_async_write(
+        self,
+        pending: PendingSave,
+    ) -> None:
+        """Extract hidden states from KV cache and submit async DtoH + disk write.
 
-        Args:
-            layer_name (str): the name of the layer.
-            kv_layer (torch.Tensor): the paged KV buffer of the current
-                layer in vLLM.
-            attn_metadata (AttentionMetadata): the attention metadata.
-            **kwargs: additional arguments for the save operation.
+        Called from get_finished for each request that has finished generating.
         """
-        if layer_name not in self.cache_layers:
+        if not self._is_tp_rank_zero:
             return
+        assert self._kv_cache is not None
 
-        from vllm.model_executor.models.extract_hidden_states import (
-            CacheOnlyAttentionMetadata,
+        # Compute slot mapping from block_ids
+        block_ids_t = torch.tensor(pending.block_ids, dtype=torch.long)
+        num_blocks = block_ids_t.shape[0]
+        block_offsets = torch.arange(0, self._block_size, dtype=torch.long)
+        slot_mapping = (
+            block_offsets.reshape((1, self._block_size))
+            + block_ids_t.reshape((num_blocks, 1)) * self._block_size
         )
+        slot_mapping = slot_mapping.flatten()
 
-        assert isinstance(attn_metadata, CacheOnlyAttentionMetadata), (
-            "ExampleHiddenStatesConnector only supports CacheOnlyAttentionBackend"
-        )
-
-        connector_metadata = self._get_connector_metadata()
-        assert isinstance(connector_metadata, ExampleHiddenStatesConnectorMetadata)
-
-        os.makedirs(self._storage_path, exist_ok=True)
+        num_tokens = pending.token_ids.shape[0]
 
         copy_stream = self._get_copy_stream()
 
@@ -341,39 +379,56 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         ready_event.record()
         copy_stream.wait_event(ready_event)
 
-        slot_mapping = get_forward_context().slot_mapping[layer_name]  # type: ignore
-        offset = 0
-        for request in connector_metadata.requests:
-            num_tokens = request.token_ids.shape[0]
-            with torch.cuda.stream(copy_stream):
-                req_slot_mapping_gpu = slot_mapping[offset : offset + num_tokens]
-                assert req_slot_mapping_gpu.device == kv_layer.device
-                offset += num_tokens
-
-                hidden_states_gpu = extract_from_kv_cache(
-                    kv_layer, req_slot_mapping_gpu, num_tokens
-                )
-                # Async DtoH copy into pinned host memory.
-                pinned_hs = torch.empty_like(
-                    hidden_states_gpu, device="cpu", pin_memory=True
-                )
-                pinned_hs.copy_(hidden_states_gpu, non_blocking=True)
-
-            # Record completion of this copy on the copy stream.
-            copy_done = torch.cuda.Event()
-            copy_done.record(copy_stream)
-
-            # token_ids is already on CPU (created in ReqMeta.make_meta).
-            assert not request.token_ids.is_cuda, (
-                "Expected token_ids on CPU, got CUDA tensor"
+        with torch.cuda.stream(copy_stream):
+            # Move the CPU slot_mapping to GPU on the copy stream so the
+            # implicit H2D inside fancy indexing doesn't sync the default
+            # stream.
+            slot_mapping_gpu = slot_mapping.to(
+                device=self._kv_cache.device, non_blocking=True
             )
-            tensors = {
-                "hidden_states": pinned_hs,
-                "token_ids": request.token_ids.clone(),
-            }
-            self._pending_copies.append(
-                (tensors, copy_done, request.filename, request.req_id)
+            hidden_states_gpu = extract_from_kv_cache(
+                self._kv_cache, slot_mapping_gpu, num_tokens
             )
+            # Async DtoH copy into pinned host memory.
+            pinned_hs = torch.empty_like(
+                hidden_states_gpu, device="cpu", pin_memory=True
+            )
+            pinned_hs.copy_(hidden_states_gpu, non_blocking=True)
+
+        # Record completion of this copy on the copy stream.
+        copy_done = torch.cuda.Event()
+        copy_done.record(copy_stream)
+
+        # token_ids is already on CPU (created in request_finished).
+        assert not pending.token_ids.is_cuda, (
+            "Expected token_ids on CPU, got CUDA tensor"
+        )
+        tensors = {
+            "hidden_states": pinned_hs,
+            "token_ids": pending.token_ids.clone(),
+        }
+
+        # Submit to thread pool for disk write.
+        prior = self._req_futures.get(pending.req_id)
+        assert prior is None, "Found another KV transfer request with same req_id!"
+
+        os.makedirs(os.path.dirname(pending.filename), exist_ok=True)
+
+        # Use the pre-created lock fd from wait_for_save (already holds
+        # LOCK_EX). Falls back to creating one here if use_lock is True
+        # but no pre-created fd exists (shouldn't happen in normal flow).
+        lock_fd = self._lock_fds.pop(pending.req_id, None)
+        if lock_fd is None and self.use_lock:
+            lock_path = pending.filename + ".lock"
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+        future = self._executor.submit(
+            self._write_tensors, tensors, copy_done, pending.filename, lock_fd
+        )
+        self._req_copy_events[pending.req_id] = copy_done
+        self._req_futures[pending.req_id] = future
+        future.add_done_callback(partial(self._on_write_done, pending.req_id))
 
     # ==============================
     # Scheduler-side methods
@@ -421,17 +476,34 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         meta = ExampleHiddenStatesConnectorMetadata()
+
+        # Transfer pending saves into metadata (scheduler → worker bridge)
+        meta.pending_saves = list(self._pending_saves.values())
+        self._pending_saves.clear()
+
+        # Resolve save paths for new requests and tell the worker so it can
+        # pre-create lock files before the client receives the output path.
         for new_req in scheduler_output.scheduled_new_reqs:
-            token_ids = new_req.prompt_token_ids or []
-            filename = os.path.join(self._storage_path, f"{new_req.req_id}.safetensors")
-            meta.add_request(
-                new_req.req_id,
-                filename=filename,
-                token_ids=token_ids,
+            default_path = os.path.join(
+                self._storage_path, f"{new_req.req_id}.safetensors"
             )
+            kv_params = (
+                new_req.sampling_params.extra_args.get("kv_transfer_params")
+                if new_req.sampling_params and new_req.sampling_params.extra_args
+                else None
+            ) or {}
+            custom_path = kv_params.get("hidden_states_path")
+            if custom_path is not None and not self.allow_custom_save_path:
+                logger.warning(
+                    "Request %s provided hidden_states_path but "
+                    "allow_custom_save_path is disabled. Ignoring "
+                    "custom path and using default.",
+                    new_req.req_id,
+                )
+                custom_path = None
+            filename = custom_path or default_path
             self._request_filenames[new_req.req_id] = filename
-            self._active_requests[new_req.req_id] = new_req
-            self._req_blocks[new_req.req_id] = list(new_req.block_ids[0])
+            meta.new_req_filenames[new_req.req_id] = filename
 
         return meta
 
@@ -444,35 +516,54 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the blocks
-        asynchronously by returning True.
-
-        Returns:
-            True if the request is being saved/sent asynchronously and blocks
-            should not be freed until the request_id is returned from
-            get_finished().
-            Optional KVTransferParams to be included in the request outputs
-            returned by the engine.
+        Returns True to delay block freeing until get_finished extracts
+        the hidden states from the KV cache.
         """
         req_id = request.request_id
-        req_filename = self._request_filenames.pop(req_id, None)
-        _ = self._active_requests.pop(req_id, None)
-        _ = self._req_blocks.pop(req_id, None)
-
-        return True, {"hidden_states_path": req_filename}
+        filename = self._request_filenames.pop(req_id)
+        kv_params = request.kv_transfer_params or {}
+        if kv_params.get("include_output_tokens", False):
+            # Exclude the final token — it was the model's output, never an
+            # input to a forward pass, so its hidden state is not in the cache.
+            token_ids = torch.tensor(list(request.all_token_ids)[:-1])
+        elif request.prompt_token_ids is not None:
+            token_ids = torch.tensor(request.prompt_token_ids)
+        else:
+            logger.warning(
+                "Request %s has no prompt_token_ids (prompt_embeds only). "
+                "Saved token_ids will be empty.",
+                req_id,
+            )
+            token_ids = torch.tensor([], dtype=torch.long)
+        self._pending_saves[req_id] = PendingSave(
+            req_id=req_id,
+            filename=filename,
+            token_ids=token_ids,
+            block_ids=list(block_ids),
+        )
+        return True, {"hidden_states_path": filename}
 
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        """Poll DtoH-copy completion for requests that finished generating.
+        """Extract hidden states and poll DtoH-copy completion.
 
-        The scheduler passes finished_req_ids to tell the worker which
-        requests are done generating.  We accumulate these across calls
-        and return a request as "finished sending" once its DtoH copy
-        event is complete (or if it never had a pending copy).  The
-        subsequent disk write may still be in flight; clients block on
-        the per-file flock to wait for it.
+        On the worker side, connector metadata carries pending saves from the
+        scheduler. For each one we extract from the KV cache and launch an
+        async DtoH copy + thread-pool disk write.
+
+        We then poll accumulated finished req_ids: a request is "done sending"
+        once its DtoH copy event is complete. The subsequent disk write may
+        still be in flight; clients block on the per-file flock to wait for it.
         """
+        # Extract and submit async writes for newly finished requests
+        if self.has_connector_metadata():
+            connector_metadata = self._get_connector_metadata()
+            if isinstance(connector_metadata, ExampleHiddenStatesConnectorMetadata):
+                for pending in connector_metadata.pending_saves:
+                    self._submit_async_write(pending)
+
+        # Poll for completed DtoH copies
         self._accumulated_finished_req_ids.update(finished_req_ids)
 
         done_sending: set[str] = set()
@@ -482,6 +573,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 self._req_copy_events.pop(req_id, None)
                 done_sending.add(req_id)
                 self._accumulated_finished_req_ids.discard(req_id)
+                # Clean up any leftover lock fds (e.g. aborted requests
+                # that never went through _submit_async_write).
+                lock_fd = self._lock_fds.pop(req_id, None)
+                if lock_fd is not None:
+                    os.close(lock_fd)
 
         return done_sending or None, None
 
@@ -490,7 +586,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        return self.request_finished(request, block_ids[0])
+        return self.request_finished(request, block_ids[self._cache_kv_group_id])
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
