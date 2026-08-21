@@ -27,6 +27,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_INVOKE_NAME_END,
     DSML_INVOKE_PREFIX,
     DSML_THINK_END,
+    _ESCAPED_DSML,
     DSML_THINK_START,
     DSML_TOOL_END,
     DSML_TOOL_START,
@@ -153,6 +154,26 @@ class TestArgConverter:
         result = json.loads(_dsml_arg_converter(raw, partial=True))
         assert result["city"] == "Tokyo"
         assert result["expr"] == "x<5"
+
+    def test_partial_does_not_capture_closing_tag_prefix(self):
+        """When slot.args contains a partial closing tag (missing the
+        final >), _PARTIAL_PARAM_RE must not swallow it into the value."""
+        raw = (
+            f"<{_PARAM_OPEN.format(name='location', is_str='true')}"
+            f"Paris</{_ESCAPED_DSML}parameter"
+        )
+        result = json.loads(_dsml_arg_converter(raw, partial=True))
+        assert result == {"location": "Paris"}
+
+    def test_partial_with_complete_param_and_partial_closing_tag(self):
+        raw = self._raw(("city", "true", "Tokyo"))
+        raw += (
+            f"<{_PARAM_OPEN.format(name='date', is_str='true')}"
+            f"2025-01-01</{_ESCAPED_DSML}parameter"
+        )
+        result = json.loads(_dsml_arg_converter(raw, partial=True))
+        assert result["city"] == "Tokyo"
+        assert result["date"] == "2025-01-01"
 
     def test_null_string_false(self):
         raw = self._raw(("val", "false", "null"))

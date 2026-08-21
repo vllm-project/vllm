@@ -57,7 +57,7 @@ _PARAM_RE = re.compile(
 )
 _PARTIAL_PARAM_RE = re.compile(
     rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    rf"(.*)$",
+    rf"((?:(?!</?{_ESCAPED_DSML}).)*)",
     re.DOTALL,
 )
 
