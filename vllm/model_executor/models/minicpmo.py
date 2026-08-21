@@ -71,7 +71,12 @@ from .minicpmv import (
     MiniCPMVProcessingInfo,
     _minicpmv_field_config,
 )
-from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    cast_overflow_tensors,
+    maybe_prefix,
+)
 
 CPU_DEVICE = torch.device("cpu")
 
@@ -431,7 +436,6 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (audios := mm_data.get("audios")) is None:
             return {}
@@ -448,7 +452,6 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
                 prompts=[self.info.audio_pattern] * len(parsed_audios),
                 mm_data={"audios": [[audio] for audio in parsed_audios]},
                 mm_kwargs={**mm_kwargs, "chunk_input": True},
-                tok_kwargs=tok_kwargs,
                 out_keys={"audio_features", "audio_feature_lens"},
             )
 
@@ -481,11 +484,10 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         return {
-            **super().process_mm_inputs(mm_data, mm_kwargs, tok_kwargs),
-            **self.process_audios(mm_data, mm_kwargs, tok_kwargs),
+            **super().process_mm_inputs(mm_data, mm_kwargs),
+            **self.process_audios(mm_data, mm_kwargs),
         }
 
     def _get_prompt_updates(
@@ -672,6 +674,9 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
 class MiniCPMOBaseModel:
     """Base mixin class for MiniCPM-O models with audio support."""
 
+    # Unlike the vision-only MiniCPM-V models, audio weights are loaded here.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"tts": None})
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -718,8 +723,8 @@ class MiniCPMOBaseModel:
         return model
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self._ensure_resampler_device()
         return loaded
 

@@ -241,7 +241,6 @@ class DeepseekVL2MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             tokenizer = self.info.get_tokenizer()
@@ -252,7 +251,6 @@ class DeepseekVL2MultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         processed_outputs["num_patches"] = (
@@ -270,7 +268,9 @@ class DeepseekVL2MultiModalProcessor(
 
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            images_spatial_crop=MultiModalFieldConfig.batched("image"),
+            images_spatial_crop=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 

@@ -123,6 +123,13 @@ pub struct EngineCoreOutput {
     /// frontend grows one.
     #[serde(default)]
     pub mm_cache_miss_hashes: Option<Vec<String>>,
+    #[serde(default)]
+    pub new_sampling_mask: Option<OpaqueValue>,
+    /// Per-request speculative-decoding acceptance metrics, set on the final
+    /// output when `--per-request-spec-decode-metrics` is enabled. Opaque here;
+    /// the Rust frontend does not yet surface it in responses.
+    #[serde(default)]
+    pub spec_decode_metrics: Option<OpaqueValue>,
 }
 
 impl EngineCoreOutput {
@@ -440,6 +447,8 @@ mod tests {
                             routed_experts: None,
                             num_nans_in_logits: 0,
                             mm_cache_miss_hashes: None,
+                            new_sampling_mask: None,
+                            spec_decode_metrics: None,
                         },
                     ],
                     scheduler_stats: None,

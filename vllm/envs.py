@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
+    VLLM_CPU_CI_ENV: bool = False
     VLLM_CPU_ATTN_SPLIT_KV: bool = True
     VLLM_ZENTORCH_WEIGHT_PREPACK: bool = True
     VLLM_CPU_INT4_W4A8: bool = True
@@ -125,7 +126,9 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
+    VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
+    VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -154,6 +157,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
@@ -205,6 +209,9 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
+    VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
+    VLLM_KIMI_K3_GEMM_AR: bool = True
+    VLLM_KIMI_K3_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -254,7 +261,7 @@ if TYPE_CHECKING:
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
-    VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
+    VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -282,6 +289,7 @@ if TYPE_CHECKING:
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
+    VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
@@ -306,6 +314,7 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
+    VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
@@ -617,6 +626,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    "VLLM_REPLICATE_EMBED": lambda: (
+        os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
+    ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
     # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
@@ -713,9 +725,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_RPC_BASE_PATH", tempfile.gettempdir()
     ),
     # If true, will load models from ModelScope instead of Hugging Face Hub.
-    # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE": lambda: (
-        os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true"
+        os.environ.get("VLLM_USE_MODELSCOPE", "False").strip().lower() in ("1", "true")
     ),
     # If true, replace the Rust BPE backend that powers HF fast tokenizers
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
@@ -879,6 +890,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ
         else None
     ),
+    # (CPU backend only) whether vLLM is running in a CI environment.
+    "VLLM_CPU_CI_ENV": lambda: bool(int(os.getenv("VLLM_CPU_CI_ENV", "0"))),
     # (CPU backend only) whether to enable attention spilt KV.
     "VLLM_CPU_ATTN_SPLIT_KV": lambda: bool(
         int(os.getenv("VLLM_CPU_ATTN_SPLIT_KV", "1"))
@@ -1090,12 +1103,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "0").strip().lower()
         in ("1", "true")
     ),
-    # If set, forces FP8 Marlin to be used for FP8 quantization regardless
-    # of the hardware support for FP8 compute.
-    "VLLM_TEST_FORCE_FP8_MARLIN": lambda: (
-        os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower()
-        in ("1", "true")
-    ),
     "VLLM_TEST_FORCE_LOAD_FORMAT": lambda: os.getenv(
         "VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"
     ),
@@ -1146,12 +1153,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_PLUGINS" not in os.environ
         else os.environ["VLLM_PLUGINS"].split(",")
     ),
-    # Retain local sliding-window KV checkpoints for prefix caching.
-    # Unset (default) preserves the dense local checkpointing behavior. `0`
-    # retains only the latest completed prompt boundary. Positive values retain
-    # checkpoints at the specified interval boundaries (rounded up to the
-    # prefix-cache alignment).
-    # Applies to sliding-window attention for now but not yet Mamba/linear attention.
     "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
         int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
         if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
@@ -1201,8 +1202,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_DISABLED_KERNELS" not in os.environ
         else os.environ["VLLM_DISABLED_KERNELS"].split(",")
     ),
+    # Selects hw-agnostic layers for HF transformer backend
+    "VLLM_USE_HW_AGNOSTIC": lambda: (
+        os.getenv("VLLM_USE_HW_AGNOSTIC", "False").lower() in ("true", "1")
+    ),
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
+    ),
+    # Select the GDN MTP decode implementation. "cuda" uses the fused decode
+    # kernel where supported and falls back to "triton" otherwise; setting it
+    # explicitly to "cuda" raises when unsupported.
+    "VLLM_GDN_DECODE_KERNEL": env_with_choices(
+        "VLLM_GDN_DECODE_KERNEL",
+        "cuda",
+        ["cuda", "triton"],
+        case_sensitive=False,
     ),
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
@@ -1590,6 +1604,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT": lambda: bool(
         int(os.getenv("VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", "0"))
     ),
+    # Kimi K3 only, and unrelated to the MoE flags above. Tap the pre-norm
+    # AttnRes mixture, rather than the post-mixture sum, as the auxiliary
+    # hidden state handed to a DFlash drafter. This changes the numerics the
+    # speculator sees, so it is off by default while the effect is measured.
+    "VLLM_KIMI_K3_AUX_ATTN_RES_STREAM": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_AUX_ATTN_RES_STREAM", "0"))
+    ),
+    # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
+    # attention projections. All TP ranks must belong to one NVLink domain.
+    "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
+    # Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 sequence-parallel
+    # row-parallel projections. All TP ranks must belong to one NVLink domain.
+    "VLLM_KIMI_K3_GEMM_RS": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_RS", "0"))),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -1837,7 +1864,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
-        int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0"))
+        int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "1"))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
@@ -1973,6 +2000,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
     ),
+    # Emergency rollback for the DeepSeek-V4 NVIDIA MegaMoE path. By default,
+    # DeepGEMM computes replicated FP8 shared experts in the same persistent
+    # SM100 kernel as the routed FP4 experts.
+    "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
+    ),
     # Limits when we run shared_experts in a separate stream.
     # We found out that for large batch sizes, the separate stream
     # execution is not beneficial (most likely because of the input clone)
@@ -2083,6 +2116,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force N-contiguous weight layout for all XPU unquantized linears.
     "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
         int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
+    # Kernel backend for INC weight-only intN (WNA16) linear layers on XPU.
+    # "auto" keeps the default preference order (ARK when importable, else the
+    # oneDNN w4a16 path). "ark" forces the auto_round_kernel backend, "w4a16"
+    # forces oneDNN int4_gemm_w4a16, and "w4a8" additionally quantizes
+    # activations to per-token int8 (int4_gemm_w4a8) for large token counts.
+    # The two oneDNN backends are int4-only; ARK also serves int2.
+    # Which one is fastest is device-dependent, so this is left as an opt-in.
+    "VLLM_XPU_INC_WNA16_BACKEND": env_with_choices(
+        "VLLM_XPU_INC_WNA16_BACKEND", "auto", ["auto", "ark", "w4a16", "w4a8"]
     ),
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
@@ -2227,6 +2269,9 @@ def compile_factors() -> dict[str, object]:
         "S3_ACCESS_KEY_ID",
         "S3_SECRET_ACCESS_KEY",
         "S3_ENDPOINT_URL",
+        # Credential; never affects compiled artifacts and must not be
+        # persisted in cache_key_factors.json.
+        "VLLM_API_KEY",
         "VLLM_USAGE_STATS_SERVER",
         "VLLM_NO_USAGE_STATS",
         "VLLM_DO_NOT_TRACK",

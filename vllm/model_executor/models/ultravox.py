@@ -43,6 +43,7 @@ from vllm.multimodal.processing import (
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -194,7 +195,6 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not mm_data.get("audios", []):
@@ -217,16 +217,10 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
 
         item_processor_data = dict(**mm_data, audios=audios)
 
-        # some tokenizer kwargs are incompatible with UltravoxProcessor
-        tok_kwargs.pop("add_special_tokens", None)
-        tok_kwargs.pop("padding", None)
-        tok_kwargs.pop("truncation", None)
-
         output = super()._call_hf_processor(
             prompt=prompt,
             mm_data=item_processor_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
         output["audio_features"] = output.pop("audio_values")
 
@@ -244,9 +238,13 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
             # higher than the number of audio samples
             audio_features=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
             audio_token_len=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
-            audio_lens=MultiModalFieldConfig.flat_from_sizes("audio", num_chunks),
+            # Only ever used to derive the encoder attention metadata on the
+            # host, so keep it there.
+            audio_lens=MultiModalFieldConfig.flat_from_sizes(
+                "audio", num_chunks, keep_on_cpu=True
+            ),
             # num_chunks can convert audio_chunked to audio batch dimension
-            audio_num_chunks=MultiModalFieldConfig.batched("audio"),
+            audio_num_chunks=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
             audio_embeds=MultiModalFieldConfig.batched("audio"),
         )
 
@@ -837,15 +835,19 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             embeddings.shape[0], -1
         )
         mask = indices < audio_token_len[:, None]
-        # Apply mask and flatten
-        flattened_embeddings = embeddings[mask]
 
-        # Return one tensor per input audio
-        embed_lens = [
-            chunk_lens.sum().item()
-            for chunk_lens in audio_token_len.split(audio_input["num_chunks"].tolist())
-        ]
-        return flattened_embeddings.split(embed_lens)
+        with gpu_sync_allowed():
+            # Apply mask and flatten
+            flattened_embeddings = embeddings[mask]
+
+            # Return one tensor per input audio
+            embed_lens = [
+                chunk_lens.sum().item()
+                for chunk_lens in audio_token_len.split(
+                    audio_input["num_chunks"].tolist()
+                )
+            ]
+            return flattened_embeddings.split(embed_lens)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
