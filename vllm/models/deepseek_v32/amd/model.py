@@ -56,9 +56,12 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         if get_tensor_model_parallel_world_size() == 1:
             return norm(hidden_states, residual)
 
+        # The fused op asserts the kernel ran; oversized batches must fall back.
         if (
             rocm_aiter_ops.is_fused_ar_rmsnorm_enabled()
-            and rocm_aiter_ops.get_aiter_allreduce() is not None
+            and (aiter_ar := rocm_aiter_ops.get_aiter_allreduce()) is not None
+            and not aiter_ar.disabled
+            and aiter_ar.should_custom_ar(hidden_states)
         ):
             out = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(
                 input_=hidden_states,

@@ -446,7 +446,8 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
                 q_pe,
                 kv_c,
                 k_pe,
-                self.kv_cache,
+                # aiter rejects the raw uint8 cache; the enable gate guarantees fp8.
+                self.kv_cache.view(torch.float8_e4m3fn),
                 mqa_q,
                 mla_slot,
                 self._k_scale,
