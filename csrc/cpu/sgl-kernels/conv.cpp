@@ -9,6 +9,44 @@
 
 namespace {
 
+enum class ConvStateLayout { SD, DS };
+
+struct ConvStateLayoutInfo {
+  ConvStateLayout layout;
+  int64_t state_len;
+  int64_t conv_state_slot_stride;
+};
+
+ConvStateLayoutInfo validate_conv_state_layout(
+    const at::Tensor& conv_states,
+    int64_t dim,
+    int64_t width,
+    const char* op_name) {
+  const int64_t state_len = conv_states.size(2);
+  CHECK_GE(state_len, width - 1);
+
+  ConvStateLayout layout = ConvStateLayout::SD;
+  if (conv_states.stride(-2) == 1 && conv_states.stride(-1) == dim) {
+    layout = ConvStateLayout::SD;
+  } else if (
+      conv_states.stride(-1) == 1 &&
+      conv_states.stride(-2) == state_len) {
+    layout = ConvStateLayout::DS;
+  } else {
+    TORCH_CHECK(
+        false,
+        op_name,
+        ": conv_states must use SD "
+        "(stride[-2]=1, stride[-1]=dim) or DS "
+        "(stride[-2]=state_len, stride[-1]=1) layout; got strides ",
+        conv_states.stride(-2),
+        ", ",
+        conv_states.stride(-1));
+  }
+
+  return {layout, state_len, conv_states.stride(0)};
+}
+
 template <typename scalar_t>
 inline void copy_stub(scalar_t* __restrict__ y, const scalar_t* __restrict__ x, int64_t size) {
   using Vec = at::vec::Vectorized<scalar_t>;
@@ -28,11 +66,11 @@ void inline update_conv_state(
     int64_t dim,
     int64_t seqlen,
     bool has_initial_states,
-    bool is_ds,
+    ConvStateLayout layout,
     int64_t state_len) {
   // width for `conv_states`
   int64_t width1 = width - 1;
-  if (is_ds) {
+  if (layout == ConvStateLayout::DS) {
     for (int64_t d = 0; d < dim; ++d) {
       scalar_t* state = conv_states + d * state_len;
       int64_t w = 0;
@@ -252,7 +290,7 @@ void causal_conv1d_fwd_kernel_impl(
     int64_t width,
     int64_t num_seq_blocks,
     int64_t conv_state_slot_stride,
-    bool is_ds,
+    ConvStateLayout layout,
     int64_t state_len,
     const scalar_t* __restrict__ tinygemm_states,
     int64_t tinygemm_state_slot_stride) {
@@ -284,7 +322,7 @@ void causal_conv1d_fwd_kernel_impl(
         const scalar_t* tinygemm_state = nullptr;
         if (has_conv_states) {
           tinygemm_state =
-              is_ds
+              layout == ConvStateLayout::DS
                   ? (tinygemm_states == nullptr
                          ? nullptr
                          : tinygemm_states + bs * tinygemm_state_slot_stride)
@@ -320,7 +358,7 @@ void causal_conv1d_fwd_kernel_impl(
             dim,
             seqlen,
             has_initial_state[bs],
-            is_ds,
+            layout,
             state_len);
       }
     });
@@ -356,7 +394,7 @@ void causal_conv1d_fwd_varlen_kernel_impl(
     int64_t width,
     int64_t num_seq_blocks,
     int64_t conv_state_slot_stride,
-    bool is_ds,
+    ConvStateLayout layout,
     int64_t state_len,
     const scalar_t* __restrict__ tinygemm_states,
     int64_t tinygemm_state_slot_stride) {
@@ -389,7 +427,7 @@ void causal_conv1d_fwd_varlen_kernel_impl(
         const scalar_t* tinygemm_state = nullptr;
         if (has_conv_states) {
           tinygemm_state =
-              is_ds
+              layout == ConvStateLayout::DS
                   ? (tinygemm_states == nullptr
                          ? nullptr
                          : tinygemm_states + bs * tinygemm_state_slot_stride)
@@ -427,7 +465,7 @@ void causal_conv1d_fwd_varlen_kernel_impl(
             dim,
             seqlen,
             has_initial_state[bs],
-            is_ds,
+            layout,
             state_len);
       }
     });
@@ -448,7 +486,7 @@ void causal_conv1d_update_kernel_impl(
     int64_t seqlen,
     int64_t width,
     int64_t conv_state_slot_stride,
-    bool is_ds,
+    ConvStateLayout layout,
     int64_t state_len,
     const scalar_t* __restrict__ tinygemm_states,
     int64_t tinygemm_state_slot_stride) {
@@ -475,7 +513,7 @@ void causal_conv1d_update_kernel_impl(
         const bool has_initial_states_value = true;
         int32_t conv_state_index = has_conv_indices ? conv_indices[bs] : bs;
         const scalar_t* tinygemm_state =
-            is_ds
+            layout == ConvStateLayout::DS
                 ? tinygemm_states + bs * tinygemm_state_slot_stride
                 : conv_states + conv_state_index * conv_state_slot_stride;
 
@@ -503,7 +541,7 @@ void causal_conv1d_update_kernel_impl(
       int32_t conv_state_index = has_conv_indices ? conv_indices[bs] : bs;
       scalar_t* state =
           conv_states + conv_state_index * conv_state_slot_stride;
-      if (is_ds) {
+      if (layout == ConvStateLayout::DS) {
         for (int64_t d = 0; d < dim; ++d) {
           scalar_t* row = state + d * state_len;
           for (int64_t w = 1; w < width - 1; ++w) {
@@ -544,7 +582,7 @@ void causal_conv1d_update_multi_kernel_impl(
     int64_t width,
     int64_t state_len,
     int64_t conv_state_slot_stride,
-    bool is_ds,
+    ConvStateLayout layout,
     const scalar_t* __restrict__ tinygemm_states,
     int64_t tinygemm_state_slot_stride) {
   constexpr int64_t BLOCK_N = block_size_n() * 2;
@@ -561,7 +599,7 @@ void causal_conv1d_update_multi_kernel_impl(
         const int32_t conv_state_index = conv_indices[bs];
         const int32_t history_offset = num_accepted_tokens[bs] - 1;
         const scalar_t* tinygemm_state =
-            is_ds
+            layout == ConvStateLayout::DS
                 ? tinygemm_states + bs * tinygemm_state_slot_stride
                 : conv_states + conv_state_index * conv_state_slot_stride;
 
@@ -605,7 +643,7 @@ void causal_conv1d_update_multi_kernel_impl(
       const int32_t num_accepted = num_accepted_tokens[bs];
       scalar_t* state = conv_states + conv_state_index * conv_state_slot_stride;
 
-      if (is_ds) {
+      if (layout == ConvStateLayout::DS) {
         for (int64_t d = 0; d < dim; ++d) {
           scalar_t* row = state + d * state_len;
           std::memmove(
@@ -784,7 +822,7 @@ at::Tensor causal_conv1d_fwd_cpu(
   CHECK_OPTIONAL_SHAPE_DTYPE(conv_state_indices, batch, at::kInt);
   CHECK_OPTIONAL_SHAPE_DTYPE(has_initial_state, batch, at::kBool);
 
-  bool is_ds = false;
+  ConvStateLayout layout = ConvStateLayout::SD;
   int64_t state_len = 0;
   int64_t conv_state_slot_stride = 0;
   if (conv_states.has_value()) {
@@ -793,27 +831,16 @@ at::Tensor causal_conv1d_fwd_cpu(
     CHECK_EQ(conv_states_val.scalar_type(), scalar_type);
     CHECK_GE(padded_batch, batch);
     CHECK_EQ(conv_states_val.size(1), dim);
-    state_len = conv_states_val.size(2);
-    CHECK_GE(state_len, width - 1);
-    const bool is_sd =
-        conv_states_val.stride(-2) == 1 &&
-        conv_states_val.stride(-1) == dim;
-    is_ds =
-        conv_states_val.stride(-1) == 1 &&
-        conv_states_val.stride(-2) == state_len;
-    TORCH_CHECK(
-        is_sd || is_ds,
-        "causal_conv1d_fwd_cpu: conv_states must use SD "
-        "(stride[-2]=1, stride[-1]=dim) or DS "
-        "(stride[-2]=state_len, stride[-1]=1) layout; got strides ",
-        conv_states_val.stride(-2),
-        ", ",
-        conv_states_val.stride(-1));
-    conv_state_slot_stride = conv_states_val.stride(0);
+    const auto layout_info = validate_conv_state_layout(
+        conv_states_val, dim, width, "causal_conv1d_fwd_cpu");
+    layout = layout_info.layout;
+    state_len = layout_info.state_len;
+    conv_state_slot_stride = layout_info.conv_state_slot_stride;
   }
 
   at::Tensor tinygemm_states;
-  if (is_ds && conv_states.has_value() && has_initial_state.has_value()) {
+  if (layout == ConvStateLayout::DS && conv_states.has_value() &&
+      has_initial_state.has_value()) {
     const bool* initial_state_data = has_initial_state.value().data_ptr<bool>();
     bool reads_initial_state = false;
     for (int64_t bs = 0; bs < batch; ++bs) {
@@ -860,7 +887,7 @@ at::Tensor causal_conv1d_fwd_cpu(
           width,
           num_seq_blocks,
           conv_state_slot_stride,
-          is_ds,
+          layout,
           state_len,
           tinygemm_states_ptr,
           tinygemm_state_slot_stride);
@@ -880,7 +907,7 @@ at::Tensor causal_conv1d_fwd_cpu(
           width,
           num_seq_blocks,
           conv_state_slot_stride,
-          is_ds,
+          layout,
           state_len,
           tinygemm_states_ptr,
           tinygemm_state_slot_stride);
@@ -930,20 +957,12 @@ at::Tensor causal_conv1d_update_cpu(
 
   CHECK_EQ(conv_states.scalar_type(), scalar_type);
   CHECK_EQ(conv_states.size(1), dim);
-  const int64_t state_len = conv_states.size(2);
-  CHECK_GE(state_len, width - 1);
-  const bool is_sd =
-      conv_states.stride(-2) == 1 && conv_states.stride(-1) == dim;
-  const bool is_ds =
-      conv_states.stride(-1) == 1 && conv_states.stride(-2) == state_len;
-  TORCH_CHECK(
-      is_sd || is_ds,
-      "causal_conv1d_update_cpu: conv_states must use SD "
-      "(stride[-2]=1, stride[-1]=dim) or DS "
-      "(stride[-2]=state_len, stride[-1]=1) layout; got strides ",
-      conv_states.stride(-2),
-      ", ",
-      conv_states.stride(-1));
+  const auto layout_info = validate_conv_state_layout(
+      conv_states, dim, width, "causal_conv1d_update_cpu");
+  const ConvStateLayout layout = layout_info.layout;
+  const int64_t state_len = layout_info.state_len;
+  const int64_t conv_state_slot_stride =
+      layout_info.conv_state_slot_stride;
 
   at::Tensor tinygemm_states;
 
@@ -986,12 +1005,11 @@ at::Tensor causal_conv1d_update_cpu(
           "causal_conv1d_update_cpu: history window exceeds conv_states.");
     }
 
-    if (is_ds) {
+    if (layout == ConvStateLayout::DS) {
       tinygemm_states =
           stage_ds_conv_states(conv_states, conv_state_indices, batch);
     }
 
-    int64_t conv_state_slot_stride = conv_states.stride(0);
     at::Tensor out = at::empty_like(x);
     AT_DISPATCH_REDUCED_FLOATING_TYPES(
         scalar_type, "causal_conv1d_update_multi_kernel_impl", [&] {
@@ -1010,7 +1028,7 @@ at::Tensor causal_conv1d_update_cpu(
               width,
               state_len,
               conv_state_slot_stride,
-              is_ds,
+              layout,
               tinygemm_states.defined()
                   ? tinygemm_states.data_ptr<scalar_t>()
                   : nullptr,
@@ -1024,12 +1042,11 @@ at::Tensor causal_conv1d_update_cpu(
       "causal_conv1d_update_cpu: num_accepted_tokens is only supported for 3D "
       "x.");
 
-  if (is_ds) {
+  if (layout == ConvStateLayout::DS) {
     tinygemm_states =
         stage_ds_conv_states(conv_states, conv_state_indices, batch);
   }
 
-  int64_t conv_state_slot_stride = conv_states.stride(0);
   at::Tensor out = at::empty_like(x);
   AT_DISPATCH_REDUCED_FLOATING_TYPES(scalar_type, "causal_conv1d_update_kernel_impl", [&] {
     causal_conv1d_update_kernel_impl<scalar_t>(
@@ -1045,7 +1062,7 @@ at::Tensor causal_conv1d_update_cpu(
         seqlen,
         width,
         conv_state_slot_stride,
-        is_ds,
+        layout,
         state_len,
         tinygemm_states.defined()
             ? tinygemm_states.data_ptr<scalar_t>()
