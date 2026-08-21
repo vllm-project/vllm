@@ -8,6 +8,18 @@
 //! Mirrors the Python vLLM implementation in
 //! `vllm/entrypoints/scale_out/derender/` (api_router.py, serving.py) and
 //! `vllm/renderers/online_derenderer.py`.
+//!
+//! Deliberate deviations from the Python implementation:
+//! - Streaming chunks are bounds-checked like non-streaming payloads
+//!   (`validate_stream_bounds`); Python only bounds the non-streaming path.
+//! - Streaming chat derender is rejected for reasoning-parser models (Python
+//!   parity), but tool-parser models are rejected only when the request
+//!   actually engages tool parsing, matching the normal chat pipeline.
+//! - Non-streaming completion derender honours `completion_request.echo`
+//!   (including the `max_tokens=0` prompt-only case); Python ignores `echo`.
+//! - The streaming detok state additionally carries `prev_token_ids` so
+//!   window reconstruction decodes from token IDs instead of round-tripping
+//!   lossy `id_to_token` pieces through `token_to_id`.
 
 mod detok;
 mod logprobs;
@@ -25,7 +37,7 @@ use tracing::{debug, warn};
 use vllm_chat::{AssistantContentBlock, AssistantMessageExt as _, ChatRequestProcessor};
 use vllm_chat::{ChatEventStream, FinishReason};
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{DecodedTextEvent, Finished};
+use vllm_text::{DecodedTextEvent, Finished, Prompt, TextRequestProcessor};
 
 use self::types::{
     DerenderChatCompletionResponse, DerenderChatRequest, DerenderChatRequestUnion,
@@ -33,7 +45,9 @@ use self::types::{
     DerenderCompletionRequestUnion, DerenderCompletionStreamRequest,
     DerenderCompletionStreamResponse,
 };
-use crate::error::{ApiError, bail_invalid_request, chat_submit_error, server_error};
+use crate::error::{
+    ApiError, bail_invalid_request, chat_submit_error, server_error, text_submit_error,
+};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::inference::generate::GenerateResponse;
@@ -41,12 +55,14 @@ use crate::routes::openai::chat_completions::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionStreamChoice,
     ChatCompletionStreamResponse, ChatMessageDelta, lower_chat_request,
 };
+use crate::routes::openai::utils::logprobs::{append_openai_logprobs, text_len};
 use crate::routes::openai::utils::types::{
     FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage,
 };
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
     CompletionChoice, CompletionResponse, CompletionStreamChoice, CompletionStreamResponse,
+    completion_echo_text,
 };
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, unix_timestamp};
@@ -67,6 +83,7 @@ pub(crate) struct DerenderContext<'a> {
     tokenizer: DynTokenizer,
     max_model_len: u32,
     max_logprobs: i32,
+    text: &'a TextRequestProcessor,
     chat: &'a ChatRequestProcessor,
 }
 
@@ -90,6 +107,7 @@ fn render_context(state: &RenderState) -> DerenderContext<'_> {
         tokenizer: state.text.tokenizer(),
         max_model_len: state.text.max_model_len(),
         max_logprobs: state.text.max_logprobs(),
+        text: &state.text,
         chat: &state.chat,
     }
 }
@@ -103,6 +121,7 @@ async fn app_context<'a>(state: &'a AppState, model: Option<&str>) -> DerenderCo
         tokenizer: text.tokenizer(),
         max_model_len: text.max_model_len(),
         max_logprobs: text.max_logprobs(),
+        text,
         chat: state.chat.request_processor(),
     }
 }
@@ -198,6 +217,49 @@ fn validate_derender_bounds(
     Ok(())
 }
 
+/// Bound one streaming chunk before decoding, matching the non-streaming
+/// `validate_derender_bounds` token/logprob limits. Python skips this check on
+/// the streaming path; we deliberately harden it so a single caller-supplied
+/// chunk cannot force token-by-token detokenization past `max_model_len`.
+fn validate_stream_bounds(
+    generate_chunk: &crate::routes::inference::generate::GenerateStreamResponse,
+    max_model_len: u32,
+    max_logprobs: i32,
+) -> Result<(), ApiError> {
+    let max_model_len = max_model_len as usize;
+    for choice in &generate_chunk.choices {
+        if choice.token_ids.len() > max_model_len {
+            bail_invalid_request!(
+                "token_ids length ({}) in choice {} exceeds max_model_len ({}).",
+                choice.token_ids.len(),
+                choice.index,
+                max_model_len
+            );
+        }
+        if let Some(content) = choice.logprobs.as_ref().and_then(|l| l.content.as_ref()) {
+            if content.len() > max_model_len {
+                bail_invalid_request!(
+                    "logprobs.content length ({}) in choice {} exceeds max_model_len ({}).",
+                    content.len(),
+                    choice.index,
+                    max_model_len
+                );
+            }
+            for entry in content {
+                if max_logprobs >= 0 && entry.top_logprobs.len() > max_logprobs as usize {
+                    bail_invalid_request!(
+                        "top_logprobs count ({}) in choice {} exceeds max_logprobs ({}).",
+                        entry.top_logprobs.len(),
+                        choice.index,
+                        max_logprobs
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Map a wire `finish_reason` string to the internal enum for the replayed
 /// parse pipeline. The response echoes the wire string verbatim; this mapping
 /// only feeds the structured assembly.
@@ -213,13 +275,17 @@ fn wire_finish_reason(finish_reason: Option<&str>) -> FinishReason {
 /// Replay already-generated tokens through the chat output pipeline so the
 /// configured reasoning/tool parser splits them into reasoning, content and
 /// tool calls, mirroring Python's `parser.parse()` one-shot extraction.
+///
+/// Returns the assembled message plus whether output metadata (logprobs, token
+/// IDs) may be attached: like the normal chat path, per-token data is
+/// suppressed when it would leak hidden reasoning tokens.
 async fn parse_chat_choice(
     ctx: &DerenderContext<'_>,
     chat_request: crate::routes::openai::chat_completions::ChatCompletionRequest,
     token_ids: &[u32],
     finish_reason: Option<&str>,
     ctx_request: ResolvedRequestContext,
-) -> Result<ChatCompletionMessage, ApiError> {
+) -> Result<(ChatCompletionMessage, bool), ApiError> {
     let include_reasoning = chat_request.include_reasoning;
     let is_named_tool_choice =
         matches!(&chat_request.tool_choice, Some(ToolChoice::Function { .. }));
@@ -229,10 +295,21 @@ async fn parse_chat_choice(
     );
 
     let lowered = lower_chat_request(chat_request, &ctx.lora_resolution, ctx_request)?;
-    let (adjusted, processor) = ctx
+    // Render and tokenize the supplied chat request so the replayed stream
+    // starts from the real prompt: several parsers derive their starting mode
+    // from the prompt tail (e.g. a prefilled think/response channel opener).
+    let (text_request, processor) = ctx
         .chat
-        .new_output_processor(lowered)
+        .prepare(lowered)
+        .await
         .map_err(|error| chat_submit_error("failed to prepare derender chat request", error))?;
+    let prepared = ctx
+        .text
+        .prepare(text_request)
+        .map_err(|error| text_submit_error("failed to prepare derender chat request", error))?;
+    let request_id = prepared.text_request.request_id.clone();
+    let prompt_token_ids = prepared.generate_request.prompt_token_ids;
+    let prompt_token_count = prompt_token_ids.len();
 
     // Parser path: decode with special tokens preserved so the parser can see
     // markers like </think>, <tool_call>, or Harmony channel tokens.
@@ -243,7 +320,7 @@ async fn parse_chat_choice(
 
     let events = vec![
         Ok(DecodedTextEvent::Start {
-            prompt_token_ids: Arc::from([]),
+            prompt_token_ids: Arc::from(prompt_token_ids),
             prompt_logprobs: None,
         }),
         Ok(DecodedTextEvent::TextDelta {
@@ -252,7 +329,7 @@ async fn parse_chat_choice(
             logprobs: None,
             finished: Some(Finished {
                 usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 0,
+                    prompt_token_count,
                     output_token_count: token_ids.len(),
                     cached_token_count: 0,
                 },
@@ -266,10 +343,11 @@ async fn parse_chat_choice(
     let chat_stream = processor
         .process(decoded_stream)
         .map_err(|error| chat_submit_error("failed to derender chat response", error))?;
-    let collected = ChatEventStream::from_stream(adjusted.request_id.clone(), chat_stream)
-        .collect_message()
-        .await
-        .map_err(|error| chat_submit_error("failed to derender chat response", error))?;
+    let collected =
+        ChatEventStream::from_stream(request_id, chat_stream)
+            .collect_message()
+            .await
+            .map_err(|error| chat_submit_error("failed to derender chat response", error))?;
 
     let has_content = collected
         .message
@@ -298,16 +376,21 @@ async fn parse_chat_choice(
         })
         .collect();
 
-    Ok(ChatCompletionMessage {
-        role: AssistantRole,
-        content,
-        tool_calls,
-        reasoning: if include_reasoning {
-            collected.message.reasoning()
-        } else {
-            None
+    // Mirror collect_chat_completion: when reasoning is parsed out but the
+    // request hides it, per-token output metadata is suppressed as well so
+    // hidden reasoning tokens cannot leak through logprobs.
+    let reasoning = collected.message.reasoning();
+    let include_output_metadata = include_reasoning || reasoning.is_none();
+
+    Ok((
+        ChatCompletionMessage {
+            role: AssistantRole,
+            content,
+            tool_calls,
+            reasoning: if include_reasoning { reasoning } else { None },
         },
-    })
+        include_output_metadata,
+    ))
 }
 
 /// Postprocess a GenerateResponse into a chat completion response.
@@ -343,7 +426,7 @@ async fn derender_chat(
             .map(|logprobs| logprobs::resolve_logprobs(logprobs, &ctx.tokenizer))
             .transpose()?;
 
-        let message = if ctx.has_parser()
+        let (message, include_output_metadata) = if ctx.has_parser()
             && let Some(chat_request) = request.chat_request.clone()
         {
             parse_chat_choice(
@@ -366,18 +449,25 @@ async fn derender_chat(
                 .tokenizer
                 .decode(&choice.token_ids, skip_special)
                 .map_err(|error| server_error!("derender decode failed: {}", error.as_report()))?;
-            ChatCompletionMessage {
-                role: AssistantRole,
-                content: Some(decoded_text),
-                tool_calls: Vec::new(),
-                reasoning: None,
-            }
+            (
+                ChatCompletionMessage {
+                    role: AssistantRole,
+                    content: Some(decoded_text),
+                    tool_calls: Vec::new(),
+                    reasoning: None,
+                },
+                true,
+            )
         };
 
         choices.push(ChatCompletionChoice {
             index: choice.index,
             message,
-            logprobs: resolved_logprobs,
+            logprobs: if include_output_metadata {
+                resolved_logprobs
+            } else {
+                None
+            },
             finish_reason: choice.finish_reason.clone(),
             stop_reason: None,
             token_ids: None,
@@ -403,7 +493,7 @@ async fn derender_chat(
         choices,
         usage: Usage {
             prompt_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
+            total_tokens: checked_total_tokens(prompt_tokens, completion_tokens)?,
             completion_tokens: Some(completion_tokens),
             prompt_tokens_details: None,
         },
@@ -450,6 +540,32 @@ fn derender_completion(
         .map(|request| request.skip_special_tokens)
         .unwrap_or(true);
 
+    // Honour `completion_request.echo` like the normal completions path
+    // (Python derender ignores `echo`): prepend the prompt to each choice's
+    // text, and for prompt-only requests (echo + max_tokens=0) expose just
+    // the prompt, hiding the one internally generated token.
+    let completion_request = request.completion_request.as_ref();
+    let echo = completion_request
+        .map(|request| completion_echo_text(request, ctx.tokenizer.as_ref()))
+        .transpose()?
+        .flatten();
+    let prompt_only =
+        echo.is_some() && completion_request.is_some_and(|request| request.max_tokens == Some(0));
+    let echo_prompt_token_ids = match completion_request.filter(|_| echo.is_some()) {
+        Some(request) => Some(match &request.prompt {
+            Prompt::Text(text) => {
+                ctx.tokenizer.encode(text, request.add_special_tokens).map_err(|error| {
+                    ApiError::invalid_request(
+                        format!("Failed to tokenize prompt for echo: {}", error.as_report()),
+                        Some("prompt"),
+                    )
+                })?
+            }
+            Prompt::TokenIds(token_ids) => token_ids.clone(),
+        }),
+        None => None,
+    };
+
     let mut choices = Vec::new();
     let mut total_prompt_tokens = 0;
     let mut total_completion_tokens = 0;
@@ -471,7 +587,12 @@ fn derender_completion(
                 .tokenizer
                 .decode(&choice.token_ids, skip_special)
                 .map_err(|error| server_error!("derender decode failed: {}", error.as_report()))?;
-            let logprobs = choice
+            let text = match &echo {
+                None => decoded_text,
+                Some(prompt) if prompt_only => prompt.clone(),
+                Some(prompt) => format!("{prompt}{decoded_text}"),
+            };
+            let mut logprobs = choice
                 .logprobs
                 .as_ref()
                 .map(|logprobs| {
@@ -479,10 +600,57 @@ fn derender_completion(
                         .map(|resolved| logprobs::chat_logprobs_to_completion(&resolved))
                 })
                 .transpose()?;
+            if let Some(prompt) = &echo {
+                if prompt_only {
+                    // Choice logprobs would describe the hidden internal
+                    // token; echo back prompt logprobs like the normal path.
+                    logprobs = match &response.prompt_logprobs {
+                        Some(prompt_logprobs) => Some(logprobs::prompt_logprobs_to_completion(
+                            prompt_logprobs,
+                            echo_prompt_token_ids.as_deref().unwrap_or(&[]),
+                            &ctx.tokenizer,
+                        )?),
+                        None => None,
+                    };
+                } else if let Some(completion_logprobs) = logprobs {
+                    logprobs = Some(match &response.prompt_logprobs {
+                        // The render step enables prompt logprobs for echo
+                        // requests, so prepend them exactly like the normal
+                        // echoed completions path.
+                        Some(prompt_logprobs) => {
+                            let prompt_logprobs = logprobs::prompt_logprobs_to_completion(
+                                prompt_logprobs,
+                                echo_prompt_token_ids.as_deref().unwrap_or(&[]),
+                                &ctx.tokenizer,
+                            )?;
+                            let completion_start = prompt_logprobs
+                                .text_offset
+                                .last()
+                                .zip(prompt_logprobs.tokens.last())
+                                .map(|(&offset, token)| offset.saturating_add(text_len(token)))
+                                .unwrap_or(0);
+                            let mut completion_logprobs = completion_logprobs;
+                            logprobs::shift_text_offsets(
+                                &mut completion_logprobs,
+                                completion_start,
+                            );
+                            append_openai_logprobs(prompt_logprobs, completion_logprobs)
+                        }
+                        None => {
+                            let mut completion_logprobs = completion_logprobs;
+                            logprobs::shift_text_offsets(
+                                &mut completion_logprobs,
+                                text_len(prompt),
+                            );
+                            completion_logprobs
+                        }
+                    });
+                }
+            }
 
             choices.push(CompletionChoice {
                 index,
-                text: decoded_text,
+                text,
                 logprobs,
                 finish_reason: choice.finish_reason.clone(),
                 stop_reason: None,
@@ -493,7 +661,7 @@ fn derender_completion(
             total_completion_tokens += choice.token_ids.len();
             index += 1;
         }
-        total_prompt_tokens += prompt_tokens;
+        total_prompt_tokens = checked_total_tokens(total_prompt_tokens, prompt_tokens)?;
     }
 
     let first = &request.generate_responses[0];
@@ -528,7 +696,7 @@ fn derender_completion(
         choices,
         usage: Some(Usage {
             prompt_tokens: total_prompt_tokens,
-            total_tokens: total_prompt_tokens + total_completion_tokens,
+            total_tokens: checked_total_tokens(total_prompt_tokens, total_completion_tokens)?,
             completion_tokens: Some(total_completion_tokens),
             prompt_tokens_details: None,
         }),
@@ -538,17 +706,51 @@ fn derender_completion(
     })
 }
 
+/// `prompt_tokens` in derender requests is caller supplied, so adding the
+/// completion count with plain arithmetic could overflow.
+fn checked_total_tokens(prompt_tokens: usize, completion_tokens: usize) -> Result<usize, ApiError> {
+    prompt_tokens.checked_add(completion_tokens).ok_or_else(|| {
+        ApiError::invalid_request(
+            format!(
+                "prompt_tokens ({prompt_tokens}) + completion_tokens \
+                 ({completion_tokens}) overflows the token counter"
+            ),
+            None,
+        )
+    })
+}
+
 /// Aggregate chunk usage, forwarding the caller-supplied prompt token count.
-fn stream_usage(prompt_tokens: Option<usize>, usage: Option<&Usage>) -> Option<Usage> {
-    let usage = usage?;
+fn stream_usage(
+    prompt_tokens: Option<usize>,
+    usage: Option<&Usage>,
+) -> Result<Option<Usage>, ApiError> {
+    let Some(usage) = usage else {
+        return Ok(None);
+    };
     let prompt_tokens = prompt_tokens.unwrap_or(usage.prompt_tokens);
     let completion_tokens = usage.completion_tokens.unwrap_or(0);
-    Some(Usage {
+    Ok(Some(Usage {
         prompt_tokens,
-        total_tokens: prompt_tokens + completion_tokens,
+        total_tokens: checked_total_tokens(prompt_tokens, completion_tokens)?,
         completion_tokens: Some(completion_tokens),
         prompt_tokens_details: None,
-    })
+    }))
+}
+
+/// Whether the supplied chat request would engage the tool parser in the
+/// normal chat pipeline (`ResolvedToolContext::parsing_enabled`): tools are
+/// declared and tool_choice is not explicitly "none". Function/Required/
+/// AllowedTools choices fail closed and count as engaged even without a
+/// tools list.
+fn tool_parsing_would_engage(
+    request: &crate::routes::openai::chat_completions::ChatCompletionRequest,
+) -> bool {
+    match &request.tool_choice {
+        Some(ToolChoice::Value(ToolChoiceValue::None)) => false,
+        Some(_) => true,
+        None => request.tools.as_ref().is_some_and(|tools| !tools.is_empty()),
+    }
 }
 
 /// Streaming counterpart to [`derender_chat`].
@@ -563,12 +765,28 @@ fn derender_chat_stream(
     request: DerenderChatStreamRequest,
 ) -> Result<DerenderChatStreamResponse, ApiError> {
     check_model(ctx, request.model.as_deref())?;
+    validate_stream_bounds(&request.generate_chunk, ctx.max_model_len, ctx.max_logprobs)?;
 
-    if ctx.has_parser() {
-        // Fail closed on the parser alone. A parser configured model must
-        // never fall through to plain detok on the streaming path, even when
-        // `chat_request` is omitted or reasoning/tool markup would leak into
-        // `delta.content`.
+    // Fail closed for reasoning parsers: the streaming parse path is not yet
+    // implemented (Python raises NotImplementedError in the same situation),
+    // so hidden reasoning markup must never leak through plain detok.
+    if ctx.chat.reasoning_parser_name(ctx.model_id).is_some() {
+        bail_invalid_request!(
+            "Streaming chat derender is not yet supported for models with a reasoning or \
+             tool parser configured. Use the non-streaming derender endpoint (stream=false) \
+             for parsed output."
+        );
+    }
+
+    // Deviation from Python (which rejects on any configured parser): the
+    // normal chat pipeline only engages the tool parser when the request
+    // itself enables tool parsing, so a tool-capable model serving a
+    // tool-free request streams plain text there. Mirror that here instead of
+    // rejecting on the mere presence of a tool parser.
+    if ctx.chat.tool_call_parser_name(ctx.model_id).is_some()
+        && let Some(chat_request) = &request.chat_request
+        && tool_parsing_would_engage(chat_request)
+    {
         bail_invalid_request!(
             "Streaming chat derender is not yet supported for models with a reasoning or \
              tool parser configured. Use the non-streaming derender endpoint (stream=false) \
@@ -585,7 +803,7 @@ fn derender_chat_stream(
         bail_invalid_request!("derender_chat_stream expects at most one choice per chunk");
     }
 
-    let mut state = request.stream_state.unwrap_or_default();
+    let mut state = request.stream_state.map(|state| *state).unwrap_or_default();
     state.validate()?;
 
     let skip_special = request
@@ -637,7 +855,7 @@ fn derender_chat_stream(
         unix_timestamp(),
     );
     chunk.choices = stream_choices;
-    chunk.usage = stream_usage(request.prompt_tokens, request.generate_chunk.usage.as_ref());
+    chunk.usage = stream_usage(request.prompt_tokens, request.generate_chunk.usage.as_ref())?;
 
     Ok(DerenderChatStreamResponse {
         chunk,
@@ -654,6 +872,7 @@ fn derender_completion_stream(
     request: DerenderCompletionStreamRequest,
 ) -> Result<DerenderCompletionStreamResponse, ApiError> {
     check_model(ctx, request.model.as_deref())?;
+    validate_stream_bounds(&request.generate_chunk, ctx.max_model_len, ctx.max_logprobs)?;
 
     // See the equivalent check in derender_chat_stream: a single
     // DerenderStreamState is threaded through every choice in this chunk, so
@@ -663,7 +882,7 @@ fn derender_completion_stream(
         bail_invalid_request!("derender_completion_stream expects at most one choice per chunk");
     }
 
-    let mut state = request.stream_state.unwrap_or_default();
+    let mut state = request.stream_state.map(|state| *state).unwrap_or_default();
     state.validate()?;
 
     let skip_special = request
@@ -701,7 +920,7 @@ fn derender_completion_stream(
         unix_timestamp(),
     );
     chunk.choices = stream_choices;
-    chunk.usage = stream_usage(request.prompt_tokens, request.generate_chunk.usage.as_ref());
+    chunk.usage = stream_usage(request.prompt_tokens, request.generate_chunk.usage.as_ref())?;
 
     Ok(DerenderCompletionStreamResponse {
         chunk,

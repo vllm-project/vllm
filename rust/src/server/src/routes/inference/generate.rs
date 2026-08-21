@@ -29,6 +29,7 @@ use self::convert::{ResponseOptions, prepare_generate_request};
 pub(crate) use self::types::{
     GenerateLogprob, GenerateRequest, GenerateResponse, GenerateResponseChoice,
     GenerateResponseStreamChoice, GenerateSamplingParams, GenerateStreamResponse,
+    PromptLogprobMaps,
 };
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;

@@ -7,15 +7,13 @@
 //! Mirrors the Python vLLM `Derender*Request` / `Derender*Stream*` classes in
 //! `vllm/entrypoints/scale_out/token_in_token_out/protocol.py`.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use validator::{Validate, ValidationErrors};
 
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::inference::generate::{
-    GenerateLogprob, GenerateResponse, GenerateStreamResponse,
+    GenerateResponse, GenerateStreamResponse, PromptLogprobMaps,
 };
 use crate::routes::openai::chat_completions::ChatCompletionRequest;
 use crate::routes::openai::utils::types::{Normalizable, Usage};
@@ -54,6 +52,17 @@ pub(crate) struct DerenderStreamState {
     /// number of chunks.
     #[serde(default)]
     pub prev_tokens: Vec<String>,
+    /// Token IDs parallel to `prev_tokens`, used to reconstruct the decode
+    /// window without a lossy `id_to_token` → `token_to_id` round-trip
+    /// (some backends store byte pieces as lossy UTF-8). Slots without a
+    /// decodable ID carry `u32::MAX`.
+    ///
+    /// Rust-specific extension: states produced by the Python implementation
+    /// lack this field (`null`/absent), in which case the pieces are mapped
+    /// back through `token_to_id` as a best-effort fallback. Python ignores
+    /// the unknown field when it parses our state.
+    #[serde(default)]
+    pub prev_token_ids: Option<Vec<u32>>,
     /// Prefix offset into `prev_tokens` for incremental detokenization.
     #[serde(default)]
     pub prefix_offset: usize,
@@ -98,6 +107,16 @@ impl DerenderStreamState {
                  read_offset={}, prev_tokens length={})",
                 self.prefix_offset,
                 self.read_offset,
+                self.prev_tokens.len()
+            );
+        }
+        if let Some(ids) = &self.prev_token_ids
+            && ids.len() != self.prev_tokens.len()
+        {
+            bail_invalid_request!(
+                "invalid stream_state: prev_token_ids length ({}) does not match \
+                 prev_tokens length ({})",
+                ids.len(),
                 self.prev_tokens.len()
             );
         }
@@ -175,7 +194,9 @@ pub(crate) struct DerenderChatStreamRequest {
     /// One SSE chunk from `/inference/v1/generate` (`stream=True`).
     pub generate_chunk: GenerateStreamResponse,
     /// Client carried detok state from the previous call. `None` on first.
-    pub stream_state: Option<DerenderStreamState>,
+    ///
+    /// Boxed to keep the untagged request-union variants similarly sized.
+    pub stream_state: Option<Box<DerenderStreamState>>,
     /// Prompt token count for usage. Forwarded from the render step.
     pub prompt_tokens: Option<usize>,
     /// The original (post adjust_request) ChatCompletionRequest from /render.
@@ -221,7 +242,9 @@ pub(crate) struct DerenderCompletionStreamRequest {
     /// One SSE chunk from `/inference/v1/generate`.
     pub generate_chunk: GenerateStreamResponse,
     /// Client-carried detok state. `None` on the first call.
-    pub stream_state: Option<DerenderStreamState>,
+    ///
+    /// Boxed to keep the untagged request-union variants similarly sized.
+    pub stream_state: Option<Box<DerenderStreamState>>,
     /// Prompt token count for usage.
     pub prompt_tokens: Option<usize>,
     /// The original (post adjust_request) CompletionRequest from /render.
@@ -301,7 +324,7 @@ pub(crate) struct DerenderChatCompletionResponse {
     pub model: String,
     pub choices: Vec<crate::routes::openai::chat_completions::ChatCompletionChoice>,
     pub usage: Usage,
-    pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
+    pub prompt_logprobs: Option<PromptLogprobMaps>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
 }

@@ -27,6 +27,7 @@ use vllm_text::{
     TextOutputStreamExt as _, TextRequest,
 };
 
+pub(crate) use self::convert::completion_echo_text;
 use self::convert::{ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
 use self::types::CompletionSseChunk;

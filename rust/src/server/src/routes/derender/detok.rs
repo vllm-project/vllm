@@ -6,18 +6,38 @@
 //! Ports `vllm/tokenizers/detokenizer_utils.py::detokenize_incrementally`
 //! onto the caller-supplied, JSON-serializable [`DerenderStreamState`].
 //!
-//! The Rust [`Tokenizer`] trait has no `convert_ids_to_tokens` /
-//! `convert_tokens_to_string` pair; token pieces come from `id_to_token`
-//! (with special/OOV ids mapped to `""` exactly like Python's
-//! `_replace_none_with_empty`), and `convert_tokens_to_string(pieces)` is
-//! approximated by mapping the pieces back to ids via `token_to_id` and
-//! running a single `decode(ids, false)` over them.
+//! Window reconstruction decodes from the token IDs carried alongside the
+//! wire pieces (`DerenderStreamState::prev_token_ids`), so byte-fallback
+//! pieces whose bytes are not valid UTF-8 on their own still decode exactly
+//! like one-shot `decode`. The Rust [`Tokenizer`] trait has no
+//! `convert_ids_to_tokens` / `convert_tokens_to_string` pair, and some
+//! backends' `id_to_token` is lossy UTF-8 (e.g. tiktoken stores base-token
+//! byte pieces with replacement characters), so round-tripping pieces back
+//! through `token_to_id` would drop or corrupt split multi-byte characters.
+//!
+//! States produced by the Python implementation carry only `prev_tokens`
+//! pieces; those are mapped back through `token_to_id` as a best-effort
+//! fallback.
 
 use thiserror_ext::AsReport as _;
 use vllm_text::tokenizer::DynTokenizer;
 
 use super::types::DerenderStreamState;
 use crate::error::{ApiError, server_error};
+
+/// Sentinel written into `DerenderStreamState::prev_token_ids` for window
+/// slots without a decodable token ID (only reachable via the foreign-state
+/// fallback). Always out of vocabulary, so window reconstruction filters it.
+const NO_TOKEN_ID: u32 = u32::MAX;
+
+/// One slot in the carried decode window: the wire piece plus its token ID.
+///
+/// `id` is `None` only for foreign (Python-produced) state whose piece did
+/// not map back through `token_to_id`.
+struct WindowToken {
+    piece: String,
+    id: Option<u32>,
+}
 
 /// Convert one token id into the raw token piece carried in the decode
 /// window.
@@ -35,16 +55,34 @@ fn token_piece(tokenizer: &DynTokenizer, token_id: u32, skip_special_tokens: boo
     tokenizer.id_to_token(token_id).unwrap_or_default()
 }
 
-/// Approximate `convert_tokens_to_string(pieces)`: round-trip the pieces
-/// through `token_to_id` and decode them in one shot.
-pub(super) fn pieces_to_text(
-    tokenizer: &DynTokenizer,
-    pieces: &[String],
-) -> Result<String, ApiError> {
-    let ids: Vec<u32> = pieces.iter().filter_map(|piece| tokenizer.token_to_id(piece)).collect();
+/// Whether a window token ID participates in decoding: in vocabulary, and
+/// not a special token when `skip_special_tokens` is set (matching the `""`
+/// piece those tokens produce in [`token_piece`]).
+fn is_decodable(tokenizer: &DynTokenizer, token_id: u32, skip_special_tokens: bool) -> bool {
+    (token_id as usize) < tokenizer.vocab_size()
+        && !(skip_special_tokens && tokenizer.is_special_id(token_id))
+}
+
+fn decode_ids(tokenizer: &DynTokenizer, token_ids: &[u32]) -> Result<String, ApiError> {
     tokenizer
-        .decode(&ids, false)
+        .decode(token_ids, false)
         .map_err(|error| server_error!("derender detokenization failed: {}", error.as_report()))
+}
+
+/// Decode the decodable IDs in `window[range]`, approximating Python's
+/// `convert_tokens_to_string(pieces)` without a lossy piece round-trip.
+fn decode_window(
+    tokenizer: &DynTokenizer,
+    window: &[WindowToken],
+    range: std::ops::Range<usize>,
+    skip_special_tokens: bool,
+) -> Result<String, ApiError> {
+    let ids: Vec<u32> = window[range]
+        .iter()
+        .filter_map(|token| token.id)
+        .filter(|&id| is_decodable(tokenizer, id, skip_special_tokens))
+        .collect();
+    decode_ids(tokenizer, &ids)
 }
 
 /// Slice `text` to the characters after the first `prefix_chars`, mirroring
@@ -55,8 +93,8 @@ fn drop_prefix_chars(text: &str, prefix_chars: usize) -> String {
 
 /// Outcome of feeding one new token into the incremental decode window.
 struct IncrementalStep {
-    /// The raw piece appended to the window (`""` for skipped/OOV tokens).
-    new_piece: String,
+    /// The window slot appended for this token.
+    new_token: WindowToken,
     /// Newly visible text, or `""` when the tail is an unfinished multi-byte
     /// sequence.
     text: String,
@@ -66,15 +104,15 @@ struct IncrementalStep {
 
 /// Port of `detokenize_incrementally` for a single new token id.
 ///
-/// `prev_tokens` is always a (possibly empty) list here, so this only
-/// implements the non-first-iteration path from Python.
+/// The window is always a (possibly empty) list here, so this only implements
+/// the non-first-iteration path from Python.
 ///
 /// The offsets are necessary to defeat cleanup algorithms in the decode which
 /// decide to add a space or not depending on the surrounding ids.
 fn detokenize_incrementally(
     tokenizer: &DynTokenizer,
     new_token_id: u32,
-    prev_tokens: &[String],
+    window: &[WindowToken],
     prefix_offset: usize,
     read_offset: usize,
     skip_special_tokens: bool,
@@ -84,25 +122,33 @@ fn detokenize_incrementally(
     // The prefix text is necessary only to defeat cleanup algorithms in
     // the decode which decide to add a space or not depending on the
     // surrounding ids.
-    let prefix_text = pieces_to_text(tokenizer, &prev_tokens[prefix_offset..read_offset])?;
-    let new_text = {
-        let mut window: Vec<&str> =
-            prev_tokens[prefix_offset..].iter().map(String::as_str).collect();
-        window.push(&new_piece);
-        let ids: Vec<u32> =
-            window.iter().filter_map(|piece| tokenizer.token_to_id(piece)).collect();
-        tokenizer.decode(&ids, false).map_err(|error| {
-            server_error!("derender detokenization failed: {}", error.as_report())
-        })?
-    };
+    let prefix_text = decode_window(
+        tokenizer,
+        window,
+        prefix_offset..read_offset,
+        skip_special_tokens,
+    )?;
+    let mut window_ids: Vec<u32> = window[prefix_offset..]
+        .iter()
+        .filter_map(|token| token.id)
+        .filter(|&id| is_decodable(tokenizer, id, skip_special_tokens))
+        .collect();
+    if is_decodable(tokenizer, new_token_id, skip_special_tokens) {
+        window_ids.push(new_token_id);
+    }
+    let new_text = decode_ids(tokenizer, &window_ids)?;
 
     let prefix_chars = prefix_text.chars().count();
+    let new_token = WindowToken {
+        piece: new_piece,
+        id: Some(new_token_id),
+    };
     // A trailing U+FFFD char means it's a potential unfinished byte sequence
     // from byte fallback tokenization. If it's in the middle, it's probably a
     // real invalid id generated by the model.
     if new_text.chars().count() <= prefix_chars || new_text.ends_with('\u{FFFD}') {
         return Ok(IncrementalStep {
-            new_piece,
+            new_token,
             text: String::new(),
             prefix_offset,
             read_offset,
@@ -110,10 +156,10 @@ fn detokenize_incrementally(
     }
 
     Ok(IncrementalStep {
-        new_piece,
+        new_token,
         text: drop_prefix_chars(&new_text, prefix_chars),
         prefix_offset: read_offset,
-        read_offset: prev_tokens.len() + 1,
+        read_offset: window.len() + 1,
     })
 }
 
@@ -138,7 +184,29 @@ pub(super) fn detokenize_delta(
     state: &DerenderStreamState,
     skip_special_tokens: bool,
 ) -> Result<(String, DerenderStreamState), ApiError> {
-    let mut prev_tokens = state.prev_tokens.clone();
+    // Prefer the carried token IDs. States produced by the Python
+    // implementation have only `prev_tokens` pieces; map those back through
+    // `token_to_id` as a best-effort fallback (lossy for backends whose
+    // `id_to_token` is lossy UTF-8, hence the ID side channel).
+    let mut window: Vec<WindowToken> = match &state.prev_token_ids {
+        Some(ids) => state
+            .prev_tokens
+            .iter()
+            .zip(ids)
+            .map(|(piece, &id)| WindowToken {
+                piece: piece.clone(),
+                id: (id != NO_TOKEN_ID).then_some(id),
+            })
+            .collect(),
+        None => state
+            .prev_tokens
+            .iter()
+            .map(|piece| WindowToken {
+                id: tokenizer.token_to_id(piece),
+                piece: piece.clone(),
+            })
+            .collect(),
+    };
     let mut prefix_offset = state.prefix_offset;
     let mut read_offset = state.read_offset;
 
@@ -147,12 +215,12 @@ pub(super) fn detokenize_delta(
         let step = detokenize_incrementally(
             tokenizer,
             token_id,
-            &prev_tokens,
+            &window,
             prefix_offset,
             read_offset,
             skip_special_tokens,
         )?;
-        prev_tokens.push(step.new_piece);
+        window.push(step.new_token);
         text.push_str(&step.text);
         prefix_offset = step.prefix_offset;
         read_offset = step.read_offset;
@@ -161,9 +229,11 @@ pub(super) fn detokenize_delta(
     // Trim to the tail still readable by detokenize_incrementally
     // (everything before prefix_offset is dead) and rebase the offsets so
     // the carried window stays bounded regardless of generation length.
-    let trimmed = prev_tokens.split_off(prefix_offset);
+    let trimmed = window.split_off(prefix_offset);
     let mut updated_state = state.clone();
-    updated_state.prev_tokens = trimmed;
+    updated_state.prev_tokens = trimmed.iter().map(|token| token.piece.clone()).collect();
+    updated_state.prev_token_ids =
+        Some(trimmed.iter().map(|token| token.id.unwrap_or(NO_TOKEN_ID)).collect());
     updated_state.prefix_offset = 0;
     updated_state.read_offset = read_offset - prefix_offset;
     Ok((text, updated_state))

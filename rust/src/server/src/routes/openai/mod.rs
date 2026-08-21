@@ -11,6 +11,6 @@ pub(crate) use chat_completions::{ChatCompletionRequest, lower_chat_request};
 pub use completions::completions;
 pub(crate) use completions::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionStreamChoice,
-    CompletionStreamResponse, lower_completion_request,
+    CompletionStreamResponse, completion_echo_text, lower_completion_request,
 };
 pub use models::list_models;

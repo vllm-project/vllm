@@ -96,15 +96,53 @@ pub(crate) struct GenerateStreamResponse {
     pub usage: Option<Usage>,
 }
 
+/// Engine-wire prompt logprobs: one candidate map per prompt position.
+pub(crate) type PromptLogprobMaps = Vec<Option<HashMap<u32, GenerateLogprob>>>;
+
 /// Mirrors the Python vLLM `GenerateResponse` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct GenerateResponse {
     #[serde(default)]
     pub request_id: String,
     pub choices: Vec<GenerateResponseChoice>,
-    pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
+    #[serde(default, deserialize_with = "deserialize_prompt_logprob_maps")]
+    pub prompt_logprobs: Option<PromptLogprobMaps>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
+}
+
+/// Deserialize prompt-logprob position maps with integer keys.
+///
+/// Serde's untagged-union buffering (used by the derender request unions)
+/// cannot drive `HashMap<u32, _>`'s key parsing, so accept string keys and
+/// parse them explicitly.
+fn deserialize_prompt_logprob_maps<'de, D>(
+    deserializer: D,
+) -> Result<Option<PromptLogprobMaps>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<Vec<Option<HashMap<String, GenerateLogprob>>>>::deserialize(deserializer)?;
+    raw.map(|positions| {
+        positions
+            .into_iter()
+            .map(|position| {
+                position
+                    .map(|candidates| {
+                        candidates
+                            .into_iter()
+                            .map(|(key, value)| {
+                                key.parse::<u32>()
+                                    .map(|token_id| (token_id, value))
+                                    .map_err(serde::de::Error::custom)
+                            })
+                            .collect::<Result<HashMap<_, _>, _>>()
+                    })
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .transpose()
 }
 
 /// Mirrors the Python vLLM `Logprob` class used in prompt-logprobs payloads.

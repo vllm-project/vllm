@@ -15,8 +15,8 @@ use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_text::tokenizer::DynTokenizer;
 
-use super::detok::pieces_to_text;
 use crate::error::{ApiError, server_error};
+use crate::routes::inference::generate::GenerateLogprob;
 use crate::routes::openai::utils::logprobs::text_len;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, ChatLogProbsContent, LogProbs, TopLogProb,
@@ -32,6 +32,10 @@ fn parse_token_id_placeholder(token: &str) -> Option<u32> {
 /// Returns `(token, None)` unchanged if token is not a placeholder.
 /// This is the inverse of `format_token_id` on the /generate side
 /// when `return_tokens_as_token_ids` is active.
+///
+/// Decodes the ID directly rather than round-tripping through
+/// `id_to_token`/`token_to_id`, which is lossy for backends whose byte
+/// pieces are not valid UTF-8 on their own.
 fn resolve_token_id_placeholder(
     token: &str,
     tokenizer: &DynTokenizer,
@@ -39,14 +43,16 @@ fn resolve_token_id_placeholder(
     let Some(token_id) = parse_token_id_placeholder(token) else {
         return Ok((token.to_string(), None));
     };
-    let Some(piece) = tokenizer.id_to_token(token_id) else {
+    if tokenizer.id_to_token(token_id).is_none() {
         warn!(
             token_id,
             "resolve_token_id_placeholder: token_id has no vocab entry; substituting empty string"
         );
         return Ok((String::new(), None));
-    };
-    let token_str = pieces_to_text(tokenizer, &[piece])?;
+    }
+    let token_str = tokenizer.decode(&[token_id], false).map_err(|error| {
+        server_error!("derender logprobs resolution failed: {}", error.as_report())
+    })?;
     Ok((token_str.clone(), Some(token_str.into_bytes())))
 }
 
@@ -198,5 +204,100 @@ pub(super) fn chat_logprobs_to_completion(logprobs: &ChatLogProbs) -> LogProbs {
         token_logprobs,
         top_logprobs: top_logprobs_list,
         text_offset,
+    }
+}
+
+/// Resolve one wire token string: `token_id:N` placeholders decode through
+/// the tokenizer, `decoded_token` strings pass through, and unknown IDs fall
+/// back to the placeholder form.
+fn wire_token_str(
+    token_id: u32,
+    decoded_token: Option<&str>,
+    tokenizer: &DynTokenizer,
+) -> Result<String, ApiError> {
+    match decoded_token {
+        Some(token) => Ok(resolve_token_id_placeholder(token, tokenizer)?.0),
+        None if tokenizer.id_to_token(token_id).is_some() => {
+            tokenizer.decode(&[token_id], false).map_err(|error| {
+                server_error!("derender logprobs resolution failed: {}", error.as_report())
+            })
+        }
+        None => Ok(format!("token_id:{token_id}")),
+    }
+}
+
+/// Convert engine-wire prompt logprobs (one candidate map per prompt
+/// position, as carried by `GenerateResponse.prompt_logprobs`) into the
+/// completions [`LogProbs`] shape, mirroring the normal path's echoed and
+/// prompt-only logprobs.
+///
+/// `prompt_token_ids` identifies the sampled token at each position; when it
+/// is shorter than the position list, the remaining positions fall back to
+/// their first candidate.
+pub(super) fn prompt_logprobs_to_completion(
+    prompt_logprobs: &[Option<HashMap<u32, GenerateLogprob>>],
+    prompt_token_ids: &[u32],
+    tokenizer: &DynTokenizer,
+) -> Result<LogProbs, ApiError> {
+    let mut tokens = Vec::with_capacity(prompt_logprobs.len());
+    let mut token_logprobs = Vec::with_capacity(prompt_logprobs.len());
+    let mut top_logprobs_list = Vec::with_capacity(prompt_logprobs.len());
+    let mut text_offset = Vec::with_capacity(prompt_logprobs.len());
+
+    let mut offset = 0;
+    for (position, position_logprobs) in prompt_logprobs.iter().enumerate() {
+        text_offset.push(offset);
+        let sampled_id = prompt_token_ids.get(position).copied();
+        match position_logprobs {
+            // The first prompt position carries no logprobs.
+            None => {
+                let token = match sampled_id {
+                    Some(id) => wire_token_str(id, None, tokenizer)?,
+                    None => String::new(),
+                };
+                offset += text_len(&token);
+                tokens.push(token);
+                token_logprobs.push(None);
+                top_logprobs_list.push(None);
+            }
+            Some(candidates) => {
+                let sampled = sampled_id
+                    .and_then(|id| candidates.get(&id).map(|entry| (id, entry)))
+                    .or_else(|| candidates.iter().next().map(|(&id, entry)| (id, entry)));
+                let (token, token_logprob) = match sampled {
+                    Some((id, entry)) => (
+                        wire_token_str(id, entry.decoded_token.as_deref(), tokenizer)?,
+                        Some(entry.logprob),
+                    ),
+                    None => (String::new(), None),
+                };
+                offset += text_len(&token);
+                tokens.push(token);
+                token_logprobs.push(token_logprob);
+                let mut top = HashMap::with_capacity(candidates.len());
+                for (&id, entry) in candidates {
+                    top.insert(
+                        wire_token_str(id, entry.decoded_token.as_deref(), tokenizer)?,
+                        entry.logprob,
+                    );
+                }
+                top_logprobs_list.push((!top.is_empty()).then_some(top));
+            }
+        }
+    }
+
+    Ok(LogProbs {
+        tokens,
+        token_logprobs,
+        top_logprobs: top_logprobs_list,
+        text_offset,
+    })
+}
+
+/// Shift every text offset by `prefix_len`, used when an echoed prompt is
+/// prepended to the choice text.
+pub(super) fn shift_text_offsets(logprobs: &mut LogProbs, prefix_len: u32) {
+    for offset in &mut logprobs.text_offset {
+        *offset = offset.saturating_add(prefix_len);
     }
 }

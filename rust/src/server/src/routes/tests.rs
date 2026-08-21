@@ -7737,3 +7737,492 @@ async fn derender_stream_invalid_body_rejected() {
     let (status, _) = derender_completion(&mut app, json!([1, 2, 3])).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn derender_chat_parser_sees_rendered_prompt() {
+    // The replayed parse starts from the real rendered prompt: a prompt whose
+    // last reasoning boundary is `</think>` leaves the parser in content
+    // mode, so the same tokens that parse as reasoning under an empty prompt
+    // here come out as plain content.
+    let mut app = test_derender_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("deepseek_r1".to_string()),
+    );
+    let token_ids = derender_token_ids("plain answer");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!(token_ids)),
+            "chat_request": {
+                "model": "render-model",
+                "messages": [{"role": "user", "content": "hi </think>"}],
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let message = &json["choices"][0]["message"];
+    assert_eq!(message["content"], "plain answer");
+    assert_eq!(message["reasoning"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn derender_chat_hidden_reasoning_drops_logprobs() {
+    // Like the normal chat path, per-token output metadata is suppressed when
+    // reasoning is parsed out but hidden, so hidden reasoning tokens cannot
+    // leak through logprobs.
+    let mut app = test_derender_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("deepseek_r1".to_string()),
+    );
+    let token_ids = derender_token_ids("hidden</think>visible");
+    let mut response = derender_generate_response(json!(token_ids));
+    response["choices"][0]["logprobs"] = json!({
+        "content": [{"token": "token_id:104", "logprob": -1.0, "top_logprobs": []}],
+    });
+
+    for (include_reasoning, expect_logprobs) in [(false, false), (true, true)] {
+        let (status, json) = derender_chat(
+            &mut app,
+            json!({
+                "model": "render-model",
+                "generate_response": response,
+                "chat_request": {
+                    "model": "render-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "include_reasoning": include_reasoning,
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let choice = &json["choices"][0];
+        assert_eq!(choice["message"]["content"], "visible");
+        if expect_logprobs {
+            assert!(choice["logprobs"].is_object(), "{json}");
+        } else {
+            assert_eq!(choice["logprobs"], serde_json::Value::Null, "{json}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn derender_chat_usage_overflow_rejected() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("abc");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!(token_ids)),
+            "prompt_tokens": u64::MAX,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("overflows the token counter"),
+        "{json}"
+    );
+}
+
+#[tokio::test]
+async fn derender_chat_stream_usage_overflow_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "usage-overflow",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 5,
+                    "total_tokens": 8,
+                },
+            },
+            "prompt_tokens": u64::MAX,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("overflows the token counter"),
+        "{json}"
+    );
+}
+
+#[tokio::test]
+async fn derender_chat_stream_oversized_chunk_rejected() {
+    let mut app = test_derender_app();
+    // One token past the fixture's max_model_len of 128.
+    let oversized_ids: Vec<u32> = (0..129u32).collect();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{"index": 0, "token_ids": oversized_ids, "finish_reason": null}],
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"].as_str().unwrap().contains("exceeds max_model_len"),
+        "{json}"
+    );
+}
+
+#[tokio::test]
+async fn derender_completion_stream_oversized_chunk_rejected() {
+    let mut app = test_derender_app();
+    let oversized_ids: Vec<u32> = (0..129u32).collect();
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{"index": 0, "token_ids": oversized_ids, "finish_reason": null}],
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"].as_str().unwrap().contains("exceeds max_model_len"),
+        "{json}"
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_state_carries_token_ids() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("h");
+
+    let (status, json) =
+        derender_chat_stream_call(&mut app, &token_ids, None, serde_json::Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["stream_state"]["prev_tokens"], json!(["h"]));
+    assert_eq!(json["stream_state"]["prev_token_ids"], json!(token_ids));
+}
+
+#[tokio::test]
+async fn derender_stream_lossy_pieces_recover_via_token_ids() {
+    // The carried token IDs reconstruct the decode window even when the wire
+    // pieces no longer map back through token_to_id (e.g. a backend whose
+    // id_to_token is lossy UTF-8): corrupting prev_tokens must not change the
+    // output as long as prev_token_ids is intact.
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("日");
+    assert!(token_ids.len() > 1, "test needs a multi-byte character");
+
+    let (status, json) =
+        derender_chat_stream_call(&mut app, &token_ids[..1], None, serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    // The unfinished multi-byte sequence is held back.
+    assert_eq!(
+        json["chunk"]["choices"][0]["delta"]["content"],
+        serde_json::Value::Null
+    );
+
+    let mut state = json["stream_state"].clone();
+    state["prev_tokens"] = json!([""]); // lossy placeholder, unmappable
+    let (status, json) =
+        derender_chat_stream_call(&mut app, &token_ids[1..], Some("stop"), state).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["chunk"]["choices"][0]["delta"]["content"], "日");
+}
+
+#[tokio::test]
+async fn derender_stream_foreign_state_without_token_ids() {
+    // States produced by the Python implementation carry only prev_tokens
+    // pieces; those map back through token_to_id as a fallback.
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("日本");
+
+    let (status, json) =
+        derender_chat_stream_call(&mut app, &token_ids[..1], None, serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let mut state = json["stream_state"].clone();
+    state["prev_token_ids"] = serde_json::Value::Null;
+    let (status, json) =
+        derender_chat_stream_call(&mut app, &token_ids[1..], Some("stop"), state).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["chunk"]["choices"][0]["delta"]["content"], "日本");
+}
+
+#[tokio::test]
+async fn derender_stream_mismatched_prev_token_ids_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{"index": 0, "token_ids": [104], "finish_reason": null}],
+            },
+            "stream_state": {
+                "prev_tokens": ["a"],
+                "prev_token_ids": [97, 98],
+                "read_offset": 1,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"].as_str().unwrap().contains("prev_token_ids length"),
+        "{json}"
+    );
+}
+
+/// Tool-capable model (hermes tool parser, no reasoning parser) for the
+/// streaming tool-gating tests.
+fn test_derender_tool_parser_app() -> axum::Router {
+    test_derender_app_with_parser_selections(
+        ParserSelection::Explicit("hermes".to_string()),
+        ParserSelection::Auto,
+    )
+}
+
+fn derender_tool_stream_body(chat_request: serde_json::Value) -> serde_json::Value {
+    let mut body = json!({
+        "stream": true,
+        "model": "render-model",
+        "generate_chunk": {
+            "request_id": "test-stream",
+            "choices": [{"index": 0, "token_ids": derender_token_ids("hello"), "finish_reason": null}],
+        },
+    });
+    if !chat_request.is_null() {
+        body["chat_request"] = chat_request;
+    }
+    body
+}
+
+#[tokio::test]
+async fn derender_chat_stream_tool_parser_allows_plain_requests() {
+    let mut app = test_derender_tool_parser_app();
+
+    // No chat_request at all.
+    let (status, json) =
+        derender_chat(&mut app, derender_tool_stream_body(serde_json::Value::Null)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["chunk"]["choices"][0]["delta"]["content"], "hello");
+
+    // chat_request without tools: the normal pipeline would not engage the
+    // tool parser either.
+    let (status, json) = derender_chat(
+        &mut app,
+        derender_tool_stream_body(json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hi"}],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    // Tools declared but tool_choice "none" disables tool parsing.
+    let (status, json) = derender_chat(
+        &mut app,
+        derender_tool_stream_body(json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": "none",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+}
+
+#[tokio::test]
+async fn derender_chat_stream_tool_parser_rejects_tool_requests() {
+    let mut app = test_derender_tool_parser_app();
+
+    for chat_request in [
+        // Tools present with the default (auto) tool choice.
+        json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+        }),
+        // An explicit required tool choice.
+        json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": "required",
+        }),
+    ] {
+        let (status, json) = derender_chat(&mut app, derender_tool_stream_body(chat_request)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(
+            json["error"]["message"].as_str().unwrap().contains(
+                "Streaming chat derender is not yet supported for models with a reasoning or \
+                 tool parser configured"
+            ),
+            "{json}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn derender_completion_echo_prepends_prompt() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("there");
+
+    for prompt in [json!("hi "), json!(derender_token_ids("hi "))] {
+        let (status, json) = derender_completion(
+            &mut app,
+            json!({
+                "model": "render-model",
+                "generate_responses": [derender_generate_response(json!(token_ids))],
+                "completion_request": {
+                    "model": "render-model",
+                    "prompt": prompt,
+                    "echo": true,
+                    "max_tokens": 5,
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["choices"][0]["text"], "hi there");
+    }
+}
+
+#[tokio::test]
+async fn derender_completion_prompt_only_echo_hides_internal_token() {
+    let mut app = test_derender_app();
+    // echo + max_tokens=0 generates one internal token to drive the engine to
+    // a finished event; the derendered choice must expose just the prompt.
+    let token_ids = derender_token_ids("x");
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [derender_generate_response(json!(token_ids))],
+            "completion_request": {
+                "model": "render-model",
+                "prompt": "hi ",
+                "echo": true,
+                "max_tokens": 0,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["choices"][0]["text"], "hi ");
+}
+
+#[tokio::test]
+async fn derender_completion_prompt_only_echo_returns_prompt_logprobs() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("x");
+    let mut response = derender_generate_response(json!(token_ids));
+    // add_special_tokens defaults to true, so the prompt tokenizes to
+    // [BOS, 104, 105]; the first position carries no logprobs, matching the
+    // engine's prompt-logprobs convention.
+    response["prompt_logprobs"] = json!([
+        null,
+        {"104": {"logprob": -0.5, "rank": 1, "decoded_token": "token_id:104"}},
+        {"105": {"logprob": -0.25, "rank": 1, "decoded_token": "token_id:105"}},
+    ]);
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [response],
+            "completion_request": {
+                "model": "render-model",
+                "prompt": "hi",
+                "echo": true,
+                "max_tokens": 0,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let logprobs = &json["choices"][0]["logprobs"];
+    assert_eq!(logprobs["tokens"], json!(["<bos>", "h", "i"]), "{json}");
+    assert_eq!(
+        logprobs["token_logprobs"],
+        json!([null, -0.5, -0.25]),
+        "{json}"
+    );
+    // "<bos>" is 5 characters wide.
+    assert_eq!(logprobs["text_offset"], json!([0, 5, 6]), "{json}");
+}
+
+#[tokio::test]
+async fn derender_completion_echo_shifts_logprob_offsets() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("hi");
+    let mut response = derender_generate_response(json!(token_ids));
+    response["choices"][0]["logprobs"] = json!({
+        "content": [
+            {"token": "token_id:104", "logprob": -1.0, "top_logprobs": []},
+            {"token": "token_id:105", "logprob": -2.0, "top_logprobs": []},
+        ],
+    });
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [response],
+            "completion_request": {
+                "model": "render-model",
+                "prompt": "say ",
+                "echo": true,
+                "max_tokens": 5,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["choices"][0]["text"], "say hi");
+    let logprobs = &json["choices"][0]["logprobs"];
+    // Without prompt logprobs in the response, the generated-token offsets are
+    // shifted past the echoed prompt ("say " is 4 characters).
+    assert_eq!(logprobs["text_offset"], json!([4, 5]), "{json}");
+    assert_eq!(logprobs["tokens"], json!(["h", "i"]), "{json}");
+}
