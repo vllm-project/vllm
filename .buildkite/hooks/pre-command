@@ -29,6 +29,10 @@ sample() {
   [ -n "$BKD_CG" ] && echo "HBSAMPLE bkd_cpustat=$(tr '\n' ' ' < "/sys/fs/cgroup${BKD_CG}/cpu.stat" 2>/dev/null) bkd_weight=$(cat "/sys/fs/cgroup${BKD_CG}/cpu.weight" 2>/dev/null)"
   echo "HBSAMPLE net_http=$(curl -s -o /dev/null -w '%{http_code}:%{time_total}' --max-time 3 https://agent.buildkite.com/v3 2>/dev/null || echo FAIL)"
   echo "HBSAMPLE net_dev=$(grep -E 'ens|eth' /proc/net/dev 2>/dev/null | head -1 | tr -s ' ')"
+  IFACE=$(ls /sys/class/net/ 2>/dev/null | grep -E '^(ens|eth)' | head -1)
+  [ -n "$IFACE" ] && echo "HBSAMPLE ena=$(ethtool -S "$IFACE" 2>/dev/null | grep -E 'allowance|conntrack' | tr -d ' ' | tr '\n' ' ')"
+  echo "HBSAMPLE sockstat=$(head -2 /proc/net/sockstat 2>/dev/null | tr '\n' ' ')"
+  echo "HBSAMPLE conntrack_count=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo n/a)/$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo n/a)"
 }
 n=0
 while true; do
