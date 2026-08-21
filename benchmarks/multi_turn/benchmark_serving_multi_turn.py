@@ -1078,26 +1078,47 @@ async def main_mp(
         f"finished {len(output_conv)} out of {total_convs} conversations)"
     )
 
-    # Queues should be closed, required to avoid hang at interpreter shutdown
+    # Drain unconsumed items from task_queue to unblock the feeder thread.
+    # mp.Queue.empty() is unreliable (races with the feeder), so we use
+    # get_nowait with a double-check after a short sleep.
     unfinished_tasks = 0
-    while not task_queue.empty():
-        task_queue.get()
-        unfinished_tasks += 1
+    while True:
+        try:
+            task_queue.get_nowait()
+            unfinished_tasks += 1
+        except Exception:
+            await asyncio.sleep(0.1)
+            try:
+                task_queue.get_nowait()
+                unfinished_tasks += 1
+            except Exception:
+                break
 
     if unfinished_tasks > 0:
-        # Can happen if not all tasks (conversations) have finished.
-        # May happen if --max-num-requests was used,
-        # or if an error occurred in one of the clients.
         logger.debug(f"Discarding {unfinished_tasks} unfinished tasks")
 
+    # Drain result_queue to collect any remaining metrics still in flight.
+    while True:
+        try:
+            client_metrics.append(result_queue.get_nowait())
+        except Exception:
+            await asyncio.sleep(0.1)
+            try:
+                client_metrics.append(result_queue.get_nowait())
+            except Exception:
+                break
+
+    # cancel_join_thread() prevents deadlock if any items remain in the OS
+    # pipe buffer despite draining (e.g. feeder thread wrote between our
+    # last get_nowait and close).
+    task_queue.cancel_join_thread()
     task_queue.close()
-    task_queue.join_thread()
 
+    result_queue.cancel_join_thread()
     result_queue.close()
-    result_queue.join_thread()
 
+    conv_queue.cancel_join_thread()
     conv_queue.close()
-    conv_queue.join_thread()
 
     return output_conv, client_metrics
 
