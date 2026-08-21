@@ -5,6 +5,7 @@
 import pytest
 import torch
 from packaging import version
+from torch.nn.attention.flex_attention import AuxOutput, AuxRequest
 
 from tests.utils import set_random_seed
 from tests.v1.attention.utils import (
@@ -15,8 +16,10 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import AttentionConfig
 from vllm.model_executor.layers.attention import Attention
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flex_attention import (
     BlockSparsityHint,
+    FlexAttentionImpl,
     FlexAttentionMetadataBuilder,
     physical_to_logical_mapping,
 )
@@ -26,6 +29,35 @@ from ..models.utils import check_embeddings_close, check_logprobs_close
 TORCH_VERSION = version.parse(torch.__version__)
 MINIMUM_TORCH_VERSION = version.parse("2.7.0")
 DIRECT_BUILD_VERSION = version.parse("2.9.dev0")
+
+
+@pytest.mark.parametrize("use_out_transform", [False, True])
+def test_flex_attention_exposes_max_scores(use_out_transform):
+    impl = FlexAttentionImpl(
+        num_heads=2,
+        head_size=4,
+        scale=0.5,
+        num_kv_heads=2,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        attn_type=AttentionType.ENCODER_ONLY,
+    )
+    captured_max_scores: list[torch.Tensor] = []
+    impl.set_max_scores_capture_fn(captured_max_scores.append)
+
+    max_scores = torch.randn(1, 2, 3)
+    if use_out_transform:
+        impl.out_transform = lambda out, lse: out
+
+    assert impl._get_aux_request() == AuxRequest(
+        lse=use_out_transform,
+        max_scores=True,
+    )
+    impl._process_aux(AuxOutput(max_scores=max_scores))
+
+    assert len(captured_max_scores) == 1
+    assert captured_max_scores[0] is max_scores
 
 
 @pytest.mark.parametrize(

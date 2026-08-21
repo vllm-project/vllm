@@ -12,6 +12,7 @@ import torch
 import torch._dynamo.decorators
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import (
+    AuxOutput,
     AuxRequest,
     BlockMask,
     _mask_mod_signature,
@@ -1241,6 +1242,29 @@ class FlexAttentionImpl(AttentionImpl):
 
         # Optional post-attention epilogue transform
         self.out_transform = kwargs.get("out_transform")
+        self.max_scores_capture_fn: Callable[[torch.Tensor], None] | None = kwargs.get(
+            "max_scores_capture_fn"
+        )
+
+    def set_max_scores_capture_fn(
+        self,
+        capture_fn: Callable[[torch.Tensor], None] | None,
+    ) -> None:
+        """Set a callback receiving per-query maximum scores with shape (B, H, Q)."""
+        self.max_scores_capture_fn = capture_fn
+
+    def _get_aux_request(self) -> AuxRequest | None:
+        return_aux = AuxRequest(
+            lse=self.out_transform is not None,
+            max_scores=self.max_scores_capture_fn is not None,
+        )
+        return return_aux if any(return_aux) else None
+
+    def _process_aux(self, aux: AuxOutput) -> None:
+        if self.max_scores_capture_fn is not None:
+            max_scores = aux.max_scores
+            assert max_scores is not None
+            self.max_scores_capture_fn(max_scores)
 
     @staticmethod
     def view_as_4d(tensor: torch.Tensor) -> torch.Tensor:
@@ -1397,6 +1421,7 @@ class FlexAttentionImpl(AttentionImpl):
             kernel_options["BLOCK_N"] = self.block_n
         if envs.VLLM_BATCH_INVARIANT:
             kernel_options["IS_DIVISIBLE"] = False
+        return_aux = self._get_aux_request()
         out = flex_attention_compiled(
             query,
             key_tensor,
@@ -1406,12 +1431,14 @@ class FlexAttentionImpl(AttentionImpl):
             self.scale,
             enable_gqa=enable_gqa,
             kernel_options=kernel_options,
-            return_aux=AuxRequest(lse=True) if self.out_transform is not None else None,
+            return_aux=return_aux,
         )
 
-        if self.out_transform is not None:
+        if return_aux is not None:
             out, aux = out
-            out = self.out_transform(out, aux.lse)
+            self._process_aux(aux)
+            if self.out_transform is not None:
+                out = self.out_transform(out, aux.lse)
 
         # Flex doesn't have an out variant today, rely on epilogue fusion
         out = out.permute(0, 2, 1, 3).squeeze(0)
