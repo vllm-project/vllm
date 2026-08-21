@@ -385,17 +385,11 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    if model_id == "google/gemma-3n-E2B-it":
-        pytest.skip("Fix later")
-    if model_id == "OpenGVLab/InternVL2-2B":
-        pytest.skip("Fix later")
     if model_id == "openvla/openvla-7b":
         pytest.skip(
             "OpenVLA uses a custom vLLM processor because its HF remote "
             "processor is incompatible with current Transformers."
         )
-    if model_id == "jinaai/jina-reranker-m0":
-        pytest.skip("Fix later")
     if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
         pytest.skip(
             "Voxtral Realtime doesn't make use of any place-holder "
@@ -403,8 +397,6 @@ def test_processing_correctness(
             "correctness test as is. Let's revisit adapting this "
             "test once more realtime models exist."
         )
-    if model_id == "CohereLabs/cohere-transcribe-03-2026":
-        pytest.skip("Fix later")
     if model_id.startswith("OpenMOSS-Team/MOSS-Audio-"):
         pytest.skip(
             "MOSS-Audio uses a custom processor that dynamically expands "
