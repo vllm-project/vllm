@@ -246,10 +246,13 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
                                   std::optional<torch::stable::Tensor> scale_ub,
                                   bool is_scale_transposed);
 
-void silu_and_mul_per_token_quant(
-    torch::stable::Tensor& out, torch::stable::Tensor const& input,
-    torch::stable::Tensor& scale,
-    std::optional<torch::stable::Tensor> scale_ub);
+void silu_and_mul_per_token_quant(torch::stable::Tensor& out,
+                                  torch::stable::Tensor const& input,
+                                  torch::stable::Tensor& scale,
+                                  std::optional<torch::stable::Tensor> scale_ub,
+                                  std::optional<double> swiglu_limit,
+                                  std::optional<double> absmax_floor,
+                                  bool round_activation_to_input_dtype);
 
 // Positional encoding kernels (shared CUDA/ROCm)
 void rotary_embedding(torch::stable::Tensor& positions,

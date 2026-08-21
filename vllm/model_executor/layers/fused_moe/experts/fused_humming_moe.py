@@ -187,6 +187,59 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             quanted_input=quanted_input,
         )
 
+    def _supports_fused_silu_fp8_quant(self, activation: MoEActivation) -> bool:
+        from vllm.utils.humming import dtypes
+
+        w13_config = self.humming_configs["w13"]
+        w2_config = self.humming_configs["w2"]
+        return (
+            activation == MoEActivation.SILU
+            and current_platform.is_cuda()
+            and current_platform.has_device_capability(89)
+            and hasattr(torch.ops._C, "silu_and_mul_per_token_quant")
+            and w13_config.a_dtype == dtypes.float8e4m3
+            and w2_config.a_dtype == dtypes.float8e4m3
+            and w2_config.as_dtype == dtypes.float32
+            and w2_config.input_scale_group_size == 0
+            and w13_config.c_dtype in (dtypes.float16, dtypes.bfloat16)
+        )
+
+    def activation_and_quantize(
+        self,
+        activation: MoEActivation,
+        buffers: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        gate_up_output = buffers["gate_up_output"]
+        if self._supports_fused_silu_fp8_quant(activation):
+            quanted_down_input = buffers["quanted_down_input"]
+            input_scale = torch.empty(
+                (gate_up_output.size(0), 1),
+                dtype=torch.float32,
+                device=gate_up_output.device,
+            )
+            torch.ops._C.silu_and_mul_per_token_quant(
+                quanted_down_input,
+                gate_up_output,
+                input_scale,
+                None,
+                self.activation_config.clamp_limit,
+                1e-30,
+                True,
+            )
+            return quanted_down_input, input_scale
+
+        activation_output = buffers["activation_output"]
+        self.apply_activation(
+            activation=activation,
+            input=gate_up_output,
+            output=activation_output,
+        )
+        return self.quantize_input(
+            "w2",
+            inputs=activation_output,
+            quanted_input=buffers.get("quanted_down_input"),
+        )
+
     def humming_forward(
         self,
         sublayer_name: str,
@@ -390,8 +443,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         # hidden_states
         # (-> quanted_gate_up_input) (if not BF16/FP16 activation)
         # -> gate_up_output
-        # -> activation_output
-        # (-> quanted_down_input) (if not BF16/FP16 activation)
+        # -> activation_output -> quanted_down_input, or
+        # -> fused activation + quanted_down_input
         # -> down_output
         # (-> output) (if not is_batched)
         # Neighboring nodes are required to utilize distinct workspaces.
@@ -466,6 +519,13 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         if num_bits == 16:
             required_buffers = ["gate_up_output", "activation_output", "down_output"]
+        elif self._supports_fused_silu_fp8_quant(activation):
+            required_buffers = [
+                "quanted_gate_up_input",
+                "gate_up_output",
+                "quanted_down_input",
+                "down_output",
+            ]
         else:
             required_buffers = [
                 "quanted_gate_up_input",
@@ -722,17 +782,7 @@ class HummingIndexedExperts(HummingExpertsBase):
             **moe_kwargs1,
         )
 
-        self.apply_activation(
-            activation=activation,
-            input=buffers["gate_up_output"],
-            output=buffers["activation_output"],
-        )
-
-        inputs, input_scale = self.quantize_input(
-            "w2",
-            inputs=buffers["activation_output"],
-            quanted_input=buffers.get("quanted_down_input", None),
-        )
+        inputs, input_scale = self.activation_and_quantize(activation, buffers)
 
         self.humming_forward(
             "w2",
@@ -833,17 +883,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             tuning_config=self.w13_tuning_config_str,
         )
 
-        self.apply_activation(
-            activation=activation,
-            input=buffers["gate_up_output"],
-            output=buffers["activation_output"],
-        )
-
-        inputs, input_scale = self.quantize_input(
-            "w2",
-            inputs=buffers["activation_output"],
-            quanted_input=buffers.get("quanted_down_input", None),
-        )
+        inputs, input_scale = self.activation_and_quantize(activation, buffers)
 
         self.humming_forward(
             "w2",
@@ -940,17 +980,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             tuning_config=self.w13_tuning_config_str,
         )
 
-        self.apply_activation(
-            activation=activation,
-            input=buffers["gate_up_output"],
-            output=buffers["activation_output"],
-        )
-
-        inputs, input_scale = self.quantize_input(
-            "w2",
-            inputs=buffers["activation_output"],
-            quanted_input=buffers.get("quanted_down_input", None),
-        )
+        inputs, input_scale = self.activation_and_quantize(activation, buffers)
 
         self.humming_forward(
             "w2",

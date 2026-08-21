@@ -418,7 +418,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! result, "
       "Tensor input, "
       "Tensor! scale, "
-      "Tensor? scale_ub=None) -> ()");
+      "Tensor? scale_ub=None, "
+      "float? swiglu_limit=None, "
+      "float? absmax_floor=None, "
+      "bool round_activation_to_input_dtype=False) -> ()");
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
