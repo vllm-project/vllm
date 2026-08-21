@@ -45,7 +45,15 @@ class PEFTHelper:
         """
         error_msg = []
         if self.modules_to_save:
-            error_msg.append("vLLM only supports modules_to_save being None.")
+            unsupported_modules = [
+                m for m in self.modules_to_save if m not in ["classifier", "score"]
+            ]
+            if unsupported_modules:
+                error_msg.append(
+                    "vLLM only supports modules_to_save being either None "
+                    'or ["classifier", "score"] for classification models. '
+                    f"Unsupported modules_to_save: {unsupported_modules}"
+                )
         if self.use_dora:
             error_msg.append("vLLM does not yet support DoRA.")
         return error_msg

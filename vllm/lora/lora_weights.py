@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence as GenericSequence
+from dataclasses import dataclass
 
 import torch
 import torch.types
@@ -280,3 +281,17 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     @property
     def is_packed(self) -> bool:
         return True
+
+
+@dataclass
+class LoRAFullModuleWeights:
+    """LoRA"""
+
+    module_name: str
+    weight: torch.Tensor
+    bias: torch.Tensor | None = None
+
+    def pin_memory(self) -> None:
+        self.weight = self.weight.pin_memory()
+        if self.bias is not None:
+            self.bias = self.bias.pin_memory()
