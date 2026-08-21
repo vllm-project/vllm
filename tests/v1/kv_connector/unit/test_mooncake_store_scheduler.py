@@ -3,6 +3,8 @@
 
 from types import SimpleNamespace
 
+import torch
+
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
     MooncakeStoreWorkerMetadata,
@@ -13,6 +15,29 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
     MooncakeStoreScheduler,
 )
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
+
+
+def _single_transfer_group_config() -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
 
 
 def _make_bare_scheduler(
@@ -25,6 +50,7 @@ def _make_bare_scheduler(
     scheduler._block_size = 16
     scheduler._hash_block_size = hash_block_size
     scheduler.enable_partial_hash_hits = enable_partial_hash_hits
+    scheduler.kv_cache_config = _single_transfer_group_config()
     scheduler.load_specs = {}
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
@@ -101,6 +127,22 @@ def _add_unfinished_request(
         token_ids=token_ids[:44],
         prefill_end_tokens=prefill_end_tokens,
     )
+
+
+def test_transfer_block_ids_excludes_nontransfer_groups():
+    """Store metadata must match the worker's registered cache groups."""
+    scheduler = _make_bare_scheduler()
+    spec = scheduler.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    scheduler.kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer.0"], spec),
+            KVCacheGroupSpec(["layer.1"], spec, enable_kv_transfer=False),
+        ],
+    )
+
+    assert scheduler._transfer_block_ids(([1, 2], [9])) == ([1, 2],)
 
 
 def test_cached_request_with_spec_decode_does_not_save_scheduled_drafts():
