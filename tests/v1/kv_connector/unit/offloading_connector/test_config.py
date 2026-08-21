@@ -45,6 +45,7 @@ def _make_vllm_config(
     config.cache_config.enable_prefix_caching = True
     config.cache_config.prefix_match_unit = None
     config.cache_config.cache_dtype = torch.float16
+    config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "test-model"
     config.model_config.use_mla = False
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate

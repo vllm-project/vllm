@@ -3425,7 +3425,7 @@ def test_retention_interval_sparsifies_swa_stores(
         num_gpu_blocks=num_gpu_blocks,
         async_scheduling=async_scheduling,
         kv_cache_groups=kv_cache_groups,
-        extra_config_overrides={"retention_interval": 32},
+        retention_interval=32,
     )
 
     assert runner.connector_scheduler.config.retention_interval == 32
@@ -3505,7 +3505,7 @@ def test_retention_interval_zero_stores_only_replay_boundary(
         num_gpu_blocks=num_gpu_blocks,
         async_scheduling=async_scheduling,
         kv_cache_groups=kv_cache_groups,
-        extra_config_overrides={"retention_interval": 0},
+        retention_interval=0,
     )
 
     assert runner.connector_scheduler.config.retention_interval == 0

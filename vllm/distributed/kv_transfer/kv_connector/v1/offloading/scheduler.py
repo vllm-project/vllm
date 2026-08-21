@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from itertools import chain, islice
 from typing import Any, NamedTuple
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
@@ -192,22 +191,7 @@ class SchedulerOffloadConfig(NamedTuple):
             if all_tokens_per_chunk:
                 alignment_tokens = max(all_tokens_per_chunk)
 
-        kv_transfer_config = vllm_config.kv_transfer_config
-        extra_config = (
-            kv_transfer_config.kv_connector_extra_config
-            if kv_transfer_config is not None
-            else None
-        ) or {}
-        _sentinel = object()
-        raw_retention = extra_config.get("retention_interval", _sentinel)
-        if raw_retention is not _sentinel:
-            retention_interval: int | None = (
-                int(raw_retention) if raw_retention is not None else None
-            )
-        else:
-            retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
-            if retention_interval is None:
-                retention_interval = 0
+        retention_interval = vllm_config.cache_config.prefix_cache_retention_interval
 
         eagle_groups = {
             idx
@@ -280,17 +264,6 @@ class SchedulerOffloadConfig(NamedTuple):
         )
 
         if retention_interval is not None:
-            has_swa_or_mamba = any(
-                config.sliding_window_size_in_chunks is not None
-                for config in kv_group_configs
-            )
-            if not has_swa_or_mamba:
-                logger.warning(
-                    "VLLM_PREFIX_CACHE_RETENTION_INTERVAL is set but this "
-                    "model has no sliding-window or Mamba KV cache group, "
-                    "so retention has no effect. Unset it (it only applies "
-                    "to sliding-window and Mamba attention)."
-                )
             if retention_interval < 0:
                 raise ValueError(
                     f"VLLM_PREFIX_CACHE_RETENTION_INTERVAL "
