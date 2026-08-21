@@ -15,7 +15,7 @@ requiring a real NIXL agent or network:
 * The worker matches D registrations against P finished blocks (both
   scenario directions) and forwards non-PUSH_REG NIXL notifs to the main
   thread's ``_get_new_notifs``.
-* ``get_finished`` enqueues evictions for the writer.
+* ``get_transfer_results`` enqueues evictions for the writer.
 """
 
 from __future__ import annotations
@@ -706,21 +706,19 @@ class TestPushWriterNotifs:
         assert notified == set()
         assert request_id in w._recving_transfers
 
-    def test_get_finished_evicts_completed_state(self):
-        """``get_finished`` should enqueue evictions and wake the writer."""
+    def test_get_transfer_results_evicts_completed_state(self):
+        """Transfer completion should enqueue evictions and wake the writer."""
         w = _StubWriterWorker.fresh()
 
-        # Stub the base ``get_finished`` to return one done_sending entry.
-        # Patch via the MRO's parent class.
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
-            "get_finished",
-            return_value=({"req-done"}, set()),
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(finished_sending={"req-done"}),
         ):
-            done_sending, done_recving = w.get_finished()
+            results = w.get_transfer_results()
 
-        assert "req-done" in done_sending
-        assert done_recving == set()
+        assert results.finished_sending == {"req-done"}
+        assert results.finished_recving == set()
         # Eviction enqueued for the writer.
         evicted = []
         while True:
@@ -892,19 +890,21 @@ class TestPushWriterNegative:
         assert len(w._pending_d_registrations) == 1
         assert w.start_push_calls == []
 
-    def test_get_finished_enqueues_eviction_for_each_done_request(self):
-        """``get_finished`` must enqueue an eviction for every request
+    def test_get_transfer_results_enqueues_each_completed_request(self):
+        """``get_transfer_results`` must enqueue every completed request
         in ``done_sending`` so the writer can drop stale matching state.
         Unlike the happy-path test, this verifies the *cardinality*: N
         completed requests -> N evictions, in order."""
         w = _StubWriterWorker.fresh()
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
-            "get_finished",
-            return_value=({"req-1", "req-2", "req-3"}, set()),
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(
+                finished_sending={"req-1", "req-2", "req-3"}
+            ),
         ):
-            done_sending, _ = w.get_finished()
-        assert done_sending == {"req-1", "req-2", "req-3"}
+            results = w.get_transfer_results()
+        assert results.finished_sending == {"req-1", "req-2", "req-3"}
 
         evicted: list[str] = []
         while True:
@@ -914,19 +914,19 @@ class TestPushWriterNegative:
                 break
         assert sorted(evicted) == ["req-1", "req-2", "req-3"]
 
-    def test_get_finished_with_no_completions_does_not_enqueue_eviction(self):
+    def test_empty_transfer_results_do_not_enqueue_eviction(self):
         """If there's nothing newly done, no eviction should be enqueued.
         The wake event IS still set because ``get_finished`` always wakes
         the writer to drain notifs."""
         w = _StubWriterWorker.fresh()
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
-            "get_finished",
-            return_value=(set(), set()),
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(),
         ):
-            done_sending, done_recving = w.get_finished()
-        assert done_sending == set()
-        assert done_recving == set()
+            results = w.get_transfer_results()
+        assert results.finished_sending == set()
+        assert results.finished_recving == set()
         assert w._evict_finished_inbox.qsize() == 0
         # Wake set so the writer drains NIXL notifs even when idle.
         assert w._push_writer_wake.is_set()
