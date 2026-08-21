@@ -19,6 +19,7 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
 
@@ -127,14 +128,13 @@ class WorkerLoRAManager:
             # loading weights, throwing an exception if validation fails.
             peft_helper.validate_legal(self.lora_config)
 
-            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
-            # to ensure correct loading of lora weights. Drop the QKV/MLP fusion
-            # substr maps so constituent names (e.g. `q_proj`) survive for the
-            # LoRA manager to pack, while keeping genuine renames/prefixes.
+            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper to ensure
+            # correct loading of lora weights. We only need to know about renames for
+            # this, so we use get_rename_mapper() to ignore stacking and deletions.
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
             if hf_to_vllm_mapper is not None:
-                hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
+                hf_to_vllm_mapper = hf_to_vllm_mapper.get_rename_mapper()
 
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
@@ -223,9 +223,11 @@ class WorkerLoRAManager:
     def add_adapter(self, adapter_request: Any) -> bool:
         if adapter_request.adapter_id in self.list_adapters():
             return False
-        loaded_adapter = self._load_adapter(adapter_request)
-        loaded = self._adapter_manager.add_adapter(loaded_adapter)
-        self._adapter_manager.activate_adapter(loaded_adapter.id)
+        # One-time per adapter
+        with gpu_sync_allowed():
+            loaded_adapter = self._load_adapter(adapter_request)
+            loaded = self._adapter_manager.add_adapter(loaded_adapter)
+            self._adapter_manager.activate_adapter(loaded_adapter.id)
         return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
@@ -288,32 +290,34 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if (
-            lora_request.lora_int_id not in self.list_adapters()
-            or lora_request.load_inplace
-        ):
-            # Load the new adapter first to ensure it is actually valid, before
-            # evicting any existing adapters.
-            # This may cause the # of loaded lora adapters to very temporarily
-            # exceed `--max-cpu-loras`.
-            lora = self._load_adapter(lora_request)
+        with gpu_sync_allowed():
+            if (
+                lora_request.lora_int_id not in self.list_adapters()
+                or lora_request.load_inplace
+            ):
+                # Load the new adapter first to ensure it is actually valid, before
+                # evicting any existing adapters.
+                # This may cause the # of loaded lora adapters to very temporarily
+                # exceed `--max-cpu-loras`.
+                lora = self._load_adapter(lora_request)
 
-            # Remove the existing adapter if it exists
-            # Use case for LoRA inplace
-            self._adapter_manager.remove_adapter(lora.id)
+                # Remove the existing adapter if it exists
+                # Use case for LoRA inplace
+                self._adapter_manager.remove_adapter(lora.id)
 
-            # Loading succeeded, now check if we will exceed cache capacity and
-            # evict if the oldest adapter if so
-            if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
-                assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
-                self._adapter_manager.remove_oldest_adapter()
-            # Then add the new adapter to the cache
-            loaded = self._adapter_manager.add_adapter(lora)
-        else:
-            # If the lora is already loaded, just touch it to
-            # update its position in the caches
-            loaded = (
-                self._adapter_manager.get_adapter(lora_request.lora_int_id) is not None
-            )
-        self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+                # Loading succeeded, now check if we will exceed cache capacity and
+                # evict if the oldest adapter if so
+                if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
+                    assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
+                    self._adapter_manager.remove_oldest_adapter()
+                # Then add the new adapter to the cache
+                loaded = self._adapter_manager.add_adapter(lora)
+            else:
+                # If the lora is already loaded, just touch it to
+                # update its position in the caches
+                loaded = (
+                    self._adapter_manager.get_adapter(lora_request.lora_int_id)
+                    is not None
+                )
+            self._adapter_manager.activate_adapter(lora_request.lora_int_id)
         return loaded
