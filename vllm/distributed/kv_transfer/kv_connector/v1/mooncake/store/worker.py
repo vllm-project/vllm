@@ -507,7 +507,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
-# req_id -> ids of its store jobs that are still queued or running.
+        # req_id -> ids of its store jobs that are still queued or running.
         # Keying by store_job_id, which never repeats for the engine's lifetime,
         # rather than counting jobs per request id makes the ledger immune to id
         # reuse across preemption: a job left over from a retired generation is
