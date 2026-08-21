@@ -57,6 +57,9 @@ try:
 except ImportError as exc:
     raise SystemExit("PyYAML is required. Install it with: pip install pyyaml") from exc
 
+from hardware_detection import detect_hardware
+from runtime_tuning import WorkloadHints, finetune_runtime_config
+
 
 DEFAULT_API_BASE = "https://recipes.vllm.ai"
 
@@ -116,6 +119,49 @@ def parse_args() -> argparse.Namespace:
         "--env-out",
         default="env.sh",
         help="Output shell environment file (default: env.sh)",
+    )
+
+    tuning = p.add_argument_group(
+        "optional runtime tuning",
+        "Refine the recipe baseline only when additional information is supplied.",
+    )
+    tuning.add_argument(
+        "--detect-hardware",
+        action="store_true",
+        help=(
+            "Detect effective CPU/NUMA/memory resources and allow hardware "
+            "policies to override recipe runtime arguments."
+        ),
+    )
+    tuning.add_argument(
+        "--input-tokens",
+        type=int,
+        help="Expected input-token length. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--output-tokens",
+        type=int,
+        help="Expected output-token length. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--concurrency",
+        type=int,
+        help="Expected maximum concurrent requests. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--ttft-sla-ms",
+        type=float,
+        help="Optional time-to-first-token objective in milliseconds.",
+    )
+    tuning.add_argument(
+        "--tpot-sla-ms",
+        type=float,
+        help="Optional time-per-output-token objective in milliseconds.",
+    )
+    tuning.add_argument(
+        "--target-qps",
+        type=float,
+        help="Optional capacity target for future DP/capacity tuning.",
     )
     return p.parse_args()
 
@@ -642,8 +688,32 @@ def main() -> int:
 
         argv = recipe_argv(recipe)
         config = argv_to_config(argv)
+
+        hardware = detect_hardware() if args.detect_hardware else None
+        workload = WorkloadHints(
+            input_tokens=args.input_tokens,
+            output_tokens=args.output_tokens,
+            concurrency=args.concurrency,
+            ttft_sla_ms=args.ttft_sla_ms,
+            tpot_sla_ms=args.tpot_sla_ms,
+            target_qps=args.target_qps,
+        )
+        tuning = finetune_runtime_config(
+            config,
+            hardware=hardware,
+            workload=workload,
+        )
+        config.update(tuning.overrides)
+
         write_config(args.config_out, source, recipe, config)
         write_env(args.env_out, source, recipe)
+
+        if tuning.overrides:
+            print("Applied runtime tuning overrides:")
+            for key, value in tuning.overrides.items():
+                print(f"  {key}: {value}")
+        for note in tuning.notes:
+            print(f"  tuning: {note}")
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
