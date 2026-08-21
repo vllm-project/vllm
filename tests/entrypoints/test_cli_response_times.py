@@ -42,5 +42,6 @@ def test_vllm_serve_response_time():
         median_ms = median(times_ms)
         assert median_ms < MAX_MEDIAN_MS, (
             f"`{command}`: median={median_ms:.1f}ms max={MAX_MEDIAN_MS}ms "
-            f"runs={[round(t, 1) for t in times_ms]}"
+            f"runs={[round(t, 1) for t in times_ms]}. "
+            "Use .claude/skills/healthy-import-time/SKILL.md to debug."
         )
