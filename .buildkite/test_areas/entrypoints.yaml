@@ -14,7 +14,7 @@ steps:
   - .buildkite/scripts/initialized-snapshot-e2e.sh
   - .buildkite/test_areas/entrypoints.yaml
   - docker/Dockerfile
-  - docker/install_snapshot_runtime.sh
+  - tools/install_snapshot_runtime.sh
   - vllm/entrypoints/cli/
   - vllm/snapshot/
   commands:
