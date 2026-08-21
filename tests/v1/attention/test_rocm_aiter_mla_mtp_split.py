@@ -17,6 +17,7 @@ from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
     AiterMLAHelper,
     AiterMLAMetadataBuilder,
+    _lse_combine_natural,
 )
 
 
@@ -66,10 +67,21 @@ def _builder(
     max_decode_rows: int = 32,
     num_heads: int = 16,
     kv_cache_dtype: str = "auto",
+    dcp_world_size: int = 1,
+    dcp_rank: int = 0,
 ):
-    return SimpleNamespace(
+    stub = SimpleNamespace(
         device=torch.device("cpu"),
         num_heads=num_heads,
+        # DCP gathers every rank's head shard before decode, and the routing
+        # predicates read the gathered count.
+        _decode_num_heads=num_heads * dcp_world_size,
+        dcp_world_size=dcp_world_size,
+        dcp_rank=dcp_rank,
+        cp_kv_cache_interleave_size=1,
+        _verify_row_indptr=None,
+        _verify_row_page_table=None,
+        _verify_row_lens=None,
         _kv_cache_dtype_str=kv_cache_dtype,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
@@ -95,6 +107,12 @@ def _builder(
         _mla_kv_dtype=torch.bfloat16,
         decode_attn_out_dtype=torch.bfloat16,
     )
+    # Bound to the stub rather than faked: the verify flatten's per-row view is
+    # part of what _build_decode is being tested for.
+    stub._build_verify_row_view = (
+        AiterMLAMetadataBuilder._build_verify_row_view.__get__(stub)
+    )
+    return stub
 
 
 def test_backend_declares_uniform_batch_support():
@@ -108,6 +126,40 @@ def test_backend_declares_uniform_batch_support():
         AiterMLAMetadataBuilder._cudagraph_support
         == rocm_aiter_mla.AttentionCGSupport.UNIFORM_BATCH
     )
+
+
+def test_dcp_verify_row_view_excludes_in_hand_window():
+    qlen = 4
+    builder = _builder(mtp_decode_qlen=qlen, dcp_world_size=2)
+    # The local shard contains five pages for a global length of ten. The first
+    # six global tokens are committed, three of which belong to rank zero.
+    indptr, pages, row_lens, _ = builder._build_verify_row_view(
+        qlen,
+        torch.tensor([0, 5], dtype=torch.int32),
+        torch.arange(5, dtype=torch.int32),
+        torch.tensor([10], dtype=torch.int32),
+    )
+
+    assert row_lens.tolist() == [3] * qlen
+    assert indptr.tolist() == [0, 3, 6, 9, 12]
+    assert pages.tolist() == [0, 1, 2] * qlen
+
+
+def test_verify_partial_attention_merge():
+    device = torch.device("cuda")
+    out_a = torch.tensor([[[1.0, 2.0]], [[3.0, 4.0]]], device=device)
+    out_b = torch.tensor([[[5.0, 6.0]], [[7.0, 8.0]]], device=device)
+    lse_a = torch.tensor([[0.0], [1.0]], device=device)
+    lse_b = torch.tensor([[1.0], [0.0]], device=device)
+
+    out, lse = _lse_combine_natural(out_a, lse_a, out_b, lse_b, torch.float32)
+    normalizer = torch.logaddexp(lse_a, lse_b)
+    expected = out_a * torch.exp(lse_a - normalizer).unsqueeze(-1) + out_b * torch.exp(
+        lse_b - normalizer
+    ).unsqueeze(-1)
+
+    torch.testing.assert_close(out, expected)
+    torch.testing.assert_close(lse, normalizer)
 
 
 @pytest.mark.parametrize("num_heads", [8, 16, 24, 32, 64, 128])
@@ -160,6 +212,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
 
     def init_common_builder(self, *args, **kwargs):
         self.num_heads = num_heads
+        self.dcp_world_size = 1
         # Mirror what _init_reorder_batch_threshold would have left behind: the
         # metadata is sized from the routing threshold, so a stub that skips it
         # would size for qlen=1 and hide the very mismatch this test covers.
@@ -189,12 +242,23 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
             num_speculative_tokens=3,
             parallel_drafting=parallel_drafting,
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=8),
-        model_config=SimpleNamespace(max_model_len=16, dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8,
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=16,
+            dtype=torch.bfloat16,
+            get_num_attention_heads=lambda parallel_config: num_heads,
+        ),
         scheduler_config=SimpleNamespace(max_num_seqs=2),
         cache_config=SimpleNamespace(cache_dtype="fp8_e4m3"),
         compilation_config=SimpleNamespace(
-            cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False)
+            cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
+            # Empty: the per-layer head-count probe finds no attention layer and
+            # falls back to the model config above.
+            static_forward_context={},
         ),
     )
     builder = AiterMLAMetadataBuilder(

@@ -2246,7 +2246,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
-            self.reorder_batch_threshold, supports_spec_decode, supports_dcp_with_varlen
+            self.reorder_batch_threshold,
+            supports_spec_decode,
+            supports_dcp_with_varlen,
         )
 
         if self.query_len_support == QueryLenSupport.SINGLE_ONLY:
@@ -2402,6 +2404,17 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if num_decodes > 0:
             dcp_tot_seq_lens_device = None
             if self.dcp_world_size > 1:
+                assert seq_lens is not None, (
+                    "MLA DCP decode requires seq_lens on CommonAttentionMetadata"
+                )
+                if dcp_local_seq_lens is None:
+                    # Speculative paths may omit dcp_local_seq_lens; derive it.
+                    dcp_local_seq_lens = get_dcp_local_seq_lens(
+                        seq_lens,
+                        dcp_size=self.dcp_world_size,
+                        dcp_rank=get_dcp_group().rank_in_group,
+                        cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                    )
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
                 seq_lens = dcp_local_seq_lens
 
@@ -2997,6 +3010,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     understand this class
     """
 
+    supports_dcp_verify_window: ClassVar[bool] = False
+
     def fused_output_quant_supported(self, quant_key):
         return quant_key in (
             kFp8StaticTensorSym,
@@ -3075,5 +3090,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: M,
         layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        raise NotImplementedError
+
+    def forward_mqa_with_dcp_verify_window(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: M,
+        layer: AttentionLayer,
+        k_window: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError

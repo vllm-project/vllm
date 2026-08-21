@@ -19,6 +19,7 @@ handed to the Gluon kernel, and pins verify row ``t`` of request ``r`` to the
 """
 
 import types
+from contextlib import ExitStack
 from unittest.mock import patch
 
 import pytest
@@ -58,6 +59,10 @@ CONTEXT_LENS = [0, 1, 37, 512]
 # to an empty window.
 PADDING_ROWS = 1
 
+# Distinguishable from 1.0 so the fp8 route's scale handling is observable.
+Q_SCALE = 0.5
+K_SCALE = 0.25
+
 # The Gluon path flattens the KV cache to one page per token.
 PAGE_SIZE = 1
 MAX_MODEL_LEN = 1024
@@ -73,18 +78,27 @@ def _expected_row_lens() -> list[int]:
     return [max(0, s - (QLEN - 1) + t) for s in _seq_lens() for t in range(QLEN)]
 
 
-def _run_verify_block():
+def _run_verify_block(
+    cache_dtype_str: str = "auto",
+    run_forward: bool = True,
+    full_cudagraphs: bool = True,
+):
     """Drive the real builder + forward_mqa over one multi-token verify block.
 
+    ``cache_dtype_str`` selects the KV cache the flatten runs over: ``"auto"``
+    hands Gluon a bf16 query and cache, ``"fp8"`` an fp8 cache and -- as the
+    layer would -- an fp8 query the flatten has to dequantize itself.
+
     Returns ``(metadata, captured)`` where ``captured`` holds the ``page_table``,
-    ``seq_info`` and ``min_kv_seq_len`` the backend passed to the Gluon kernel.
+    ``seq_info``, ``min_kv_seq_len``, the query dtype and the cache scale the
+    backend passed to the Gluon kernel.
     """
     from tests.v1.attention.utils import (
         BatchSpec,
         create_common_attn_metadata,
         create_vllm_config,
     )
-    from vllm.config import SpeculativeConfig
+    from vllm.config import CUDAGraphMode, SpeculativeConfig
     from vllm.config.vllm import set_current_vllm_config
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -110,13 +124,30 @@ def _run_verify_block():
     vllm_config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=QLEN - 1
     )
+    # get_num_attention_heads() reads model_arch_config, which is derived when
+    # ModelConfig is built, so the hf_config override alone would leave the
+    # builder sizing the decode for the checkpoint's 128 heads while the impl
+    # below runs with NUM_QUERY_HEADS.
+    vllm_config.model_config.model_arch_config.total_num_attention_heads = (
+        NUM_QUERY_HEADS
+    )
+    if not full_cudagraphs:
+        # Gluon's split count is fixed at launch, so the builder only passes the
+        # real per-step minimum row length when nothing captures it.
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+    kv_dtype = (
+        torch.float8_e4m3fn
+        if cache_dtype_str == "fp8"
+        else vllm_config.model_config.dtype
+    )
+    vllm_config.cache_config.cache_dtype = cache_dtype_str
     spec = MLAAttentionSpec(
         block_size=PAGE_SIZE,
         num_kv_heads=1,
         head_size=vllm_config.model_config.get_head_size(),
-        dtype=vllm_config.model_config.dtype,
-        cache_dtype_str="auto",
+        dtype=kv_dtype,
+        cache_dtype_str=cache_dtype_str,
     )
 
     backend_cls = AttentionBackendEnum.ROCM_AITER_MLA.get_class()
@@ -147,8 +178,23 @@ def _run_verify_block():
         captured["page_table"] = kwargs["page_table"].detach().clone()
         captured["seq_info"] = kwargs["seq_info"].detach().clone()
         captured["min_kv_seq_len"] = kwargs["min_kv_seq_len"]
+        captured["q_dtype"] = kwargs["q_nope"].dtype
+        captured["kv_scale"] = kwargs["kv_scale"]
 
-    with set_current_vllm_config(vllm_config):
+    # The arch and aiter-feature probes are forced for the builder as well as for
+    # the forward below: the builder takes the per-row KV ranges, so it has to
+    # reach the same routing decision the impl acts on.
+    def _gluon_probes() -> list:
+        prefix = "vllm.v1.attention.backends.mla.rocm_aiter_mla."
+        return [
+            patch(prefix + "_gluon_mla_decode_supported", lambda: True),
+            patch(prefix + "_gluon_mla_fp8_batch_supported", lambda: True),
+        ]
+
+    with ExitStack() as stack:
+        stack.enter_context(set_current_vllm_config(vllm_config))
+        for probe in _gluon_probes():
+            stack.enter_context(probe)
         builder = builder_cls(spec, [layer_name], vllm_config, device)
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, PAGE_SIZE, device, arange_block_indices=True
@@ -164,7 +210,7 @@ def _run_verify_block():
             num_kv_heads=1,
             alibi_slopes=None,
             sliding_window=None,
-            kv_cache_dtype="auto",
+            kv_cache_dtype=cache_dtype_str,
             logits_soft_cap=None,
             attn_type="decoder",
             kv_sharing_target_layer_name=None,
@@ -177,31 +223,41 @@ def _run_verify_block():
             kv_b_proj=None,
         )
 
+    if not run_forward:
+        # The routing decision is already visible in the metadata: the builder
+        # only fills the per-row view when the flatten will serve the batch.
+        return metadata, captured
+
     num_rows = num_reqs * QLEN
-    dtype = torch.bfloat16
+    # An fp8 KV cache is handed an fp8 query, as MLAAttention would; the flatten
+    # is what widens it back for Gluon.
+    q_dtype = torch.float8_e4m3fn if cache_dtype_str == "fp8" else torch.bfloat16
     q_nope = torch.zeros(
-        num_rows, NUM_QUERY_HEADS, KV_LORA_RANK, dtype=dtype, device=device
+        num_rows, NUM_QUERY_HEADS, KV_LORA_RANK, dtype=q_dtype, device=device
     )
     q_pe = torch.zeros(
-        num_rows, NUM_QUERY_HEADS, QK_ROPE_HEAD_DIM, dtype=dtype, device=device
+        num_rows, NUM_QUERY_HEADS, QK_ROPE_HEAD_DIM, dtype=q_dtype, device=device
     )
     kv_cache = torch.zeros(
-        num_gpu_blocks, PAGE_SIZE, HEAD_SIZE, dtype=dtype, device=device
+        num_gpu_blocks, PAGE_SIZE, HEAD_SIZE, dtype=kv_dtype, device=device
+    )
+    layer = types.SimpleNamespace(
+        _q_scale=torch.tensor([Q_SCALE], dtype=torch.float32, device=device),
+        _k_scale_float=K_SCALE,
     )
 
     # The Gluon kernel only reads the metadata this test is about, so a spy in
     # its place keeps the assertions independent of the AITER build.
-    with (
-        patch(
-            "vllm.v1.attention.backends.mla.rocm_aiter_mla._gluon_mla_decode_supported",
-            lambda: True,
-        ),
-        patch(
-            "vllm.v1.attention.backends.mla.rocm_aiter_mla._get_mla_gluon",
-            lambda: spy,
-        ),
-    ):
-        impl.forward_mqa((q_nope, q_pe), kv_cache, metadata, layer=None)
+    with ExitStack() as stack:
+        for probe in _gluon_probes():
+            stack.enter_context(probe)
+        stack.enter_context(
+            patch(
+                "vllm.v1.attention.backends.mla.rocm_aiter_mla._get_mla_gluon",
+                lambda: spy,
+            )
+        )
+        impl.forward_mqa((q_nope, q_pe), kv_cache, metadata, layer=layer)
 
     return metadata, captured
 
@@ -259,10 +315,72 @@ def test_verify_flatten_rows_are_causal():
         f"got {padding_rows}"
     )
 
-    # min_kv_seq_len tells Gluon how short the shortest row is, so it must be
-    # the minimum over the causal rows actually submitted, not over the
-    # per-request lengths they were cut from.
-    assert captured["min_kv_seq_len"] == min(want_row_lens), (
+    # Gluon sizes its KV split count from this bound, and a captured graph fixes
+    # that count, so a replay whose shortest row is shorter would read an empty
+    # split. Under full cudagraphs the builder pins it to a single split.
+    assert captured["min_kv_seq_len"] == 1, (
+        f"min_kv_seq_len={captured['min_kv_seq_len']} should be pinned to a "
+        "single split while a graph can capture it"
+    )
+
+
+def test_verify_flatten_min_row_len_is_exact_when_eager():
+    """Without a graph to freeze it, the bound is the shortest submitted row.
+
+    It must be the minimum over the causal rows, not over the per-request
+    lengths they were cut from, or Gluon splits a row it cannot fill.
+    """
+    _, captured = _run_verify_block(full_cudagraphs=False)
+    want = min(_expected_row_lens())
+    assert captured["min_kv_seq_len"] == want, (
         f"min_kv_seq_len={captured['min_kv_seq_len']} does not match the "
-        f"shortest submitted row ({min(want_row_lens)})"
+        f"shortest submitted row ({want})"
+    )
+
+
+def test_verify_flatten_keeps_a_bf16_query_unscaled():
+    """A bf16 cache hands Gluon the query as-is, with no scale folded in."""
+    _, captured = _run_verify_block(cache_dtype_str="auto")
+    assert captured["q_dtype"] == torch.bfloat16
+    assert captured["kv_scale"] == 1.0, (
+        f"a bf16 KV cache needs no dequant scale, got {captured['kv_scale']}"
+    )
+
+
+def test_fp8_verify_stays_on_the_asm_decode_without_dcp():
+    """Without DCP an fp8 verify keeps the asm decode, which has a kernel for it.
+
+    The flatten serves fp8 only where there is no alternative, i.e. under DCP.
+    Widening it further would move every fp8 small-head verify onto a Gluon path
+    that has not been measured against the asm q-row fold.
+    """
+    metadata, _ = _run_verify_block(cache_dtype_str="fp8", run_forward=False)
+    decode = metadata.decode
+    assert decode is not None, "batch was not classified as a decode"
+    assert decode.verify_row_lens is None, (
+        "the builder took the Gluon flatten for an fp8 verify without DCP; the "
+        "asm verify serves that batch"
+    )
+
+
+@pytest.mark.parametrize("fp8_batch_supported", [True, False])
+def test_fp8_verify_flatten_gate(fp8_batch_supported: bool):
+    """Under DCP the fp8 flatten follows Gluon's own batch support.
+
+    A single process cannot hold a DCP group, so the routing decision is checked
+    on the predicate the builder and the impl both call.
+    """
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    prefix = "vllm.v1.attention.backends.mla.rocm_aiter_mla."
+    with (
+        patch(prefix + "_gluon_mla_decode_supported", lambda: True),
+        patch(prefix + "_gluon_mla_max_bh16_heads", lambda: 96),
+        patch(prefix + "_gluon_mla_fp8_batch_supported", lambda: fp8_batch_supported),
+    ):
+        # TP8 x DCP8 gathers 96 heads onto the decode kernel.
+        got = AiterMLAHelper.use_gluon_verify(96, QLEN, "fp8", 8)
+    assert got is fp8_batch_supported, (
+        "an fp8 DCP verify must take the flatten exactly when Gluon's fp8 regime "
+        f"accepts a batch (support={fp8_batch_supported}, took flatten={got})"
     )

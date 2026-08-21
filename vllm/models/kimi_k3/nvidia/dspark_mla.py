@@ -79,6 +79,7 @@ class K3DSparkDecoderLayer(nn.Module):
             ),
             use_rope=True,
             non_causal_multi_token_decode=True,
+            enable_dcp_q_replicate=False,
         )
         # Both row-parallel outputs stay un-reduced; their all-reduces are fused
         # into the RMSNorm that follows via fused_allreduce_rms_norm.

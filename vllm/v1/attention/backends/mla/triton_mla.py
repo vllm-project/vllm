@@ -48,22 +48,24 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
 
 
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
-    # Non-causal DSpark block is flattened to one decode row per query token in
-    # forward_mqa, so no intra-block causal masking is required.
+    # UNIFORM_BATCH so DSpark draft does not demote the process to PIECEWISE.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # forward_mqa flattens each non-causal block to one decode row per token.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         # DCP local sequence lengths are not advanced between draft steps.
         self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
-        # Only the non-causal DSpark draft group serves multi-token blocks via
-        # the decode path; raise its reorder threshold to the spec block length
-        # so full-cudagraph capture admits it. Causal usage stays single-token.
+        # Raise reorder threshold to the spec block length for non-causal draft.
+        # supports_dcp_with_varlen keeps the threshold under DCP>1 (otherwise
+        # clamp-to-1 blocks FULL capture of max_query_len=1+num_spec).
         if getattr(self, "non_causal_multi_token_decode", False):
-            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+            self._init_reorder_batch_threshold(
+                1,
+                supports_spec_as_decode=True,
+                supports_dcp_with_varlen=True,
+            )
         self._reserve_attn_logits_workspace()
 
     def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:

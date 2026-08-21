@@ -198,10 +198,13 @@ if TYPE_CHECKING:
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
-    VLLM_DCP_Q_REPLICATE: bool = False
+    # None = auto (on when dcp_comm_backend=="a2a"); True/False = force.
+    VLLM_DCP_Q_REPLICATE: bool | None = None
     VLLM_USE_DIRECT_DCP_A2A: bool | None = None
     VLLM_USE_DIRECT_DCP_Q_GATHER: bool | None = None
     VLLM_USE_DIRECT_DCP_KV_GATHER: bool | None = None
+    # Keep FULL cudagraph when DCP>1 (default platform forces PIECEWISE).
+    VLLM_ALLOW_DCP_FULL_CUDAGRAPH: bool = False
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -1563,8 +1566,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
     ),
-    # Opt-in MLA DCP query replication: skip the decode query all-gather.
-    "VLLM_DCP_Q_REPLICATE": lambda: bool(int(os.getenv("VLLM_DCP_Q_REPLICATE", "0"))),
+    # MLA DCP query replication (skip decode Q all-gather). Unset = auto-on
+    # when dcp_comm_backend=="a2a"; 0/1 forces off/on.
+    "VLLM_DCP_Q_REPLICATE": lambda: maybe_convert_bool(
+        os.getenv("VLLM_DCP_Q_REPLICATE")
+    ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine
@@ -2147,6 +2153,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_USE_DIRECT_DCP_KV_GATHER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_DIRECT_DCP_KV_GATHER")
+    ),
+    # Keep FULL cudagraph when DCP>1 (default platform forces PIECEWISE).
+    "VLLM_ALLOW_DCP_FULL_CUDAGRAPH": lambda: bool(
+        int(os.getenv("VLLM_ALLOW_DCP_FULL_CUDAGRAPH", "0"))
     ),
     # Whether to enable dual cuda streams for LoRA computation
     # (used by both BaseLinearLayerWithLoRA and FusedMoEWithLoRA to

@@ -28,7 +28,24 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
+    from vllm.config.parallel import ParallelConfig
     from vllm.distributed.parallel_state import GroupCoordinator
+
+
+def resolve_dcp_q_replicate(parallel_config: ParallelConfig) -> bool:
+    """Whether MLA decode should replicate the Q projection under DCP.
+
+    ``VLLM_DCP_Q_REPLICATE`` overrides the configured model default when set.
+    DCP must be active and PCP disabled.
+    """
+    flag = envs.VLLM_DCP_Q_REPLICATE
+    if flag is None:
+        flag = parallel_config.dcp_q_replicate
+    return (
+        bool(flag)
+        and parallel_config.decode_context_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size <= 1
+    )
 
 
 # LSE/output combine

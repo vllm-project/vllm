@@ -33,7 +33,6 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm._custom_ops as ops
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -106,6 +105,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
+from vllm.v1.attention.ops.dcp import resolve_dcp_q_replicate
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from .interfaces import (
@@ -1041,17 +1041,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
 
-        # The env var predates the config field and still wins if set explicitly.
-        qrep_requested = (
-            envs.VLLM_DCP_Q_REPLICATE
-            if envs.is_set("VLLM_DCP_Q_REPLICATE")
-            else bool(vllm_config.parallel_config.dcp_q_replicate)
-        )
-        qrep_enabled = (
-            qrep_requested
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
-            and vllm_config.parallel_config.prefill_context_parallel_size <= 1
-        )
+        qrep_enabled = resolve_dcp_q_replicate(vllm_config.parallel_config)
         q_proj_cls = (
             DCPGroupColumnParallelLinear if qrep_enabled else ColumnParallelLinear
         )

@@ -418,6 +418,14 @@ class MLAAttentionSpec(FullAttentionSpec):
             "quantization method, compress ratio, model version, and KV block "
             "stride indexing."
         )
+        # The metadata builder reads this once per group, so mixing causal
+        # target layers with non-causal draft layers would route the target
+        # through the draft decode path.
+        non_causal_mtd_set = set(spec.non_causal_multi_token_decode for spec in specs)
+        assert len(non_causal_mtd_set) == 1, (
+            "All attention layers in the same KV cache group must agree on "
+            "non_causal_multi_token_decode."
+        )
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -431,9 +439,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
-            non_causal_multi_token_decode=any(
-                spec.non_causal_multi_token_decode for spec in specs
-            ),
+            non_causal_multi_token_decode=non_causal_mtd_set.pop(),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
