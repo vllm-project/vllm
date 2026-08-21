@@ -70,14 +70,6 @@ class QuarkOCP_MX(QuarkScheme):
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
 
-        self.static_input_scales = False
-
-        if self.static_input_scales:
-            raise NotImplementedError(
-                "QuarkOCP_MX with static input scales is currently not "
-                "implemented. Please open an issue."
-            )
-
         if not current_platform.supports_mx():
             logger.warning_once(
                 "The current platform does not support native MXFP4/MXFP6 "

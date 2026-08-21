@@ -103,8 +103,6 @@ __all__ = [
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
-    activation_quant_key: QuantKey | None
-    weight_quant_key: QuantKey
     supported_activation_quant_keys: list[QuantKey | None] = []
     supported_weight_quant_keys: list[QuantKey] = []
 

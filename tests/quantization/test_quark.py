@@ -109,9 +109,10 @@ class QTensorConfig:
     name: str
     weight: QuarkQTensorHint
     input_tensors: QuarkQTensorHint
-    weight_quant_key: QuantKey
-    act_quant_key: QuantKey | None
-    dispatch_cls: type[QuarkScheme] | type[QuarkMoEMethod]
+    weight_quant_key: QuantKey | None = None
+    act_quant_key: QuantKey | None = None
+    dispatch_cls: type[QuarkScheme] | type[QuarkMoEMethod] | None = None
+    expected_error: tuple[type[Exception], str] | None = None
 
 
 QTENSOR_CONFIGS = [
@@ -235,6 +236,59 @@ QTENSOR_CONFIGS = [
         weight_quant_key=kFp8Static128BlockE8M0Sym,
         act_quant_key=kFp8Dynamic128Sym,
         dispatch_cls=QuarkW8A8Fp8PerBlock,
+    ),
+    QTensorConfig(
+        name="fp8_w8a8_block_static_input",
+        weight={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "is_dynamic": False,
+            "block_size": [128, 128],
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "is_dynamic": False,
+            "group_size": 128,
+            "symmetric": True,
+        },
+        expected_error=(NotImplementedError, "No quark compatible scheme"),
+    ),
+    QTensorConfig(
+        name="fp8_w8a8_block_group_size_mismatch",
+        weight={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "is_dynamic": False,
+            "block_size": [128, 128],
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "is_dynamic": True,
+            "group_size": 64,
+            "symmetric": True,
+        },
+        expected_error=(NotImplementedError, "No quark compatible scheme"),
+    ),
+    QTensorConfig(
+        name="fp8_w8a8_block_missing_block_size",
+        weight={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "is_dynamic": True,
+            "group_size": 128,
+            "symmetric": True,
+        },
+        expected_error=(ValueError, "requires `block_size`"),
     ),
     QTensorConfig(
         name="int8_w8a8_static_symmetric",
@@ -722,6 +776,13 @@ def test_quant_method_dispatch_ignored(default_vllm_config):
 @pytest.mark.parametrize("case", QTENSOR_CONFIGS, ids=lambda case: case.name)
 def test_quant_method_dispatch_target(case):
     config = _make_qtensor_config(case.weight, case.input_tensors)
+    if case.expected_error is not None:
+        error_type, error_message = case.expected_error
+        with pytest.raises(error_type, match=error_message):
+            config.get_quant_method_target("linear", LinearBase)
+        return
+
+    assert case.dispatch_cls is not None
     is_linear = issubclass(case.dispatch_cls, QuarkScheme)
 
     weight_quant_key, act_quant_key, method_cls = config.get_quant_method_target(
@@ -779,9 +840,14 @@ def test_quant_method_dispatch_unsupported(weight, input_tensors):
         config.get_quant_method(TestRoutedExperts(), "experts")
 
 
-@pytest.mark.parametrize("case", QTENSOR_CONFIGS, ids=lambda case: case.name)
+@pytest.mark.parametrize(
+    "case",
+    [case for case in QTENSOR_CONFIGS if case.expected_error is None],
+    ids=lambda case: case.name,
+)
 def test_quant_method_dispatch_instantiation(case, monkeypatch, default_vllm_config):
     config = _make_qtensor_config(case.weight, case.input_tensors)
+    assert case.dispatch_cls is not None
     if issubclass(case.dispatch_cls, QuarkScheme):
 
         class TestLinear(LinearBase):
@@ -834,87 +900,6 @@ def test_quant_method_dispatch_instantiation(case, monkeypatch, default_vllm_con
         method = config.get_quant_method(layer, "experts")
 
         assert isinstance(method, case.dispatch_cls)
-
-
-def test_quark_fp8_w8a8_detects_per_block_config():
-    config = QuarkConfig({})
-    weight_config = {
-        "dtype": "fp8_e4m3",
-        "qscheme": "per_block",
-        "is_dynamic": False,
-        "block_size": [128, 128],
-        "symmetric": True,
-    }
-    input_config = {
-        "dtype": "fp8_e4m3",
-        "qscheme": "per_group",
-        "is_dynamic": True,
-        "group_size": 128,
-        "symmetric": True,
-    }
-
-    assert config._is_fp8_w8a8(weight_config, input_config)
-
-
-def test_quark_fp8_w8a8_rejects_per_block_static_input():
-    config = QuarkConfig({})
-    weight_config = {
-        "dtype": "fp8_e4m3",
-        "qscheme": "per_block",
-        "is_dynamic": False,
-        "block_size": [128, 128],
-        "symmetric": True,
-    }
-    input_config = {
-        "dtype": "fp8_e4m3",
-        "qscheme": "per_group",
-        "is_dynamic": False,
-        "group_size": 128,
-        "symmetric": True,
-    }
-
-    assert not config._is_fp8_w8a8(weight_config, input_config)
-
-
-def test_quark_fp8_w8a8_rejects_per_block_group_size_mismatch():
-    config = QuarkConfig({})
-    weight_config = {
-        "dtype": "fp8_e4m3",
-        "qscheme": "per_block",
-        "is_dynamic": False,
-        "block_size": [128, 128],
-        "symmetric": True,
-    }
-    input_config = {
-        "dtype": "fp8_e4m3",
-        "qscheme": "per_group",
-        "is_dynamic": True,
-        "group_size": 64,
-        "symmetric": True,
-    }
-
-    assert not config._is_fp8_w8a8(weight_config, input_config)
-
-
-def test_quark_w8a8_fp8_per_block_requires_block_size():
-    weight_config = {
-        "dtype": "fp8_e4m3",
-        "qscheme": "per_block",
-        "is_dynamic": False,
-        "symmetric": True,
-    }
-    input_config = {
-        "dtype": "fp8_e4m3",
-        "qscheme": "per_group",
-        "is_dynamic": True,
-        "group_size": 128,
-        "symmetric": True,
-    }
-
-    with pytest.raises(ValueError, match="requires `block_size`"):
-        QuarkConfig({})._get_scheme_cls_from_config(
-            {"weight": weight_config, "input_tensors": input_config}
-        )
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])

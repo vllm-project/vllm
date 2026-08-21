@@ -54,27 +54,14 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         self.packed_factor: Fraction = Fraction(2, 1)  # 2 FP4 values per byte
         self.weight_block_size = OCP_MX_BLOCK_SIZE
 
-        self.is_static_input_scheme = True
-
         self.fp8_min, self.fp8_max = get_fp8_min_max()
         self.fp8_dtype = current_platform.fp8_dtype()
-
-        if not self.is_static_input_scheme:
-            raise NotImplementedError(
-                "Dynamic FP8 activation quantization is not yet supported "
-                "for W4A8. The current implementation expects static per-tensor "
-                "FP8 scales stored in the checkpoint."
-            )
 
         kernel_supported_gpu = False
         if current_platform.is_rocm():
             kernel_supported_gpu = current_platform.supports_mx()
 
-        self.use_aiter_kernel = (
-            is_aiter_found_and_supported()
-            and self.is_static_input_scheme
-            and kernel_supported_gpu
-        )
+        self.use_aiter_kernel = is_aiter_found_and_supported() and kernel_supported_gpu
 
         if not self.use_aiter_kernel:
             logger.warning_once(
@@ -132,17 +119,16 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE (FP8 per-tensor static scale)
-        if self.is_static_input_scheme:
-            input_scale = PerTensorScaleParameter(
-                data=torch.empty(
-                    len(output_partition_sizes),
-                    dtype=torch.float32,
-                ),
-                weight_loader=weight_loader,
-            )
-            # Initialize to avoid NaN
-            input_scale[:] = torch.finfo(torch.float32).min
-            layer.register_parameter("input_scale", input_scale)
+        input_scale = PerTensorScaleParameter(
+            data=torch.empty(
+                len(output_partition_sizes),
+                dtype=torch.float32,
+            ),
+            weight_loader=weight_loader,
+        )
+        # Initialize to avoid NaN
+        input_scale[:] = torch.finfo(torch.float32).min
+        layer.register_parameter("input_scale", input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Ensuring weights & scales are non-trainable
@@ -151,16 +137,15 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
             layer.weight_scale.data, requires_grad=False
         )
 
-        if self.is_static_input_scheme:
-            input_scale = layer.input_scale.data
-            # For fused modules (QKV), take the max scale
-            if input_scale.numel() != 1:
-                input_scale = input_scale.max()
+        input_scale = layer.input_scale.data
+        # For fused modules (QKV), take the max scale
+        if input_scale.numel() != 1:
+            input_scale = input_scale.max()
 
-            layer.input_scale = torch.nn.Parameter(
-                torch.tensor(input_scale, dtype=torch.float32),
-                requires_grad=False,
-            )
+        layer.input_scale = torch.nn.Parameter(
+            torch.tensor(input_scale, dtype=torch.float32),
+            requires_grad=False,
+        )
 
     def apply_weights(
         self,
