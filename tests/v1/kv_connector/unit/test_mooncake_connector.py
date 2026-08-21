@@ -196,6 +196,7 @@ def test_filter_dcp_block_ids(
     assert actual_p_blocks == expected_p_blocks
     assert actual_d_blocks == expected_d_blocks
 
+
 @pytest.mark.asyncio
 async def test_build_transfer_params_filters_dcp_blocks():
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
@@ -248,13 +249,17 @@ async def test_build_transfer_params_filters_dcp_blocks():
         remote_block_size=16,
     )
 
-    src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = (
-        await worker._build_transfer_params(
-            ready_reqs=[("d-req-dcp-filter", send_meta)],
-            agent_meta=xfer_meta,
-            local_regions=local_regions,
-            remote_regions=remote_regions,
-        )
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        ready_reqs=[("d-req-dcp-filter", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=local_regions,
+        remote_regions=remote_regions,
     )
 
     assert err_reqs == []
@@ -316,13 +321,17 @@ async def test_build_transfer_params_returns_empty_for_unowned_dcp_blocks():
         remote_block_size=16,
     )
 
-    src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = (
-        await worker._build_transfer_params(
-            ready_reqs=[("d-req-dcp-empty", send_meta)],
-            agent_meta=xfer_meta,
-            local_regions=local_regions,
-            remote_regions=remote_regions,
-        )
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        ready_reqs=[("d-req-dcp-empty", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=local_regions,
+        remote_regions=remote_regions,
     )
 
     assert src_ptrs == []
@@ -1703,15 +1712,18 @@ def test_get_prefill_ranks_for_decode_mla_cases(
     p_dcp_size: int,
     expected: list[int],
 ):
-    assert _get_prefill_ranks_for_decode(
-        d_tp_rank=d_tp_rank,
-        d_tp_size=d_tp_size,
-        d_dcp_size=d_dcp_size,
-        p_tp_size=p_tp_size,
-        p_dcp_size=p_dcp_size,
-        total_num_kv_heads=1,
-        is_mla=True,
-    ) == expected
+    assert (
+        _get_prefill_ranks_for_decode(
+            d_tp_rank=d_tp_rank,
+            d_tp_size=d_tp_size,
+            d_dcp_size=d_dcp_size,
+            p_tp_size=p_tp_size,
+            p_dcp_size=p_dcp_size,
+            total_num_kv_heads=1,
+            is_mla=True,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -1756,15 +1768,18 @@ def test_get_prefill_ranks_for_decode_gqa_and_heterogeneous_tp(
     num_kv_heads: int,
     expected: list[int],
 ):
-    assert _get_prefill_ranks_for_decode(
-        d_tp_rank=d_tp_rank,
-        d_tp_size=d_tp_size,
-        d_dcp_size=d_dcp_size,
-        p_tp_size=p_tp_size,
-        p_dcp_size=p_dcp_size,
-        total_num_kv_heads=num_kv_heads,
-        is_mla=False,
-    ) == expected
+    assert (
+        _get_prefill_ranks_for_decode(
+            d_tp_rank=d_tp_rank,
+            d_tp_size=d_tp_size,
+            d_dcp_size=d_dcp_size,
+            p_tp_size=p_tp_size,
+            p_dcp_size=p_dcp_size,
+            total_num_kv_heads=num_kv_heads,
+            is_mla=False,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -1810,15 +1825,18 @@ def test_get_decode_ranks_for_prefill_inverse_mapping(
     is_mla: bool,
     expected: list[int],
 ):
-    assert _get_decode_ranks_for_prefill(
-        p_tp_rank=p_tp_rank,
-        p_tp_size=p_tp_size,
-        p_dcp_size=p_dcp_size,
-        d_tp_size=d_tp_size,
-        d_dcp_size=d_dcp_size,
-        total_num_kv_heads=num_kv_heads,
-        is_mla=is_mla,
-    ) == expected
+    assert (
+        _get_decode_ranks_for_prefill(
+            p_tp_rank=p_tp_rank,
+            p_tp_size=p_tp_size,
+            p_dcp_size=p_dcp_size,
+            d_tp_size=d_tp_size,
+            d_dcp_size=d_dcp_size,
+            total_num_kv_heads=num_kv_heads,
+            is_mla=is_mla,
+        )
+        == expected
+    )
 
 
 def test_process_pulling_result_waits_for_all_dcp_acks():
@@ -1874,8 +1892,7 @@ async def test_receive_kv_selects_remote_dcp_peer_ranks():
         decode_worker.pp_rank = 0
         decode_worker._remote_agents = {
             "p-engine": {
-                rank: {0: f"tcp://producer-tp{rank}:1234"}
-                for rank in range(4)
+                rank: {0: f"tcp://producer-tp{rank}:1234"} for rank in range(4)
             }
         }
         decode_worker._tp_size["p-engine"] = 4
@@ -1932,8 +1949,7 @@ async def test_receive_kv_routes_metadata_by_dcp_rank_modulo():
         decode_worker.pp_rank = 0
         decode_worker._remote_agents = {
             "p-engine": {
-                rank: {0: f"tcp://producer-tp{rank}:1234"}
-                for rank in range(4)
+                rank: {0: f"tcp://producer-tp{rank}:1234"} for rank in range(4)
             }
         }
         decode_worker._tp_size["p-engine"] = 4

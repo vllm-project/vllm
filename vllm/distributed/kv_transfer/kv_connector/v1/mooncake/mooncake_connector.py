@@ -114,8 +114,6 @@ def _validate_dcp_size_for_kv_head_groups(
         )
 
 
-
-
 def _get_kv_head_group_rank_and_count(
     tp_rank: int,
     tp_size: int,
@@ -137,10 +135,8 @@ def _get_prefill_ranks_for_decode(
     total_num_kv_heads: int,
     is_mla: bool,
 ) -> list[int]:
-    d_kv_head_group_rank, d_kv_head_group_count = (
-        _get_kv_head_group_rank_and_count(
-            d_tp_rank, d_tp_size, total_num_kv_heads, is_mla
-        )
+    d_kv_head_group_rank, d_kv_head_group_count = _get_kv_head_group_rank_and_count(
+        d_tp_rank, d_tp_size, total_num_kv_heads, is_mla
     )
     _, p_kv_head_group_count = _get_kv_head_group_rank_and_count(
         0, p_tp_size, total_num_kv_heads, is_mla
@@ -196,8 +192,6 @@ def _get_decode_ranks_for_prefill(
         if p_tp_rank in p_tp_ranks:
             d_tp_ranks.append(d_tp_rank)
     return d_tp_ranks
-
-
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
@@ -1130,8 +1124,8 @@ class MooncakeConnectorWorker:
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
         self.use_mla = self.model_config.use_mla
-        self._total_num_kv_heads = 1 if self.use_mla else (
-            self.model_config.get_total_num_kv_heads()
+        self._total_num_kv_heads = (
+            1 if self.use_mla else (self.model_config.get_total_num_kv_heads())
         )
         if self.dcp_size > 1 and len(kv_cache_config.kv_cache_groups) != 1:
             msg = (
