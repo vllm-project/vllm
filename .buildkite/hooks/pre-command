@@ -8,11 +8,47 @@
 # job log before the command phase starts.
 if [[ "${BUILDKITE_STEP_KEY:-}" == "image-build" ]]; then
   echo "HBSAMPLE hook context: $(which buildkite-agent) | bk env vars: $(env | grep -c '^BUILDKITE')"
-  if ! command -v ethtool >/dev/null 2>&1; then
-    sudo -n dnf install -y ethtool >/dev/null 2>&1 || sudo -n yum install -y ethtool >/dev/null 2>&1 || true
-  fi
+cat > /tmp/ena_stats.py <<'PYEOF'
+import array, fcntl, socket, struct, sys
+# Read ethtool NIC stats via SIOCETHTOOL ioctl - no ethtool binary needed.
+SIOCETHTOOL = 0x8946
+ETHTOOL_GSSET_INFO = 0x37
+ETHTOOL_GSTRINGS = 0x1B
+ETHTOOL_GSTATS = 0x1D
+ETH_SS_STATS = 1
+
+def ena_stats(iface):
+    sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # number of stats
+    sset = struct.pack("IIQI", ETHTOOL_GSSET_INFO, 0, 1 << ETH_SS_STATS, 0)
+    buf = array.array("b", sset + b"\x00" * 4)
+    ifr = struct.pack("16sP", iface.encode(), buf.buffer_info()[0])
+    fcntl.ioctl(sk.fileno(), SIOCETHTOOL, ifr)
+    n = struct.unpack_from("I", bytes(buf), 16)[0]
+    if not n:
+        return {}
+    # names
+    gstr = struct.pack("III", ETHTOOL_GSTRINGS, ETH_SS_STATS, n)
+    buf = array.array("b", gstr + b"\x00" * (32 * n))
+    ifr = struct.pack("16sP", iface.encode(), buf.buffer_info()[0])
+    fcntl.ioctl(sk.fileno(), SIOCETHTOOL, ifr)
+    raw = bytes(buf)[12:]
+    names = [raw[i*32:(i+1)*32].split(b"\x00")[0].decode() for i in range(n)]
+    # values
+    gst = struct.pack("II", ETHTOOL_GSTATS, n)
+    buf = array.array("b", gst + b"\x00" * (8 * n))
+    ifr = struct.pack("16sP", iface.encode(), buf.buffer_info()[0])
+    fcntl.ioctl(sk.fileno(), SIOCETHTOOL, ifr)
+    vals = struct.unpack_from(f"{n}Q", bytes(buf), 8)
+    return dict(zip(names, vals))
+
+iface = sys.argv[1]
+stats = ena_stats(iface)
+hits = {k: v for k, v in stats.items() if "allowance" in k or "conntrack" in k}
+print(" ".join(f"{k}={v}" for k, v in sorted(hits.items())) or f"NO_ALLOWANCE_STATS total={len(stats)}")
+PYEOF
   IF0=$(ls /sys/class/net/ 2>/dev/null | grep -E '^(ens|eth)' | head -1)
-  echo "HBSAMPLE ethtool probe: $(command -v ethtool || echo MISSING) | stats lines: $(ethtool -S "$IF0" 2>/dev/null | grep -cE 'allowance|conntrack' || echo 0)"
+  echo "HBSAMPLE ena probe: $(python3 /tmp/ena_stats.py "$IF0" 2>&1 | head -c 400)"
   echo "hb probe $(date -u +%FT%TZ)" > /tmp/hb-probe.log
   (cd /tmp && buildkite-agent artifact upload hb-probe.log)
   echo "HBSAMPLE foreground probe upload exit=$?"
@@ -35,7 +71,7 @@ sample() {
   echo "HBSAMPLE net_http=$(curl -s -o /dev/null -w '%{http_code}:%{time_total}' --max-time 3 https://agent.buildkite.com/v3 2>/dev/null || echo FAIL)"
   echo "HBSAMPLE net_dev=$(grep -E 'ens|eth' /proc/net/dev 2>/dev/null | head -1 | tr -s ' ')"
   IFACE=$(ls /sys/class/net/ 2>/dev/null | grep -E '^(ens|eth)' | head -1)
-  [ -n "$IFACE" ] && echo "HBSAMPLE ena=$(ethtool -S "$IFACE" 2>/dev/null | grep -E 'allowance|conntrack' | tr -d ' ' | tr '\n' ' ')"
+      echo "HBSAMPLE ena=$(python3 /tmp/ena_stats.py "$(ls /sys/class/net/ | grep -E '^(ens|eth)' | head -1)" 2>/dev/null)"
   echo "HBSAMPLE sockstat=$(head -2 /proc/net/sockstat 2>/dev/null | tr '\n' ' ')"
   echo "HBSAMPLE conntrack_count=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo n/a)/$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo n/a)"
 }
