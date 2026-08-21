@@ -78,6 +78,8 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         self.apply_router_weight_on_input: bool | None = None
         self.router_weights_fn = self._keep_router_weights
         self.activation = None
+        self.inter_size: int = 0
+        self.inter_size_scale: int = 1
 
         logger.info_once("Using ARK XPU WNA16 MoE kernel.")
 
@@ -129,8 +131,26 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         else:
             self.router_weights_fn = self._keep_router_weights
         self.activation = layer.activation
+        self.inter_size = layer.w13_weight.shape[-2] // 2
+        self.inter_size_scale = 1 if layer.activation.is_gated else 2
         self.remap_hidden_states_op = torch.ops._moe_C.remap_hidden_states
         self.moe_gather_op = torch.ops._moe_C.moe_gather
+
+        self.w13_moe_plan = self.ark.prepare_moe_gemm_sym(
+            layer.w13_weight,
+            layer.w13_scales,
+            weight_bits=4,
+            group_size=layer.group_size,
+            activation_dtype=layer.w13_scales.dtype,
+        )
+
+        self.w2_moe_plan = self.ark.prepare_moe_gemm_sym(
+            layer.w2_weight,
+            layer.w2_scales,
+            weight_bits=4,
+            group_size=layer.group_size,
+            activation_dtype=layer.w2_scales.dtype,
+        )
 
     def get_fused_moe_quant_config(
         self,
@@ -298,33 +318,40 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             local_experts_num=self.local_num_experts,
         )
 
-        gemm1_output = self._ark_moe(
+        # gemm1_output = self._ark_moe(
+        #     remapped_hidden_states,
+        #     self.w13_weight,
+        #     self.w13_scales,
+        #     rows_per_expert,
+        #     self.group_size,
+        # )
+        gemm1_output = self.w13_moe_plan.moe(
             remapped_hidden_states,
-            self.w13_weight,
-            self.w13_scales,
             rows_per_expert,
-            self.group_size,
+            phase="auto",
         )
 
-        activated_size = (
-            gemm1_output.shape[-1] // 2
-            if self.activation.is_gated
-            else gemm1_output.shape[-1]
+        act_output = gemm1_output.new_empty(
+            (gemm1_output.shape[0], self.inter_size * self.inter_size_scale)
         )
-        act_output = gemm1_output.new_empty((gemm1_output.shape[0], activated_size))
         apply_moe_activation(
             self.activation,
             act_output,
             gemm1_output,
         )
 
-        gemm2_output = self._ark_moe(
+        gemm2_output = self.w2_moe_plan.moe(
             act_output,
-            self.w2_weight,
-            self.w2_scales,
             rows_per_expert,
-            self.group_size,
+            phase="auto",
         )
+        # gemm2_output = self._ark_moe(
+        #     act_output,
+        #     self.w2_weight,
+        #     self.w2_scales,
+        #     rows_per_expert,
+        #     self.group_size,
+        # )
 
         self.moe_gather_op(
             output,
