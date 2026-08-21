@@ -359,6 +359,9 @@ def select_common_block_size(
         ValueError: If no valid block size found.
     """
 
+    if not backends:
+        return kv_manager_block_size
+
     return select_common_block_size_from_constraints(
         kv_manager_block_size,
         [backend.get_supported_kernel_block_sizes() for backend in backends],
