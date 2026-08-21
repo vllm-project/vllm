@@ -322,8 +322,7 @@ class CudaGraphManager:
                     pad_up = [
                         d
                         for d in decode_full_descs
-                        if d.num_tokens >= i
-                        and d.num_active_loras == num_active_loras
+                        if d.num_tokens >= i and d.num_active_loras == num_active_loras
                     ]
                     self._candidates[(i, num_active_loras)] = pad_up + [
                         d for d in fallback if d not in pad_up
