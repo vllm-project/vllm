@@ -197,21 +197,59 @@ def get_query_lens_mismatch_unsupported_backend(
     return None
 
 
+def _allocate_cache_backing(
+    nbytes: int,
+    device: torch.device,
+    use_pcp_direct: bool,
+    pcp_group,
+) -> torch.Tensor:
+    if use_pcp_direct:
+        if pcp_group is None:
+            raise RuntimeError(
+                "VLLM_USE_PCP_DIRECT_KV=1 requires an initialized PCP group"
+            )
+        from vllm.model_executor.layers.attention.pcp_direct_kv import (
+            allocate_pcp_direct_backing,
+        )
+
+        return allocate_pcp_direct_backing(
+            nbytes, device, pcp_group.device_group
+        ).storage
+    return torch.zeros(nbytes, dtype=torch.int8, device=device)
+
+
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
 ):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     packed_backing: torch.Tensor | None = None
+    pcp_group = None
+    use_pcp_direct = False
+    from vllm.model_executor.layers.attention.pcp_direct_kv import (
+        pcp_direct_kv_requested,
+    )
+
+    if pcp_direct_kv_requested():
+        from vllm.distributed.parallel_state import get_pcp_group
+
+        pcp_group = get_pcp_group()
+        if pcp_group.world_size <= 1:
+            raise RuntimeError(
+                "VLLM_USE_PCP_DIRECT_KV=1 requires PCP world size greater than 1"
+            )
+        use_pcp_direct = True
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         if kv_cache_tensor.block_stride > 0:
             # Allocate once; all packed tensors alias the same backing.
             if packed_backing is None:
-                packed_backing = torch.zeros(
-                    kv_cache_tensor.size, dtype=torch.int8, device=device
+                packed_backing = _allocate_cache_backing(
+                    kv_cache_tensor.size, device, use_pcp_direct, pcp_group
                 )
             tensor = packed_backing
         else:
-            tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
+            tensor = _allocate_cache_backing(
+                kv_cache_tensor.size, device, use_pcp_direct, pcp_group
+            )
         for layer_name in kv_cache_tensor.shared_by:
             kv_cache_raw_tensors[layer_name] = tensor
 
@@ -574,6 +612,24 @@ def init_kv_cache(
         else 1
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
+    from vllm.distributed.parallel_state import get_pcp_group
+    from vllm.model_executor.layers.attention.pcp_direct_kv import (
+        bind_pcp_direct_layer_views,
+        close_pcp_direct_kv,
+        pcp_direct_kv_active,
+        should_allocate_pcp_direct_kv,
+    )
+
+    if should_allocate_pcp_direct_kv(vllm_config):
+        pcp_group = get_pcp_group()
+        try:
+            bind_pcp_direct_layer_views(kv_caches, pcp_group.device_group, device)
+        except Exception:
+            close_pcp_direct_kv()
+            raise
+        if not pcp_direct_kv_active():
+            close_pcp_direct_kv()
+            raise RuntimeError("VLLM_USE_PCP_DIRECT_KV=1 failed to enable after bind")
     return kv_caches
 
 
