@@ -38,10 +38,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     ChunkedLocalAttentionSpec,
+    CrossAttentionSpec,
+    EncoderOnlyAttentionSpec,
     FullAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheGroupSpec,
+    KVCacheSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    RSWASpec,
+    SinkFullAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
@@ -2451,6 +2462,189 @@ def test_request_level_supply_covers_consumer_demand(
         f"{len(missing)} of {len(demanded)} demanded keys are never offered to "
         f"prepare_store, so a peer fetching them would wait out the load timeout"
     )
+
+
+# Whether a policy keeps prefix-hit chunks in the store path. BLOCK_LEVEL skips
+# them, which is what left a warm PD producer with nothing to supply in #52808,
+# so a producer leg must never run a policy declared False here. A new policy
+# has to declare.
+_POLICY_KEEPS_PREFIX_HITS = {
+    OffloadPolicy.BLOCK_LEVEL: False,
+    OffloadPolicy.REQUEST_LEVEL: True,
+}
+
+
+@pytest.mark.parametrize("policy", list(OffloadPolicy))
+def test_prefix_hit_store_behavior_declared_for_every_policy(request_runner, policy):
+    """Whether prefix hits stay in the store path is what a warm producer has
+    left to supply, so every policy needs deliberate behavior."""
+    assert policy in _POLICY_KEEPS_PREFIX_HITS, f"{policy} has no declared behavior"
+    num_tokens = 32
+    runner = request_runner(block_size=16, num_gpu_blocks=200, async_scheduling=False)
+
+    def store_everything_offered():
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+
+    # Warm the prefix, so the next request computes no new block.
+    store_everything_offered()
+    runner.new_request(token_ids=[0] * num_tokens)
+    runner._run(decoded_tokens=[0], complete_transfers=True)
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+
+    runner.manager.reset_mock()
+    store_everything_offered()
+    runner.manager.on_new_request.return_value = RequestOffloadingContext(policy=policy)
+    runner.manager.lookup.return_value = LookupResult.HIT
+    runner.new_request(token_ids=[0] * num_tokens)
+    runner._run(decoded_tokens=[0], complete_transfers=True)
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+
+    offered = bool(runner.manager.prepare_store.call_args_list)
+    assert offered is _POLICY_KEEPS_PREFIX_HITS[policy]
+
+
+# The branch of get_sliding_window_size_in_chunks each KV cache spec resolves
+# to. The store path prunes exactly the groups reporting a window and the load
+# path scans those with _sliding_window_lookup, so the two only agree while
+# every spec lands where it is declared to. None means the spec is not handled
+# and trips the function's closing assert, which otherwise only surfaces at
+# runtime on a model that uses it. A new spec has to declare.
+#
+# UniformTypeKVCacheSpecs is declared None because it never reaches this
+# function: generate_scheduler_kv_cache_config replaces the wrapper with a
+# representative per-layer spec before the scheduler sees a group. Only the
+# worker side keeps the wrapper, which is why worker.py and canonical_mapping.py
+# branch on it and this file does not.
+_GROUP_STORE_PRUNING: dict[type[KVCacheSpec], type[KVCacheSpec] | None] = {
+    AttentionSpec: None,
+    ChunkedLocalAttentionSpec: ChunkedLocalAttentionSpec,
+    CrossAttentionSpec: None,
+    EncoderOnlyAttentionSpec: None,
+    FullAttentionSpec: FullAttentionSpec,
+    HiddenStateCacheSpec: FullAttentionSpec,
+    MambaSpec: MambaSpec,
+    MLAAttentionSpec: FullAttentionSpec,
+    RSWASpec: FullAttentionSpec,
+    SinkFullAttentionSpec: FullAttentionSpec,
+    SlidingWindowMLASpec: SlidingWindowSpec,
+    SlidingWindowSpec: SlidingWindowSpec,
+    UniformTypeKVCacheSpecs: None,
+}
+
+# What each declared branch reports for a spec built by _make_kv_cache_spec
+# below, at tokens_per_chunk=16.
+_BRANCH_WINDOW_IN_CHUNKS = {
+    FullAttentionSpec: None,
+    SlidingWindowSpec: 2,
+    ChunkedLocalAttentionSpec: 4,
+    MambaSpec: 1,
+}
+
+_SPEC_TOKENS_PER_CHUNK = 16
+
+
+def _concrete_kv_cache_specs() -> list[type[KVCacheSpec]]:
+    def walk(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from walk(sub)
+
+    return sorted(set(walk(KVCacheSpec)), key=lambda spec: spec.__name__)
+
+
+def _make_kv_cache_spec(spec_type: type[KVCacheSpec]) -> KVCacheSpec | None:
+    """Smallest instance of `spec_type`, or None if it needs real model shapes."""
+    if spec_type is MambaSpec:
+        return MambaSpec(block_size=16, shapes=((1,),), dtypes=(torch.float32,))
+    if spec_type is UniformTypeKVCacheSpecs:
+        return None
+    kwargs: dict = dict(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    if issubclass(spec_type, SlidingWindowSpec):
+        kwargs["sliding_window"] = 32
+    if issubclass(spec_type, ChunkedLocalAttentionSpec):
+        kwargs["attention_chunk_size"] = 64
+    if issubclass(spec_type, RSWASpec):
+        kwargs["rswa_window"] = 32
+    return spec_type(**kwargs)
+
+
+@pytest.mark.parametrize("spec_type", _concrete_kv_cache_specs())
+def test_store_pruning_declared_for_every_kv_cache_spec(spec_type):
+    """A spec that starts pruning without the load path agreeing strands blocks
+    silently, and an unhandled one only fails on a model that uses it."""
+    assert spec_type in _GROUP_STORE_PRUNING, f"{spec_type.__name__} is not declared"
+    branch = _GROUP_STORE_PRUNING[spec_type]
+
+    spec = _make_kv_cache_spec(spec_type)
+    if spec is None:
+        return
+    if branch is None:
+        with pytest.raises(AssertionError):
+            get_sliding_window_size_in_chunks(spec, _SPEC_TOKENS_PER_CHUNK)
+        return
+    assert (
+        get_sliding_window_size_in_chunks(spec, _SPEC_TOKENS_PER_CHUNK)
+        == (_BRANCH_WINDOW_IN_CHUNKS[branch])
+    )
+
+
+@pytest.mark.parametrize("with_swa_group", [False, True])
+def test_demand_oracle_matches_a_real_lookup_scan(request_runner, with_swa_group: bool):
+    """`_demanded_keys` reimplements the scan it stands in for, so it can drift
+    along with production instead of pinning it. Pin it against the real one."""
+    full_attn_block_size = 16
+    swa_block_size = 4
+    num_tokens = 32
+
+    kv_cache_groups = (
+        _full_and_swa_groups(full_attn_block_size, swa_block_size, sliding_window=8)
+        if with_swa_group
+        else None
+    )
+    runner = request_runner(
+        block_size=swa_block_size if with_swa_group else full_attn_block_size,
+        num_gpu_blocks=200,
+        async_scheduling=False,
+        kv_cache_groups=kv_cache_groups,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.manager.lookup.return_value = LookupResult.HIT_PENDING
+
+    scanned: list = []
+    offload_keys_per_group: list[list] = []
+
+    def capture_first_scan() -> None:
+        if scanned:
+            return
+        scanned.extend(c.args[0] for c in runner.manager.lookup.call_args_list)
+        for req_status in runner.connector_scheduler._req_status.values():
+            offload_keys_per_group.extend(
+                list(group_state.offload_keys)
+                for group_state in req_status.group_states
+            )
+        # HIT_PENDING defers admission forever; let the request through now
+        # that its scan is recorded.
+        runner.manager.lookup.return_value = LookupResult.MISS
+
+    runner.new_request(token_ids=[0] * num_tokens)
+    runner._run(
+        decoded_tokens=[0, EOS_TOKEN_ID],
+        complete_transfers=True,
+        post_step_fn=capture_first_scan,
+    )
+
+    assert scanned, "the real scheduler scanned nothing"
+    assert set(scanned) == _demanded_keys(runner, offload_keys_per_group, num_tokens)
+
+    # The oracle must bound itself to num_tokens rather than lean on the
+    # captured key lists happening to end there, so padding them changes
+    # nothing.
+    padded = [keys + to_keys(range(9000, 9000 + 4)) for keys in offload_keys_per_group]
+    assert set(scanned) == _demanded_keys(runner, padded, num_tokens)
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

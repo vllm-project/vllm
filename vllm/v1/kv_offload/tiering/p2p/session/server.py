@@ -18,12 +18,18 @@ coordinator's ``_dispatch_message`` can reuse its existing
 from __future__ import annotations
 
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    ReqContext,
+    get_offload_group_idx,
+)
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortAckMsg,
@@ -978,6 +984,23 @@ class ServerRole:
             len(req.available),
             send_done,
         )
+        if not success and req.demanded:
+            # The peer waits out its whole load timeout on this demand, so name
+            # it here: producer supply and consumer demand are computed
+            # independently, and a divergence is usually one KV cache group's
+            # store pruning rather than a transport failure.
+            per_group = Counter(get_offload_group_idx(key) for key in req.demanded)
+            logger.warning(
+                "P2PSession %s: kv_request_id=%s round=%s ended with %d "
+                "demanded blocks never supplied, per KV cache group %s, "
+                "and %d supplied blocks never demanded",
+                self._peer_id,
+                kv_request_id,
+                round_key,
+                len(req.demanded),
+                dict(sorted(per_group.items())),
+                len(req.available),
+            )
         if send_done and req.demand_received:
             self._send(
                 {
