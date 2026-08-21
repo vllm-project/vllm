@@ -76,6 +76,10 @@ def _set_rocm_arch(monkeypatch: pytest.MonkeyPatch, gcn_arch: str):
     monkeypatch.setattr(rocm_platform, "on_rdna", lambda: _on_rdna)
     monkeypatch.setattr(rocm_platform, "on_rdna4", lambda: _on_rdna4)
 
+    # Also patch _ON_GFX1X module variable
+    # (used directly by use_rocm_custom_paged_attention)
+    monkeypatch.setattr(rocm_platform, "_ON_GFX1X", _on_gfx1x_raw)
+
     # Clear the cached paged attention function
     rocm_platform.use_rocm_custom_paged_attention.cache_clear()
 
@@ -140,7 +144,7 @@ def test_skinny_gemm_env_controls_rocm_fp8_scaled_mm_support(
         pytest.param(
             "gfx90a",
             False,
-            False,
+            True,  # CDNA supports FP8
             False,
             torch.float8_e4m3fn,
             id="gfx90a-MI200",
