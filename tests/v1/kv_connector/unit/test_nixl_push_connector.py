@@ -117,6 +117,22 @@ def _stub_sw_clipping(scheduler) -> None:
 
 
 class TestPushScheduler:
+    def test_heartbeat_uses_decode_internal_request_id(self):
+        sched = make_nixl_push_scheduler()
+        request = _make_request(
+            request_id="cmpl-shared-0-bbbbbbbb",
+            remote_request_id="shared",
+        )
+
+        sched.on_new_request(request)
+
+        info = sched._heartbeat_by_engine["prefill-engine"]
+        assert info.req_ids == {request.request_id}
+        assert sched._heartbeat_req_engine[request.request_id] == (
+            "prefill-engine",
+            request.request_id,
+        )
+
     def test_d_side_update_state_after_alloc_stages_registration(self):
         """D scheduler stashes registration data + arms watchdog deadline."""
         sched = make_nixl_push_scheduler()
@@ -984,6 +1000,19 @@ class TestPushWriterNegative:
             assert w._reqs_to_send[rid] >= now
         # Unknown request must not be inserted by the heartbeat path.
         assert "req-unknown" not in w._reqs_to_send
+
+    def test_heartbeat_matches_decode_id_by_base_request_id(self):
+        w = _StubWriterWorker.fresh()
+        w._lease_extension = 10
+        p_request_id = "cmpl-shared-0-aaaaaaaa"
+        d_request_id = "cmpl-shared-0-bbbbbbbb"
+        old_expiry = time.perf_counter() - 5.0
+        w._reqs_to_send[p_request_id] = old_expiry
+
+        w._handle_heartbeat(d_request_id)
+
+        assert w._reqs_to_send[p_request_id] > old_expiry
+        assert d_request_id not in w._reqs_to_send
 
 
 # ----------------------------------------------------------------- #

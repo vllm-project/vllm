@@ -53,6 +53,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
+    get_base_request_id,
     get_representative_spec_type,
     zmq_ctx,
 )
@@ -2204,22 +2205,31 @@ class NixlBaseConnectorWorker:
         """Extend leases for requests referenced in a heartbeat.
 
         Args:
-            payload: comma-separated P-side request IDs, e.g.
-                     "req_abc,req_def".
+            payload: Comma-separated request IDs. Push mode sends D-side IDs
+                and matches their base IDs against P-side lease IDs.
         """
         new_expiry = time.perf_counter() + self._lease_extension
-        for req_id in payload.split(","):
-            if req_id in self._reqs_to_send:
-                old = self._reqs_to_send[req_id]
-                self._reqs_to_send[req_id] = max(old, new_expiry)
-                logger.debug(
-                    "Heartbeat extended lease for request %s "
-                    "by %ds (old_expiry=%.1f, new_expiry=%.1f)",
-                    req_id,
-                    self._lease_extension,
-                    old,
-                    new_expiry,
-                )
+        req_ids_by_base: dict[str, str] = {}
+        if self._TRANSFER_MODE == "push":
+            for req_id in self._reqs_to_send:
+                req_ids_by_base.setdefault(get_base_request_id(req_id), req_id)
+
+        for heartbeat_request_id in payload.split(","):
+            req_id = heartbeat_request_id
+            if req_id not in self._reqs_to_send:
+                req_id = req_ids_by_base.get(get_base_request_id(req_id), "")
+            if req_id not in self._reqs_to_send:
+                continue
+            old = self._reqs_to_send[req_id]
+            self._reqs_to_send[req_id] = max(old, new_expiry)
+            logger.debug(
+                "Heartbeat extended lease for request %s "
+                "by %ds (old_expiry=%.1f, new_expiry=%.1f)",
+                req_id,
+                self._lease_extension,
+                old,
+                new_expiry,
+            )
 
     def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
         """
