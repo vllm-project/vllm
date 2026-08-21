@@ -89,11 +89,12 @@ fn lower_render_request(
         model: Some(model),
         token_ids,
         sampling_params: GenerateSamplingParams {
+            n: None,
             stop: text_request.decode_options.stop_strings.map(StringOrArray::Array),
             include_stop_str_in_output: text_request.decode_options.include_stop_str_in_output,
             skip_special_tokens: text_request.decode_options.skip_special_tokens,
             detokenize: true,
-            sampling: text_request.sampling_params,
+            inner: text_request.sampling_params,
         },
         stream,
         stream_options,

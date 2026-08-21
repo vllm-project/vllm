@@ -55,16 +55,18 @@ pub(super) fn prepare_generate_request(
             .as_ref()
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let include_logprobs = request.sampling_params.sampling.logprobs.is_some();
-    let include_prompt_logprobs = request.sampling_params.sampling.prompt_logprobs.is_some();
+    let include_logprobs = request.sampling_params.inner.logprobs.is_some();
+    let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
 
     let GenerateSamplingParams {
-        sampling: mut sampling_params,
+        inner: mut sampling_params,
         stop,
         include_stop_str_in_output,
         skip_special_tokens,
-        // Only gates `stop` (checked while validating); the Rust frontend
-        // always runs the shared detokenizer.
+        // Rejected while validating when not 1.
+        n: _,
+        // Only gates `stop` (checked while validating); with stop strings the
+        // route runs the shared detokenizer.
         detokenize: _,
     } = request.sampling_params;
 

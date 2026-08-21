@@ -19,13 +19,18 @@ use crate::routes::openai::utils::types::{
 /// so the detokenization-side options travel inside the same object as the
 /// sampler-side ones. `vllm_text::SamplingParams` stops at the sampler
 /// boundary, so the decode-side half is split back out here and lowered into
-/// `TextDecodeOptions`.
+/// `TextDecodeOptions`. `n` is captured for the same reason: the shared type
+/// omits it, and validation rejects `n > 1` rather than silently returning one
+/// choice.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(try_from = "Map<String, Value>")]
 pub struct GenerateSamplingParams {
+    /// Number of output sequences to generate. Only `1` is supported.
+    pub n: Option<u32>,
+    /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
-    pub sampling: SamplingParams,
+    pub inner: SamplingParams,
     pub stop: Option<StringOrArray>,
     pub include_stop_str_in_output: bool,
     pub skip_special_tokens: bool,
@@ -37,7 +42,8 @@ pub struct GenerateSamplingParams {
 impl Default for GenerateSamplingParams {
     fn default() -> Self {
         Self {
-            sampling: SamplingParams::default(),
+            n: None,
+            inner: SamplingParams::default(),
             stop: None,
             include_stop_str_in_output: false,
             skip_special_tokens: true,
@@ -57,13 +63,14 @@ impl TryFrom<Map<String, Value>> for GenerateSamplingParams {
     fn try_from(mut object: Map<String, Value>) -> Result<Self, Self::Error> {
         let defaults = Self::default();
         Ok(Self {
+            n: take_field(&mut object, "n")?.flatten(),
             stop: take_field::<Option<StringOrArray>>(&mut object, "stop")?.flatten(),
             include_stop_str_in_output: take_field(&mut object, "include_stop_str_in_output")?
                 .unwrap_or(defaults.include_stop_str_in_output),
             skip_special_tokens: take_field(&mut object, "skip_special_tokens")?
                 .unwrap_or(defaults.skip_special_tokens),
             detokenize: take_field(&mut object, "detokenize")?.unwrap_or(defaults.detokenize),
-            sampling: serde_json::from_value(Value::Object(object))?,
+            inner: serde_json::from_value(Value::Object(object))?,
         })
     }
 }
