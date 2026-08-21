@@ -205,6 +205,33 @@ DEFAULT_POLICIES: tuple[Policy, ...] = (
     _resolve_data_parallel_size,
 )
 
+# Select tuning behavior from the hardware requested by the Recipes rendering,
+# not from devices physically present in the host. A GPU server still exposes
+# its host CPU topology, so host inspection alone cannot determine deployment
+# intent.
+HARDWARE_TUNING_POLICIES: dict[str, tuple[Policy, ...]] = {
+    "xeon6": DEFAULT_POLICIES,
+}
+
+
+def get_runtime_tuning_policies(
+    recipe_hardware: object,
+) -> tuple[Policy, ...]:
+    if not isinstance(recipe_hardware, str) or not recipe_hardware:
+        raise ValueError(
+            "Runtime tuning requires the resolved Recipes JSON to declare "
+            "a non-empty `hardware` field."
+        )
+
+    policies = HARDWARE_TUNING_POLICIES.get(recipe_hardware)
+    if policies is None:
+        supported = ", ".join(sorted(HARDWARE_TUNING_POLICIES))
+        raise ValueError(
+            "Runtime tuning is not supported for recipe hardware "
+            f"{recipe_hardware!r}. Currently supported: {supported}."
+        )
+    return policies
+
 
 def finetune_runtime_config(
     config: dict[str, Any],
