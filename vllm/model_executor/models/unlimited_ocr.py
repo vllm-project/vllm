@@ -225,14 +225,13 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+    ) -> tuple[list[int], MultiModalProcessingInfo]:
         # The processor logic differs for single-image (crop) vs multi-image
         # (no crop) requests. The processing cache assumes per-item output is
         # invariant of how many images are passed per prompt, so we only cache
         # the single-image case and recompute multi-image requests fresh.
         if inputs.mm_data_items.get_count("image", strict=False) > 1:
-            prompt_ids, mm_info = self._apply_hf_processor(inputs, timing_ctx)
-            return prompt_ids, mm_info, False
+            return self._apply_hf_processor(inputs, timing_ctx)
 
         return super()._cached_apply_hf_processor(inputs, timing_ctx)
 

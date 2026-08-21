@@ -141,6 +141,14 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingIn
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[list[int], BatchFeature]:
+        # HF processor adds sep token for chat mode
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        sep_token_id = vocab[tokenizer.sep_token]  # type: ignore
+
+        prompt = [*prompt, sep_token_id]
+
         valid_mm_items = mm_items.select(
             {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
@@ -159,13 +167,7 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingIn
         )
         processed_data.update(passthrough_data)
 
-        # HF processor adds sep token for chat mode
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-
-        sep_token_id = vocab[tokenizer.sep_token]  # type: ignore
-
-        return prompt + [sep_token_id], processed_data
+        return prompt, processed_data
 
     def _get_mm_fields_config(
         self,

@@ -51,12 +51,10 @@ from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    MultiModalProcessingInfo,
     ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
-    TimingContext,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -213,6 +211,9 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
 
 
 class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]):
+    # The tokens are already inserted by the chat template
+    hf_processor_applies_updates = True
+
     def _get_mm_fields_config(
         self,
         hf_inputs: Mapping[str, NestedTensors],
@@ -284,16 +285,6 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
                 replacement=get_replacement,
             ),
         ]
-
-    def _cached_apply_hf_processor(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
-        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(inputs, timing_ctx)
-
-        # NOTE: The tokens are already inserted by the chat template
-        return prompt_ids, mm_info, True
 
 
 @MULTIMODAL_REGISTRY.register_processor(

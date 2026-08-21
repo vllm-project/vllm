@@ -8,6 +8,7 @@ from enum import Enum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
+    ClassVar,
     Generic,
     NamedTuple,
     Protocol,
@@ -1176,6 +1177,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with `transformers.ProcessorMixin`.
     """
 
+    hf_processor_applies_updates: ClassVar[bool] = False
+    """
+    Only set to True if the tokenizer or chat template
+    (which are run before MM processing) inserts placeholder tokens.
+    """
+
     def __init__(
         self,
         info: _I,
@@ -1477,7 +1484,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+    ) -> tuple[list[int], MultiModalProcessingInfo]:
         """
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
@@ -1486,8 +1493,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         _, passthrough_data = self._get_hf_mm_data(inputs.mm_data_items)
         if cache is None or passthrough_data:
-            prompt_ids, mm_info = self._apply_hf_processor(inputs, timing_ctx)
-            return prompt_ids, mm_info, False
+            return self._apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("get_mm_hashes"):
             mm_hashes = inputs.get_mm_hashes(
@@ -1506,10 +1512,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # so we can't apply prompt updates until the new multimodal
         # items are combined with the cached multimodal items
         with timing_ctx.record("apply_hf_processor"):
-            (
-                prompt_ids,
-                mm_missing_processed_data,
-            ) = self._apply_hf_processor_main(
+            prompt_ids, mm_missing_processed_data = self._apply_hf_processor_main(
                 prompt=inputs.prompt,
                 mm_items=mm_missing_data_items,
                 hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
@@ -1543,7 +1546,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             prompt_updates=mm_prompt_updates,
         )
 
-        return prompt_ids, mm_info, False
+        return prompt_ids, mm_info
 
     def _apply_token_matches(
         self,
@@ -1756,11 +1759,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        (
-            prompt_ids,
-            mm_info,
-            is_update_applied,
-        ) = self._cached_apply_hf_processor(inputs, timing_ctx)
+        prompt_ids, mm_info = self._cached_apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
@@ -1768,7 +1767,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 prompt_ids=prompt_ids,
                 mm_kwargs=mm_info.kwargs,
                 mm_prompt_updates=mm_info.prompt_updates,
-                is_update_applied=is_update_applied,
+                is_update_applied=self.hf_processor_applies_updates,
             )
 
         mm_placeholder_ranges = {

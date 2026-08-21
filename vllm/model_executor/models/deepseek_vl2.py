@@ -321,14 +321,13 @@ class DeepseekVL2MultiModalProcessor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+    ) -> tuple[list[int], MultiModalProcessingInfo]:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
         # perform caching for the most common case
         if inputs.mm_data_items.get_count("image", strict=False) > 2:
-            prompt_ids, mm_info = self._apply_hf_processor(inputs, timing_ctx)
-            return prompt_ids, mm_info, False
+            return self._apply_hf_processor(inputs, timing_ctx)
 
         return super()._cached_apply_hf_processor(inputs, timing_ctx)
 

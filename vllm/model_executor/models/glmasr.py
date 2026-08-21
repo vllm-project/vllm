@@ -770,8 +770,6 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         audio = mm_data.get("audio", [])
         audio_list = [audio] if audio and not isinstance(audio, list) else audio
 
-        # Early return for text-only.
-
         # Handle sampling_rate
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         hf_processor_mm_kwargs = dict(
@@ -779,7 +777,6 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             sampling_rate=feature_extractor.sampling_rate,
         )
 
-        # Call parent method
         outputs = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_processor_mm_kwargs),
             mm_data,
