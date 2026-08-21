@@ -472,6 +472,22 @@ def paged_mqa_logits_module():
     return None
 
 
+@functools.lru_cache
+def _aiter_top_k_per_row_decode():
+    """Resolve AITER's decode top-k, which routes FlyDSL vs HIP by arch/shape.
+
+    Returns None when the installed aiter predates the dispatcher, so the caller
+    falls back to the native ``torch.ops._C`` kernel.
+    """
+    if find_spec("aiter") is None:
+        return None
+    try:
+        from aiter import top_k_per_row_decode
+    except ImportError:
+        return None
+    return top_k_per_row_decode
+
+
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -882,16 +898,29 @@ def rocm_aiter_sparse_attn_indexer(
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
         num_rows = logits.shape[0]
 
-        torch.ops._C.top_k_per_row_decode(
-            logits,
-            next_n,
-            decode_metadata.seq_lens,
-            topk_indices,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
-            topk_tokens,
-        )
+        aiter_top_k_per_row_decode = _aiter_top_k_per_row_decode()
+        if aiter_top_k_per_row_decode is not None:
+            aiter_top_k_per_row_decode(
+                logits,
+                next_n,
+                decode_metadata.seq_lens,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+        else:
+            torch.ops._C.top_k_per_row_decode(
+                logits,
+                next_n,
+                decode_metadata.seq_lens,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
