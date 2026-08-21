@@ -11,12 +11,31 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+    apply_moe_activation,
+    apply_moe_activation_supported,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.platforms import current_platform
+
+DEVICE = current_platform.device_type
+
+pytestmark = [
+    pytest.mark.skipif(
+        not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+        reason="Triton MoE kernels require a CUDA-alike or XPU device.",
+    ),
+    pytest.mark.skipif(
+        current_platform.is_cuda_alike()
+        and not current_platform.has_device_capability(80),
+        reason="Triton MoE kernels require compute capability >= 8.0 on CUDA/ROCm.",
+    ),
+]
 
 # Test parameters
 M_SIZES = [1, 16, 64]
@@ -31,6 +50,49 @@ NO_MUL_ACTIVATIONS = [
 ]
 
 
+def test_apply_moe_activation_supported_contract():
+    supported = {
+        activation
+        for activation in MoEActivation
+        if apply_moe_activation_supported(activation)
+    }
+
+    assert supported == set(MoEActivation) - {MoEActivation.RELU2}
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    "activation",
+    [
+        activation
+        for activation in MoEActivation
+        if apply_moe_activation_supported(activation)
+    ],
+)
+@torch.inference_mode()
+def test_supported_apply_moe_activation_executes(activation: MoEActivation):
+    output_width = 64
+    input_width = output_width * 2 if activation.is_gated else output_width
+    input = torch.randn(2, input_width, device="cuda", dtype=torch.bfloat16)
+    output = torch.empty(2, output_width, device="cuda", dtype=torch.bfloat16)
+    activation_config = ApplyMoEActivationConfig()
+    if activation == MoEActivation.SITU:
+        activation_config = ApplyMoEActivationConfig(activation_situ_beta=1.0)
+    elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        activation_config = ApplyMoEActivationConfig(clamp_limit=7.0)
+
+    apply_moe_activation(activation, output, input, activation_config=activation_config)
+
+    assert torch.isfinite(output).all()
+
+
+@pytest.mark.parametrize("activation", list(MoEActivation))
+def test_triton_activation_metadata_tracks_shared_apply(activation: MoEActivation):
+    assert TritonExperts._supports_activation(
+        activation
+    ) == apply_moe_activation_supported(activation)
+
+
 def make_test_tensors(
     m: int,
     n: int,
@@ -38,7 +100,7 @@ def make_test_tensors(
     num_experts: int,
     topk: int,
     dtype: torch.dtype = torch.bfloat16,
-    device: str = "cuda",
+    device: str = DEVICE,
 ):
     """Create test tensors for MoE with non-gated activation.
 
@@ -58,10 +120,6 @@ def make_test_tensors(
     return hidden_states, w1, w2, topk_weights, topk_ids
 
 
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(80),
-    reason="Requires compute capability >= 8.0",
-)
 @pytest.mark.parametrize("m", M_SIZES)
 @pytest.mark.parametrize("n", N_SIZES)
 @pytest.mark.parametrize("k", K_SIZES)
@@ -144,10 +202,6 @@ def test_triton_experts_no_mul_activation(
     assert output.abs().sum() > 0, "Output is all zeros"
 
 
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(80),
-    reason="Requires compute capability >= 8.0",
-)
 @torch.inference_mode()
 def test_workspace_shapes_no_mul_vs_gated():
     """Test that workspace shapes differ correctly between gated and non-gated."""
@@ -185,10 +239,6 @@ def test_workspace_shapes_no_mul_vs_gated():
     assert out_no_mul == out_gated == (M, K)
 
 
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(80),
-    reason="Requires compute capability >= 8.0",
-)
 @torch.inference_mode()
 def test_adjust_n_for_activation():
     """Test the adjust_N_for_activation method."""

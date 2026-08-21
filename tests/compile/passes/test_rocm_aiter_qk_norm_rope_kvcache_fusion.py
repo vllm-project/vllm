@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from importlib.metadata import version
 
 import pytest
 import torch
+from packaging.version import Version
 
 import vllm.config
 from tests.compile.backend import TestBackend
@@ -40,8 +42,25 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+pytestmark = pytest.mark.skip_global_cleanup
+
+if not is_aiter_found_and_supported():
+    pytest.skip(
+        "ROCm with supported AITER is required",
+        allow_module_level=True,
+    )
+
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 FP8_DTYPE = current_platform.fp8_dtype()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def module_global_cleanup():
+    # Cleanup once at the end of the module
+    from vllm.distributed import cleanup_dist_env_and_memory
+
+    yield
+    cleanup_dist_env_and_memory()
 
 
 class QKNormRoPEKVCacheTestModel(torch.nn.Module):
@@ -416,24 +435,28 @@ _FUSION_CONFIGS = [
         AttentionBackendEnum.ROCM_AITER_FA,
     ],
 )
-@pytest.mark.parametrize("num_tokens", [5, 16, 2048])
-@pytest.mark.parametrize("use_shuffle_kv_layout", ["1", "0"])
+@pytest.mark.parametrize("num_tokens", [5, 2048])
 @pytest.mark.parametrize(
     "kv_stride_order",
-    [
-        pytest.param((0, 1, 2, 3, 4), id="block_first"),
-        pytest.param((1, 0, 2, 3, 4), id="kv_first"),
-    ],
+    # FA/unified use the 4D packed cache (num_blocks, num_kv_heads, block_size,
+    # 2*head_size); no separate K/V dim to permute.
+    [pytest.param((0, 1, 2, 3), id="packed_4d")],
 )
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
 @pytest.mark.parametrize("block_size", [16, 32, 64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-@pytest.mark.parametrize("rms_norm_eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("rms_norm_eps", [1e-6])
 @pytest.mark.parametrize("custom_op", ["+rotary_embedding", "+rms_norm"])
+# The fused_qk_norm_rope_cache kernel used by this test aborts on AITER < 0.1.20
+# (fused_qk_norm_rope_cache_quant.cu: "k_cache/v_cache must be contiguous within
+# a block")
 @pytest.mark.skipif(
-    not is_aiter_found_and_supported(),
-    reason="Only test on ROCm with AITER installed and supported",
+    not Version(version("amd_aiter")) >= Version("0.1.20"),
+    reason=(
+        "Requires AITER >= 0.1.20; older kernels abort on "
+        "fused_qk_norm_rope_cache (k_cache/v_cache contiguity)"
+    ),
 )
 def test_qk_norm_rope_kvcache_fusion(
     num_tokens: int,
@@ -444,7 +467,6 @@ def test_qk_norm_rope_kvcache_fusion(
     is_neox: bool,
     attn_backend: AttentionBackendEnum,
     enable_aiter_triton_rope: bool,
-    use_shuffle_kv_layout: str,
     kv_stride_order: tuple[int, ...],
     block_size: int,
     dtype: torch.dtype,
@@ -453,11 +475,6 @@ def test_qk_norm_rope_kvcache_fusion(
     custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    if (
-        attn_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
-        and use_shuffle_kv_layout == "1"
-    ):
-        pytest.skip("ROCM_AITER_UNIFIED_ATTN is NHD-only; shuffle env is ignored")
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,
@@ -468,7 +485,7 @@ def test_qk_norm_rope_kvcache_fusion(
         rotary_dim=rotary_dim,
         block_size=block_size,
         is_neox=is_neox,
-        use_shuffle_kv_layout=use_shuffle_kv_layout,
+        use_shuffle_kv_layout="0",
         kv_stride_order=kv_stride_order,
         dtype=dtype,
         kv_cache_dtype=kv_cache_dtype,

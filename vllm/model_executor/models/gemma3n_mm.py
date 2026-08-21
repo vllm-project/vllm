@@ -54,6 +54,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (
@@ -83,6 +84,52 @@ class Gemma3nImagePixelInputs(TensorSchema):
     pixel_values: Annotated[torch.Tensor, TensorShape("bn", 3, "h", "w")]
 
 
+def batch_audio_features(
+    input_features: torch.Tensor | list[torch.Tensor],
+    input_features_mask: torch.Tensor | list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return mel features and their validity mask as batched tensors.
+
+    Audio features are unpadded per item so that a multimodal cache entry does
+    not depend on the batch it was first processed in.
+    [`MultiModalFieldConfig.batched`][vllm.multimodal.inputs.MultiModalFieldConfig.batched]
+    stacks items only when their shapes agree, so a batch of clips with
+    differing durations reaches the model as a list and must be re-padded here.
+
+    Padded frames are zero-filled and marked invalid. Audio towers consume the
+    mask, and callers keep only masked-in positions, so padding never reaches
+    the language model.
+
+    Gemma4 shares this helper: its audio path has the same unpad/re-pad
+    contract and the same fields.
+
+    Args:
+        input_features: `(bn, s, f)` tensor, or a list of `(s_i, f)` tensors
+            when clip durations differ.
+        input_features_mask: Matching `(bn, s)` tensor, or list of `(s_i,)`
+            tensors. `True` marks a valid frame.
+
+    Returns:
+        The `(bn, s_max, f)` features and their `(bn, s_max)` mask.
+    """
+    if isinstance(input_features, torch.Tensor):
+        return input_features.squeeze(1), input_features_mask.squeeze(1)
+
+    max_len = max(features.shape[0] for features in input_features)
+    batched_features = input_features[0].new_zeros(
+        (len(input_features), max_len, input_features[0].shape[-1])
+    )
+    batched_mask = input_features_mask[0].new_zeros(
+        (len(input_features_mask), max_len), dtype=torch.bool
+    )
+    for i, (features, mask) in enumerate(
+        zip(input_features, input_features_mask, strict=True)
+    ):
+        batched_features[i, : features.shape[0]] = features
+        batched_mask[i, : mask.shape[0]] = mask
+    return batched_features, batched_mask
+
+
 class Gemma3nAudioInputs(TensorSchema):
     """
     Dimensions:
@@ -92,8 +139,12 @@ class Gemma3nAudioInputs(TensorSchema):
     """
 
     type: Literal["audio"] = "audio"
-    input_features_padded: Annotated[torch.Tensor, TensorShape("bn", "s", "f")]
-    input_features_mask: Annotated[torch.Tensor, TensorShape("bn", "s")]
+    input_features_padded: Annotated[
+        torch.Tensor, TensorShape("bn", "s", "f", dynamic_dims={"s"})
+    ]
+    input_features_mask: Annotated[
+        torch.Tensor, TensorShape("bn", "s", dynamic_dims={"s"})
+    ]
 
 
 Gemma3nImageInputs = Gemma3nImagePixelInputs
@@ -211,7 +262,6 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # HF Transformers audio processor no longer accepts `audios` key.
         # We pop `audios` and replace it with `audio` key to suppress
@@ -222,7 +272,6 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
             prompt,
             mm_data,
             mm_kwargs,
-            tok_kwargs,
         )
 
         if "input_features" in processed_outputs:
@@ -339,6 +388,40 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         )
 
         return token_ids, res
+
+    def _apply_token_matches_with_placeholders(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[
+        list[int],
+        MultiModalPromptUpdatesApplyResult,
+        Mapping[str, list[PlaceholderFeaturesInfo]],
+    ]:
+        new_token_ids, match_result = self._apply_token_matches(
+            token_ids,
+            mm_prompt_updates,
+        )
+
+        placeholders: dict[str, list[PlaceholderFeaturesInfo]] = {
+            modality: [] for modality in mm_prompt_updates
+        }
+
+        if all(
+            all(update_idx is not None for update_idx in update_idxs)
+            for update_idxs in match_result.values()
+        ):
+            placeholders = dict(
+                self._find_mm_placeholders(
+                    new_token_ids,
+                    self._matched_updates_from_result(
+                        mm_prompt_updates,
+                        match_result,
+                    ),
+                )
+            )
+
+        return new_token_ids, match_result, placeholders
 
     def _find_mm_placeholders(
         self,
@@ -615,8 +698,10 @@ class Gemma3nForConditionalGeneration(
         audio_input: Gemma3nAudioInputs,
     ) -> list[torch.Tensor]:
         # Run on padded features to enable batching
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features, input_features_mask = batch_audio_features(
+            audio_input["input_features_padded"],
+            audio_input["input_features_mask"],
+        )
         audio_outputs = self.audio_tower(input_features, ~input_features_mask)
         audio_encodings = audio_outputs.last_hidden_state
         audio_mask = audio_outputs.audio_mel_mask
@@ -631,10 +716,18 @@ class Gemma3nForConditionalGeneration(
         # We handle both cases:
         # - If fewer tokens: pad with the embedding of the last vocab token
         # - If more tokens: truncate to the expected count
-        # TODO precompute and cache padding
-        audio_padding_toks = torch.tensor(
-            [[self.vocab_size - 1]], dtype=torch.long, device=audio_features.device
-        )
+        # Cache the single-scalar padding-token tensor per-device to avoid a
+        # synchronous H2D tensor construction on every forward.
+        cache = getattr(self, "_audio_padding_toks_cache", None)
+        if cache is None:
+            cache = {}
+            self._audio_padding_toks_cache = cache
+        audio_padding_toks = cache.get(audio_features.device)
+        if audio_padding_toks is None:
+            audio_padding_toks = async_tensor_h2d(
+                [[self.vocab_size - 1]], dtype=torch.long, device=audio_features.device
+            )
+            cache[audio_features.device] = audio_padding_toks
         audio_padding_embs = self.embed_audio(input_ids=audio_padding_toks)
         audio_features = torch.where(
             audio_mask.unsqueeze(-1), audio_padding_embs, audio_features

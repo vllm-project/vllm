@@ -225,7 +225,6 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
@@ -234,12 +233,11 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
             # MistralCommonVoxtralProcessor accepts "audio"
             mm_data["audio"] = audios
 
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+        outputs = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(text=prompt, **mm_data),
             # Avoid padding issue
-            tok_kwargs={**tok_kwargs, "return_tensors": None},
+            dict(**mm_kwargs, return_tensors=None),
         )
 
         # Missing batch dimension
@@ -773,15 +771,11 @@ class VoxtralEncoderModel(nn.Module):
         if global_log_mel_max := self.config.global_log_mel_max:
             if not isinstance(global_log_mel_max, float):
                 raise TypeError(f"{global_log_mel_max=} needs to be of type float.")
-            log_spec_max = torch.tensor(
-                global_log_mel_max,
-                device=log_spec.device,
-                dtype=log_spec.dtype,
-            )
+            # Use `clamp` to avoid gpu<->cpu sync.
+            log_spec = torch.clamp(log_spec, min=global_log_mel_max - 8.0)
         else:
             log_spec_max = log_spec.max()
-
-        log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
+            log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
         log_spec = (log_spec + 4.0) / 4.0
         return log_spec.to(input_dtype)
 
