@@ -95,6 +95,9 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
 )
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    profile_cudagraph_memory as _profile_cudagraph_memory,
+)
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
@@ -503,7 +506,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return {}
         return get_kv_cache_spec(self.vllm_config)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, is_profiling: bool = False
+    ) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
@@ -589,6 +594,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
+            is_profiling=is_profiling,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -624,7 +630,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kernel_block_sizes,
             self.vllm_config,
         )
-        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        if is_profiling:
+            self.kv_connector = NO_OP_KV_CONNECTOR
+        else:
+            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -848,9 +857,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
 
+    @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
-        # NOTE(woosuk): It is TBD whether we keep this API or not.
-        return 0
+        """Estimate the GPU memory required to capture CUDA graphs."""
+        return _profile_cudagraph_memory(self)
 
     @torch.inference_mode()
     def capture_model(self) -> int:
