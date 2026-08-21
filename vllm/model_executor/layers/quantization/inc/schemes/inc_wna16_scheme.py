@@ -72,6 +72,7 @@ class INCWna16Scheme(INCScheme):
                 )
 
                 backend = envs.VLLM_XPU_INC_WNA16_BACKEND
+                ark_disabled = envs.VLLM_INC_DISABLE_ARK
                 if backend in XPU_ONEDNN_BACKENDS:
                     if layer_config.bits != 4:
                         raise NotImplementedError(
@@ -84,19 +85,27 @@ class INCWna16Scheme(INCScheme):
                     return INCLinearMethod(INCXPULinearMethod(layer_config))
 
                 is_ark_available, ark_error, _, _ = get_ark_state()
-                if backend == "ark" and not is_ark_available:
-                    raise NotImplementedError(
-                        "VLLM_XPU_INC_WNA16_BACKEND=ark was requested but "
-                        f"auto_round_kernel is unavailable: "
-                        f"{ark_error or 'unknown error'}. Layer: {prefix}."
-                    )
-                if is_ark_available:
+                if backend == "ark":
+                    if ark_disabled:
+                        raise NotImplementedError(
+                            "VLLM_XPU_INC_WNA16_BACKEND=ark was requested but "
+                            "VLLM_INC_DISABLE_ARK is set. Layer: "
+                            f"{prefix}."
+                        )
+                    if not is_ark_available:
+                        raise NotImplementedError(
+                            "VLLM_XPU_INC_WNA16_BACKEND=ark was requested but "
+                            f"auto_round_kernel is unavailable: "
+                            f"{ark_error or 'unknown error'}. Layer: {prefix}."
+                        )
+                if is_ark_available and not ark_disabled:
                     return INCLinearMethod(INCARKLinearMethod(layer_config))
                 elif layer_config.bits == 2:
                     raise NotImplementedError(
                         "INC int2 on XPU requires the ARK backend. "
                         f"Layer: {prefix}. "
-                        f"auto_round_kernel unavailable: "
+                        + ("VLLM_INC_DISABLE_ARK is set. " if ark_disabled else "")
+                        + f"auto_round_kernel unavailable: "
                         f"{ark_error or 'unknown error'}"
                     )
 
