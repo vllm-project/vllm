@@ -456,27 +456,6 @@ class Scheduler(SchedulerInterface):
         end = min((s for s in stops if start < s < end), default=end)
         return max(end - start, 0)
 
-    def _align_encoder_cap_to_hash_block(
-        self,
-        num_computed_tokens: int,
-        num_new_tokens: int,
-        num_new_tokens_before_encoder_cap: int,
-    ) -> int:
-        """Prefer a hash-aligned encoder cap without blocking progress."""
-        if not (
-            self.mamba_has_prefill_checkpoint_blocks
-            and 0 < num_new_tokens < num_new_tokens_before_encoder_cap
-        ):
-            return num_new_tokens
-
-        aligned_end = (
-            (num_computed_tokens + num_new_tokens)
-            // self.hash_block_size
-            * self.hash_block_size
-        )
-        aligned_num_new_tokens = aligned_end - num_computed_tokens
-        return aligned_num_new_tokens if aligned_num_new_tokens > 0 else num_new_tokens
-
     def _get_local_prefix_cache_hit(
         self, request: Request
     ) -> tuple[KVCacheBlocks, int, int, bool]:
@@ -623,7 +602,6 @@ class Scheduler(SchedulerInterface):
             external_load_encoder_input: list[int] = []
             new_encoder_compute_budget = encoder_compute_budget
             if request.has_encoder_inputs:
-                num_new_tokens_before_encoder_cap = num_new_tokens
                 (
                     encoder_inputs_to_schedule,
                     num_new_tokens,
@@ -635,11 +613,6 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens,
                     encoder_compute_budget,
                     shift_computed_tokens=self.num_prefill_lookahead,
-                )
-                num_new_tokens = self._align_encoder_cap_to_hash_block(
-                    request.num_computed_tokens,
-                    num_new_tokens,
-                    num_new_tokens_before_encoder_cap,
                 )
 
             # Multi-module MTP: avoid ending a prefill chunk within
@@ -1022,7 +995,6 @@ class Scheduler(SchedulerInterface):
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
-                        num_new_tokens_before_encoder_cap = num_new_tokens
                         (
                             encoder_inputs_to_schedule,
                             num_new_tokens,
@@ -1034,11 +1006,6 @@ class Scheduler(SchedulerInterface):
                             num_new_tokens,
                             encoder_compute_budget,
                             shift_computed_tokens=self.num_prefill_lookahead,
-                        )
-                        num_new_tokens = self._align_encoder_cap_to_hash_block(
-                            num_computed_tokens,
-                            num_new_tokens,
-                            num_new_tokens_before_encoder_cap,
                         )
 
                     # Multi-module MTP: avoid ending a prefill chunk within
