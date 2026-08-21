@@ -168,8 +168,8 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def release_kv_cache_memory(self, mode: "PauseMode" = "abort") -> None:
-        """Discard KV cache physical GPU memory."""
+    async def release_kv_cache_memory(self) -> None:
+        """Discard KV cache physical GPU memory. Requires a completed pause."""
         ...
 
     @abstractmethod

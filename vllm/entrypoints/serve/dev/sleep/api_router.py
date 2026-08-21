@@ -31,8 +31,7 @@ async def sleep(raw_request: Request):
 
 @router.post("/release_kv_cache_memory")
 async def release_kv_cache_memory(raw_request: Request):
-    mode = raw_request.query_params.get("mode", "abort")
-    await engine_client(raw_request).release_kv_cache_memory(mode)
+    await engine_client(raw_request).release_kv_cache_memory()
     return Response(status_code=200)
 
 
