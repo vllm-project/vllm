@@ -35,9 +35,30 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
     flash_attn_varlen_func,
     get_scheduler_metadata,
+    is_fa_version_supported,
 )
 
 logger = init_logger(__name__)
+
+
+def _get_mla_fa_version(vllm_config: VllmConfig | None = None) -> int:
+    fa_version = (
+        vllm_config.attention_config.flash_attn_version
+        if vllm_config is not None
+        and vllm_config.attention_config.flash_attn_version is not None
+        else get_flash_attn_version()
+    )
+    if fa_version not in (3, 4) and is_fa_version_supported(4):
+        fa_version = 4
+    if fa_version not in (3, 4):
+        raise NotImplementedError(
+            f"FlashAttention MLA decode requires FA3 or FA4, got FA{fa_version}"
+        )
+    if not is_fa_version_supported(fa_version):
+        raise NotImplementedError(
+            f"FlashAttention MLA decode requested unsupported FA{fa_version}"
+        )
+    return fa_version
 
 
 class FlashAttnMLABackend(MLACommonBackend):
@@ -134,7 +155,8 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             supports_dcp_with_varlen=(interleave_size == 1),
         )
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        self.fa_aot_schedule = get_flash_attn_version() == 3
+        self.fa_version = _get_mla_fa_version(vllm_config)
+        self.fa_aot_schedule = self.fa_version == 3
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -206,7 +228,6 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
     ) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
-
         # For Flash Attention MLA + full cudagraph
         max_num_splits = 0
         if (
@@ -233,7 +254,11 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             max_num_splits=max_num_splits,
         )
 
-        if self.use_full_cuda_graph and scheduler_metadata is not None:
+        if (
+            self.use_full_cuda_graph
+            and self.fa_aot_schedule
+            and scheduler_metadata is not None
+        ):
             n = scheduler_metadata.shape[0]
             # Ensure the persistent buffer is large enough
             assert n <= self.scheduler_metadata.shape[0], (
@@ -294,6 +319,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         )
 
         assert flash_attn_supports_mla(), "FlashAttnMLA is not supported on this device"
+        self.fa_version = _get_mla_fa_version()
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -356,7 +382,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             softmax_scale=self.scale,
             causal=True,
             return_softmax_lse=self.need_to_return_lse_for_decode,
-            fa_version=3,  # only version 3 is supported
+            fa_version=self.fa_version,
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
             num_splits=attn_metadata.decode.max_num_splits,
             cp_world_size=self.dcp_world_size,

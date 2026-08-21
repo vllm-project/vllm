@@ -1,0 +1,65 @@
+description: "Production-path standard attention mix"
+
+provenance:
+  geometries:
+    - model_id: tiiuae/falcon-7b
+      role: D64 MQA selector with reduced query-head count
+      synthetic: true
+    - model_id: meta-llama/Llama-3.1-8B
+      role: D128 GQA production geometry
+      synthetic: false
+    - model_id: microsoft/Phi-3-mini-128k-instruct
+      role: D96 MHA production geometry
+      synthetic: false
+    - model_id: google/gemma-2-9b
+      role: D256 GQA production geometry
+      synthetic: false
+
+model:
+  num_layers: 60
+  block_size: 32
+
+model_parameter_sweep:
+  values:
+    # Representative MQA geometry for the D64 selector family.
+    - num_layers: 32
+      head_dim: 64
+      num_q_heads: 16
+      num_kv_heads: 1
+    # Llama 3.1 8B TP1.
+    # https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
+    - num_layers: 32
+      head_dim: 128
+      num_q_heads: 32
+      num_kv_heads: 8
+    # Phi-3 Mini 128K TP1.
+    # https://huggingface.co/microsoft/Phi-3-mini-128k-instruct/blob/main/config.json
+    - num_layers: 32
+      head_dim: 96
+      num_q_heads: 32
+      num_kv_heads: 32
+    # Gemma 2 9B TP1 geometry. This suite does not claim local-window or
+    # attention-softcap coverage.
+    # https://huggingface.co/google/gemma-2-9b/blob/main/config.json
+    - num_layers: 42
+      head_dim: 256
+      num_q_heads: 16
+      num_kv_heads: 8
+  label_format: "{backend}_d{head_dim}_h{num_q_heads}_kv{num_kv_heads}"
+
+batch_specs:
+  - "q2k"
+  - "q1s512"
+  - "q1s4k"
+  - "32q1s4k"
+  - "2q1k_16q1s2k"
+  - "16q4s4k"
+  - "4q512s8k"
+  # Heterogeneous residual lengths across prefill, decode, spec, and extend.
+  - "q257_7q1s1057_3q4s2051_2q129s4093"
+  # Keep every sequence within Gemma 2 9B's 8,192-token context.
+  - "q769_3q1s6143_2q8s3073_q257s8191"
+
+device: "cuda:0"
+profile_memory: false
+cuda_graphs: true

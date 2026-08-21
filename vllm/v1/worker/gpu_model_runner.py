@@ -1060,7 +1060,7 @@ class GPUModelRunner(
         v_attr_names = ("_v_scale", "v_scale")
 
         attn_layers = self.compilation_config.static_forward_context
-        for name, module in attn_layers.items():
+        for module in attn_layers.values():
             if isinstance(module, (Attention, MLAAttention)):
                 # TODO: Generally, scale is 1.0 if user uses on-the-fly fp8
                 # kvcache quant. However, to get better accuracy, compression
@@ -5860,7 +5860,8 @@ class GPUModelRunner(
         randomize_inputs: bool = False,
     ):
         """
-        Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
+        Randomize dummy inputs when explicitly requested or when
+        VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set for data parallelism.
         This is to help balance expert-selection
          - during profile_run
          - during DP rank dummy run
@@ -5945,8 +5946,10 @@ class GPUModelRunner(
         remove_lora: bool = True,
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
-        profile_seq_lens: int | None = None,
+        profile_seq_lens: int | Sequence[int] | None = None,
+        *,
         randomize_inputs: bool = False,
+        num_reqs: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5971,9 +5974,12 @@ class GPUModelRunner(
             remove_lora: If False, dummy LoRAs are not destroyed after the run
             num_active_loras: Number of distinct active LoRAs to capture for.
                 LoRA is activated when num_active_loras > 0.
-            profile_seq_lens: If provided, use this value for seq_lens instead
-                of max_query_len. Used to profile attention workspace that
-                scales with context length.
+            profile_seq_lens: If provided, use this value or per-request values
+                for seq_lens instead of max_query_len. Used to profile attention
+                workspace that scales with context length.
+            randomize_inputs: If True, randomize the dummy model inputs.
+            num_reqs: If provided, distribute tokens across exactly this many
+                requests instead of the scheduler maximum.
         """
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
@@ -6006,6 +6012,11 @@ class GPUModelRunner(
         # has num_tokens in total.
         assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
+        if num_reqs is not None:
+            assert not create_mixed_batch
+            assert not uniform_decode
+            assert 0 < num_reqs <= min(num_tokens, max_num_reqs)
+            max_num_reqs = num_reqs
         if create_mixed_batch:
             assert not uniform_decode
             # Create mixed batch:
@@ -6119,7 +6130,13 @@ class GPUModelRunner(
             # Otherwise, it only happens for cudagraph_runtime_mode=FULL.
             if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
                 if profile_seq_lens is not None:
-                    seq_lens = profile_seq_lens  # type: ignore[assignment]
+                    if isinstance(profile_seq_lens, Sequence):
+                        assert len(profile_seq_lens) == num_reqs
+                        seq_lens = torch.tensor(
+                            profile_seq_lens, dtype=torch.int, device="cpu"
+                        )
+                    else:
+                        seq_lens = profile_seq_lens  # type: ignore[assignment]
                 elif create_mixed_batch:
                     # In the mixed batch mode (used for FI warmup), we use
                     # shorter sequence lengths to run faster.

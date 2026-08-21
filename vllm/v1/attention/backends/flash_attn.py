@@ -355,12 +355,24 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     # to FULL_AND_PIECEWISE.
     # TODO(luka, lucas): audit FA2 as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
-    _cudagraph_support = (
-        AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() == 3
-        else AttentionCGSupport.UNIFORM_BATCH
-    )
+    _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
     supports_update_block_table: bool = True
+
+    @staticmethod
+    def _get_effective_fa_version(
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "KVCacheSpec",
+    ) -> int | None:
+        model_config = vllm_config.model_config
+        head_size = getattr(kv_cache_spec, "head_size", None)
+        return get_flash_attn_version(
+            requires_alibi=model_config is not None and model_config.uses_alibi,
+            requires_local_attention=(
+                getattr(kv_cache_spec, "sliding_window", None) is not None
+            ),
+            head_size=head_size,
+            head_size_v=getattr(kv_cache_spec, "head_size_v", head_size),
+        )
 
     @classmethod
     def get_cudagraph_support(
@@ -368,6 +380,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         vllm_config: "VllmConfig",
         kv_cache_spec: "KVCacheSpec",
     ) -> AttentionCGSupport:
+        if cls._get_effective_fa_version(vllm_config, kv_cache_spec) == 3:
+            return AttentionCGSupport.ALWAYS
         return cls._cudagraph_support
 
     def _get_scheduler_metadata(
@@ -444,7 +458,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        self.aot_schedule = get_flash_attn_version() == 3
+        self.fa_version = self._get_effective_fa_version(vllm_config, kv_cache_spec)
+        self.aot_schedule = self.fa_version == 3
 
         try:
             from vllm.distributed.parallel_state import get_dcp_group
@@ -462,7 +477,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         # path (for example max_dcp_context_kv_len), and those Python-side
         # fields are not refreshed in-place between graph replays. Keep the
         # fused path disabled until DCP gets a full replay-safe refresh model.
-        self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
+        # FA4 planner metadata is rebuilt for each advancing draft step.
+        self.supports_draft_decode_metadata_update = (
+            self.dcp_world_size == 1 and self.fa_version != 4
+        )
 
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
@@ -494,6 +512,23 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.max_num_splits = (
                 self.attention_config.flash_attn_max_num_splits_for_cuda_graph
             )
+
+        if self.fa_version == 4 and current_platform.is_device_capability(90):
+            from vllm.vllm_flash_attn.cute.split_scheduler import (
+                SplitSchedulerPlanner,
+            )
+
+            # Hopper FA4 uses per-request SplitKV scheduling; retaining the
+            # planner also keeps its workspace stable for CUDA graph capture.
+            self.fa4_split_planner = SplitSchedulerPlanner(
+                device=self.device,
+                max_batch_size=max(
+                    vllm_config.scheduler_config.max_num_seqs,
+                    self.max_cudagraph_size or 0,
+                ),
+            )
+        else:
+            self.fa4_split_planner = None
 
         if self.dcp_world_size > 1:
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
@@ -577,6 +612,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     self.aot_schedule = False
                     aot_schedule = False
 
+        # Symmetrize the spec's sliding_window for non-causal attention.
+        group_sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
+        base_window = (
+            (-1, -1) if group_sliding_window is None else (group_sliding_window - 1, 0)
+        )
+        effective_sliding_window = _maybe_symmetrize_window(base_window, causal)
+
         max_num_splits = 0  # 0 means use FA3's heuristics, not CG compatible
         if (
             self.use_full_cuda_graph
@@ -604,6 +646,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_kv_lens = None
         suffix_kv_lens = None
         prefix_scheduler_metadata = None
+        split_plan = None
 
         if self.dcp_world_size > 1:
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
@@ -708,7 +751,44 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 causal=causal,
                 max_num_splits=max_num_splits,
             )
+            if (
+                self.fa4_split_planner is not None
+                and common_attn_metadata.query_start_loc_cpu is not None
+                and common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            ):
+                use_graph_bound = (
+                    self.use_full_cuda_graph
+                    and self.max_cudagraph_size is not None
+                    and num_actual_tokens <= self.max_cudagraph_size
+                )
+                cuda_graph_max_num_splits = (
+                    (
+                        1
+                        if envs.VLLM_BATCH_INVARIANT
+                        else (
+                            self.attention_config.flash_attn_max_num_splits_for_cuda_graph
+                        )
+                    )
+                    if use_graph_bound
+                    else None
+                )
+                split_plan = self.fa4_split_planner(
+                    common_attn_metadata.query_start_loc_cpu[: num_reqs + 1],
+                    common_attn_metadata.seq_lens_cpu_upper_bound[:num_reqs],
+                    num_heads_q=self.num_heads_q,
+                    num_heads_kv=self.num_heads_kv,
+                    head_dim=self.headdim,
+                    head_dim_v=self.headdim,
+                    has_qv=False,
+                    cp_world_size=self.dcp_world_size,
+                    window_size=effective_sliding_window,
+                    cuda_graph_max_num_splits=cuda_graph_max_num_splits,
+                    fast_build=fast_build,
+                )
         scheduler_metadata = self._store_scheduler_metadata(scheduler_metadata)
+        if split_plan is not None:
+            max_num_splits = split_plan.num_splits
+            scheduler_metadata = split_plan.scheduler_metadata
 
         if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
             causal = causal.to(torch.int32)
