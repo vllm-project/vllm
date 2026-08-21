@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1202,6 +1203,53 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
             "model.layers.1.eagle_attn",
         ]
         assert worker.registered_layer_indices == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_sender_listener_binds_ipv6_address():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.hostname = "2001:db8::1"
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.register_worker_with_bootstrap = AsyncMock(
+        side_effect=RuntimeError("bootstrap failed")
+    )
+
+    sock = MagicMock()
+    sock.bind_to_random_port.return_value = 12345
+    worker.async_zmq_ctx.socket.return_value = sock
+
+    ready_event = threading.Event()
+    startup_error: list[BaseException] = []
+    with pytest.raises(RuntimeError, match="bootstrap failed"):
+        await worker._mooncake_sender_listener(ready_event, startup_error)
+
+    sock.setsockopt.assert_any_call(zmq.IPV6, 1)
+    sock.bind_to_random_port.assert_called_once_with("tcp://[2001:db8::1]")
+    assert ready_event.is_set()
+    assert len(startup_error) == 1
+
+
+@pytest.mark.asyncio
+async def test_sender_listener_reports_startup_error():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.hostname = "127.0.0.1"
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+
+    sock = MagicMock()
+    sock.bind_to_random_port.side_effect = RuntimeError("bind failed")
+    worker.async_zmq_ctx.socket.return_value = sock
+
+    ready_event = threading.Event()
+    startup_error: list[BaseException] = []
+    with pytest.raises(RuntimeError, match="bind failed"):
+        await worker._mooncake_sender_listener(ready_event, startup_error)
+
+    assert ready_event.is_set()
+    assert len(startup_error) == 1
 
 
 @pytest.mark.asyncio
