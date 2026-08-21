@@ -761,6 +761,11 @@ class FusedMoEExperts(ABC):
         """
         return False
 
+    @staticmethod
+    def supports_invalid_expert_routes() -> bool:
+        """Whether negative expert-map rows are skipped without dummy work."""
+        return False
+
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """
         A flag indicating whether or not this class can process packed ue8m0
@@ -1645,6 +1650,9 @@ class FusedMoEKernel:
 
     def supports_lora(self) -> bool:
         return self.fused_experts.supports_lora()
+
+    def supports_invalid_expert_routes(self) -> bool:
+        return self.fused_experts.supports_invalid_expert_routes()
 
     def _post_init_setup(self):
         """

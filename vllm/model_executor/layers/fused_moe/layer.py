@@ -23,6 +23,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
 )
+from vllm.model_executor.layers.fused_moe.expert_replacement import (
+    ConstantExpertReplacement,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
@@ -135,6 +138,7 @@ def FusedMoEFactory(
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
+    expert_replacement: ConstantExpertReplacement | None = None,
 ) -> MoERunner:
     """Factory function for creating MoE execution pipeline.
 
@@ -222,6 +226,35 @@ def FusedMoEFactory(
         parallel_config=vllm_config.parallel_config,
     )
 
+    if expert_replacement is not None:
+        unsupported = [
+            name
+            for name, enabled in (
+                ("quantized MoE weights", quant_config is not None),
+                ("MoE LoRA", vllm_config.lora_config is not None),
+                ("EPLB", num_redundant_experts != 0 or enable_eplb),
+                ("fused shared experts", fuse_shared_experts),
+                ("expert parallelism", moe_parallel_config.use_ep),
+                ("data parallelism", moe_parallel_config.dp_size > 1),
+                ("prefill-context parallelism", moe_parallel_config.pcp_size > 1),
+                ("sequence parallelism", moe_parallel_config.is_sequence_parallel),
+                ("deferred MoE reduction", not reduce_results),
+                ("router weights on expert inputs", apply_router_weight_on_input),
+                ("routed input transforms", routed_input_transform is not None),
+                ("routed output transforms", routed_output_transform is not None),
+            )
+            if enabled
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                "expert substitution does not support: " + ", ".join(unsupported)
+            )
+        if expert_replacement.num_compute_experts != num_experts:
+            raise ValueError(
+                "num_experts must equal the number of retained compute experts: "
+                f"{num_experts} != {expert_replacement.num_compute_experts}"
+            )
+
     # Resolve the deferred all-reduce request against the parallel config.
     skip_final_all_reduce = (
         not reduce_results
@@ -238,6 +271,8 @@ def FusedMoEFactory(
             fuse_shared_experts,
         )
     )
+    if expert_replacement is not None:
+        logical_num_experts = expert_replacement.num_logical_experts
 
     # Initialize EPLB manager (or None?)
     eplb_state: EplbLayerState | None = None
@@ -279,7 +314,11 @@ def FusedMoEFactory(
     if router is None:
         router = create_fused_moe_router(
             top_k=top_k,
-            global_num_experts=global_num_experts,
+            global_num_experts=(
+                logical_num_experts
+                if expert_replacement is not None
+                else global_num_experts
+            ),
             eplb_state=eplb_state,
             renormalize=renormalize,
             use_grouped_topk=use_grouped_topk,
@@ -328,6 +367,21 @@ def FusedMoEFactory(
         # since model_config is not set in the pytest test.
         moe_in_dtype = params_dtype
 
+    moe_backend = vllm_config.kernel_config.moe_backend
+    if expert_replacement is not None:
+        if moe_backend == "auto":
+            moe_backend = "triton"
+            logger.info(
+                "Using the Triton MoE backend for %s because expert "
+                "substitution requires invalid-route skipping.",
+                prefix,
+            )
+        elif moe_backend != "triton":
+            raise NotImplementedError(
+                "expert replacement currently requires the Triton MoE backend; "
+                f"backend={moe_backend!r}"
+            )
+
     moe_config = FusedMoEConfig(
         num_experts=global_num_experts,
         experts_per_token=top_k,
@@ -338,7 +392,7 @@ def FusedMoEFactory(
         num_logical_experts=logical_num_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=moe_in_dtype,
-        moe_backend=vllm_config.kernel_config.moe_backend,
+        moe_backend=moe_backend,
         router_logits_dtype=router_logits_dtype,
         max_num_tokens=max_num_batched_tokens,
         has_bias=has_bias,
@@ -353,6 +407,7 @@ def FusedMoEFactory(
         activation_situ_linear_beta=activation_situ_linear_beta,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
         skip_final_all_reduce=skip_final_all_reduce,
+        skip_invalid_expert_routes=expert_replacement is not None,
     )
 
     logger.debug("FusedMoEConfig = %s", moe_config)
@@ -391,8 +446,18 @@ def FusedMoEFactory(
         # TODO get from router? needs to be truncated?
         e_score_correction_bias=e_score_correction_bias,
         apply_router_weight_on_input=apply_router_weight_on_input,
+        expert_replacement=expert_replacement,
         **routed_experts_args if routed_experts_args is not None else {},
     )
+
+    if expert_replacement is not None and (
+        routed_experts.quant_method.is_monolithic
+        or not routed_experts.quant_method.supports_invalid_expert_routes
+    ):
+        raise NotImplementedError(
+            "expert replacement requires a decomposed MoE backend that skips "
+            "invalid expert-map routes without dummy GEMMs"
+        )
 
     if runner_cls is None:
         runner_cls = MoERunner
@@ -414,6 +479,7 @@ def FusedMoEFactory(
         routed_scaling_factor=routed_scaling_factor
         if apply_routed_scale_to_output
         else 1.0,
+        expert_replacement=expert_replacement,
         **runner_args if runner_args is not None else {},
     )
 

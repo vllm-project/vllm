@@ -56,7 +56,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    clear_expert_substitution_load_state,
     fused_moe_make_expert_params_mapping,
+    make_expert_replacement,
+    validate_expert_substitution_targets,
+    validate_expert_substitution_weights_loaded,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
@@ -293,6 +297,7 @@ class DeepseekV2MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         apply_routed_scale_to_output: bool = False,
+        layer_idx: int | None = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -333,7 +338,23 @@ class DeepseekV2MoE(nn.Module):
 
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_logical_experts = self.n_routed_experts
-        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        replacement = None
+        if layer_idx is not None:
+            replacement = make_expert_replacement(
+                config=config,
+                module_path=f"model.layers.{layer_idx}.mlp.experts",
+                num_logical_experts=self.n_logical_experts,
+                hidden_size=config.hidden_size,
+                params_dtype=getattr(
+                    config, "dtype", getattr(config, "torch_dtype", None)
+                ),
+            )
+        num_compute_experts = (
+            replacement.num_compute_experts
+            if replacement is not None
+            else self.n_logical_experts
+        )
+        self.n_physical_experts = num_compute_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
@@ -370,7 +391,8 @@ class DeepseekV2MoE(nn.Module):
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
-            num_experts=config.n_routed_experts,
+            num_experts=num_compute_experts,
+            expert_replacement=replacement,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
@@ -1297,6 +1319,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
                 # aiter applies routed_scaling_factor internally
                 apply_routed_scale_to_output=not rocm_aiter_ops.is_fused_moe_enabled(),
+                layer_idx=layer_idx,
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -1395,6 +1418,15 @@ class DeepseekV2Model(nn.Module):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        moe_layer_freq = getattr(config, "moe_layer_freq", 1)
+        supported_substitution_targets = {
+            f"model.layers.{layer_idx}.mlp.experts"
+            for layer_idx in range(config.num_hidden_layers)
+            if config.n_routed_experts is not None
+            and layer_idx >= config.first_k_dense_replace
+            and layer_idx % moe_layer_freq == 0
+        }
+        validate_expert_substitution_targets(config, supported_substitution_targets)
         self.config = config
         self.device = current_platform.device_type
         self.hidden_size = config.hidden_size
@@ -1591,6 +1623,17 @@ class DeepseekV2Model(nn.Module):
             ),
             num_redundant_experts=self.num_redundant_experts,
         )
+        replacement_params_mapping: dict[str, list[tuple[str, int]]] = {}
+        for (
+            mapped_param,
+            mapped_weight,
+            mapped_expert,
+            mapped_shard,
+        ) in expert_params_mapping:
+            if mapped_shard == "constant":
+                replacement_params_mapping.setdefault(mapped_weight, []).append(
+                    (mapped_param, mapped_expert)
+                )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
@@ -1601,6 +1644,19 @@ class DeepseekV2Model(nn.Module):
             n.rsplit(".indexer.", 1)[0] for n in params_dict if ".indexer." in n
         }
         for name, loaded_weight in weights:
+            # Replacement tensor references are exact checkpoint names. Load
+            # them before the legacy substring-based projection mappings so an
+            # otherwise arbitrary explicit path cannot be misclassified.
+            if replacement_mappings := replacement_params_mapping.get(name):
+                for mapped_param, mapped_expert in replacement_mappings:
+                    if not is_pp_missing_parameter(mapped_param, self):
+                        param = params_dict[mapped_param]
+                        param.weight_loader(
+                            param, loaded_weight, expert_id=mapped_expert
+                        )
+                        loaded_params.add(mapped_param)
+                continue
+
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -1936,8 +1992,6 @@ class DeepseekV2ForCausalLM(
         return logits
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
@@ -1948,8 +2002,11 @@ class DeepseekV2ForCausalLM(
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        clear_expert_substitution_load_state(self)
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        loaded_params = loader.load_weights(weights)
+        validate_expert_substitution_weights_loaded(self)
+        return loaded_params
 
 
 class DeepseekForCausalLM(DeepseekV2ForCausalLM):
