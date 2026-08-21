@@ -897,6 +897,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         self.llm_engine.collective_rpc("finish_weight_update")
         if weight_version is not None:
             self.llm_engine.set_weight_version(weight_version)
+        self.llm_engine.reset_prefix_cache()
 
     def update_weight_version(self, new_version: str) -> None:
         """Set the weight version without updating weights."""
@@ -905,6 +906,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         return self.llm_engine.get_weight_version()
+
+    def get_rank_sharding_manifests(self) -> list[Any]:
+        """Return one rank-local checkpoint sharding manifest per worker."""
+        return self.llm_engine.collective_rpc("get_rank_sharding_manifest")
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

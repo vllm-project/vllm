@@ -175,6 +175,15 @@ class RoutedExperts(PluggableLayer):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
+        # Record which (parameter, expert, shard) each weight write covers, and
+        # let a reload session redirect writes into per-unit staging buffers.
+        # Imported here to avoid an import cycle through the reload package.
+        from vllm.model_executor.model_loader.reload.expert_loader import (
+            install_expert_shard_loaders,
+        )
+
+        install_expert_shard_loaders(self)
+
         self.lora_base_layer_prefix = ""
 
     # TODO(bnell): Temporary hack. Get rid of this.

@@ -10,9 +10,13 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 from typing_extensions import Self
 
+from vllm.config import set_current_vllm_config
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.model_executor.model_loader.reload import ModelwiseReloadSession
+    from vllm.model_executor.model_loader.reload.runtime import RuntimeReloadSession
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -109,9 +113,9 @@ class NCCLWeightTransferEngine(
     Weight transfer engine using NCCL for communication between trainer and workers.
 
     This implementation uses NCCL broadcast operations to transfer dense
-    checkpoint-format weights from the trainer (rank 0) to all inference workers
-    in a process group. Received weights are loaded via the model's
-    `load_weights` using the layerwise reload lifecycle.
+    checkpoint- or runtime-format weights from the trainer (rank 0) to all
+    inference workers in a process group. Runtime-format tensors must already
+    match each receiving rank's serving layout.
     """
 
     # Define backend-specific dataclass types
@@ -132,6 +136,7 @@ class NCCLWeightTransferEngine(
         self.packed = False
         self.packed_buffer_size_bytes = DEFAULT_PACKED_BUFFER_SIZE_BYTES
         self.packed_num_buffers = DEFAULT_PACKED_NUM_BUFFERS
+        self.reload_session: ModelwiseReloadSession | RuntimeReloadSession | None = None
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """
@@ -151,20 +156,50 @@ class NCCLWeightTransferEngine(
         )
 
     def start_weight_update(self) -> None:
-        """Initialize layerwise reloading for the incoming checkpoint weights."""
+        """Open a transaction matching the configured weight format."""
         from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
+            ModelwiseReloadSession,
+            RuntimeReloadSession,
         )
 
-        initialize_layerwise_reload(self.model)
+        if self.config.weight_format == "runtime":
+            tp_size = getattr(self.parallel_config, "tensor_parallel_size", 1)
+            pp_size = getattr(self.parallel_config, "pipeline_parallel_size", 1)
+            if tp_size > 1 or pp_size > 1:
+                raise ValueError(
+                    "NCCL runtime-format reload broadcasts one tensor to every "
+                    "rank and cannot deliver rank-local TP/PP/EP layouts. Use "
+                    "IPC or a rank-local runtime-format transport."
+                )
+            session = RuntimeReloadSession(self.model)
+        else:
+            session = ModelwiseReloadSession(
+                self.model,
+                self.model_config,
+                self.device,
+            )
+        session.start()
+        self.reload_session = session
 
     def finish_weight_update(self) -> None:
-        """Finalize layerwise reloading after all weights have been received."""
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
+        """Commit the active checkpoint- or runtime-format transaction."""
+        session = self.reload_session
+        if session is None:
+            raise RuntimeError("NCCL weight update session is not active")
+        self.reload_session = None
+        from vllm.model_executor.model_loader.reload import RuntimeReloadSession
 
-        finalize_layerwise_reload(self.model, self.model_config)
+        if isinstance(session, RuntimeReloadSession):
+            session.finish()
+            return
+        with set_current_vllm_config(self.vllm_config):
+            session.finish()
+
+    def abort_weight_update(self) -> None:
+        session = self.reload_session
+        self.reload_session = None
+        if session is not None:
+            session.abort()
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """
@@ -184,6 +219,34 @@ class NCCLWeightTransferEngine(
                 "NCCL weight transfer not initialized. "
                 "Call init_transfer_engine() first."
             )
+        if self.reload_session is None:
+            raise RuntimeError(
+                "NCCL weight update session is not active. "
+                "Call start_weight_update() first."
+            )
+
+        from vllm.model_executor.model_loader.reload import RuntimeReloadSession
+
+        if isinstance(self.reload_session, RuntimeReloadSession):
+            if self.packed:
+                raise ValueError(
+                    "Packed NCCL uses staging buffers and is incompatible with "
+                    "weight_format='runtime'"
+                )
+            for name, dtype_name, shape in zip(
+                update_info.names, update_info.dtype_names, update_info.shapes
+            ):
+                dtype = getattr(torch, dtype_name)
+                target = self.reload_session.resolve_target(name, shape, dtype)
+                if not target.is_contiguous():
+                    raise ValueError(
+                        f"Runtime NCCL destination {name!r} must be contiguous"
+                    )
+                self.model_update_group.broadcast(
+                    target, src=0, stream=torch.cuda.current_stream()
+                )
+                self.reload_session.record_direct_write(name)
+            return
 
         from vllm.model_executor.model_loader.mtp_validation import (
             disable_mtp_completeness_check,
@@ -203,13 +266,16 @@ class NCCLWeightTransferEngine(
                     iterator=state_dict_info_iterator(),
                     group=self.model_update_group,
                     src=0,
-                    post_unpack_func=self.model.load_weights,
+                    post_unpack_func=lambda weights: self.reload_session.load_weights(
+                        self.filter_rank_local_weights(iter(weights))
+                    ),
                     buffer_size_bytes=self.packed_buffer_size_bytes,
                     num_buffers=self.packed_num_buffers,
                     device=self.device,
                 )
             else:
                 # Use simple one-by-one broadcasting
+                allowed = self.rank_local_checkpoint_names()
                 for name, dtype_name, shape in zip(
                     update_info.names, update_info.dtype_names, update_info.shapes
                 ):
@@ -218,10 +284,12 @@ class NCCLWeightTransferEngine(
                     self.model_update_group.broadcast(
                         weight, src=0, stream=torch.cuda.current_stream()
                     )
-                    self.model.load_weights([(name, weight)])
+                    if allowed is None or name in allowed:
+                        self.reload_session.load_weights([(name, weight)])
                     del weight
 
     def shutdown(self) -> None:
+        self.abort_weight_update()
         if self.model_update_group is not None:
             # Clean up the communicator by removing the reference
             self.model_update_group = None
@@ -310,7 +378,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
 
     def send_weights(self) -> None:
         assert self.source is not None  # guaranteed by trainer_init / __init__
-        source = self.source
+        source = self.rank_local_source()
 
         # Metadata is declared without gathering. For Megatron it is itself a
         # collective, so every rank runs it; only the sender ships it.

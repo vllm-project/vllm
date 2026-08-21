@@ -178,6 +178,28 @@ async def start_weight_update(raw_request: Request):
     return JSONResponse(content={"message": "Weight update started"})
 
 
+@router.post("/get_rank_sharding_manifests")
+async def get_rank_sharding_manifests(raw_request: Request):
+    from dataclasses import asdict, is_dataclass
+
+    manifests = await engine_client(raw_request).collective_rpc(
+        "get_rank_sharding_manifest"
+    )
+    payload = []
+    for manifest in manifests:
+        if is_dataclass(manifest):
+            item = asdict(manifest)
+            source_names = manifest.source_names
+        else:
+            item = dict(manifest)
+            source_names = {
+                shard["source_name"] for shard in item.get("shards", ())
+            }
+        item["source_names"] = sorted(source_names)
+        payload.append(item)
+    return JSONResponse(content={"manifests": payload})
+
+
 @router.post("/start_draft_weight_update")
 async def start_draft_weight_update(raw_request: Request):
     await engine_client(raw_request).start_draft_weight_update()

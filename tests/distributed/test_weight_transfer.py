@@ -537,6 +537,11 @@ def inference_receive_tensor(
     vllm_config.model_config = MagicMock()
 
     recorder = Recorder()
+    from vllm.model_executor.model_loader.reload import (
+        record_modelwise_reload_metadata,
+    )
+
+    record_modelwise_reload_metadata(recorder)
     engine = NCCLWeightTransferEngine(
         config, vllm_config, torch.device("cuda"), recorder
     )
@@ -558,6 +563,7 @@ def inference_receive_tensor(
         packed=False,
     )
     engine.init_transfer_engine(init_info)
+    engine.start_weight_update()
 
     update_info = NCCLWeightTransferUpdateInfo(
         names=["test.weight"],
@@ -566,6 +572,7 @@ def inference_receive_tensor(
     )
     engine.receive_weights(update_info)
     torch.accelerator.synchronize()
+    engine.finish_weight_update()
 
     # Verify we received the tensor
     success = False
@@ -1143,6 +1150,7 @@ def inference_receive_ipc_tensor(
 
     init_info = IPCWeightTransferInitInfo()
     engine.init_transfer_engine(init_info)
+    engine.start_weight_update()
 
     ipc_handles = [{ipc_handle_dict["gpu_uuid"]: ipc_handle_dict["ipc_handle"]}]
 
@@ -1167,6 +1175,7 @@ def inference_receive_ipc_tensor(
     update_info = engine.parse_update_info(update_dict)
     engine.receive_weights(update_info)
     torch.accelerator.synchronize()
+    engine.finish_weight_update()
 
     success = False
     received_shape = None
@@ -1341,6 +1350,20 @@ class TestTrainerClients:
         handle.finish_weight_update.remote.assert_called_once_with()
         handle.update_weight_version.remote.assert_called_once_with("step-42")
 
+    def test_ray_client_flattens_rank_sharding_manifests(self, monkeypatch):
+        import ray
+
+        monkeypatch.setattr(ray, "get", lambda refs: [[{"rank": 0}], [{"rank": 1}]])
+        handles = [MagicMock(), MagicMock()]
+        client = RayVLLMWeightSyncClient(handles)
+
+        assert client.get_rank_sharding_manifests() == [
+            {"rank": 0},
+            {"rank": 1},
+        ]
+        for handle in handles:
+            handle.get_rank_sharding_manifests.remote.assert_called_once_with()
+
     def test_http_client_pickles_ipc_handles_for_json(self, monkeypatch):
         """HTTP update_weights must encode raw ipc_handles as a base64 pickle."""
         captured = {}
@@ -1374,6 +1397,18 @@ class TestTrainerClients:
 
         client.finish_weight_update("step-42")
         assert captured["json"] == {"weight_version": "step-42"}
+
+    def test_http_client_gets_rank_sharding_manifests(self, monkeypatch):
+        def fake_post(self, path, json=None):
+            assert path == "get_rank_sharding_manifests"
+            return {"manifests": [{"state": "exact", "source_names": ["w"]}]}
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+
+        assert client.get_rank_sharding_manifests() == [
+            {"state": "exact", "source_names": ["w"]}
+        ]
 
 
 class TestModuleSource:

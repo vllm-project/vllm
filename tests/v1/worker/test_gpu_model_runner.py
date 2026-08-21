@@ -876,6 +876,88 @@ def test_reload_weights_before_load_model(model_runner):
         model_runner.reload_weights()
 
 
+def test_checkpoint_reload_uses_modelwise_reloader(monkeypatch):
+    class ReloadableModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(2))
+
+        def load_weights(self, weights):
+            loaded = set()
+            for name, value in weights:
+                self.get_parameter(name).data.copy_(value)
+                loaded.add(name)
+            return loaded
+
+    model = ReloadableModel()
+    runner = object.__new__(GPUModelRunner)
+    runner.model_config = SimpleNamespace(quantization="fp8")
+    runner.vllm_config = get_vllm_config()
+    runner.device = torch.device("cpu")
+    runner.get_model = Mock(return_value=model)
+    runner.reset_encoder_cache = Mock()
+    runner.reset_mm_cache = Mock()
+
+    reloader = Mock()
+    reloader.return_value.reload.return_value = {"weight"}
+    monkeypatch.setattr(gpu_model_runner_module, "ModelwiseReloader", reloader)
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.reload.validation.reload_storage_guard",
+        lambda _model: nullcontext(),
+    )
+
+    runner.reload_weights(weights_iterator=[("weight", torch.ones(2))])
+
+    reloader.assert_called_once_with(model, runner.model_config, runner.device)
+    reloader.return_value.reload.assert_called_once()
+
+
+def test_runtime_reload_bypasses_modelwise_and_pwal(monkeypatch):
+    class ReloadableModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(2))
+            self.register_buffer("scale", torch.ones(1))
+
+    model = ReloadableModel()
+    weight = model.weight
+    scale = model.scale
+    runner = object.__new__(GPUModelRunner)
+    runner.model_config = SimpleNamespace(quantization="fp8")
+    runner.vllm_config = get_vllm_config()
+    runner.device = torch.device("cpu")
+    runner.get_model = Mock(return_value=model)
+    runner.reset_encoder_cache = Mock()
+    runner.reset_mm_cache = Mock()
+
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "ModelwiseReloader",
+        Mock(side_effect=AssertionError("modelwise reload must not run")),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.utils.process_weights_after_loading",
+        Mock(side_effect=AssertionError("PWAL must not run")),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.reload.validation.reload_storage_guard",
+        lambda _model: nullcontext(),
+    )
+
+    runner.reload_weights(
+        weights_iterator=[
+            ("weight", torch.tensor([3.0, 4.0])),
+            ("scale", torch.tensor([2.0])),
+        ],
+        is_checkpoint_format=False,
+    )
+
+    assert model.weight is weight
+    assert model.scale is scale
+    assert torch.equal(model.weight, torch.tensor([3.0, 4.0]))
+    assert torch.equal(model.scale, torch.tensor([2.0]))
+
+
 def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     runner = object.__new__(GPUModelRunner)
     runner.use_async_scheduling = False
