@@ -54,9 +54,6 @@ class MMEncoderModelRunner(GPUModelRunner):
         ordered by the device wait in `AsyncOutput.get_output()`; this one never
         waits, so entering blocks until the step that last wrote these slots is
         done with them and leaving records this step's last write.
-
-        Leave before the encoder runs: it reads no pooled metadata, and holding
-        the guard across it costs ~22% throughput.
         """
         idx = self._input_event_idx
         self._input_events[idx].synchronize()

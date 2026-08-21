@@ -210,7 +210,6 @@ def warmup_kernels(
     coordination.
     """
     if model_runner.vllm_config.is_mm_encoder_only:
-        # No language model to warm up.
         return
 
     num_spec_steps = model_runner.num_speculative_steps
