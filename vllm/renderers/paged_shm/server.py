@@ -276,10 +276,11 @@ class PagedShmServer:
         item_objs = [ShmWriteRequest(**item) for item in items]
         total_required = sum(item.size for item in item_objs)
 
-        # Hard reject if total request exceeds total capacity (prevents infinite FCFS blocking)
+        # Hard reject if total request exceeds total capacity
         if total_required > self.storage.size:
             raise MemoryError(
-                f"Requested {total_required} bytes exceeds total storage size {self.storage.size}"
+                f"Requested {total_required} bytes exceeds total "
+                f"storage size {self.storage.size}"
             )
 
         try:
@@ -345,7 +346,7 @@ class PagedShmServer:
         try:
             info = self.manager.get_info(real_uuid)
         except ValueError:
-            raise ValueError(f"UUID {uuid_or_token} not found")
+            raise ValueError(f"UUID {uuid_or_token} not found") from None
 
         if info["ref_count"] >= 0:
             return _OK_RESPONSE

@@ -21,7 +21,7 @@ Additionally, shared memory supports `pin_memory`, which enables faster CPU–GP
 
 The data transfer paths are as follows:
 
-```
+```text
 ZMQ IPC Path:
 [Multi-modal Tensor] ─ZMQ IPC→ [CPU Buffer] ─Pin Memory ─→ [GPU]
     (API Server)               (GPU Worker)            (H2D)
@@ -43,7 +43,7 @@ and releases it during shutdown. Other processes read from and write to the shar
 eliminates the risk of shared memory leaks.
 
 To avoid race conditions caused by multiple processes simultaneously reading from and writing to paged shared memory,
-the client must first request permission from the Server before performing any read or write operations. 
+the client must first request permission from the Server before performing any read or write operations.
 
 A typical workflow is as follows:
 

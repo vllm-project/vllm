@@ -91,19 +91,19 @@ class PagedShmTensorIPC:
 
         # 3. Write all mm tensors to shm async, and notify other clients
         # to read the data when the write operation is complete.
-        for elem, item in zip(elements, alloc):
+        for elem, a in zip(elements, alloc):
             assert isinstance(elem.data, torch.Tensor)
 
             elem.pshm_tensor = PagedShmTensor(
                 dtype=str(elem.data.dtype).removeprefix("torch."),
                 shape=tuple(elem.data.shape),
-                **asdict(item),
+                **asdict(a),
             )
             self.client.write(
-                uuid=item.uuid,
+                uuid=a.uuid,
                 data=elem.data,
-                use_cache=item.use_cache,
-                blocks=item.blocks,
+                use_cache=a.use_cache,
+                blocks=a.blocks,
                 open_read=True,
                 async_write=True,
             )

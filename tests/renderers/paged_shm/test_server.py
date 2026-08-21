@@ -164,7 +164,8 @@ class TestWriteRead:
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_write_read_torch_gpu(self, server):
-        # This test uses its own client to allow pinning, but still uses the same server.
+        # This test uses its own client to allow pinning,
+        # but still uses the same server.
         client = PagedShmClient(address=server.address, pin=True)
         try:
             uuid = _unique_uuid()
@@ -316,7 +317,7 @@ class TestContextManagers:
         class TestException(Exception):
             pass
 
-        with pytest.raises(TestException):
+        with pytest.raises(TestException):  # noqa: SIM117
             with client.write_context(uuid, size) as ctx:
                 client._storage.write(data, ctx.blocks)
                 raise TestException("trigger rollback")
