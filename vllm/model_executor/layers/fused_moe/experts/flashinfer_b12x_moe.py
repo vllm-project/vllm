@@ -98,13 +98,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self.swiglu_limit = _resolve(
             quant_config.gemm1_clamp_limit, moe_config.swiglu_limit
         )
-        if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-            if self.swiglu_limit is None:
-                raise ValueError(
-                    "swigluoai_uninterleave requires swiglu_limit "
-                    "(gemm1_clamp_limit), but none was provided."
-                )
-        elif self.swiglu_limit is not None:
+        if (
+            activation != MoEActivation.SWIGLUOAI_UNINTERLEAVE
+            and self.swiglu_limit is not None
+        ):
             raise ValueError(
                 "FlashInferB12xExperts only applies swiglu_limit with the "
                 f"swigluoai_uninterleave activation, got {activation}."
@@ -268,11 +265,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
         from flashinfer.fused_moe import B12xMoEWrapper
 
-        swiglu_kwargs: dict[str, float] = {}
-        if self.swiglu_limit is not None:
-            # Unset alpha/beta mean silu-with-clamp in vLLM
-            # (apply_moe_activation); the kernel defaults are
-            # gpt-oss-oriented (1.702/1.0), so pass explicitly.
+        swiglu_kwargs: dict[str, float | None] = {}
+        if self._activation_str == "swigluoai_uninterleave":
+            # vLLM treats unset alpha/beta as 1.0/0.0; the kernel defaults
+            # to gpt-oss 1.702/1.0, so pass explicitly.
             swiglu_kwargs = {
                 "swiglu_limit": self.swiglu_limit,
                 "swiglu_alpha": 1.0 if self.swiglu_alpha is None else self.swiglu_alpha,
