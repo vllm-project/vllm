@@ -92,9 +92,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_HOST_STAGING_SHUTDOWN_TIMEOUT_S = 2.0
-_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S = 0.001
-
 
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
@@ -274,7 +271,6 @@ class NixlBaseConnectorWorker:
 
         # Config.
         self.vllm_config = vllm_config
-        self._host_staging_shutdown_thread: threading.Thread | None = None
         # mypy will complain on re-assignment otherwise.
         self.block_size: int = cast(int, vllm_config.cache_config.block_size)
 
@@ -2235,13 +2231,7 @@ class NixlBaseConnectorWorker:
                 )
 
     def _maybe_init_host_stager(self, remote_host: str) -> HostWriteStager | None:
-        """Enable device staging for same-host host-buffer reads.
-
-        UCX falls back to TCP loopback for a remote-device to local-host read,
-        which measures ~0.20 GB/s against ~22 GB/s for the device-to-device read
-        the same stack performs. Staging through device memory composes the fast
-        remote read with a fast local device-to-host copy.
-        """
+        """Enable device staging for same-host host-buffer reads."""
         if remote_host != envs.VLLM_NIXL_SIDE_CHANNEL_HOST:
             return None
         if self._host_stager is not None or self._host_stager_init_attempted:
@@ -2685,9 +2675,6 @@ class NixlBaseConnectorWorker:
         with contextlib.suppress(Exception):
             self.shutdown(drain_timeout=0)
 
-    def _poll_host_staging_shutdown(self, cancel: bool) -> bool:
-        return self._host_stager is None or self._host_stager.poll_shutdown(cancel)
-
     def _finish_shutdown(self) -> None:
         for handle in self.src_xfer_handles_by_block_size.values():
             self.nixl_wrapper.release_dlist_handle(handle)
@@ -2701,49 +2688,19 @@ class NixlBaseConnectorWorker:
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()
-        self._host_staging_shutdown_thread = None
-
-    def _reap_host_staging_shutdown(self) -> None:
-        while not self._poll_host_staging_shutdown(cancel=True):
-            time.sleep(_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S)
-        self._finish_shutdown()
-        logger.info("Deferred NIXL host-staging cleanup completed.")
 
     def shutdown(self, drain_timeout: float | None = None) -> None:
         """Stop new work and bound the wait for host-staged reads."""
         if not hasattr(self, "_handshake_initiation_executor"):
             return
-        if self._host_staging_shutdown_thread is not None:
-            return
-        if drain_timeout is None:
-            drain_timeout = _HOST_STAGING_SHUTDOWN_TIMEOUT_S
         self._handshake_initiation_executor.shutdown(wait=False, cancel_futures=True)
         for handles in self._recving_transfers.values():
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
-        if self._host_stager is not None:
-            self._host_stager.begin_shutdown()
-
-        deadline = time.monotonic() + drain_timeout
-        drained = self._poll_host_staging_shutdown(cancel=False)
-        while not drained and time.monotonic() < deadline:
-            time.sleep(_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S)
-            drained = self._poll_host_staging_shutdown(cancel=False)
-        if not drained:
-            drained = self._poll_host_staging_shutdown(cancel=True)
-        if drained:
-            self._finish_shutdown()
+        if self._host_stager is not None and not self._host_stager.shutdown(
+            drain_timeout=drain_timeout,
+            on_complete=self._finish_shutdown,
+        ):
             return
-
-        logger.warning(
-            "NIXL host-staging shutdown timed out after %.1fs; retaining "
-            "registered memory until active operations become terminal.",
-            drain_timeout,
-        )
-        self._host_staging_shutdown_thread = threading.Thread(
-            target=self._reap_host_staging_shutdown,
-            name="vllm-nixl-host-staging-shutdown",
-            daemon=True,
-        )
-        self._host_staging_shutdown_thread.start()
+        self._finish_shutdown()
