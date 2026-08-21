@@ -22,7 +22,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -179,21 +179,11 @@ class InklingDummyInputsBuilder(BaseDummyInputsBuilder[InklingProcessingInfo]):
 
 
 class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo]):
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
-
     def _call_hf_processor(
         self,
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Inkling is not a standard HF processor (no fused text+mm call), so we run
         # the vendored extractors ourselves and tokenize the text separately.
@@ -275,10 +265,8 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
                 ids.extend(tokenizer.encode(chunk, add_special_tokens=False))
 
         # Reconcile against the declared media counts only when media is
-        # present. With no media items -- e.g. the base text-only tokenization
-        # probe (``_apply_hf_processor_text_only``), which calls this via
-        # ``_call_hf_processor`` with empty ``mm_data`` -- emit the markers
-        # verbatim; the marker<->item correspondence is enforced later by
+        # present. With no media items, emit the markers verbatim; the
+        # marker<->item correspondence is enforced later by
         # ``_get_prompt_updates`` once the media features are available.
         if num_images or num_audios:
             # Fail clearly on a placeholder/media-count mismatch instead of

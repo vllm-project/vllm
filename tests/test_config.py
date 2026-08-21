@@ -199,6 +199,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ),
     )
     config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash2_draft = lambda: False
     config._is_default_v2_model_runner_model = lambda: (
         VllmConfig._is_default_v2_model_runner_model(config)
     )
@@ -290,6 +291,29 @@ def test_v2_model_runner_supports_extract_hidden_states():
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
+
+
+def test_dflash2_draft_forces_v2_model_runner():
+    """A DFlash2 draft must reach the V2 speculator, the only one that runs its
+    candidate selector; on V1 it would draft as DFlash1 without raising."""
+
+    def config(method, architectures):
+        return SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method=method,
+                draft_model_config=SimpleNamespace(architectures=architectures),
+            )
+        )
+
+    assert VllmConfig._is_dflash2_draft(config("dflash", ["DFlash2DraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(config("dflash", ["DFlashDraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(config("eagle", ["DFlash2DraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(SimpleNamespace(speculative_config=None))
+    assert not VllmConfig._is_dflash2_draft(
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
+        )
+    )
 
 
 @pytest.mark.parametrize(

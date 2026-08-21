@@ -227,13 +227,11 @@ class Cohere2VisionMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
             mm_kwargs,
-            tok_kwargs,
         )
 
         # Ensure num_patches is available for proper tensor splitting
