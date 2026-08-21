@@ -3,6 +3,7 @@
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -251,6 +252,7 @@ def run_attention_backend(
     sliding_window: int | None = None,
     kv_cache_dtype: str = "auto",
     sinks: torch.Tensor | None = None,
+    use_cuda_graph: bool = False,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -322,6 +324,8 @@ def run_attention_backend(
         kv_cache_dtype=kv_cache_dtype,
         **({"sinks": sinks} if sinks is not None else {}),
     )
+    if sinks is not None:
+        impl.process_weights_after_loading(vllm_config.model_config.dtype)
 
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device)
@@ -337,9 +341,26 @@ def run_attention_backend(
         impl.do_kv_cache_update(
             mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
         )
-    output = impl.forward(
-        mock_layer, query, key, value, kv_cache, attn_metadata, output=output
-    )
+    if use_cuda_graph:
+        impl.forward(
+            mock_layer, query, key, value, kv_cache, attn_metadata, output=output
+        )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            impl.forward(
+                mock_layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output=output,
+            )
+        graph.replay()
+    else:
+        output = impl.forward(
+            mock_layer, query, key, value, kv_cache, attn_metadata, output=output
+        )
 
     return output
 
@@ -358,6 +379,11 @@ def _test_backend_correctness(
     tensor_parallel_size: int = 1,
     kv_cache_dtype: str = "auto",
     use_sinks: bool = False,
+    use_cuda_graph: bool = False,
+    num_speculative_tokens: int = 0,
+    model_dtype: torch.dtype | None = None,
+    max_num_seqs: int | None = None,
+    max_num_batched_tokens: int | None = None,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -402,10 +428,19 @@ def _test_backend_correctness(
         model_name=model,
         tensor_parallel_size=1,  # Always use TP=1 to avoid multi-GPU requirements
         max_model_len=max(batch_spec.seq_lens),
+        dtype=model_dtype or "auto",
         block_size=block_size,
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
     )
+    if max_num_seqs is not None:
+        vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+    if max_num_batched_tokens is not None:
+        vllm_config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    if num_speculative_tokens > 0:
+        vllm_config.speculative_config = SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens
+        )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
     device = torch.device(f"{DEVICE_TYPE}:0")
 
@@ -573,9 +608,24 @@ def _test_backend_correctness(
         if backend_name == AttentionBackendEnum.FLASHINFER:
             set_kv_cache_layout("HND")
             reset_kv_cache_layout = True
+        elif backend_name == AttentionBackendEnum.B12X:
+            set_kv_cache_layout("NHD")
+            reset_kv_cache_layout = True
 
         kv_cache_for_backend = kv_cache
-        if backend_cls is not None:
+        if backend_name == AttentionBackendEnum.B12X:
+            cache_dtype = (
+                FP8_KV_CACHE_DTYPES[kv_cache_dtype]
+                if is_quantized_kv_cache(kv_cache_dtype)
+                else kv_cache.dtype
+            )
+            typed_cache = kv_cache.view(cache_dtype)
+            key_cache = typed_cache[..., :head_size].permute(0, 2, 1, 3)
+            value_cache = typed_cache[..., head_size:].permute(0, 2, 1, 3)
+            kv_cache_for_backend = torch.stack((key_cache, value_cache), dim=1)
+            if is_quantized_kv_cache(kv_cache_dtype):
+                kv_cache_for_backend = kv_cache_for_backend.view(torch.uint8)
+        elif backend_cls is not None:
             try:
                 stride_order = backend_cls.get_kv_cache_stride_order()
             except (AttributeError, NotImplementedError):
@@ -590,22 +640,24 @@ def _test_backend_correctness(
                 )
 
         try:
-            backend_output = run_attention_backend(
-                backend_name,
-                kv_cache_spec,
-                ["placeholder"],
-                vllm_config,
-                device,
-                common_attn_metadata,
-                query_vllm,
-                key_vllm,
-                value_vllm,
-                kv_cache_for_backend,
-                sliding_window=sliding_window,
-                attn_type=attn_type,
-                kv_cache_dtype=kv_cache_dtype,
-                sinks=sinks,
-            )
+            with set_current_vllm_config(vllm_config):
+                backend_output = run_attention_backend(
+                    backend_name,
+                    kv_cache_spec,
+                    ["placeholder"],
+                    vllm_config,
+                    device,
+                    common_attn_metadata,
+                    query_vllm,
+                    key_vllm,
+                    value_vllm,
+                    kv_cache_for_backend,
+                    sliding_window=sliding_window,
+                    attn_type=attn_type,
+                    kv_cache_dtype=kv_cache_dtype,
+                    sinks=sinks,
+                    use_cuda_graph=use_cuda_graph,
+                )
         finally:
             if reset_kv_cache_layout:
                 set_kv_cache_layout(None)
