@@ -363,8 +363,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.handle_preemptions(cm)
 
     def get_finished_count(self) -> int | None:
-        # TODO(https://github.com/vllm-project/vllm/issues/33400)
-        return None
+        counts = {
+            count
+            for connector in self._connectors
+            if (count := connector.get_finished_count()) is not None
+        }
+        if len(counts) > 1:
+            raise ValueError(
+                "MultiConnector children returned incompatible finished counts: "
+                f"{sorted(counts)}"
+            )
+        return next(iter(counts), None)
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         metadata_list: list[KVConnectorWorkerMetadata | None] | None = None

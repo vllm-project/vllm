@@ -370,8 +370,9 @@ class NixlBaseConnectorWorker:
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
-        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
 
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
@@ -564,6 +565,23 @@ class NixlBaseConnectorWorker:
             "enforce_handshake_compat", True
         )
 
+    def _validate_remote_parallel_config(
+        self, agent_metadata: NixlAgentMetadata
+    ) -> None:
+        local_pcp_size = self.pcp_size
+        local_dcp_size = self.dcp_size
+        remote_pcp_size = agent_metadata.pcp_size
+        remote_dcp_size = agent_metadata.dcp_size
+        if (local_pcp_size > 1 and remote_dcp_size > 1) or (
+            remote_pcp_size > 1 and local_dcp_size > 1
+        ):
+            raise NotImplementedError(
+                "NixlConnector PCP requires decode_context_parallel_size=1 "
+                "on both instances. "
+                f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
+                f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
+            )
+
     def _sync_block_size_with_kernel(self) -> None:
         backends = get_current_attn_backends(self.vllm_config)
         kernel_block_size = select_common_block_size(self.block_size, backends)
@@ -702,6 +720,8 @@ class NixlBaseConnectorWorker:
                     raise RuntimeError(
                         f"Failed to decode NixlAgentMetadata. Error: {e}"
                     ) from e
+
+                self._validate_remote_parallel_config(metadata)
 
                 # Ensure engine id matches.
                 if metadata.engine_id != expected_engine_id:
@@ -1036,6 +1056,8 @@ class NixlBaseConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            dcp_size=self.dcp_size,
+            pcp_size=self.pcp_size,
         )
         assert self.compat_hash is not None
         encoder = msgspec.msgpack.Encoder()
@@ -1280,6 +1302,8 @@ class NixlBaseConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            dcp_size=self.dcp_size,
+            pcp_size=self.pcp_size,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
