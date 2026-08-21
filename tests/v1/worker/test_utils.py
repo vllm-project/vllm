@@ -125,7 +125,12 @@ def test_hisparse_spill_batches_wait_for_reused_staging(monkeypatch):
     def backup_layers(*args):
         num_rows.append(args[6])
 
-    monkeypatch.setattr(torch.ops._C_cache_ops, "hisparse_backup_layers", backup_layers)
+    monkeypatch.setattr(
+        torch.ops._C_cache_ops,
+        "hisparse_backup_layers",
+        backup_layers,
+        raising=False,
+    )
     monkeypatch.setattr(
         torch.accelerator, "current_stream", lambda device: current_stream
     )
@@ -235,7 +240,9 @@ def test_hisparse_worker_preserves_directly_imported_indexer(monkeypatch):
     def copy_blocks(source, indexer, src, dst):
         copied.append((src.tolist(), dst.tolist()))
 
-    monkeypatch.setattr(torch.ops._C_cache_ops, "hisparse_copy_blocks", copy_blocks)
+    monkeypatch.setattr(
+        torch.ops._C_cache_ops, "hisparse_copy_blocks", copy_blocks, raising=False
+    )
     monkeypatch.setattr(
         torch.accelerator, "current_stream", lambda device: current_stream
     )
