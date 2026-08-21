@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 import torch
-from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+from flashinfer.mla import batch_mla_paged_attention
 from flashinfer.utils import (
     get_device_sm_count,
     get_trtllm_gen_multi_ctas_kv_counter_bytes,
@@ -100,7 +100,7 @@ def _get_multi_ctas_kv_counter_buffer(
 
     trtllm-gen's multi-CTA-KV MLA decode kernel resets these semaphores to zero
     at the end of every launch, so the buffer only needs zeroing once. The
-    public ``trtllm_batch_decode_with_kv_cache_mla`` entry point builds a fresh
+    public ``batch_mla_paged_attention`` entry point builds a fresh
     runner per call, so without a caller-owned buffer it re-allocates and
     re-zeros this counter on every decode step (a tiny ``FillFunctor<uint8>``
     launch right before the FMHA). Owning it here and passing it in removes that
@@ -376,10 +376,8 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         # trtllm-gen rejects MLA head counts it can't tile (e.g. 96);
         # fall back to cute-dsl for those.
         decode_backend = _select_mla_decode_backend(runtime_num_heads)
-        extra_kwargs = {}
-        if decode_backend:
-            extra_kwargs["backend"] = decode_backend
-        elif kv_c_and_k_pe_cache.shape[-2] in (32, 64):
+        multi_ctas_kv_counter_buffer = None
+        if decode_backend is None and kv_c_and_k_pe_cache.shape[-2] in (32, 64):
             # The auto path can dispatch to trtllm-gen, whose multi-CTA-KV decode
             # kernel self-resets its semaphore counter after each launch (so it
             # only needs zeroing once). Pass a persistent counter buffer to skip
@@ -393,10 +391,10 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                     runtime_num_heads,
                     get_device_sm_count(q.device),
                 )
-            extra_kwargs["multi_ctas_kv_counter_buffer"] = (
-                _get_multi_ctas_kv_counter_buffer(self._mla_counter_bytes, q.device)
+            multi_ctas_kv_counter_buffer = _get_multi_ctas_kv_counter_buffer(
+                self._mla_counter_bytes, q.device
             )
-        kernel_out = trtllm_batch_decode_with_kv_cache_mla(
+        kernel_out = batch_mla_paged_attention(
             query=q,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
             workspace_buffer=workspace_buffer,
@@ -408,8 +406,9 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
+            backend=decode_backend or "auto",
             return_lse=return_lse,
-            **extra_kwargs,
+            multi_ctas_kv_counter_buffer=multi_ctas_kv_counter_buffer,
         )
         if return_lse:
             o, lse = kernel_out

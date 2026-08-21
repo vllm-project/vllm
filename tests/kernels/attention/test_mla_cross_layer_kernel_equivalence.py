@@ -152,7 +152,7 @@ def test_flashinfer_mla_dense_decode_unified_slot_view():
     (inflated stride(0), non-zero storage offset) bit-identically to a
     contiguous per-layer cache."""
     try:
-        from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+        from flashinfer.mla import batch_mla_paged_attention
     except ImportError:
         pytest.skip("flashinfer is not available")
     from vllm.platforms import current_platform
@@ -197,7 +197,7 @@ def test_flashinfer_mla_dense_decode_unified_slot_view():
     scale = head_dim**-0.5
 
     def run(kv):
-        return trtllm_batch_decode_with_kv_cache_mla(
+        return batch_mla_paged_attention(
             query=q,
             kv_cache=kv,
             workspace_buffer=ws,
@@ -497,7 +497,7 @@ def test_flashinfer_mla_dense_fp8_decode_unified_slot_view():
     unified-slot block-major view bit-identically to a contiguous per-layer
     cache."""
     try:
-        from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+        from flashinfer.mla import batch_mla_paged_attention
     except ImportError:
         pytest.skip("flashinfer is not available")
     from vllm.platforms import current_platform
@@ -548,7 +548,7 @@ def test_flashinfer_mla_dense_fp8_decode_unified_slot_view():
     scale = head_dim**-0.5
 
     def run(kv):
-        return trtllm_batch_decode_with_kv_cache_mla(
+        return batch_mla_paged_attention(
             query=q,
             kv_cache=kv,
             workspace_buffer=ws,

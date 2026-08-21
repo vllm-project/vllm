@@ -903,7 +903,7 @@ def test_flashinfer_mla_dcp_multi_token_decode_uses_per_query_bounds(monkeypatch
 
     monkeypatch.setattr(
         flashinfer_mla_module,
-        "trtllm_batch_decode_with_kv_cache_mla",
+        "batch_mla_paged_attention",
         fake_decode,
     )
     monkeypatch.setattr(
