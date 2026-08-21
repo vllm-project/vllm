@@ -11,6 +11,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    dcp_world_size_for_kv_cache_spec,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -141,7 +142,9 @@ class KVCacheCoordinator(ABC):
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size,
+                dcp_world_size=dcp_world_size_for_kv_cache_spec(
+                    kv_cache_group.kv_cache_spec, dcp_world_size
+                ),
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
@@ -506,11 +509,9 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             num_prefill_lookahead=num_prefill_lookahead,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        self.block_size = self.kv_cache_spec.block_size
-        self.dcp_world_size = dcp_world_size
+        self.dcp_world_size = self.single_type_managers[0].dcp_world_size
         self.pcp_world_size = pcp_world_size
-        if dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+        self.block_size = self.single_type_managers[0].block_size
         # For models using only Mamba, block_size is set to max_model_len when
         # prefix caching is disabled, and hash_block_size validation is skipped.
         assert not enable_caching or (hash_block_size == self.block_size), (
@@ -634,7 +635,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             )
             for g in kv_cache_config.kv_cache_groups
         )
-        self.enable_partial_hash_hits = has_partial_mamba_group
+        has_dcp_partial_full_attention_group = dcp_world_size > 1 and any(
+            isinstance(g.kv_cache_spec, FullAttentionSpec)
+            and manager.block_size > hash_block_size
+            for g, manager in zip(
+                kv_cache_config.kv_cache_groups, self.single_type_managers
+            )
+        )
+        self.enable_partial_hash_hits = (
+            has_partial_mamba_group or has_dcp_partial_full_attention_group
+        )
         if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
                 type(manager).__name__
@@ -843,11 +853,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=(
-                        self.dcp_world_size
-                        if isinstance(spec, FullAttentionSpec)
-                        else 1
-                    ),
+                    dcp_world_size=self.single_type_managers[
+                        first_group_id
+                    ].dcp_world_size,
+                    pcp_world_size=self.single_type_managers[
+                        first_group_id
+                    ].pcp_world_size,
                 )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
@@ -904,6 +915,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_lengths: list[int] = [0] * num_groups
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
+            manager = self.single_type_managers[group_ids[0]]
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
@@ -912,6 +924,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 kv_cache_spec=spec,
                 drop_eagle_block=use_eagle,
                 alignment_tokens=self._cache_hit_alignment_tokens,
+                dcp_world_size=manager.dcp_world_size,
+                pcp_world_size=manager.pcp_world_size,
             )
             for gid, blks in zip(group_ids, blocks):
                 hit_blocks[gid] = blks

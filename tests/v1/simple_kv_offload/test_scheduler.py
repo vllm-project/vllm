@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -1831,3 +1832,118 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
             f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
             f"less than target_base={target_base}"
         )
+
+
+def test_dcp_mixed_attention_mamba_store_and_load_geometry() -> None:
+    """DCP scales attention blocks but keeps replicated Mamba blocks unscaled."""
+    dcp_world_size = 2
+    attention_block_size = BLOCK_SIZE
+    mamba_block_size = 4 * BLOCK_SIZE
+    hash_block_size = attention_block_size * dcp_world_size
+    scheduler_block_size = mamba_block_size
+    num_gpu_blocks = 16
+
+    attention_spec = FullAttentionSpec(
+        block_size=attention_block_size,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    mamba_spec = MambaSpec(
+        block_size=mamba_block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    groups = [
+        KVCacheGroupSpec(["attention"], attention_spec),
+        KVCacheGroupSpec(["mamba"], mamba_spec),
+    ]
+    tensors = [
+        KVCacheTensor(
+            size=spec.page_size_bytes * num_gpu_blocks,
+            shared_by=group.layer_names,
+        )
+        for group, spec in zip(groups, (attention_spec, mamba_spec))
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=groups,
+    )
+    vllm_config = _make_cp_vllm_config(dcp_world_size=dcp_world_size)
+    cpu_capacity_bytes = sum(tensor.size for tensor in tensors)
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=cpu_capacity_bytes,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+    )
+    assert not sched.cpu_coordinator.enable_partial_hash_hits
+    gpu_pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    sched.bind_gpu_block_pool(gpu_pool)
+
+    req = _make_cp_request(num_blocks=2, virtual_block_size=hash_block_size)
+    attention_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool,
+        req,
+        num_blocks=2,
+        virtual_block_size=hash_block_size,
+        group_id=0,
+    )
+    mamba_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool,
+        req,
+        num_blocks=1,
+        virtual_block_size=mamba_block_size,
+        group_id=1,
+    )
+    kv_blocks = KVCacheBlocks(blocks=(attention_blocks, mamba_blocks))
+    req.num_computed_tokens = scheduler_block_size
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    store_meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: scheduler_block_size},
+            new_reqs={req.request_id: kv_blocks.get_block_ids()},
+        )
+    )
+    assert len(store_meta.store_gpu_blocks) == 3
+    simulate_store_completion(sched, store_meta.store_event)
+
+    req2 = Request(
+        request_id="req-dcp-mixed-load",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == scheduler_block_size
+    assert is_async is True
+
+    load_blocks = KVCacheBlocks(
+        blocks=(
+            gpu_pool.get_new_blocks(2),
+            gpu_pool.get_new_blocks(1),
+        )
+    )
+    sched.update_state_after_alloc(
+        req2,
+        load_blocks,
+        num_external_tokens=scheduler_block_size,
+    )
+    load_meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req2.request_id: 1},
+            new_reqs={req2.request_id: load_blocks.get_block_ids()},
+        )
+    )
+    assert len(load_meta.load_gpu_blocks) == 3
+    assert len(load_meta.load_cpu_blocks) == 3

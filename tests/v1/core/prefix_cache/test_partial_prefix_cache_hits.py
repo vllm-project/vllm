@@ -117,6 +117,20 @@ def make_full_mamba_manager(
     )
 
 
+def test_dcp_full_attention_enables_partial_hash_hits():
+    hash_block_size = 2
+    manager = make_full_mamba_manager(
+        dcp_world_size=2,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=hash_block_size,
+        num_blocks=64,
+    )
+
+    assert manager.coordinator.enable_partial_hash_hits
+    assert manager.coordinator._cache_hit_alignment_tokens == hash_block_size
+
+
 @pytest.mark.parametrize("dcp_world_size", [1, 4])
 def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
