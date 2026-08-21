@@ -1753,6 +1753,7 @@ class Qwen3VLForConditionalGeneration(
     }
 
     supports_encoder_tp_data = True
+    supports_tower_connector_lora = True
 
     supported_video_pruning_methods = ("evs", "vidcom2")
 
