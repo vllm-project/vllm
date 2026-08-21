@@ -97,6 +97,28 @@ def _packed_hnd_cache(spec) -> torch.Tensor:
     )
 
 
+def _split_nhd_flat_cache(spec) -> torch.Tensor:
+    """K and V in separate page halves (num_blocks, 2, block_size, heads * hs)
+    — the ROCm AITER form; same bytes as split_nhd with the heads flattened."""
+    return torch.zeros(
+        NUM_BLOCKS,
+        2,
+        spec.block_size,
+        spec.num_kv_heads * spec.head_size,
+        dtype=torch.int8,
+    )
+
+
+@pytest.fixture
+def aiter_split_heads(monkeypatch: pytest.MonkeyPatch):
+    """Pretend ROCm AITER allocated the cache, without needing a ROCm host."""
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1."
+        "offloading.canonical_mapping._aiter_separate_kv_head_groups",
+        lambda: True,
+    )
+
+
 CACHE_BUILDERS = {
     "split_nhd": _split_nhd_cache,
     "split_hnd": _split_hnd_cache,
@@ -150,6 +172,29 @@ def test_split_nhd_placement_rank2_of_4():
     ]
     # Heads are sharded, not replicated: this rank writes every block
     assert mapping.num_writers == 1
+
+
+def test_split_nhd_flat_matches_split_nhd(aiter_split_heads):
+    """Flattening the head group must not change the byte mapping."""
+    spec = _full_spec(num_kv_heads=4)
+    ctx = _ctx(rank=2, tp=4, heads=4)
+    flat = _mapping(spec, _split_nhd_flat_cache(spec), ctx)
+    nhd = _mapping(spec, _split_nhd_cache(spec), ctx)
+    assert _triples(flat.runs) == _triples(nhd.runs)
+    assert flat.canonical_page_size_bytes == nhd.canonical_page_size_bytes
+    assert flat.parallelism_agnostic
+
+
+def test_split_nhd_flat_fails_closed_when_shape_is_ambiguous(aiter_split_heads):
+    """At heads == 2 the flat and packed forms are byte-identical; refuse to guess."""
+    spec = _full_spec(num_kv_heads=2)
+    flat = _split_nhd_flat_cache(spec)
+    packed = _packed_hnd_cache(spec)
+    assert tuple(flat.shape) == tuple(packed.shape)
+    assert flat.stride() == packed.stride()
+
+    # Uncertifiable, so the caller falls back to an opaque whole-page mapping.
+    assert _try_mapping(spec, flat, _ctx(rank=2, tp=4)) is None
 
 
 def test_packed_nhd_placement_rank2_of_4():
