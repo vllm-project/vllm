@@ -655,12 +655,22 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        model,
-        revision=revision,
-        token=hf_token,
-        **without_trust_remote_code(kwargs),
-    )
+    try:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            model,
+            revision=revision,
+            token=hf_token,
+            **without_trust_remote_code(kwargs),
+        )
+    except OSError:
+        # This is a probe, and a reference this loader cannot read is not a
+        # speculators model -- the same conclusion drawn four lines down for a
+        # config that reads fine without the key. Formats resolved by an
+        # out-of-tree config parser (e.g. a single-file GGUF) only become
+        # readable after that parser runs, so raising here rejects them before
+        # it ever does.
+        logger.debug("Not probing %s for a speculators config", model)
+        return model, tokenizer, vllm_speculative_config
     speculators_config = config_dict.get("speculators_config")
 
     if speculators_config is None:

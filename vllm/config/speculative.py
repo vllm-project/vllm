@@ -94,6 +94,12 @@ class SpeculativeConfig:
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
+    hf_config_path: str | None = None
+    """Name or path of the Hugging Face config to use for the draft model. If
+    unspecified, the draft model name or path is used. Mirrors
+    `ModelConfig.hf_config_path`, for drafts whose weights reference carries no
+    config of its own -- a single-file checkpoint, or one sitting in the
+    directory of the model it drafts for."""
     method: SpeculativeMethod | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
@@ -901,6 +907,7 @@ class SpeculativeConfig:
                     )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
+                    hf_config_path=self.hf_config_path,
                     runner="draft",
                     tokenizer=(
                         self.model
