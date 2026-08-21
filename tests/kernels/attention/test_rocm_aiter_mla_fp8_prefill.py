@@ -56,6 +56,10 @@ SCALE = 1.0 / math.sqrt(QK_HEAD_DIM)
 # elements.
 ATOL, RTOL = 1e-1, 5e-2
 
+# The assembly kernel writes bf16 through a raw output pointer. Keep its tensors
+# and workspace reservation on one dtype.
+ATTN_OUT_DTYPE = torch.bfloat16
+
 
 @pytest.fixture(autouse=True)
 def _workspace_manager():
@@ -88,8 +92,12 @@ def _make_impl():
     return impl
 
 
-def _build_prefill_metadata(seq_lens: list[int], device: torch.device):
-    """Build fp8_prefill_* metadata via the real builder (no hand-rolling)."""
+def _build_prefill_metadata(
+    seq_lens: list[int],
+    device: torch.device,
+    attn_out_dtype: torch.dtype = ATTN_OUT_DTYPE,
+):
+    """Build metadata with the production builder and output dtype."""
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAMetadataBuilder
 
     qo_indptr_cpu = torch.zeros(len(seq_lens) + 1, dtype=torch.int32)
@@ -105,7 +113,7 @@ def _build_prefill_metadata(seq_lens: list[int], device: torch.device):
         max_num_reqs=len(seq_lens),
         max_prefill_qlen=max_q,
         max_num_batched_tokens=total_q,
-        attn_out_dtype=torch.bfloat16,
+        attn_out_dtype=attn_out_dtype,
         device=device,
     )
 
@@ -138,14 +146,14 @@ def test_fp8_prefill_matches_reference(seq_len: int) -> None:
     metadata, total_q = _build_prefill_metadata([seq_len], device)
 
     q = torch.randn(
-        total_q, NUM_HEADS, QK_HEAD_DIM, dtype=torch.bfloat16, device=device
+        total_q, NUM_HEADS, QK_HEAD_DIM, dtype=ATTN_OUT_DTYPE, device=device
     )
     k = torch.randn(
-        total_q, NUM_HEADS, QK_HEAD_DIM, dtype=torch.bfloat16, device=device
+        total_q, NUM_HEADS, QK_HEAD_DIM, dtype=ATTN_OUT_DTYPE, device=device
     )
-    v = torch.randn(total_q, NUM_HEADS, V_HEAD_DIM, dtype=torch.bfloat16, device=device)
+    v = torch.randn(total_q, NUM_HEADS, V_HEAD_DIM, dtype=ATTN_OUT_DTYPE, device=device)
     out = torch.zeros(
-        total_q, NUM_HEADS * V_HEAD_DIM, dtype=torch.bfloat16, device=device
+        total_q, NUM_HEADS * V_HEAD_DIM, dtype=ATTN_OUT_DTYPE, device=device
     )
 
     impl = _make_impl()
