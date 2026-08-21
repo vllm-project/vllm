@@ -34,6 +34,3 @@ tokenspeed-mla==0.1.8; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
 humming-kernels[cu13]==0.1.12
-
-# Dependencies for hy-v4
-transformers@https://mirrors.tencent.com/repository/generic/transformers/transformers-5.15.0.dev0+g7c7988d062-py3-none-any.whl
