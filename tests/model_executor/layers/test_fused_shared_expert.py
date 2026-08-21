@@ -488,13 +488,14 @@ def _incomplete_fhmoe_signature(
 
 def _install_fake_aiter_fhmoe(
     monkeypatch: pytest.MonkeyPatch,
-    advertised_max_tokens: object,
+    supports_dsv4_i384_fhmoe: object,
     fused_moe: object,
 ) -> None:
     fake_aiter = ModuleType("aiter")
     fake_aiter.__path__ = []
     fake_fhmoe = ModuleType("aiter.fhmoe")
-    fake_fhmoe.__dict__["DSV4_I384_FHMOE_MAX_TOKENS"] = advertised_max_tokens
+    if supports_dsv4_i384_fhmoe is not None:
+        fake_fhmoe.__dict__["supports_dsv4_i384_fhmoe"] = supports_dsv4_i384_fhmoe
     fake_fused_moe = ModuleType("aiter.fused_moe")
     fake_fused_moe.__dict__["fused_moe"] = fused_moe
     fake_aiter.__dict__["fhmoe"] = fake_fhmoe
@@ -504,29 +505,47 @@ def _install_fake_aiter_fhmoe(
     monkeypatch.setitem(sys.modules, "aiter.fused_moe", fake_fused_moe)
 
 
+def _supports_fhmoe_through_2047(max_tokens: int) -> bool:
+    return max_tokens <= 2047
+
+
+def _supports_fhmoe_through_2048(max_tokens: int) -> bool:
+    return max_tokens <= 2048
+
+
+def _raises_fhmoe_config_error(max_tokens: int) -> bool:
+    raise OSError
+
+
+def _returns_truthy_non_bool(max_tokens: int) -> int:
+    return 1
+
+
 @pytest.mark.parametrize(
-    ("required_max_tokens", "advertised_max_tokens", "fused_moe", "expected"),
+    ("required_max_tokens", "capability", "fused_moe", "expected"),
     [
-        (0, 2048, _supported_fhmoe_signature, False),
-        (True, 2048, _supported_fhmoe_signature, False),
+        (0, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
+        (True, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
         (2048, None, _supported_fhmoe_signature, False),
         (2048, True, _supported_fhmoe_signature, False),
-        (2048, 2047, _supported_fhmoe_signature, False),
-        (2048, 2048, _incomplete_fhmoe_signature, False),
-        (2048, 2048, _supported_fhmoe_signature, True),
-        (2049, 2048, _supported_fhmoe_signature, False),
+        (2048, _raises_fhmoe_config_error, _supported_fhmoe_signature, False),
+        (2048, _returns_truthy_non_bool, _supported_fhmoe_signature, False),
+        (2048, _supports_fhmoe_through_2047, _supported_fhmoe_signature, False),
+        (2048, _supports_fhmoe_through_2048, _incomplete_fhmoe_signature, False),
+        (2048, _supports_fhmoe_through_2048, _supported_fhmoe_signature, True),
+        (2049, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
     ],
 )
 def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability(
     monkeypatch: pytest.MonkeyPatch,
     required_max_tokens: object,
-    advertised_max_tokens: object,
+    capability: object,
     fused_moe: object,
     expected: bool,
 ) -> None:
     from vllm._aiter_ops import rocm_aiter_ops
 
-    _install_fake_aiter_fhmoe(monkeypatch, advertised_max_tokens, fused_moe)
+    _install_fake_aiter_fhmoe(monkeypatch, capability, fused_moe)
 
     assert (
         rocm_aiter_ops._probe_dsv4_i384_fhmoe_capability(cast(int, required_max_tokens))
@@ -554,7 +573,9 @@ def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability_catches_signature_erro
 ) -> None:
     from vllm._aiter_ops import rocm_aiter_ops
 
-    _install_fake_aiter_fhmoe(monkeypatch, 2048, _supported_fhmoe_signature)
+    _install_fake_aiter_fhmoe(
+        monkeypatch, _supports_fhmoe_through_2048, _supported_fhmoe_signature
+    )
 
     def raise_signature_error(_: object) -> inspect.Signature:
         raise error

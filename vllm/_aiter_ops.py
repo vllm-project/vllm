@@ -2077,7 +2077,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(required_max_tokens: int) -> bool:
-        """Probe AITER's DSV4 native-I384 FHMoE contract."""
+        """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
         if type(required_max_tokens) is not int or required_max_tokens <= 0:
             return False
 
@@ -2088,22 +2088,21 @@ class rocm_aiter_ops:
             from aiter.fused_moe import fused_moe
 
             params = inspect.signature(fused_moe).parameters
-            max_tokens = getattr(fhmoe, "DSV4_I384_FHMOE_MAX_TOKENS", None)
-        except (ImportError, TypeError, ValueError):
+            supports_dsv4_i384_fhmoe = getattr(fhmoe, "supports_dsv4_i384_fhmoe", None)
+            if not callable(supports_dsv4_i384_fhmoe):
+                return False
+            supports_required_tokens = supports_dsv4_i384_fhmoe(required_max_tokens)
+        except Exception:
             return False
 
-        return (
-            type(max_tokens) is int
-            and max_tokens >= required_max_tokens
-            and all(
-                name in params
-                for name in (
-                    "shared_w1",
-                    "shared_w2",
-                    "shared_w1_scale",
-                    "shared_w2_scale",
-                    "shared_expert_id",
-                )
+        return supports_required_tokens is True and all(
+            name in params
+            for name in (
+                "shared_w1",
+                "shared_w2",
+                "shared_w1_scale",
+                "shared_w2_scale",
+                "shared_expert_id",
             )
         )
 
@@ -2113,7 +2112,7 @@ class rocm_aiter_ops:
     def fused_moe_supports_heterogeneous_shared_expert(
         cls, required_max_tokens: int
     ) -> bool:
-        """Whether AITER supports DSV4 native-I384 FHMoE through the given M."""
+        """Whether AITER has DSV4 native-I384 configs through the given M."""
         return cls._probe_dsv4_i384_fhmoe_capability(required_max_tokens)
 
     @staticmethod
