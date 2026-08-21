@@ -1927,8 +1927,8 @@ class VllmConfig:
 
         `max_num_batched_tokens` is also appended to the list if it fits
         within `max_cudagraph_capture_size`, so the max batch size is captured
-        even when off-stride. Likewise, once more than one speculative token
-        is in play, the widest uniform decode batch (`max_num_seqs *
+        even when off-stride. Likewise, when the uniform decode query length
+        exceeds one, the widest uniform decode batch (`max_num_seqs *
         decode_query_len`) is appended when it fits, since it need not land on
         an 8- or 16-token stride.
 
@@ -1985,7 +1985,7 @@ class VllmConfig:
                     max_num_seqs * decode_query_len * 2, default_max_graph_size
                 )
                 if decode_query_len > 1:
-                    # A speculative decode batch is decode_query_len tokens per
+                    # A uniform decode batch is decode_query_len tokens per
                     # request, so the widest one is far outside this ceiling.
                     # Coverage comes from appending the decode sizes rather than
                     # extending the token-strided grid. Extending that grid to
@@ -2122,6 +2122,8 @@ class VllmConfig:
                 self.parallel_config.tensor_parallel_size > 1
                 and self.compilation_config.pass_config.enable_sp
             ):
+                # Sequence parallelism only captures TP-divisible sizes, so a
+                # wider non-divisible decode batch cannot be captured under SP.
                 cudagraph_capture_sizes = self.update_sizes_for_sequence_parallelism(
                     cudagraph_capture_sizes
                 )
