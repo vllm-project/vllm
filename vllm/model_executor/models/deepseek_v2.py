@@ -1267,9 +1267,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         # TODO(wentao): enable SP MoE with PP after the PP boundary logic can safely
         # send/receive sequence-parallel hidden_states across stages.
         self.use_sequence_parallel_moe = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-            and is_moe_layer
+            parallel_config.use_sequence_parallel_moe and is_moe_layer
         )
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
@@ -1525,6 +1523,19 @@ class DeepseekV2Model(nn.Module):
             )
 
         if not get_pp_group().is_last_rank:
+            if any(
+                getattr(l, "use_sequence_parallel_moe", False)
+                for l in self.layers
+            ):
+                # SP keeps the residual stream sequence-sharded (padded to the
+                # TP size, so a shard can equal full_num_tokens on decode
+                # steps); the PP boundary protocol expects full-token tensors.
+                combined_states = torch.cat([hidden_states, residual], dim=-1)
+                combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+                combined_states = combined_states[: positions.shape[0]]
+                hidden_states, residual = combined_states.split(
+                    [self.hidden_size, self.hidden_size], dim=-1
+                )
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
