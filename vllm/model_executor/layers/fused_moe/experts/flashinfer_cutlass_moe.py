@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_type,
 )
@@ -111,21 +112,15 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         self.gemm1_alpha = _per_expert(quant_config.gemm1_alpha)
         self.gemm1_beta = _per_expert(quant_config.gemm1_beta)
 
-        if quant_config.weight_quant_dtype == "mxfp4":
-            # This value is used specifically for gpt-oss,
-            # Need to revisit this for other models
-            if self.gemm1_alpha is None:
-                self.gemm1_alpha = _per_expert(1.702)
-            if self.gemm1_beta is None:
-                self.gemm1_beta = _per_expert(1.0)
-            if self.gemm1_clamp_limit is None:
-                self.gemm1_clamp_limit = _per_expert(7.0)
-            if quant_config.quant_dtype == "mxfp8":
-                self.fake_input_scale = torch.ones(
-                    self.num_experts,
-                    device=self.device,
-                    dtype=torch.float32,
-                )
+        if (
+            quant_config.weight_quant_dtype == "mxfp4"
+            and quant_config.quant_dtype == "mxfp8"
+        ):
+            self.fake_input_scale = torch.ones(
+                self.num_experts,
+                device=self.device,
+                dtype=torch.float32,
+            )
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -324,9 +319,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         elif self.weight_quant_dtype == "mxfp4":
             assert self.w1_scale is not None and self.w2_scale is not None
             assert w1.is_contiguous() and w2.is_contiguous()
-            assert self.gemm1_alpha is not None
-            assert self.gemm1_beta is not None
-            assert self.gemm1_clamp_limit is not None
             assert topk_ids.is_contiguous()
 
             fc1_expert_biases = self.w1_bias
@@ -397,6 +389,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:

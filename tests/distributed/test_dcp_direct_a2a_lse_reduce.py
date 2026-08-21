@@ -10,7 +10,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import vllm.v1.attention.ops.dcp_utils as dcp_utils
+import vllm.v1.attention.ops.cp_common as cp_common
+import vllm.v1.attention.ops.dcp as dcp
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -142,17 +143,17 @@ class _FakeProcessGroup:
 class TestDirectDCPGating:
     def test_env_disabled_returns_none(self, monkeypatch):
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
-        dcp_utils.get_direct_dcp_a2a_workspace.cache_clear()
-        workspace = dcp_utils.get_direct_dcp_a2a_workspace(
+        dcp.get_direct_dcp_a2a_workspace.cache_clear()
+        workspace = dcp.get_direct_dcp_a2a_workspace(
             _FakeGroupCoordinator(), torch.device("cpu"), 16, 2, 32, torch.bfloat16, 1
         )
         assert workspace is None
 
     def test_forced_with_unsupported_dtype_raises(self, monkeypatch):
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "1")
-        dcp_utils.get_direct_dcp_a2a_workspace.cache_clear()
+        dcp.get_direct_dcp_a2a_workspace.cache_clear()
         with pytest.raises(ValueError, match="does not support"):
-            dcp_utils.get_direct_dcp_a2a_workspace(
+            dcp.get_direct_dcp_a2a_workspace(
                 _FakeGroupCoordinator(),
                 torch.device("cpu"),
                 16,
@@ -164,14 +165,14 @@ class TestDirectDCPGating:
 
     def test_zero_ubatches_raises(self):
         with pytest.raises(ValueError, match="ubatch"):
-            dcp_utils.DirectDCPA2AWorkspace(
+            dcp.DirectDCPA2AWorkspace(
                 None, torch.device("cpu"), 16, 2, 32, torch.bfloat16, num_ubatches=0
             )
 
     def test_auto_with_unsupported_dtype_returns_none(self, monkeypatch):
         monkeypatch.delenv("VLLM_USE_DIRECT_DCP_A2A", raising=False)
-        dcp_utils.get_direct_dcp_a2a_workspace.cache_clear()
-        workspace = dcp_utils.get_direct_dcp_a2a_workspace(
+        dcp.get_direct_dcp_a2a_workspace.cache_clear()
+        workspace = dcp.get_direct_dcp_a2a_workspace(
             _FakeGroupCoordinator(), torch.device("cpu"), 16, 2, 32, torch.float32, 1
         )
         assert workspace is None
@@ -179,8 +180,8 @@ class TestDirectDCPGating:
     def test_q_gather_env_disabled_returns_none(self, monkeypatch):
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_Q_GATHER", "0")
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "1")
-        dcp_utils.get_direct_dcp_q_gather_workspace.cache_clear()
-        workspace = dcp_utils.get_direct_dcp_q_gather_workspace(
+        dcp.get_direct_dcp_q_gather_workspace.cache_clear()
+        workspace = dcp.get_direct_dcp_q_gather_workspace(
             _FakeGroupCoordinator(),
             torch.device("cpu"),
             16,
@@ -194,17 +195,17 @@ class TestDirectDCPGating:
     def test_q_gather_flag_is_independent(self, monkeypatch):
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_Q_GATHER", "1")
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
-        monkeypatch.setattr(dcp_utils, "_symm_mem_spans_group", lambda group: True)
-        dcp_utils.get_direct_dcp_q_gather_workspace.cache_clear()
+        monkeypatch.setattr(cp_common, "_symm_mem_spans_group", lambda group: True)
+        dcp.get_direct_dcp_q_gather_workspace.cache_clear()
         workspace = object()
         init_workspace = MagicMock(return_value=workspace)
         monkeypatch.setattr(
-            dcp_utils,
+            dcp,
             "DirectDCPQGatherWorkspace",
             init_workspace,
         )
 
-        result = dcp_utils.get_direct_dcp_q_gather_workspace(
+        result = dcp.get_direct_dcp_q_gather_workspace(
             _FakeGroupCoordinator(),
             torch.device("cpu"),
             16,
@@ -220,8 +221,8 @@ class TestDirectDCPGating:
     def test_kv_gather_env_disabled_returns_none(self, monkeypatch):
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_KV_GATHER", "0")
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "1")
-        dcp_utils.get_direct_dcp_kv_gather_workspace.cache_clear()
-        workspace = dcp_utils.get_direct_dcp_kv_gather_workspace(
+        dcp.get_direct_dcp_kv_gather_workspace.cache_clear()
+        workspace = dcp.get_direct_dcp_kv_gather_workspace(
             _FakeGroupCoordinator(), torch.device("cpu"), 64, 576, torch.bfloat16, 1
         )
         assert workspace is None
@@ -229,17 +230,17 @@ class TestDirectDCPGating:
     def test_kv_gather_flag_is_independent(self, monkeypatch):
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_KV_GATHER", "1")
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
-        monkeypatch.setattr(dcp_utils, "_symm_mem_spans_group", lambda group: True)
-        dcp_utils.get_direct_dcp_kv_gather_workspace.cache_clear()
+        monkeypatch.setattr(cp_common, "_symm_mem_spans_group", lambda group: True)
+        dcp.get_direct_dcp_kv_gather_workspace.cache_clear()
         workspace = object()
         init_workspace = MagicMock(return_value=workspace)
         monkeypatch.setattr(
-            dcp_utils,
+            dcp,
             "DirectDCPKVGatherWorkspace",
             init_workspace,
         )
 
-        result = dcp_utils.get_direct_dcp_kv_gather_workspace(
+        result = dcp.get_direct_dcp_kv_gather_workspace(
             _FakeGroupCoordinator(), torch.device("cpu"), 64, 576, torch.bfloat16, 1
         )
 
@@ -267,9 +268,9 @@ class TestDirectDCPGating:
         factory_name,
         factory_args,
     ):
-        factory = getattr(dcp_utils, factory_name)
+        factory = getattr(dcp, factory_name)
         monkeypatch.setenv(flag_name, "1")
-        monkeypatch.setattr(dcp_utils, "_symm_mem_spans_group", lambda group: False)
+        monkeypatch.setattr(cp_common, "_symm_mem_spans_group", lambda group: False)
         factory.cache_clear()
 
         assert (
@@ -283,25 +284,25 @@ class TestDirectDCPGating:
 
     def test_kv_gather_rejects_invalid_workspace_geometry(self):
         with pytest.raises(ValueError, match="ubatch"):
-            dcp_utils.DirectDCPKVGatherWorkspace(
+            dcp.DirectDCPKVGatherWorkspace(
                 None, torch.device("cpu"), 64, 576, num_ubatches=0
             )
         with pytest.raises(ValueError, match="divide evenly"):
-            dcp_utils.DirectDCPKVGatherWorkspace(
+            dcp.DirectDCPKVGatherWorkspace(
                 _FakeProcessGroup(), torch.device("cpu"), 63, 576
             )
         with pytest.raises(ValueError, match="16-byte"):
-            dcp_utils.DirectDCPKVGatherWorkspace(
+            dcp.DirectDCPKVGatherWorkspace(
                 _FakeProcessGroup(), torch.device("cpu"), 64, 3
             )
 
     def test_q_gather_rejects_invalid_workspace_geometry(self):
         with pytest.raises(ValueError, match="ubatch"):
-            dcp_utils.DirectDCPQGatherWorkspace(
+            dcp.DirectDCPQGatherWorkspace(
                 None, torch.device("cpu"), 16, 2, 32, num_ubatches=0
             )
         with pytest.raises(ValueError, match="padded heads"):
-            dcp_utils.DirectDCPQGatherWorkspace(
+            dcp.DirectDCPQGatherWorkspace(
                 _FakeProcessGroup(),
                 torch.device("cpu"),
                 16,
@@ -310,7 +311,7 @@ class TestDirectDCPGating:
                 padded_num_heads=7,
             )
         with pytest.raises(ValueError, match="16-byte"):
-            dcp_utils.DirectDCPQGatherWorkspace(
+            dcp.DirectDCPQGatherWorkspace(
                 _FakeProcessGroup(),
                 torch.device("cpu"),
                 16,
@@ -332,7 +333,7 @@ def _manager_config(dcp_comm_backend: str = "a2a"):
 
 
 def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
-    import vllm.v1.attention.ops.dcp_utils as dcp_manager
+    import vllm.v1.attention.ops.dcp as dcp_manager
 
     group = MagicMock(world_size=2)
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
@@ -391,7 +392,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
 
 
 def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
-    import vllm.v1.attention.ops.dcp_utils as dcp_manager
+    import vllm.v1.attention.ops.dcp as dcp_manager
 
     group = MagicMock(world_size=2)
     gathered_query = torch.empty(1, 4, 8)
@@ -460,11 +461,11 @@ def test_dcp_workspace_covers_parallel_drafting():
     config.num_speculative_tokens = 3
     config.speculative_config = MagicMock(parallel_drafting=True)
 
-    assert dcp_utils.get_dcp_workspace_max_num_tokens(config) == 28
+    assert dcp.get_dcp_workspace_max_num_tokens(config) == 28
 
 
 def test_mla_dcp_manager_selects_pcp_combine(monkeypatch):
-    import vllm.v1.attention.ops.dcp_utils as dcp_manager
+    import vllm.v1.attention.ops.dcp as dcp_manager
 
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: MagicMock(world_size=2))
     manager = dcp_manager.MLADCPManager(
@@ -521,7 +522,7 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
         lambda _: MagicMock(kv_lora_rank=8, qk_rope_head_dim=4),
     )
 
-    manager = object.__new__(dcp_utils.MLADCPManager)
+    manager = object.__new__(dcp.MLADCPManager)
     manager.init_kv_gather = MagicMock()
     layer = MagicMock(dcp_manager=manager)
     config = MagicMock()
@@ -580,12 +581,12 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
         heads_per_rank, head_dim, max_num_tokens = 6, 576, 128
         padded_num_heads = 128 if world_size == 4 else None
         active_ubatch = [0]
-        dcp_utils.dbo_current_ubatch_id = lambda: active_ubatch[0]
+        dcp.dbo_current_ubatch_id = lambda: active_ubatch[0]
         for dtype_idx, dtype_name in enumerate(
             ("bfloat16", "float8_e4m3fn", "float32")
         ):
             dtype = _dtype_from_name(dtype_name)
-            workspace = dcp_utils.DirectDCPQGatherWorkspace(
+            workspace = dcp.DirectDCPQGatherWorkspace(
                 dist.group.WORLD,
                 device,
                 max_num_tokens,
@@ -747,11 +748,11 @@ def _distributed_direct_kv_gather_worker(env: dict[str, str]) -> None:
         token_dim = 576
         max_gathered_tokens = 128 * world_size
         active_ubatch = [0]
-        dcp_utils.dbo_current_ubatch_id = lambda: active_ubatch[0]
+        dcp.dbo_current_ubatch_id = lambda: active_ubatch[0]
 
         for dtype_idx, dtype_name in enumerate(("bfloat16", "float16")):
             dtype = _dtype_from_name(dtype_name)
-            workspace = dcp_utils.DirectDCPKVGatherWorkspace(
+            workspace = dcp.DirectDCPKVGatherWorkspace(
                 dist.group.WORLD,
                 device,
                 max_gathered_tokens,
@@ -818,7 +819,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
     torch.accelerator.set_device_index(local_rank)
     dist.init_process_group(backend="nccl")
     try:
-        from vllm.v1.attention.ops.dcp_alltoall import _lse_weighted_combine
+        from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
         rank = dist.get_rank()
         world_size = dist.get_world_size()
@@ -829,8 +830,8 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         heads_per_rank, head_dim, max_num_tokens = 6, 512, 128
         total_heads = world_size * heads_per_rank
         active_ubatch = [0]
-        dcp_utils.dbo_current_ubatch_id = lambda: active_ubatch[0]
-        workspace = dcp_utils.DirectDCPA2AWorkspace(
+        dcp.dbo_current_ubatch_id = lambda: active_ubatch[0]
+        workspace = dcp.DirectDCPA2AWorkspace(
             dist.group.WORLD,
             device,
             max_num_tokens,
