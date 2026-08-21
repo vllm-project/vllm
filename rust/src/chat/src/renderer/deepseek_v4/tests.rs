@@ -1,95 +1,16 @@
-use std::fs;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::path::PathBuf;
 
 use expect_test::{ExpectFile, expect, expect_file};
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::DeepSeekV4ChatRenderer;
+use crate::ChatRenderer;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::request::{
-    ChatMessage, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode, ReasoningEffort,
-};
-use crate::{ChatRenderer, ChatRole};
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum FixtureFile {
-    WithTools(FixtureRequest),
-    MessagesOnly(Vec<FixtureMessage>),
-}
-
-#[derive(Debug, Deserialize)]
-struct FixtureRequest {
-    #[serde(default)]
-    tools: Vec<FixtureTool>,
-    messages: Vec<FixtureMessage>,
-}
-
-impl FixtureFile {
-    fn into_parts(self) -> (Vec<FixtureTool>, Vec<FixtureMessage>) {
-        match self {
-            Self::WithTools(req) => (req.tools, req.messages),
-            Self::MessagesOnly(messages) => (Vec::new(), messages),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct FixtureTool {
-    function: FixtureToolFunction,
-}
-
-#[derive(Debug, Deserialize)]
-struct FixtureToolFunction {
-    name: String,
-    description: Option<String>,
-    parameters: Value,
-    #[serde(default)]
-    strict: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "role", rename_all = "snake_case")]
-enum FixtureMessage {
-    System {
-        content: String,
-    },
-    Developer {
-        content: String,
-        #[serde(default)]
-        tools: Vec<FixtureTool>,
-    },
-    User {
-        content: String,
-    },
-    Assistant {
-        #[serde(default)]
-        content: String,
-        #[serde(default)]
-        reasoning_content: String,
-        #[serde(default)]
-        tool_calls: Vec<FixtureToolCall>,
-    },
-    Tool {
-        content: String,
-        #[serde(default)]
-        tool_call_id: Option<String>,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-struct FixtureToolCall {
-    #[serde(default)]
-    id: Option<String>,
-    function: FixtureToolCallFunction,
-}
-
-#[derive(Debug, Deserialize)]
-struct FixtureToolCallFunction {
-    name: String,
-    arguments: String,
-}
+use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort};
 
 fn render_request(request: &ChatRequest) -> String {
     DeepSeekV4ChatRenderer::new()
@@ -101,88 +22,16 @@ fn render_request(request: &ChatRequest) -> String {
 }
 
 fn fixture_request(input_name: &str) -> ChatRequest {
-    let fixture = fs::read_to_string(fixture_path(input_name)).unwrap();
-    let fixture: FixtureFile = serde_json::from_str(&fixture).unwrap();
-    let (fixture_tools, fixture_messages) = fixture.into_parts();
-    let mut request = ChatRequest {
-        request_id: "deepseek-v4-fixture".to_string(),
-        messages: fixture_messages
-            .into_iter()
-            .enumerate()
-            .map(|(index, message)| match message {
-                FixtureMessage::System { content } => ChatMessage::system(content),
-                FixtureMessage::Developer { content, tools } => ChatMessage::developer(
-                    content,
-                    (!tools.is_empty()).then(|| to_chat_tools(&tools)),
-                ),
-                FixtureMessage::User { content } => ChatMessage::user(content),
-                FixtureMessage::Assistant {
-                    content,
-                    reasoning_content,
-                    tool_calls,
-                } => {
-                    let mut blocks = Vec::new();
-                    if !reasoning_content.is_empty() {
-                        blocks.push(AssistantContentBlock::Reasoning {
-                            text: reasoning_content,
-                        });
-                    }
-                    if !content.is_empty() {
-                        blocks.push(AssistantContentBlock::Text { text: content });
-                    }
-                    blocks.extend(tool_calls.into_iter().enumerate().map(
-                        |(tool_index, tool_call)| {
-                            AssistantContentBlock::ToolCall(AssistantToolCall {
-                                id: tool_call.id.unwrap_or_else(|| {
-                                    format!("fixture-tool-call-{index}-{tool_index}")
-                                }),
-                                name: tool_call.function.name,
-                                arguments: tool_call.function.arguments,
-                            })
-                        },
-                    ));
-                    ChatMessage::assistant_blocks(blocks)
-                }
-                FixtureMessage::Tool {
-                    content,
-                    tool_call_id,
-                } => ChatMessage::tool_response(
-                    content,
-                    tool_call_id.unwrap_or_else(|| format!("fixture-tool-response-{index}")),
-                ),
-            })
-            .collect(),
-        tools: to_chat_tools(&fixture_tools),
-        tool_choice: if fixture_tools.is_empty() {
-            ChatToolChoice::None
-        } else {
-            ChatToolChoice::Auto
-        },
-        ..ChatRequest::for_test()
-    };
-    if matches!(
-        request.messages.last().map(ChatMessage::role),
-        Some(ChatRole::Assistant)
-    ) {
-        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
-    }
-    request
-        .chat_options
-        .template_kwargs
-        .insert("thinking".to_string(), Value::Bool(true));
+    let mut request = fixture_chat_request(&fixture_path(input_name), deepseek_fixture_options());
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
     request
 }
 
-fn to_chat_tools(tools: &[FixtureTool]) -> Vec<ChatTool> {
-    tools
-        .iter()
-        .map(|tool| ChatTool {
-            name: tool.function.name.clone(),
-            description: tool.function.description.clone(),
-            parameters: tool.function.parameters.clone(),
-            strict: tool.function.strict,
-        })
-        .collect()
+fn deepseek_fixture_options() -> FixtureRequestOptions {
+    FixtureRequestOptions {
+        enable_thinking: Some(true),
+        no_generation_prompt_when_last_assistant: true,
+    }
 }
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -215,6 +64,14 @@ fn renders_v4_fixture_2_multi_turn_drop_thinking() {
 }
 
 #[test]
+fn renders_developer_tools_like_hf_python() {
+    assert_fixture(
+        "test_input_developer_tools.json",
+        expect_file!["fixtures/test_output_developer_tools.txt"],
+    );
+}
+
+#[test]
 fn reasoning_effort_max_adds_prefix_when_thinking_is_enabled() {
     let mut request = ChatRequest {
         messages: vec![ChatMessage::user("solve it")],
@@ -229,12 +86,95 @@ fn reasoning_effort_max_adds_prefix_when_thinking_is_enabled() {
     let rendered = render_request(&request);
 
     expect![[r#"
+        <｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.
+        You MUST reason with the utmost depth and rigor, leaving absolutely nothing to chance: exhaustively decompose the problem into its most fundamental components, trace every causal chain to its root, and resolve the underlying cause rather than any surface symptom.
+        Do not stop reasoning until you have independently verified the solution from multiple angles and are certain that no assumption remains unchecked and no error remains undiscovered.
+
+        <｜User｜>solve it<｜Assistant｜><think>"#]]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn reasoning_effort_high_adds_0731_high_prefix() {
+    let mut request = ChatRequest {
+        messages: vec![ChatMessage::user("solve it")],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(true));
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::High);
+
+    let rendered = render_request(&request);
+
+    expect![[r#"
         <｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum with no shortcuts permitted.
         You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.
         Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.
 
         <｜User｜>solve it<｜Assistant｜><think>"#]]
     .assert_eq(&rendered);
+}
+
+#[test]
+fn omitted_thinking_and_effort_default_to_high() {
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user("solve it")],
+        ..ChatRequest::for_test()
+    };
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"));
+    assert!(rendered.ends_with("<｜Assistant｜><think>"));
+}
+
+#[test]
+fn reasoning_effort_xhigh_maps_to_high() {
+    let mut request = ChatRequest {
+        messages: vec![ChatMessage::user("solve it")],
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::XHigh);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"));
+    assert!(rendered.ends_with("<｜Assistant｜><think>"));
+}
+
+#[test]
+fn minimal_and_medium_reasoning_effort_map_to_low() {
+    for effort in [ReasoningEffort::Minimal, ReasoningEffort::Medium] {
+        let mut request = ChatRequest {
+            messages: vec![ChatMessage::user("solve it")],
+            ..ChatRequest::for_test()
+        };
+        request.chat_options.reasoning_effort = Some(effort);
+
+        let rendered = render_request(&request);
+
+        expect!["<｜begin▁of▁sentence｜><｜User｜>solve it<｜Assistant｜><think>"]
+            .assert_eq(&rendered);
+    }
+}
+
+#[test]
+fn reasoning_effort_low_keeps_the_default_prompt() {
+    let mut request = ChatRequest {
+        messages: vec![ChatMessage::user("solve it")],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(true));
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+
+    let rendered = render_request(&request);
+
+    expect!["<｜begin▁of▁sentence｜><｜User｜>solve it<｜Assistant｜><think>"].assert_eq(&rendered);
 }
 
 #[test]
@@ -272,12 +212,13 @@ fn reasoning_effort_template_kwarg_is_ignored() {
 
     let rendered = render_request(&request);
 
-    expect!["<｜begin▁of▁sentence｜><｜User｜>solve it<｜Assistant｜><think>"].assert_eq(&rendered);
+    assert!(rendered.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"));
+    assert!(rendered.ends_with("<｜Assistant｜><think>"));
 }
 
 #[test]
 fn tool_results_are_sorted_by_previous_assistant_tool_call_order() {
-    let request = ChatRequest {
+    let mut request = ChatRequest {
         messages: vec![
             ChatMessage::assistant_blocks(vec![
                 AssistantContentBlock::ToolCall(AssistantToolCall {
@@ -296,6 +237,11 @@ fn tool_results_are_sorted_by_previous_assistant_tool_call_order() {
         ],
         ..ChatRequest::for_test()
     };
+
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
 
     let rendered = render_request(&request);
 
@@ -339,6 +285,7 @@ fn drop_thinking_false_keeps_prior_assistant_reasoning() {
         .chat_options
         .template_kwargs
         .insert("drop_thinking".to_string(), Value::Bool(false));
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
 
     let rendered = render_request(&request);
 
@@ -350,7 +297,7 @@ fn drop_thinking_false_keeps_prior_assistant_reasoning() {
 
 #[test]
 fn continue_final_assistant_omits_final_eos() {
-    let request = ChatRequest {
+    let mut request = ChatRequest {
         messages: vec![
             ChatMessage::user("write"),
             ChatMessage::assistant_text("partial answer"),
@@ -361,6 +308,10 @@ fn continue_final_assistant_omits_final_eos() {
         },
         ..ChatRequest::for_test()
     };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
 
     let rendered = render_request(&request);
 

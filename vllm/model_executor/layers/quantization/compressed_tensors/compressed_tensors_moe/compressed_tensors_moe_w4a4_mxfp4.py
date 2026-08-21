@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
-    XPUExpertsMXFp4,
+    XPUExpertsMxFp4,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
@@ -54,8 +54,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             self.experts_cls = CutlassExpertsMxfp4
         elif current_platform.is_xpu():
             self.mxfp4_backend = Mxfp4MoeBackend.XPU
-            self.experts_cls = XPUExpertsMXFp4
-            logger.info_once("Using XPUExpertsMXFp4 for MXFP4 MoE on XPU platform")
+            self.experts_cls = XPUExpertsMxFp4
+            logger.info_once("Using XPUExpertsMxFp4 for MXFP4 MoE on XPU platform")
         else:
             logger.info_once("Using MarlinExperts for MXFP4 MoE")
             self.experts_cls = MarlinExperts
@@ -75,7 +75,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // 2,
                 requires_grad=False,
@@ -102,7 +102,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         w13_weight_scale = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 # 2 fp4 items are packed in the input dimension
                 hidden_size // self.group_size,
                 dtype=torch.uint8,
@@ -143,6 +143,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 mxfp4_backend=self.mxfp4_backend,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                layer=layer,
             )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:

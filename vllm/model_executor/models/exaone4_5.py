@@ -52,7 +52,12 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Exaone4_5_DummyInputsBuilder
 from .qwen2_vl import Qwen2VLMultiModalProcessor as Exaone4_5_MultiModalProcessor
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -152,6 +157,8 @@ class EXAONE4_5_VisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: int | None = None,
+        sequence_lengths: torch.Tensor
+        | None = None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -176,6 +183,7 @@ class EXAONE4_5_VisionAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         context_layer = einops.rearrange(
@@ -190,6 +198,7 @@ class EXAONE4_5_VisionAttention(nn.Module):
     dynamic_arg_dims={
         "x": 0,
         "cu_seqlens": 0,
+        "sequence_lengths": 0,
         "rotary_pos_emb_cos": 0,
         "rotary_pos_emb_sin": 0,
     },
@@ -241,6 +250,8 @@ class Exaone4_5_VisionBlock(nn.Module):
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
         seqlens: list[int] | None = None,  # Only used for xFormers
+        # Only used for FlashInfer CuDNN backend
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -248,6 +259,7 @@ class Exaone4_5_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
@@ -310,6 +322,10 @@ class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
     dummy_inputs=Exaone4_5_DummyInputsBuilder,
 )
 class Exaone4_5_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
+    hf_to_vllm_mapper = Qwen2_5_VLForConditionalGeneration.hf_to_vllm_mapper | (
+        WeightsMapper(orig_to_new_prefix={"mtp.": None})
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
 
@@ -346,10 +362,7 @@ class Exaone4_5_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["mtp."]),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod

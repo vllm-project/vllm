@@ -22,7 +22,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only IBM Granite model compatible with HuggingFace weights."""
+"""Inference-only IBM Granite model compatible with HuggingFace weights.
+
+Also serves the `granite_swa` checkpoints (`GraniteSWAForCausalLM`), supporting
+three additional features: per-layer sliding window attention (`layer_types`), a
+learnable per-head attention sink (`self_attn.sinks`), and a per-layer RoPE base
+(`layer_rope_theta`, with 0 for NoPE).
+"""
 
 from collections.abc import Iterable
 from itertools import islice
@@ -30,6 +36,7 @@ from itertools import islice
 import torch
 from torch import nn
 from transformers import GraniteConfig
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -49,20 +56,51 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
+from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    is_pp_missing_parameter,
+    WeightsMapper,
+    extract_layer_index,
     make_layers,
     maybe_prefix,
 )
+
+
+def granite_layer_attn_params(
+    config: PretrainedConfig, layer_idx: int
+) -> tuple[int | None, float, bool]:
+    """Resolve one layer's sliding window, RoPE base and sink usage.
+
+    Plain Granite configs carry no SWA fields and fall back to full
+    attention, global RoPE base and no sink. HF SWA checkpoints use
+    sinks without a dedicated flag, so assume true when `layer_types`
+    is used, and allow `attention_sinks` to override that decision.
+
+    Returns:
+        Sliding window size (`None` for full attention), RoPE base theta (`0`
+        for NoPE), and attention sink presence/absence.
+    """
+    layer_types = getattr(config, "layer_types", None)
+    sliding_window = (
+        config.sliding_window
+        if layer_types is not None and layer_types[layer_idx] == "sliding_attention"
+        else None
+    )
+
+    layer_rope_theta = getattr(config, "layer_rope_theta", None)
+    rope_theta = (
+        layer_rope_theta[layer_idx]
+        if layer_rope_theta is not None
+        else config.rope_parameters["rope_theta"]
+    )
+
+    has_sink = getattr(config, "attention_sinks", layer_types is not None)
+    return sliding_window, rope_theta, has_sink
 
 
 class GraniteMLP(nn.Module):
@@ -158,11 +196,25 @@ class GraniteAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position_embeddings,
-            rope_parameters=config.rope_parameters,
+        sliding_window, rope_theta, has_sink = granite_layer_attn_params(
+            config, extract_layer_index(prefix)
         )
+
+        self.use_rope = rope_theta != 0
+        if self.use_rope:
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters={**config.rope_parameters, "rope_theta": rope_theta},
+            )
+
+        # Per-head sink, applied in backend as extra logit in the softmax denom
+        if has_sink:
+            self.sinks = nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
+            set_weight_attrs(self.sinks, {"weight_loader": sharded_weight_loader(0)})
+        else:
+            self.sinks = None
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -170,7 +222,9 @@ class GraniteAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
+            sinks=self.sinks,
         )
 
     def forward(
@@ -180,7 +234,8 @@ class GraniteAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        if self.use_rope:
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -199,7 +254,6 @@ class GraniteDecoderLayer(nn.Module):
         self.residual_multiplier = config.residual_multiplier
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
-        # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )
@@ -253,6 +307,17 @@ class GraniteDecoderLayer(nn.Module):
 
 @support_torch_compile
 class GraniteModel(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        }
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -323,66 +388,17 @@ class GraniteModel(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
-
+class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
+    hf_to_vllm_mapper = GraniteModel.hf_to_vllm_mapper
     # LoRA specific attributes
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
@@ -408,7 +424,7 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             if hasattr(config, "logits_scaling"):
@@ -451,13 +467,5 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # With tie_word_embeddings, we can skip lm_head.weight
-        # The weight might appear unnecessarily in the files if the model is
-        # processed with quantization, LoRA, fine-tuning, etc.
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
-
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=skip_prefixes,
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

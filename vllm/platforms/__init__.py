@@ -152,9 +152,7 @@ def xpu_platform_plugin() -> str | None:
     try:
         import torch
 
-        from vllm.utils.torch_utils import supports_xccl
-
-        if supports_xccl():
+        if torch.distributed.is_xccl_available():
             dist_backend = "xccl"
             from vllm.platforms.xpu import XPUPlatform
 
@@ -180,24 +178,32 @@ def _is_amd_zen_cpu() -> bool:
 
 
 def cpu_platform_plugin() -> str | None:
-    is_cpu = False
     logger.debug("Checking if CPU platform is available.")
-    try:
-        is_cpu = vllm_version_matches_substr("cpu")
-        if is_cpu:
-            logger.debug(
-                "Confirmed CPU platform is available because vLLM is built with CPU."
-            )
-        if not is_cpu:
-            import sys
-
-            is_cpu = sys.platform.startswith("darwin")
+    is_cpu = envs.VLLM_TARGET_DEVICE == "cpu"
+    if is_cpu:
+        logger.debug(
+            "Confirmed CPU platform is available because "
+            "VLLM_TARGET_DEVICE is set to CPU."
+        )
+    else:
+        try:
+            is_cpu = vllm_version_matches_substr("cpu")
             if is_cpu:
                 logger.debug(
-                    "Confirmed CPU platform is available because the machine is MacOS."
+                    "Confirmed CPU platform is available because vLLM is built "
+                    "with CPU."
                 )
-    except Exception as e:
-        logger.debug("CPU platform is not available because: %s", str(e))
+            if not is_cpu:
+                import sys
+
+                is_cpu = sys.platform.startswith("darwin")
+                if is_cpu:
+                    logger.debug(
+                        "Confirmed CPU platform is available because the machine "
+                        "is MacOS."
+                    )
+        except Exception as e:
+            logger.debug("CPU platform is not available because: %s", str(e))
 
     if not is_cpu:
         return None
@@ -206,7 +212,7 @@ def cpu_platform_plugin() -> str | None:
         try:
             import zentorch  # noqa: F401
 
-            logger.debug(
+            logger.info(
                 "AMD Zen CPU detected with zentorch installed, using ZenCpuPlatform."
             )
             return "vllm.platforms.zen_cpu.ZenCpuPlatform"
@@ -229,6 +235,15 @@ builtin_platform_plugins = {
 
 
 def resolve_current_platform_cls_qualname() -> str:
+    # An explicit CPU target is authoritative. Native CPU-only CI jobs reuse
+    # an accelerator wheel and can run on accelerator hosts, so probing every
+    # plugin would otherwise activate both CPU and the host accelerator.
+    if envs.VLLM_TARGET_DEVICE == "cpu":
+        cpu_platform_cls_qualname = cpu_platform_plugin()
+        assert cpu_platform_cls_qualname is not None
+        logger.debug("Explicitly selected CPU platform.")
+        return cpu_platform_cls_qualname
+
     platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
 
     activated_plugins = []

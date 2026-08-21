@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
@@ -91,8 +94,8 @@ impl HfSpecialTokens {
 #[serde(default)]
 pub struct ModelConfig {
     model_type: Option<String>,
-    max_position_embeddings: Option<u32>,
-    num_attention_heads: Option<u32>,
+    vocab_size: Option<u32>,
+    eos_token_id: Option<OneOrManyTokenIds>,
     num_experts: Option<OneOrManyExpertCount>,
     moe_num_experts: Option<OneOrManyExpertCount>,
     n_routed_experts: Option<OneOrManyExpertCount>,
@@ -108,10 +111,30 @@ pub(super) struct GenerationConfig {
     pub eos_token_id: Option<OneOrManyTokenIds>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    #[serde(deserialize_with = "deserialize_top_k")]
     pub top_k: Option<u32>,
     pub min_p: Option<f32>,
     pub repetition_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
+}
+
+/// Deserialize vLLM-compatible `top_k` values from generation configs.
+///
+/// Both `-1` and `0` disable top-k sampling and become `None`; positive values
+/// are preserved.
+fn deserialize_top_k<'de, D>(deserializer: D) -> std::result::Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<i64>::deserialize(deserializer)? {
+        None | Some(-1) | Some(0) => Ok(None),
+        Some(value) if value > 0 => {
+            u32::try_from(value).map(Some).map_err(serde::de::Error::custom)
+        }
+        Some(value) => Err(serde::de::Error::custom(format!(
+            "top_k must be -1, 0, or a positive integer, got {value}"
+        ))),
+    }
 }
 
 /// HF generation configs allow either one EOS id or a list of EOS ids.
@@ -123,11 +146,15 @@ pub(super) enum OneOrManyTokenIds {
 }
 
 impl OneOrManyTokenIds {
-    pub(super) fn into_set(self) -> BTreeSet<u32> {
+    pub(super) fn as_slice(&self) -> &[u32] {
         match self {
-            Self::One(id) => BTreeSet::from([id]),
-            Self::Many(ids) => ids.into_iter().collect(),
+            Self::One(id) => std::slice::from_ref(id),
+            Self::Many(ids) => ids.as_slice(),
         }
+    }
+
+    pub(super) fn into_set(self) -> BTreeSet<u32> {
+        self.as_slice().iter().copied().collect()
     }
 }
 
@@ -179,22 +206,30 @@ impl ModelConfig {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
     }
 
-    /// Reject partially nested `text_config` payloads that are unlikely to be
-    /// valid LLM configs for our current use.
-    ///
-    /// This keeps the simplified Rust-side parsing honest: if a model declares
-    /// `text_config`, it must at least look like a real text model config.
-    fn validate_text_config_selection(&self) -> Result<()> {
-        if let Some(text_config) = self.text_config.as_deref()
-            && text_config.num_attention_heads.is_none()
-        {
-            return Err(Error::Tokenizer(
-                "the text config extracted from the model config does not have `num_attention_heads`"
-                    .to_string(),
-            ));
+    /// Return the effective model vocabulary size, following the same
+    /// simplified text-config selection as `model_type`.
+    pub fn vocab_size(&self) -> Result<u32> {
+        if let Some(vocab_size) = self.vocab_size {
+            Ok(vocab_size)
+        } else if let Some(text_config) = self.text_config.as_deref() {
+            text_config.vocab_size()
+        } else {
+            Err(Error::Tokenizer(
+                "the model config does not define `vocab_size`".to_string(),
+            ))
         }
+    }
 
-        Ok(())
+    /// Return the effective model-side EOS token ids, following the same
+    /// simplified text-config selection as `vocab_size`.
+    pub(super) fn eos_token_ids(&self) -> &[u32] {
+        if let Some(eos_token_id) = self.eos_token_id.as_ref() {
+            eos_token_id.as_slice()
+        } else if let Some(text_config) = self.text_config.as_deref() {
+            text_config.eos_token_ids()
+        } else {
+            &[]
+        }
     }
 
     /// Match Python's current expert-count priority on the selected text
@@ -237,10 +272,6 @@ impl ModelConfig {
     pub(super) fn is_moe(&self) -> bool {
         self.num_experts() > 0
     }
-
-    pub(super) fn max_position_embeddings(&self) -> Option<u32> {
-        self.effective_text_config().max_position_embeddings
-    }
 }
 
 /// Load the tokenizer-side EOS metadata if a config file is present.
@@ -255,9 +286,7 @@ pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationCo
 
 /// Load the model-side config (`config.json`) if present.
 pub fn load_model_config(path: Option<&Path>) -> Result<ModelConfig> {
-    let config: ModelConfig = read_json_file(path)?;
-    config.validate_text_config_selection()?;
-    Ok(config)
+    read_json_file(path)
 }
 
 fn read_json_file<T>(path: Option<&Path>) -> Result<T>
@@ -285,7 +314,24 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::ModelConfig;
+    use super::{GenerationConfig, ModelConfig};
+
+    #[test]
+    fn generation_config_normalizes_vllm_top_k_values() {
+        for (input, expected) in [
+            (r#"{"top_k":null}"#, None),
+            (r#"{"top_k":-1}"#, None),
+            (r#"{"top_k":0}"#, None),
+            (r#"{"top_k":20}"#, Some(20)),
+        ] {
+            let config: GenerationConfig = serde_json::from_str(input).unwrap();
+            assert_eq!(config.top_k, expected, "input={input}");
+        }
+
+        for input in [r#"{"top_k":-2}"#, r#"{"top_k":4294967296}"#] {
+            assert!(serde_json::from_str::<GenerationConfig>(input).is_err());
+        }
+    }
 
     #[test]
     fn model_config_detects_moe_from_named_expert_fields() {
@@ -335,12 +381,9 @@ mod tests {
             r#"{
                 "model_type": "top_level",
                 "num_experts": 64,
-                "max_position_embeddings": 8192,
                 "text_config": {
                     "model_type": "nested",
-                    "num_attention_heads": 32,
-                    "num_local_experts": 8,
-                    "max_position_embeddings": 4096
+                    "num_local_experts": 8
                 }
             }"#,
         )
@@ -348,26 +391,62 @@ mod tests {
 
         assert_eq!(config.num_experts(), 8);
         assert_eq!(config.model_type(), Some("top_level"));
-        assert_eq!(config.max_position_embeddings(), Some(4096));
         assert!(config.is_moe());
     }
 
     #[test]
-    fn model_config_defaults_to_non_moe_when_no_expert_metadata_exists() {
-        let config: ModelConfig =
-            serde_json::from_str(r#"{"max_position_embeddings":4096}"#).unwrap();
+    fn model_config_uses_nested_vocab_size_when_top_level_is_absent() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "text_config": {
+                    "vocab_size": 151936
+                }
+            }"#,
+        )
+        .unwrap();
 
-        assert_eq!(config.num_experts(), 0);
-        assert!(!config.is_moe());
-        assert_eq!(config.max_position_embeddings(), Some(4096));
+        assert_eq!(config.vocab_size().unwrap(), 151936);
     }
 
     #[test]
-    fn model_config_rejects_nested_text_config_without_attention_heads() {
-        let config: ModelConfig =
-            serde_json::from_str(r#"{"text_config":{"max_position_embeddings":4096}}"#).unwrap();
+    fn model_config_reads_top_level_eos_token_ids() {
+        let single: ModelConfig = serde_json::from_str(r#"{"eos_token_id":151645}"#).unwrap();
+        let many: ModelConfig =
+            serde_json::from_str(r#"{"eos_token_id":[128001,128008,128009]}"#).unwrap();
+        let null: ModelConfig = serde_json::from_str(r#"{"eos_token_id":null}"#).unwrap();
 
-        let error = config.validate_text_config_selection().unwrap_err();
-        assert!(error.to_string().contains("does not have `num_attention_heads`"),);
+        assert_eq!(single.eos_token_ids(), &[151645]);
+        assert_eq!(many.eos_token_ids(), &[128001, 128008, 128009]);
+        assert!(null.eos_token_ids().is_empty());
+    }
+
+    #[test]
+    fn model_config_uses_nested_eos_token_ids_when_top_level_is_absent() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "text_config": {
+                    "eos_token_id": [59246, 59253, 59255]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.eos_token_ids(), &[59246, 59253, 59255]);
+    }
+
+    #[test]
+    fn model_config_rejects_missing_vocab_size() {
+        let config: ModelConfig = serde_json::from_str(r#"{}"#).unwrap();
+
+        let error = config.vocab_size().unwrap_err();
+        assert!(error.to_string().contains("does not define `vocab_size`"));
+    }
+
+    #[test]
+    fn model_config_defaults_to_non_moe_when_no_expert_metadata_exists() {
+        let config: ModelConfig = serde_json::from_str(r#"{}"#).unwrap();
+
+        assert_eq!(config.num_experts(), 0);
+        assert!(!config.is_moe());
     }
 }

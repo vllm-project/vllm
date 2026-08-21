@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
@@ -15,7 +16,7 @@ from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 def compute_varlen_chunk_metadata(
@@ -68,22 +69,22 @@ def compute_varlen_chunk_metadata(
 
     # Exclusive prefix sum over logical-chunk lengths
     if chunk_lens:
-        cu_chunk_seqlens = torch.tensor(
-            [0] + list(itertools.accumulate(chunk_lens)),
-            device=device,
-            dtype=torch.int32,
-        )
-        # Final boundary must equal total tokens
-        assert int(cu_chunk_seqlens[-1].item()) == total
+        cu_chunk_seqlens_list = [0] + list(itertools.accumulate(chunk_lens))
+        # Final boundary must equal total tokens (check on host to avoid a sync)
+        assert cu_chunk_seqlens_list[-1] == total
     else:
-        cu_chunk_seqlens = torch.tensor([0], device=device, dtype=torch.int32)
-
-    last_chunk_indices_t = (
-        torch.tensor(last_chunk_indices, device=device, dtype=torch.int32)
-        if len(starts) > 0
-        else torch.empty((0,), device=device, dtype=torch.int32)
+        cu_chunk_seqlens_list = [0]
+    cu_chunk_seqlens = async_tensor_h2d(
+        cu_chunk_seqlens_list, dtype=torch.int32, device=device
     )
-    seq_idx_chunks_t = torch.tensor(seq_idx_chunks, device=device, dtype=torch.int32)
+
+    # last_chunk_indices is empty when there are no sequences (len(starts) == 0).
+    last_chunk_indices_t = async_tensor_h2d(
+        last_chunk_indices, dtype=torch.int32, device=device
+    )
+    seq_idx_chunks_t = async_tensor_h2d(
+        seq_idx_chunks, dtype=torch.int32, device=device
+    )
     return cu_chunk_seqlens, last_chunk_indices_t, seq_idx_chunks_t
 
 
@@ -117,7 +118,7 @@ class Mamba2AttentionMetadataBuilder(
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: MambaSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -149,11 +150,15 @@ class Mamba2AttentionMetadataBuilder(
 
         # Compute seq_idx for prefill only
         if common.num_prefills > 0:
-            prep_initial_states = (
-                torch.any(common.has_initial_states_p).item()
-                if common.has_initial_states_p is not None
-                else False
-            )
+            prep_initial_states = False
+            if common.has_initial_states_p is not None:
+                # Same condition as `has_initial_states_p`, but derived from CPU
+                # data so it needs no D2H. `seq_lens_cpu_upper_bound` is precise
+                # for prefill rows, which is all this slice covers.
+                num_computed_tokens_p_cpu, _ = self._prefill_cpu_metadata(
+                    common, common_attn_metadata
+                )
+                prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
             cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
                 self._build_chunk_metadata_tensors(

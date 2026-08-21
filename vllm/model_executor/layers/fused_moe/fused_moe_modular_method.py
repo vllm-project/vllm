@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -14,11 +15,15 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernel,
-    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import (
+        RoutedExperts,
+    )
 
 logger = init_logger(__name__)
 
@@ -41,19 +46,13 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def wraps_legacy_quant_method(self) -> bool:
         return not self.old_quant_method.supports_internal_mk
 
-    @staticmethod
-    def make(
-        moe_layer: torch.nn.Module,
-        old_quant_method: FusedMoEMethodBase,
-        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-    ) -> "FusedMoEModularMethod":
-        return FusedMoEModularMethod(
-            old_quant_method,
-            FusedMoEKernel(
-                prepare_finalize,
-                old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
-            ),
-        )
+    @property
+    def skip_forward_padding(self) -> bool:
+        return self.old_quant_method.skip_forward_padding
+
+    @property
+    def has_unpadded_output(self) -> bool:
+        return self.old_quant_method.has_unpadded_output
 
     @property
     def supports_eplb(self) -> bool:
@@ -65,7 +64,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -75,13 +74,13 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         raise NotImplementedError
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: "RoutedExperts"
     ) -> FusedMoEQuantConfig | None:
         return self.moe_quant_config
 
     def apply(
         self,
-        layer: "RoutedExperts",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,

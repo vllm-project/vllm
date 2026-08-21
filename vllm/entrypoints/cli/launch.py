@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import signal
+import inspect
 
 import uvloop
 
@@ -24,11 +24,14 @@ class LaunchSubcommandBase(CLISubcommand):
     def add_cli_args(cls, parser: FlexibleArgumentParser) -> None:
         """Add the CLI arguments to the parser.
 
-        By default, adds the standard vLLM serving arguments.
+        By default, uses the subcommand's docstring as the description and adds
+        the standard vLLM serving arguments.
         Subclasses can override to add component-specific arguments.
         """
         from vllm.entrypoints.openai.cli_args import make_arg_parser
 
+        if cls.__doc__:
+            parser.description = inspect.cleandoc(cls.__doc__)
         make_arg_parser(parser)
 
     @staticmethod
@@ -37,13 +40,25 @@ class LaunchSubcommandBase(CLISubcommand):
 
 
 class RenderSubcommand(LaunchSubcommandBase):
-    """The `render` subcommand for `vllm launch`."""
+    """`vllm launch render` starts a GPU-less rendering server for preprocessing
+    and postprocessing only.
+
+    ```bash
+    vllm launch render meta-llama/Llama-3.2-1B-Instruct --port 8100
+    ```
+
+    This command reuses the standard serving parser, so model, frontend,
+    networking, and related CLI options follow the same conventions as
+    [`vllm serve`](https://docs.vllm.ai/en/latest/cli/serve/).
+    """
 
     name = "render"
     help = "Launch a GPU-less rendering server (preprocessing and postprocessing only)."
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
+        from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
+
         uvloop.run(run_launch_fastapi(args))
 
 
@@ -89,7 +104,6 @@ class LaunchSubcommand(CLISubcommand):
             cmd_subparser = launch_subparsers.add_parser(
                 cmd_cls.name,
                 help=cmd_cls.help,
-                description=cmd_cls.help,
                 usage=f"vllm {self.name} {cmd_cls.name} [options]",
             )
             cmd_subparser.set_defaults(launch_command=cmd_cls.cmd)
@@ -103,46 +117,3 @@ class LaunchSubcommand(CLISubcommand):
 
 def cmd_init() -> list[CLISubcommand]:
     return [LaunchSubcommand()]
-
-
-async def run_launch_fastapi(args: argparse.Namespace) -> None:
-    """Run the online serving layer with FastAPI (no GPU inference)."""
-
-    # Interrupt initialization if SIGTERM arrives before uvicorn installs
-    # its own signal handlers. Once uvicorn is running it replaces this.
-    def _interrupt_init(*_) -> None:
-        raise KeyboardInterrupt("terminated")
-
-    signal.signal(signal.SIGTERM, _interrupt_init)
-
-    from vllm import envs
-    from vllm.config import VllmConfig
-    from vllm.engine.arg_utils import AsyncEngineArgs
-    from vllm.entrypoints.openai.api_server import (
-        build_and_serve_renderer,
-        setup_server,
-    )
-
-    # 1. Socket binding
-    listen_address, sock = setup_server(args)
-
-    # 2. Build and serve the API server
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    model_config = engine_args.create_model_config()
-
-    # Render servers preprocess data only — no inference, no quantized kernels.
-    # Clear quantization so VllmConfig skips quant dtype/capability validation.
-    model_config.quantization = None
-
-    # Render servers never allocate KV cache; suppress the spurious CPU KV
-    # cache space warning from CpuPlatform.check_and_update_config.
-    envs.VLLM_CPU_KVCACHE_SPACE = 0
-
-    vllm_config = VllmConfig(model_config=model_config)
-    shutdown_task = await build_and_serve_renderer(
-        vllm_config, listen_address, sock, args
-    )
-    try:
-        await shutdown_task
-    finally:
-        sock.close()

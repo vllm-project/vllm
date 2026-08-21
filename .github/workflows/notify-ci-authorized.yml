@@ -1,0 +1,49 @@
+name: Notify CI authorization
+
+on:
+  pull_request_target:
+    types: [labeled]
+  workflow_run:
+    workflows: [Record CI approval]
+    types: [completed]
+
+concurrency:
+  group: >-
+    notify-ci-authorized-${{
+      github.event.pull_request.number ||
+      github.event.workflow_run.pull_requests[0].number ||
+      github.event.workflow_run.id
+    }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  notify:
+    if: >-
+      (github.event_name == 'pull_request_target' &&
+      github.event.action == 'labeled' &&
+      (github.event.label.name == 'ready' ||
+      github.event.label.name == 'ready-run-all-tests')) ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'pull_request_review' &&
+      github.event.workflow_run.conclusion == 'success')
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.12"
+      - name: Notify PR author that CI is available
+        run: >-
+          uv run --no-project --python 3.12
+          .github/workflows/scripts/run_ci_command.py
+        env:
+          CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
+          GH_TOKEN: ${{ github.token }}

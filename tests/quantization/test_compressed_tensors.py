@@ -5,11 +5,13 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
+from contextlib import contextmanager
 from unittest.mock import Mock
 
 import pytest
 import torch
 from compressed_tensors.quantization import (
+    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
@@ -19,7 +21,11 @@ from tests.models.utils import check_logprobs_close
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    MarlinFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
@@ -30,14 +36,24 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
+    CompressedTensorsW8A8Fp8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    ScaleDesc,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
@@ -342,6 +358,34 @@ def test_compressed_tensors_fp8(vllm_runner):
         assert output
 
 
+def test_compressed_tensors_w8a8_fp8_moe_forwards_swiglu_params():
+    quant_method = object.__new__(CompressedTensorsW8A8Fp8MoEMethod)
+    quant_method.input_quant = QuantizationArgs(
+        num_bits=8,
+        type=QuantizationType.FLOAT,
+        strategy=QuantizationStrategy.TOKEN,
+        dynamic=True,
+        symmetric=True,
+    )
+    quant_method.weight_block_size = None
+    quant_method.fp8_backend = Fp8MoeBackend.TRITON
+
+    layer = Mock()
+    layer.w13_weight_scale = torch.ones(2, 4, 1)
+    layer.w2_weight_scale = torch.ones(2, 8, 1)
+    layer.w13_input_scale = None
+    layer.w2_input_scale = None
+    layer.swiglu_alpha = 1.702
+    layer.swiglu_beta = None
+    layer.swiglu_limit = 7.0
+
+    quant_config = quant_method.get_fused_moe_quant_config(layer)
+
+    assert quant_config.gemm1_alpha == 1.702
+    assert quant_config.gemm1_beta is None
+    assert quant_config.gemm1_clamp_limit == 7.0
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )
@@ -369,6 +413,27 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
         assert output
 
 
+@contextmanager
+def _nvfp4_marlin_error_context(model, capfd):
+    is_rocm_and_unsupported = (
+        model == "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16"
+        and current_platform.is_rocm()
+    )
+
+    if is_rocm_and_unsupported:
+        expected_error = (
+            "ValueError: Forced NVFP4 kernel MarlinNvFp4LinearKernel is not "
+            "supported: Marlin FP4 not available"
+        )
+        with pytest.raises(RuntimeError, match="Engine core initialization failed"):
+            yield
+
+        captured = capfd.readouterr()
+        assert expected_error in captured.out + captured.err
+    else:
+        yield
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -376,9 +441,12 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
         ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", False),
     ],
 )
-def test_compressed_tensors_nvfp4(vllm_runner, args):
+def test_compressed_tensors_nvfp4(vllm_runner, args, capfd):
     model, use_a16 = args
-    with vllm_runner(model, enforce_eager=True) as llm:
+    with (
+        _nvfp4_marlin_error_context(model, capfd),
+        vllm_runner(model, enforce_eager=True) as llm,
+    ):
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -446,6 +514,11 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
         ),
+        (
+            "nm-testing/Llama-3.2-1B-Instruct-quipv16-nvfp4",
+            "Flat is better than nested.\nSparse is better than dense.",
+            150.0,
+        ),
     ],
 )
 def test_compressed_tensors_transforms_perplexity(
@@ -457,9 +530,14 @@ def test_compressed_tensors_transforms_perplexity(
         assert perplexity <= exp_perplexity
 
 
-def test_compressed_tensors_fp8_block_enabled(vllm_runner):
+@pytest.mark.parametrize(
+    "linear_backend", ["auto", "marlin"] if current_platform.is_cuda() else ["auto"]
+)
+def test_compressed_tensors_fp8_block_enabled(vllm_runner, linear_backend):
     model_path = "RedHatAI/Qwen3-0.6B-FP8-BLOCK"
-    with vllm_runner(model_path, enforce_eager=True) as llm:
+    with vllm_runner(
+        model_path, enforce_eager=True, linear_backend=linear_backend
+    ) as llm:
         fp8_dtype = current_platform.fp8_dtype()
 
         def check_model(model):
@@ -468,19 +546,29 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
-            assert isinstance(qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel)
-
-            assert qkv_proj.weight.dtype is fp8_dtype
-            assert qkv_proj.weight_scale.dtype is torch.float32
+            if linear_backend == "marlin":
+                assert isinstance(
+                    qkv_proj.scheme.fp8_linear, MarlinFP8ScaledMMLinearKernel
+                )
+                assert qkv_proj.weight.dtype is torch.int32
+                assert qkv_proj.weight_scale.dtype is qkv_proj.orig_dtype
+            else:
+                assert isinstance(
+                    qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel
+                )
+                assert qkv_proj.weight.dtype is fp8_dtype
+                assert qkv_proj.weight_scale.dtype is torch.float32
             assert len(qkv_proj.weight.shape) == 2
             assert len(qkv_proj.weight_scale.shape) == 2
 
-            input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
-            assert isinstance(input_quant_op, QuantFP8)
-            assert input_quant_op._forward_method in (
-                input_quant_op.forward_cuda,
-                input_quant_op.forward_hip,
-            )
+            if linear_backend == "auto":
+                input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
+                assert isinstance(input_quant_op, QuantFP8)
+                assert input_quant_op._forward_method in (
+                    input_quant_op.forward_cuda,
+                    input_quant_op.forward_hip,
+                    input_quant_op.forward_xpu,
+                )
 
         llm.apply_model(check_model)
 
@@ -513,20 +601,22 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     with vllm_runner(model_path, enforce_eager=True) as llm:
 
         def check_model(model):
-            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.fused_moe import MoERunner
             from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
                 CompressedTensorsMoEMethod,
             )
 
             # Check layer 0 MoE (should be quantized)
             layer_quantized = model.model.layers[0].mlp.experts
-            assert isinstance(layer_quantized, FusedMoE)
-            assert isinstance(layer_quantized.quant_method, CompressedTensorsMoEMethod)
+            assert isinstance(layer_quantized, MoERunner)
+            assert isinstance(layer_quantized._quant_method, CompressedTensorsMoEMethod)
 
             # Check layer 10 MoE (should be unquantized + ignored)
             layer_unquantized = model.model.layers[3].mlp.experts
-            assert isinstance(layer_unquantized, FusedMoE)
-            assert isinstance(layer_unquantized.quant_method, UnquantizedFusedMoEMethod)
+            assert isinstance(layer_unquantized, MoERunner)
+            assert isinstance(
+                layer_unquantized._quant_method, UnquantizedFusedMoEMethod
+            )
 
         llm.apply_model(check_model)
 
@@ -643,6 +733,201 @@ def test_get_scheme_dict_returns_none_on_no_match():
     assert result is None
 
 
+# Test constants for activation quantization
+_STATIC_SYM_INT8_ACT = QuantizationArgs(
+    num_bits=8,
+    type=QuantizationType.INT,
+    strategy=QuantizationStrategy.TENSOR.value,
+    symmetric=True,
+    dynamic=False,
+)
+
+_STATIC_ASYM_INT8_ACT = QuantizationArgs(
+    num_bits=8,
+    type=QuantizationType.INT,
+    strategy=QuantizationStrategy.TENSOR.value,
+    symmetric=False,
+    dynamic=False,
+)
+
+_DYNAMIC_INT8_ACT = QuantizationArgs(
+    num_bits=8,
+    type=QuantizationType.INT,
+    strategy=QuantizationStrategy.TOKEN.value,
+    symmetric=True,
+    dynamic=True,
+)
+
+
+@pytest.mark.parametrize(
+    "weight_bits,weight_strategy,input_act,output_act,format,expected_scheme",
+    [
+        # W8A8 int-quantized -> W8A8Int8 (regression test for #46389)
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _STATIC_SYM_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_channel_static_sym",
+        ),
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _STATIC_ASYM_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_channel_static_asym",
+        ),
+        pytest.param(
+            8,
+            QuantizationStrategy.TENSOR.value,
+            _STATIC_SYM_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_tensor_static",
+        ),
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _DYNAMIC_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_channel_dynamic",
+        ),
+        # W8A8O8 int-quantized -> WNA8O8Int (both input and output)
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _STATIC_SYM_INT8_ACT,
+            _STATIC_SYM_INT8_ACT,
+            "int-quantized",
+            CompressedTensorsWNA8O8Int,
+            id="w8a8o8_channel",
+        ),
+        pytest.param(
+            4,
+            QuantizationStrategy.GROUP.value,
+            _STATIC_SYM_INT8_ACT,
+            _STATIC_SYM_INT8_ACT,
+            "int-quantized",
+            CompressedTensorsWNA8O8Int,
+            id="w4a8o8_group",
+        ),
+        # Weight-only pack-quantized -> WNA16
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w8_pack",
+        ),
+        pytest.param(
+            4,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w4_pack",
+        ),
+        pytest.param(
+            2,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w2_pack",
+        ),
+        pytest.param(
+            3,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w3_pack",
+        ),
+        pytest.param(
+            5,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w5_pack",
+        ),
+        pytest.param(
+            6,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w6_pack",
+        ),
+        pytest.param(
+            7,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w7_pack",
+        ),
+    ],
+)
+def test_scheme_selection(
+    weight_bits, weight_strategy, input_act, output_act, format, expected_scheme
+):
+    """Test that _get_scheme_from_parts selects the correct scheme.
+
+    This parametrized test verifies scheme selection for various combinations
+    of weight bits, quantization strategies, input/output activations, and
+    compression formats.
+
+    Key regression test: W8A8 int-quantized models with channel-wise weights
+    should use W8A8Int8 (true int8 gemm), not WNA8O8Int (fake-quant).
+    WNA8O8Int should only match when BOTH input and output activations are
+    present.
+    """
+    weight_quant = QuantizationArgs(
+        num_bits=weight_bits,
+        type=QuantizationType.INT,
+        strategy=weight_strategy,
+        symmetric=True,
+        dynamic=False,
+        group_size=128 if weight_strategy == QuantizationStrategy.GROUP.value else None,
+    )
+
+    config = CompressedTensorsConfig(
+        target_scheme_map={},
+        ignore=[],
+        quant_format=format,
+    )
+
+    scheme = config._get_scheme_from_parts(
+        weight_quant=weight_quant,
+        input_quant=input_act,
+        output_quant=output_act,
+        format=format,
+    )
+
+    assert isinstance(scheme, expected_scheme), (
+        f"Expected {expected_scheme.__name__} for "
+        f"W{weight_bits} {weight_strategy} + "
+        f"input_act={input_act} + output_act={output_act} + "
+        f"format={format}, got {type(scheme).__name__}"
+    )
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda() or not current_platform.has_device_capability(75),
     reason="MXFP8 requires Turing (sm_75+) or newer.",
@@ -658,7 +943,7 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
     ) as llm:
 
         def check_model(model):
-            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.fused_moe import MoERunner
             from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8 import (  # noqa: E501
                 CompressedTensorsW8A8Mxfp8MoEMethod,
             )
@@ -670,12 +955,81 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
             assert isinstance(qkv.scheme, CompressedTensorsW8A8Mxfp8)
 
             experts = layer.mlp.experts
-            assert isinstance(experts, FusedMoE)
-            assert isinstance(experts.quant_method, CompressedTensorsW8A8Mxfp8MoEMethod)
+            assert isinstance(experts, MoERunner)
+            assert isinstance(
+                experts._quant_method, CompressedTensorsW8A8Mxfp8MoEMethod
+            )
 
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+@pytest.mark.parametrize(
+    "actorder,group_size,part,full,expected",
+    [
+        # actorder="group" with real grouping: must load full-K w2 scales and,
+        # when sharded (part != full), report is_k_full=False.
+        (ActivationOrdering.GROUP, 32, 64, 128, (True, 128, False)),
+        # actorder="group" but unsharded (part == full): full scales, k_full.
+        (ActivationOrdering.GROUP, 32, 128, 128, (True, 128, True)),
+        # actorder="group" with channel-wise (group_size == -1): no full load.
+        (ActivationOrdering.GROUP, -1, 64, 128, (False, 64, False)),
+        # "static"/"weight" reorder at quant time -> shard normally + k_full.
+        # Regression: static actorder under TP must keep is_k_full=True so the
+        # Marlin kernel never gets the invalid (group_size=16, is_k_full=0).
+        ("static", 32, 64, 128, (False, 64, True)),
+        ("weight", 32, 64, 128, (False, 64, True)),
+        (None, 32, 64, 128, (False, 64, True)),
+    ],
+)
+def test_wna16_moe_w2_scale_sharding(actorder, group_size, part, full, expected):
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+        CompressedTensorsWNA16MoEMethod,
+    )
+
+    result = CompressedTensorsWNA16MoEMethod._w2_scale_sharding(
+        actorder, group_size, part, full
+    )
+    assert result == expected
+
+
+@pytest.mark.parametrize("num_bits", range(2, 9))
+def test_humming_supports_compressed_tensors_wna16_quant_key(num_bits):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa: E501
+        WNA16_SUPPORTED_TYPES_MAP,
+    )
+
+    weight_key = QuantKey(
+        dtype=WNA16_SUPPORTED_TYPES_MAP[num_bits],
+        scale=ScaleDesc(
+            dtype=torch.float16,
+            static=True,
+            group_shape=GroupShape(row=1, col=128),
+        ),
+        symmetric=True,
+    )
+
+    assert HummingExpertsBase._supports_quant_scheme(weight_key, None)
+
+
+def test_quant_key_str_supports_scalar_type_dtypes():
+    quant_key = QuantKey(
+        dtype=scalar_types.uint2b2,
+        scale=ScaleDesc(
+            dtype=torch.float16,
+            static=True,
+            group_shape=GroupShape(row=1, col=128),
+        ),
+        symmetric=True,
+    )
+
+    assert str(quant_key) == (
+        "QuantKey(uint2b2,scale(f16,static,GroupShape(row=1, col=128)),symmetric)"
+    )
 
 
 @pytest.mark.skipif(

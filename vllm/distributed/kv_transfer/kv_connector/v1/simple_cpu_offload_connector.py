@@ -41,9 +41,24 @@ logger = init_logger(__name__)
 # Default CPU capacity: 8 GB
 DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
 
+VALID_KV_OFFLOAD_BACKENDS = ("cpu", "disk")
+# Keys that only apply to the disk backend, warned about under "cpu".
+_DISK_ONLY_KEYS = (
+    "disk_path",
+    "disk_capacity_bytes",
+    "disk_buffer_slots",
+    "use_page_cache",
+)
+
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache offloading with custom kernel transfers and BlockPool LRU."""
+
+    @property
+    def requires_kv_delivery(self) -> bool:
+        # Runs as kv_both, but is a best-effort cache: a dropped save is just a
+        # future cache miss, so opt out of the producer-role default.
+        return False
 
     def __init__(
         self,
@@ -76,6 +91,36 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
         lazy_offload = bool(extra_config.get("lazy_offload", False))
 
+        kv_offload_backend = str(extra_config.get("kv_offload_backend", "cpu"))
+        if kv_offload_backend not in VALID_KV_OFFLOAD_BACKENDS:
+            raise ValueError(
+                f"Unknown kv_offload_backend {kv_offload_backend!r}; "
+                f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
+            )
+        disk_mode = kv_offload_backend == "disk"
+
+        disk_path = extra_config.get("disk_path", None) or None
+        disk_capacity_bytes = int(
+            extra_config.get("disk_capacity_bytes", 100 * (1024**3))
+        )
+        disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
+        use_page_cache = bool(extra_config.get("use_page_cache", False))
+
+        if disk_mode:
+            if disk_path is None:
+                raise ValueError(
+                    'kv_offload_backend="disk" requires disk_path to be set.'
+                )
+        else:
+            ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
+            if ignored:
+                logger.warning(
+                    'kv_offload_backend is "cpu", ignoring disk-only config: %s. '
+                    'Set kv_offload_backend="disk" to enable the disk backend.',
+                    ", ".join(ignored),
+                )
+            disk_path = None
+
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
 
@@ -88,11 +133,13 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
         logger.info(
             "SimpleCPUOffloadConnector: role=%s, "
-            "per_rank=%.2f GB, world_size=%d, mode=%s",
+            "per_rank=%.2f GB, world_size=%d, mode=%s, backend=%s, disk=%s",
             role.name,
             cpu_capacity_per_rank / (1024**3),
             world_size,
             "lazy" if lazy_offload else "eager",
+            kv_offload_backend,
+            disk_path or "none",
         )
 
         if role == KVConnectorRole.SCHEDULER:
@@ -109,10 +156,18 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 scheduler_block_size=scheduler_block_size,
                 hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
+                disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
-                vllm_config, kv_cache_config, cpu_capacity_per_rank
+                vllm_config,
+                kv_cache_config,
+                cpu_capacity_per_rank,
+                kv_offload_backend=kv_offload_backend,
+                disk_path=disk_path,
+                disk_capacity_bytes=disk_capacity_bytes,
+                disk_buffer_slots=disk_buffer_slots,
+                use_page_cache=use_page_cache,
             )
 
     # --- Worker-side methods ---
@@ -245,10 +300,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return self.scheduler_manager.take_events()
         return []
 
+    # NOTE: Workers are not contacted. In-flight transfers drain naturally,
+    # and stale completions are ignored by the guarded
+    # SimpleCPUOffloadScheduler._process_store_event().
     def reset_cache(self) -> bool | None:
-        raise NotImplementedError(
-            "SimpleCPUOffloadConnector does not support reset_cache(). "
-            "reset_prefix_cache() requires synchronizing all pending "
-            "CPU offload transfers before clearing GPU prefix cache blocks, "
-            "which is not yet implemented."
-        )
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.reset()
+        return None

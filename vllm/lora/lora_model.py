@@ -17,14 +17,14 @@ from vllm.lora.utils import (
 )
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
 class MoEEPLoadSpec:
-    """Per-expert-parallel slicing metadata for one FusedMoE LoRA module.
+    """Per-expert-parallel slicing metadata for one FusedMoEFactory LoRA module.
 
     Threaded into the LoRA loader so per-expert weights from EP ranks
     other than this one can be skipped before they ever hit CPU memory.
@@ -126,7 +126,7 @@ class LoRAModel:
         skip_prefixes: list[str] | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
-        pin_memory = str(device) == "cpu" and is_pin_memory_available()
+        pin_memory = str(device) == "cpu" and PIN_MEMORY
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             if is_base_embedding_weights(tensor_name):
@@ -193,7 +193,7 @@ class LoRAModel:
             skip_prefixes: List of module name prefixes to skip during loading.
                 Models can define this to skip modules not used in inference
                 (e.g., MTP layers). Format: ["mtp."]
-            moe_ep_spec: When 2D FusedMoE LoRA modules are present with
+            moe_ep_spec: When 2D FusedMoEFactory LoRA modules are present with
                 expert parallelism enabled, the (ep_rank, local, global)
                 slicing metadata shared across all MoE layers. Non-local
                 expert weights are skipped at read time instead of being
@@ -245,9 +245,10 @@ class LoRAModel:
             from tensorizer import TensorDeserializer
 
             tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
-            lora_tensor_path = os.path.join(
-                tensorizer_config.tensorizer_dir, "adapter_model.tensors"
-            )
+            tensorizer_dir = tensorizer_config.tensorizer_dir
+            if tensorizer_dir is None:
+                raise ValueError("tensorizer_dir must be set in tensorizer config.")
+            lora_tensor_path = os.path.join(tensorizer_dir, "adapter_model.tensors")
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
             tensors = TensorDeserializer(
                 lora_tensor_path,

@@ -6,13 +6,18 @@ from math import ceil
 import numpy as np
 import torch
 from mistral_common.tokens.tokenizers.audio import AudioEncoder
-from transformers import BatchFeature, ProcessorMixin, TensorType
+from transformers import (
+    BatchFeature,
+    ProcessorMixin,
+    SequenceFeatureExtractor,
+    TensorType,
+)
 from transformers.audio_utils import AudioInput
 
 from vllm.tokenizers.mistral import MistralTokenizer
 
 
-class MistralCommonFeatureExtractor:
+class MistralCommonFeatureExtractor(SequenceFeatureExtractor):
     """
     Provide a HF-compatible interface for
     `mistral_common.tokens.tokenizers.multimodal.AudioEncoder`.
@@ -111,11 +116,6 @@ class MistralCommonVoxtralProcessor(ProcessorMixin):
         feature_extractor: MistralCommonFeatureExtractor,
     ) -> None:
         self.tokenizer = tokenizer.transformers_tokenizer
-
-        # Back-compatibility for Transformers v4
-        if not hasattr(self.tokenizer, "init_kwargs"):
-            self.tokenizer.init_kwargs = {}
-
         self.feature_extractor = feature_extractor
 
         audio_special_ids = self.feature_extractor.audio_encoder.special_ids

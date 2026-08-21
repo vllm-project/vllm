@@ -13,6 +13,12 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+# CUmemcpySrcAccessOrder values (CUDA driver API). STREAM(1): source read in
+# stream order, safe when the source may still be written. ANY(3): source may
+# be read early, only safe for a stable source (e.g. pinned host memory).
+CU_MEMCPY_SRC_ACCESS_ORDER_STREAM = 1
+CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 3
+
 
 def pin_tensor(tensor: torch.Tensor) -> None:
     """Pin a CPU tensor via cudaHostRegister.
@@ -106,8 +112,8 @@ class BatchMemcpyParams(NamedTuple):
     dst_bases: np.ndarray  # [num_layers] uint64
     bpb: np.ndarray  # [num_layers] uint64 — bytes per block
     num_layers: int
-    # CUDA only: one attributes entry with srcAccessOrder=ANY. Unused on
-    # ROCm (7.2.1 or 7.2.2) because the current runtime rejects numAttrs > 0.
+    # CUDA only: one attributes entry carrying srcAccessOrder. Unused on ROCm
+    # (7.2.1 or 7.2.2) because the current runtime rejects numAttrs > 0.
     attrs: _CUmemcpyAttributes
     attrs_idx: ctypes.c_size_t
     # NOTE: cuMemcpyBatchAsync_v2() removed fail_idx field, but we use
@@ -120,6 +126,7 @@ def build_params(
     src_caches: dict[str, torch.Tensor],
     dst_caches: dict[str, torch.Tensor],
     stream: torch.cuda.Stream,
+    src_access_order: int = CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
 ) -> BatchMemcpyParams:
     global _batch_memcpy_fn
     if _batch_memcpy_fn is None:
@@ -137,10 +144,7 @@ def build_params(
         dst_bases.append(d.data_ptr())
         bpb.append(s_bpb)
 
-    # ``srcAccessOrder=3`` == CU_MEMCPY_SRC_ACCESS_ORDER_ANY /
-    # hipMemcpySrcAccessOrderAny. See
-    # https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__MEM.html#group__CUDA__MEM_1g6f1ff58e3065df3eb4b573dba77ad31f  # noqa: E501
-    attrs = _CUmemcpyAttributes(srcAccessOrder=3)
+    attrs = _CUmemcpyAttributes(srcAccessOrder=src_access_order)
 
     return BatchMemcpyParams(
         src_bases=np.array(src_bases, dtype=np.uint64),

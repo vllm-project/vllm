@@ -14,7 +14,7 @@ from transformers import (
 )
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -454,6 +454,7 @@ class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
         num_images = mm_counts.get("image", 0)
 
         image_overrides = mm_options.get("image")
+        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
 
         return {
             "image": self._get_dummy_images(
@@ -471,7 +472,6 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             # HF processor always adds placeholders even when there's no image
@@ -483,7 +483,6 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
     def _get_mm_fields_config(
@@ -620,8 +619,8 @@ class Blip2ForConditionalGeneration(
         return self._image_pixels_to_features(self.vision_model, pixel_values)
 
     def _process_image_input(self, image_input: Blip2ImageInputs) -> torch.Tensor:
-        if image_input["type"] == "image_embeds":
-            return image_input["data"]
+        if image_input.type == "image_embeds":
+            return image_input.data
 
         image_features = self._process_image_pixels(image_input)
 

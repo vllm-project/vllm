@@ -37,6 +37,7 @@ try:
         get_kernel_by_name,
         get_registered_kernels,
     )
+    from vllm.kernels.helion.ops import import_all_kernels
     from vllm.kernels.helion.utils import get_canonical_gpu_name
     from vllm.logger import init_logger
     from vllm.utils.import_utils import has_helion
@@ -381,6 +382,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # import all helion kernels
+    import_all_kernels()
 
     import logging
 

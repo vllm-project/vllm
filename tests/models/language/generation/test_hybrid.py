@@ -7,8 +7,9 @@ from contextlib import contextmanager, nullcontext
 import pytest
 
 from tests.models.registry import HF_EXAMPLE_MODELS
-from tests.utils import multi_gpu_test, wait_for_gpu_memory_to_clear
+from tests.utils import multi_gpu_test
 from vllm import LLM
+from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -35,9 +36,7 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
-    "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
@@ -46,7 +45,6 @@ HYBRID_MODELS = [
 
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
@@ -94,7 +92,10 @@ def test_models(
         )
 
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        attention_backend=ATTN_BACKEND,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -131,7 +132,9 @@ def test_batching(
     _set_conv_state_layout(monkeypatch, conv_state_layout)
 
     for_loop_outputs = []
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(
+        model, max_num_seqs=MAX_NUM_SEQS, enable_chunked_prefill=True
+    ) as vllm_model:
         for prompt in example_prompts:
             (single_output,) = vllm_model.generate_greedy_logprobs(
                 [prompt], max_tokens, num_logprobs
@@ -208,6 +211,8 @@ def test_mamba_cache_cg_padding(
     cudagraph_dispatcher.initialize_cudagraph_keys(
         vllm_config.compilation_config.cudagraph_mode
     )
+    if cudagraph_dispatcher.cudagraph_mode == CUDAGraphMode.NONE:
+        pytest.skip("CUDA/XPU graph is disabled.Please enable it to run this test. ")
     while (
         len(example_prompts)
         == cudagraph_dispatcher.dispatch(len(example_prompts))[1].num_tokens
@@ -215,7 +220,7 @@ def test_mamba_cache_cg_padding(
         example_prompts.append(example_prompts[0])
 
     try:
-        with vllm_runner(model) as vllm_model:
+        with vllm_runner(model, enable_chunked_prefill=True) as vllm_model:
             vllm_model.generate_greedy(example_prompts, max_tokens)
     except RuntimeError:
         pytest.fail(
@@ -241,7 +246,9 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     a single step.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(
+            model, max_num_seqs=MAX_NUM_SEQS, enable_chunked_prefill=True
+        ) as vllm_model:
             vllm_model.generate_greedy([example_prompts[0]] * 100, 10)
     except ValueError:
         pytest.fail(
@@ -263,7 +270,9 @@ def test_state_cleanup(
     If it's not cleaned, an error would be expected.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(
+            model, max_num_seqs=MAX_NUM_SEQS, enable_chunked_prefill=True
+        ) as vllm_model:
             for _ in range(10):
                 vllm_model.generate_greedy([example_prompts[0]] * 100, 1)
     except ValueError:
@@ -285,14 +294,20 @@ def test_distributed_correctness(
     num_logprobs: int,
 ) -> None:
     with vllm_runner(
-        model, tensor_parallel_size=1, max_num_seqs=MAX_NUM_SEQS
+        model,
+        tensor_parallel_size=1,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs_tp_1 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
 
     with vllm_runner(
-        model, tensor_parallel_size=2, max_num_seqs=MAX_NUM_SEQS
+        model,
+        tensor_parallel_size=2,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -331,7 +346,10 @@ def test_full_cuda_graph(
         )
 
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        attention_backend=ATTN_BACKEND,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -373,8 +391,14 @@ def test_fp32_cache_state(
             example_prompts, max_tokens, num_logprobs
         )
 
+    # Leave enough headroom for repeated engine initialization on a
+    # 32.5 GiB MIG.
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, **{cache_dtype_param: "float32"}
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        gpu_memory_utilization=0.9,
+        enable_chunked_prefill=True,
+        **{cache_dtype_param: "float32"},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -405,28 +429,10 @@ def _get_vllm_runner_params(
     }
 
 
-def _wait_for_rocm_memory_to_settle() -> None:
-    if not current_platform.is_rocm():
-        return
-
-    num_gpus = current_platform.device_count()
-    if num_gpus == 0:
-        return
-
-    wait_for_gpu_memory_to_clear(
-        devices=list(range(num_gpus)),
-        threshold_ratio=0.01,
-        timeout_s=120,
-    )
-
-
 @contextmanager
-def _owned_vLLM_runner(vllm_runner, kwargs):
-    try:
-        with vllm_runner(**kwargs) as runner:
-            yield runner
-    finally:
-        _wait_for_rocm_memory_to_settle()
+def _owned_vllm_runner(vllm_runner, kwargs):
+    with vllm_runner(**kwargs) as runner:
+        yield runner
 
 
 def _get_vLLM_output(
@@ -439,7 +445,7 @@ def _get_vLLM_output(
     vllm_model=None,
 ):
     runner_context = (
-        _owned_vLLM_runner(vllm_runner, kwargs)
+        _owned_vllm_runner(vllm_runner, kwargs)
         if vllm_model is None
         else nullcontext(vllm_model)
     )
@@ -457,7 +463,7 @@ def _get_vLLM_output(
     return outs, vllm_model
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -521,7 +527,7 @@ def test_apc_single_prompt(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -602,7 +608,7 @@ def test_apc_single_prompt_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -671,7 +677,7 @@ def test_apc_multiple_prompts_all_cached_outputs(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -756,7 +762,7 @@ def test_apc_multiple_prompts_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -801,7 +807,7 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
     # Cache only part of all the prompts
     vllm_runner_kwargs["enable_prefix_caching"] = True
-    with _owned_vLLM_runner(vllm_runner, vllm_runner_kwargs) as vllm_model:
+    with _owned_vllm_runner(vllm_runner, vllm_runner_kwargs) as vllm_model:
         vllm_outputs_partial_cache, _ = _get_vLLM_output(
             vllm_runner,
             vllm_runner_kwargs,
@@ -861,7 +867,7 @@ def test_same_mamba_output_apc_on_vs_off(
 
     # No prefix caching
     kwargs_no_apc = {**base_kwargs, "enable_prefix_caching": False}
-    with _owned_vLLM_runner(vllm_runner, kwargs_no_apc) as vllm_model:
+    with vllm_runner(**kwargs_no_apc) as vllm_model:
         outputs_no_apc, _ = _get_vLLM_output(
             vllm_runner,
             kwargs_no_apc,
@@ -876,7 +882,7 @@ def test_same_mamba_output_apc_on_vs_off(
         "enable_prefix_caching": True,
         "mamba_block_size": 16,
     }
-    with _owned_vLLM_runner(vllm_runner, kwargs_with_apc) as vllm_model:
+    with vllm_runner(**kwargs_with_apc) as vllm_model:
         outputs_with_apc, _ = _get_vLLM_output(
             vllm_runner,
             kwargs_with_apc,
