@@ -54,6 +54,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
@@ -421,7 +422,9 @@ class Qwen3_5ForCausalLMBase(
     def get_mamba_state_copy_func(
         cls,
     ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
-        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func(
+            token_indexed_conv=current_platform.is_xpu()
+        )
 
     def compute_logits(
         self,
@@ -630,7 +633,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
-        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+        return Qwen3_5ForCausalLMBase.get_mamba_state_copy_func()
 
 
 ########################################################

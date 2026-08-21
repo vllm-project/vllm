@@ -215,6 +215,7 @@ def test_precopy_matches_v1_copy_specs(
         num_reqs,
         COPY_BLOCK_SIZE=1024,
         CONV_STATE_DIM_FIRST=conv_state_dim_first,
+        TOKEN_INDEXED_CONV=False,
         HAS_IDX_MAPPING=has_idx_mapping,
         TEMPORAL_TILES=temporal_tiles,
     )
