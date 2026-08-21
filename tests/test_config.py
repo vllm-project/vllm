@@ -147,6 +147,7 @@ def test_hisparse_requires_v2_model_runner():
 
 def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
     with pytest.raises(ValueError, match="decode context parallelism"):
         VllmConfig(
             attention_config=AttentionConfig(
@@ -161,6 +162,7 @@ def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
 
 def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
     with pytest.raises(ValueError, match="pipeline parallelism"):
         VllmConfig(
             attention_config=AttentionConfig(
@@ -244,6 +246,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     )
     config = SimpleNamespace(
         model_config=model_config,
+        attention_config=AttentionConfig(),
         speculative_config=SimpleNamespace(method="mtp") if with_mtp else None,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         compilation_config=CompilationConfig(
