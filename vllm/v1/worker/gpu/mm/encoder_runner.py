@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -18,6 +19,8 @@ from vllm.multimodal.utils import (
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
 )
+from vllm.renderers.paged_shm.tensor_ipc import PagedShmTensorIPC
+from vllm.utils.time_utils import debug_spend_time
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
@@ -35,6 +38,7 @@ class EncoderRunner:
     def __init__(
         self,
         model: SupportsMultiModal,
+        vllm_config: VllmConfig,
         max_num_tokens: int,
         hidden_size: int,
         encoder_cache: EncoderCache,
@@ -58,6 +62,8 @@ class EncoderRunner:
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
         )
+
+        self._pshm_tensor_ipc = PagedShmTensorIPC(vllm_config.model_config, pin=True)
 
     def has_cudagraph(self) -> bool:
         return self.cudagraph_manager is not None
@@ -151,6 +157,13 @@ class EncoderRunner:
         self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
     ) -> list[torch.Tensor]:
         encoder_outputs: list[torch.Tensor] = []
+
+        stream = torch.cuda.Stream()
+        with stream:
+            self._pshm_tensor_ipc.read(mm_kwargs, device=self.device)
+        stream.synchronize()
+        debug_spend_time("after execute_mm_encoder")
+
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
         ):

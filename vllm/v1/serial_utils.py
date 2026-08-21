@@ -6,6 +6,7 @@ import importlib
 import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from functools import partial
 from inspect import isclass
 from types import FunctionType
@@ -33,6 +34,7 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
+from vllm.renderers.paged_shm.types import PagedShmTensor
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.utils import tensor_data
 
@@ -287,6 +289,9 @@ class MsgpackEncoder:
                 None if elem.data is None else self._encode_nested_tensors(elem.data)
             ),
             "field": self._encode_mm_field(elem.field),
+            "pshm_tensor": None
+            if elem.pshm_tensor is None
+            else asdict(elem.pshm_tensor),
         }
 
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
@@ -451,6 +456,10 @@ class MsgpackDecoder:
             factory_kw["slices"] = self._decode_nested_slices(factory_kw["slices"])
 
         obj["field"] = factory_meth("", **factory_kw).field
+
+        if obj["pshm_tensor"] is not None:
+            obj["pshm_tensor"] = PagedShmTensor(**obj["pshm_tensor"])
+
         return MultiModalFieldElem(**obj)
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:

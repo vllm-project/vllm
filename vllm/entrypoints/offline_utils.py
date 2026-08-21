@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
@@ -31,6 +30,7 @@ from vllm.renderers.inputs.preprocess import (
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.time_utils import debug_spend_time
 from vllm.utils.tqdm_utils import maybe_tqdm
 from vllm.v1.engine.llm_engine import LLMEngine
 
@@ -346,6 +346,7 @@ class OfflineInferenceMixin:
             tokenization_kwargs=tokenization_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
         )
+        debug_spend_time("after _add_completion_requests")
         return self._run_engine(use_tqdm=use_tqdm, output_type=output_type)
 
     def _run_chat(

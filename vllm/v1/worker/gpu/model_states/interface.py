@@ -87,6 +87,7 @@ class ModelState(ABC):
             observability_config = vllm_config.observability_config
             self.encoder_runner = EncoderRunner(
                 model=self.model,
+                vllm_config=self.vllm_config,
                 max_num_tokens=self.max_num_tokens,
                 hidden_size=self.inputs_embeds_size,
                 encoder_cache=encoder_cache,
