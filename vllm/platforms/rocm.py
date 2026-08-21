@@ -913,7 +913,7 @@ class RocmPlatform(Platform):
             elif parallel_config.decode_context_parallel_size > 1 and allow_dcp_full:
                 logger.warning_once(
                     "VLLM_ALLOW_DCP_FULL_CUDAGRAPH=1: keeping full CUDA graphs "
-                    "with DCP enabled (experimental on ROCm)."
+                    "with DCP enabled."
                 )
             # prefill context parallel do not support full cudagraphs
             elif parallel_config.prefill_context_parallel_size > 1:

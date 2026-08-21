@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 import sys
 from types import SimpleNamespace
 from unittest import mock
@@ -18,6 +19,9 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
     AiterMLAHelper,
     AiterMLAMetadataBuilder,
     _lse_combine_natural,
+)
+from vllm.v1.attention.ops.rocm_aiter_mla_reduce import (  # noqa: E402
+    reduce_mla_segment_partials,
 )
 
 
@@ -79,9 +83,12 @@ def _builder(
         dcp_world_size=dcp_world_size,
         dcp_rank=dcp_rank,
         cp_kv_cache_interleave_size=1,
+        _dcp_verify_graph_max_kv_seq_len=128,
         _verify_row_indptr=None,
         _verify_row_page_table=None,
         _verify_row_lens=None,
+        _dcp_verify_block_table=None,
+        _dcp_verify_qo_indptr=None,
         _kv_cache_dtype_str=kv_cache_dtype,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
@@ -112,6 +119,9 @@ def _builder(
     stub._build_verify_row_view = (
         AiterMLAMetadataBuilder._build_verify_row_view.__get__(stub)
     )
+    stub._build_dcp_verify_row_view = (
+        AiterMLAMetadataBuilder._build_dcp_verify_row_view.__get__(stub)
+    )
     return stub
 
 
@@ -131,18 +141,65 @@ def test_backend_declares_uniform_batch_support():
 def test_dcp_verify_row_view_excludes_in_hand_window():
     qlen = 4
     builder = _builder(mtp_decode_qlen=qlen, dcp_world_size=2)
-    # The local shard contains five pages for a global length of ten. The first
-    # six global tokens are committed, three of which belong to rank zero.
+    builder.compilation_config.cudagraph_mode.has_full_cudagraphs = lambda: False
+    builder.kernel_block_size = 2
+    builder._dcp_verify_block_table = None
+    builder._dcp_verify_qo_indptr = None
+    block_table = torch.tensor([[7, 8, 9], [10, 11, 12]], dtype=torch.int32)
+
+    pages, row_lens, qo_indptr, max_kv_len = builder._build_dcp_verify_row_view(
+        qlen,
+        block_table,
+        torch.tensor([10, 12], dtype=torch.int32),
+    )
+
+    # The in-hand four-token window is excluded before mapping the committed
+    # prefix to each DCP shard. Every flattened row for a request reuses that
+    # request's same paged committed shard.
+    assert row_lens.tolist() == [3] * qlen + [4] * qlen
+    assert qo_indptr.tolist() == list(range(2 * qlen + 1))
+    assert pages.tolist() == [[7, 8]] * qlen + [[10, 11]] * qlen
+    assert max_kv_len == 4
+
+
+def test_dcp_verify_row_view_uses_static_graph_bound():
+    qlen = 3
+    builder = _builder(
+        mtp_decode_qlen=qlen,
+        dcp_world_size=8,
+        has_full_cudagraphs=True,
+    )
+    builder.kernel_block_size = 1536
+    builder._dcp_verify_graph_max_kv_seq_len = 3072
+    builder._dcp_verify_block_table = torch.zeros((qlen, 24), dtype=torch.int32)
+    builder._dcp_verify_qo_indptr = torch.zeros(qlen + 1, dtype=torch.int32)
+    builder._verify_row_lens = torch.zeros(qlen, dtype=torch.int32)
+
+    pages, row_lens, qo_indptr, max_kv_len = builder._build_dcp_verify_row_view(
+        qlen,
+        torch.arange(2, dtype=torch.int32).view(1, 2),
+        torch.tensor([1000], dtype=torch.int32),
+    )
+
+    assert row_lens.tolist() == [125] * qlen
+    assert pages.data_ptr() == builder._dcp_verify_block_table.data_ptr()
+    assert qo_indptr.data_ptr() == builder._dcp_verify_qo_indptr.data_ptr()
+    assert pages[0].tolist() == list(range(24))
+    assert max_kv_len == 3072
+
+
+def test_non_dcp_verify_row_view_remains_causal():
+    qlen = 4
+    builder = _builder(mtp_decode_qlen=qlen)
     indptr, pages, row_lens, _ = builder._build_verify_row_view(
         qlen,
         torch.tensor([0, 5], dtype=torch.int32),
         torch.arange(5, dtype=torch.int32),
-        torch.tensor([10], dtype=torch.int32),
     )
 
-    assert row_lens.tolist() == [3] * qlen
-    assert indptr.tolist() == [0, 3, 6, 9, 12]
-    assert pages.tolist() == [0, 1, 2] * qlen
+    assert row_lens.tolist() == [2, 3, 4, 5]
+    assert indptr.tolist() == [0, 2, 5, 9, 14]
+    assert pages.tolist() == [0, 1, 0, 1, 2, 0, 1, 2, 3, 0, 1, 2, 3, 4]
 
 
 def test_verify_partial_attention_merge():
@@ -160,6 +217,32 @@ def test_verify_partial_attention_merge():
 
     torch.testing.assert_close(out, expected)
     torch.testing.assert_close(lse, normalizer)
+
+
+def test_segmented_verify_reduce_returns_natural_lse_and_masks_empty_rows():
+    segment_output = torch.tensor(
+        [1.0, 3.0, 99.0, 99.0],
+        device="cuda",
+    ).reshape(2, 1, 2, 1)
+    segment_max = torch.tensor(
+        [[[0.0, 1.0]], [[99.0, 99.0]]],
+        device="cuda",
+    )
+    segment_expsum = torch.ones_like(segment_max)
+
+    output, lse = reduce_mla_segment_partials(
+        segment_output,
+        segment_max,
+        segment_expsum,
+        torch.tensor([2, 0], dtype=torch.int32, device="cuda"),
+        tile_size=1,
+        out_dtype=torch.float32,
+    )
+
+    torch.testing.assert_close(output[0], torch.tensor([[7.0 / 3]], device="cuda"))
+    assert output[1].item() == 0
+    torch.testing.assert_close(lse[0], torch.tensor([math.log(3.0)], device="cuda"))
+    assert lse[1].item() == float("-inf")
 
 
 @pytest.mark.parametrize("num_heads", [8, 16, 24, 32, 64, 128])

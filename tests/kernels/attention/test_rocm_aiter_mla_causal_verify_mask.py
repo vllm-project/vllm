@@ -188,7 +188,6 @@ def _run_verify_block(
         prefix = "vllm.v1.attention.backends.mla.rocm_aiter_mla."
         return [
             patch(prefix + "_gluon_mla_decode_supported", lambda: True),
-            patch(prefix + "_gluon_mla_fp8_batch_supported", lambda: True),
         ]
 
     with ExitStack() as stack:
@@ -363,24 +362,19 @@ def test_fp8_verify_stays_on_the_asm_decode_without_dcp():
     )
 
 
-@pytest.mark.parametrize("fp8_batch_supported", [True, False])
-def test_fp8_verify_flatten_gate(fp8_batch_supported: bool):
-    """Under DCP the fp8 flatten follows Gluon's own batch support.
-
-    A single process cannot hold a DCP group, so the routing decision is checked
-    on the predicate the builder and the impl both call.
-    """
+@pytest.mark.parametrize("segmented_supported", [True, False])
+def test_fp8_verify_segmented_decode_gate(segmented_supported: bool):
+    """DCP fp8 verification requires segmented MLA support."""
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
 
     prefix = "vllm.v1.attention.backends.mla.rocm_aiter_mla."
     with (
         patch(prefix + "_gluon_mla_decode_supported", lambda: True),
         patch(prefix + "_gluon_mla_max_bh16_heads", lambda: 96),
-        patch(prefix + "_gluon_mla_fp8_batch_supported", lambda: fp8_batch_supported),
+        patch(prefix + "_segmented_mla_decode_supported", lambda: segmented_supported),
     ):
-        # TP8 x DCP8 gathers 96 heads onto the decode kernel.
         got = AiterMLAHelper.use_gluon_verify(96, QLEN, "fp8", 8)
-    assert got is fp8_batch_supported, (
-        "an fp8 DCP verify must take the flatten exactly when Gluon's fp8 regime "
-        f"accepts a batch (support={fp8_batch_supported}, took flatten={got})"
+    assert got is segmented_supported, (
+        "an fp8 DCP verify must take the segmented path exactly when the "
+        f"installed AITER supports it (support={segmented_supported}, got={got})"
     )
