@@ -46,7 +46,9 @@ resources:
 gpuModels:
   - "TYPE_GPU_USED"
 
-# -- Autoscaling configuration
+# -- Autoscaling configuration (plain Kubernetes HPA on CPU/memory).
+# Mutually exclusive with .Values.keda -- do not enable both, they will
+# fight over control of the same Deployment's replica count.
 autoscaling:
   # -- Enable autoscaling
   enabled: false
@@ -57,6 +59,46 @@ autoscaling:
   # -- Target CPU utilization for autoscaling
   targetCPUUtilizationPercentage: 80
   # targetMemoryUtilizationPercentage: 80
+
+# -- KEDA-based autoscaling on vLLM's own queue-depth metric
+# (vllm:num_requests_waiting) via a Prometheus scaler. Preferred over
+# .Values.autoscaling (HPA) for GPU-bound workloads, where CPU/memory
+# utilization doesn't reflect real load. Requires the KEDA operator/CRDs
+# installed cluster-wide and a Prometheus instance scraping this pod (see
+# .Values.podAnnotations). Mutually exclusive with .Values.autoscaling.
+keda:
+  # -- Enable a KEDA ScaledObject for this deployment
+  enabled: false
+  # -- Minimum replicas (kept >=1 to avoid scale-to-zero cold-start cost)
+  minReplicaCount: 1
+  # -- Maximum replicas
+  maxReplicaCount: 3
+  # -- How often (seconds) KEDA polls the Prometheus query
+  pollingInterval: 15
+  # -- How long (seconds) load must stay below threshold before scaling a replica down
+  cooldownPeriod: 120
+  # -- Optional: seconds after ScaledObject creation before the first scale-down is allowed
+  initialCooldownPeriod: 0
+  # -- Prometheus server address to query, e.g. http://prometheus-server.vllm.svc.cluster.local:9090
+  prometheusServerAddress: ""
+  # -- PromQL query; must return a single vector/scalar element. sum() is
+  # required once there's more than one replica, since each pod exposes its
+  # own gauge value as a separate scrape target/time series.
+  query: "sum(vllm:num_requests_waiting)"
+  # -- Threshold for the proportional scaling formula:
+  # desiredReplicas = ceil(currentReplicas * currentMetricValue / threshold).
+  # This is NOT a strict step function -- see chart README/PR notes for the
+  # worked example of how this behaves at low replica counts.
+  threshold: "2"
+
+# -- Additional annotations applied to the pod template. Commonly used for
+# Prometheus annotation-based scrape discovery, e.g.:
+#   podAnnotations:
+#     prometheus.io/scrape: "true"
+#     prometheus.io/port: "8000"
+#     prometheus.io/path: "/metrics"
+podAnnotations: {}
+
 
 # -- Configmap
 configs: {}
@@ -133,6 +175,20 @@ extraInit:
   s3modelpath: "relative_s3_model_path/opt-125m"
   # -- Storage size for the PVC
   pvcStorage: "1Gi"
+  # -- Access mode for the model-cache PVC. Default ReadWriteOnce works for
+  # a single replica (e.g. plain EBS gp3). For multiple replicas across
+  # different nodes (e.g. behind a KEDA ScaledObject), EBS's RWO can't be
+  # shared -- a volume can only attach to one node at a time, so replica
+  # pods on other nodes would be stuck waiting on an attach that can never
+  # succeed. Set to ReadWriteMany with an RWX-capable storageClassName
+  # (e.g. an EFS-backed StorageClass) to let every replica mount the same
+  # already-downloaded model cache regardless of which node it lands on.
+  pvcAccessMode: "ReadWriteOnce"
+  # -- StorageClassName for the model-cache PVC. Leave unset to use the
+  # cluster's default StorageClass (today's behavior, unchanged). Required
+  # if pvcAccessMode is ReadWriteMany, since the default StorageClass is
+  # typically block storage (e.g. gp3/EBS) which doesn't support it.
+  pvcStorageClassName: ""
   # -- Disable AWS EC2 metadata service
   awsEc2MetadataDisabled: true
 
