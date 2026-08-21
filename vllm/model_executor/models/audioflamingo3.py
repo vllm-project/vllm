@@ -382,7 +382,6 @@ class AudioFlamingo3MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processor_mm_data = dict(mm_data)
         audios = processor_mm_data.pop("audios", None)
@@ -393,7 +392,6 @@ class AudioFlamingo3MultiModalProcessor(
             prompt=prompt,
             mm_data=processor_mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         if "input_features_mask" in outputs:
