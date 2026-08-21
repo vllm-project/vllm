@@ -151,55 +151,6 @@ def _load_q_and_rope(
     )
 
 
-def fused_indexer_q_rope_quant_mxfp4_cutedsl(
-    positions: torch.Tensor,
-    index_q: torch.Tensor,
-    index_q_cos_sin_cache: torch.Tensor,
-    index_weights: torch.Tensor,
-    index_weights_softmax_scale: float,
-    index_weights_head_scale: float,
-    index_q_packed: torch.Tensor,
-    index_q_scale: torch.Tensor,
-    index_weights_out: torch.Tensor,
-) -> None:
-    _INDEXER_Q_CUTEDSL_KERNEL(
-        positions=positions,
-        q=index_q,
-        cos_sin_cache=index_q_cos_sin_cache,
-        weights=index_weights,
-        weights_softmax_scale=index_weights_softmax_scale,
-        weights_head_scale=index_weights_head_scale,
-        q_quant=index_q_packed,
-        q_scale=index_q_scale,
-        weights_out=index_weights_out,
-        use_fp4=True,
-    )
-
-
-def fused_indexer_q_rope_quant_fp8_cutedsl(
-    positions: torch.Tensor,
-    index_q: torch.Tensor,
-    index_q_cos_sin_cache: torch.Tensor,
-    index_weights: torch.Tensor,
-    index_weights_softmax_scale: float,
-    index_weights_head_scale: float,
-    index_q_fp8: torch.Tensor,
-    index_weights_out: torch.Tensor,
-) -> None:
-    # The cute kernel treats the FP8 buffer as raw bytes (Uint8).
-    _INDEXER_Q_CUTEDSL_KERNEL(
-        positions=positions,
-        q=index_q,
-        cos_sin_cache=index_q_cos_sin_cache,
-        weights=index_weights,
-        weights_softmax_scale=index_weights_softmax_scale,
-        weights_head_scale=index_weights_head_scale,
-        q_quant=index_q_fp8.view(torch.uint8),
-        weights_out=index_weights_out,
-        use_fp4=False,
-    )
-
-
 class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
     tb_size = 128
 
@@ -363,18 +314,12 @@ class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
     def dispatch(  # type: ignore[override]
         self,
         *,
-        head_dim: int,
-        rope_dim: int,
-        num_heads: int,
         cos_sin_dtype: type[cutlass.Numeric],
-        coarsen: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
-            head_dim=head_dim,
-            rope_dim=rope_dim,
-            num_heads=num_heads,
+            **compile_key_fields,
             cos_sin_dtype=cos_sin_dtype,
-            coarsen=coarsen,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -398,7 +343,7 @@ class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
 
         num_tokens = cute.sym_int()
@@ -658,18 +603,12 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
     def dispatch(  # type: ignore[override]
         self,
         *,
-        head_dim: int,
-        rope_dim: int,
-        num_heads: int,
         cos_sin_dtype: type[cutlass.Numeric],
-        coarsen: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
-            head_dim=head_dim,
-            rope_dim=rope_dim,
-            num_heads=num_heads,
+            **compile_key_fields,
             cos_sin_dtype=cos_sin_dtype,
-            coarsen=coarsen,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -693,7 +632,7 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
 
         num_tokens = cute.sym_int()
@@ -775,47 +714,5 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
         )
 
 
-class IndexerQCuteDSLKernel:
-    def __call__(
-        self,
-        *,
-        positions: torch.Tensor,
-        q: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        weights: torch.Tensor,
-        weights_softmax_scale: float,
-        weights_head_scale: float,
-        q_quant: torch.Tensor,
-        weights_out: torch.Tensor,
-        use_fp4: bool,
-        q_scale: torch.Tensor | None = None,
-    ) -> Any:
-        if use_fp4:
-            if q_scale is None:
-                raise ValueError("MXFP4 indexer-Q requires q_scale.")
-            return _INDEXER_Q_MXFP4_KERNEL(
-                positions=positions,
-                q=q,
-                cos_sin_cache=cos_sin_cache,
-                weights=weights,
-                weights_softmax_scale=weights_softmax_scale,
-                weights_head_scale=weights_head_scale,
-                q_packed=q_quant,
-                q_scale=q_scale,
-                weights_out=weights_out,
-            )
-        return _INDEXER_Q_FP8_KERNEL(
-            positions=positions,
-            q=q,
-            cos_sin_cache=cos_sin_cache,
-            weights=weights,
-            weights_softmax_scale=weights_softmax_scale,
-            weights_head_scale=weights_head_scale,
-            q_fp8=q_quant,
-            weights_out=weights_out,
-        )
-
-
 _INDEXER_Q_MXFP4_KERNEL = IndexerQMxFp4Kernel()
 _INDEXER_Q_FP8_KERNEL = IndexerQFp8Kernel()
-_INDEXER_Q_CUTEDSL_KERNEL = IndexerQCuteDSLKernel()

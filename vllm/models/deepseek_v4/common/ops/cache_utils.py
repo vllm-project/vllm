@@ -368,20 +368,18 @@ class DequantizeAndGatherKCacheKernel(
         *,
         max_model_len: int,
         cache_block_size: int,
-        use_fnuz: bool,
-        has_gather_lens: bool,
+        **compile_key_fields: bool,
     ) -> CompileKey:
         token_stride = 576
         scale_stride = 8
         unpadded = cache_block_size * (token_stride + scale_stride)
         block_stride = ((unpadded + token_stride - 1) // token_stride) * token_stride
         return self.CompileKey(
+            **compile_key_fields,
             max_blocks_per_seq=(max_model_len + cache_block_size - 1)
             // cache_block_size,
             cache_block_size=cache_block_size,
             block_stride=block_stride,
-            use_fnuz=use_fnuz,
-            has_gather_lens=has_gather_lens,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -496,10 +494,10 @@ def dequantize_and_gather_k_cache(
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
-            DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
+            _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
         )
 
-        DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL(
+        _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL(
             out=out,
             k_cache=k_cache,
             seq_lens=seq_lens,
@@ -1340,8 +1338,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
         topk: int,
         topk_width: int,
         decode_compressed_topk: int,
-        decode_compressed_indices_are_local: bool,
-        has_decode_compressed_lens: bool,
+        **compile_key_fields: bool,
     ) -> CompileKey:
         topk_storage_width = (
             topk_width
@@ -1358,14 +1355,13 @@ class BuildFlashinferMixedSparseIndicesKernel(
             swa_block_size if compress_ratio == 1 else 256 // compress_ratio
         )
         return self.CompileKey(
+            **compile_key_fields,
             window_size=window_size,
             swa_index_width=swa_index_width,
             compress_ratio=compress_ratio,
             top_k=topk,
             padded_top_k=padded_topk,
             decode_compressed_topk=decode_compressed_topk,
-            decode_compressed_indices_are_local=decode_compressed_indices_are_local,
-            has_decode_compressed_lens=has_decode_compressed_lens,
             swa_block_size=swa_block_size,
             compressed_block_size=compressed_block_size,
             window_block_size=window_block_size,
@@ -1385,7 +1381,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
                 get_dspark_swa_index_width,
             )
 
-            swa_index_width = (
+            swa_index_width: int | tuple[int, int] = (
                 window_size,
                 get_dspark_swa_index_width(
                     window_size,

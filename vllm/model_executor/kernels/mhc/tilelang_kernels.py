@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from functools import cache
+from typing import Any
 
 import torch
 
@@ -973,12 +974,10 @@ class HcPrenormGemmTileLangKernel(
         *,
         num_tokens: int,
         hc_hidden_size: int,
-        hidden_size: int,
-        hc_mult: int,
-        n_out: int,
         n_thr: int = 512,
         tile_n: int = 12,
         n_splits: int = 1,
+        **compile_key_fields: int,
     ) -> CompileKey:
         use_default_config = n_splits == 1 and tile_n == 12 and n_thr == 512
         use_block_m = use_default_config and num_tokens >= 1024
@@ -991,9 +990,7 @@ class HcPrenormGemmTileLangKernel(
         effective_n_thr = 1024 if use_small_tile else n_thr
         effective_tile_n = 4 if use_small_tile else tile_n
         return self.CompileKey(
-            hidden_size=hidden_size,
-            hc_mult=hc_mult,
-            n_out=n_out,
+            **compile_key_fields,
             n_thr=effective_n_thr,
             tile_n=effective_tile_n,
             n_splits=n_splits,
@@ -1183,15 +1180,12 @@ class MhcPreBigFuseTileLangKernel(
         use_norm_weight: bool,
         use_pre_gemm_splits: bool = False,
         pre_gemm_k: int = 0,
-        rms_eps: float,
-        hc_pre_eps: float,
-        hc_sinkhorn_eps: float,
-        hc_post_mult_value: float,
         sinkhorn_repeat: int,
         norm_eps: float,
         broadcast_norm_eps: float = 0.0,
         num_tokens: int = 1,
         use_fused_tilelang: bool = False,
+        **compile_key_fields: float,
     ) -> CompileKey:
         pre_gemm_n_splits = (
             compute_num_split(64, pre_gemm_k, (num_tokens + 63) // 64)
@@ -1203,15 +1197,12 @@ class MhcPreBigFuseTileLangKernel(
         actual_norm_eps = broadcast_norm_eps if is_broadcast else norm_eps
         actual_use_norm_weight = use_norm_weight or is_broadcast
         return self.CompileKey(
+            **compile_key_fields,
             hidden_size=hidden_size,
             hc_mult=hc_mult,
             n_splits=actual_n_splits,
             use_norm_weight=actual_use_norm_weight,
             is_broadcast=is_broadcast,
-            rms_eps=rms_eps,
-            hc_pre_eps=hc_pre_eps,
-            hc_sinkhorn_eps=hc_sinkhorn_eps,
-            hc_post_mult_value=hc_post_mult_value,
             sinkhorn_repeat=sinkhorn_repeat,
             norm_eps=actual_norm_eps if actual_use_norm_weight else 0.0,
         )
@@ -1414,23 +1405,17 @@ class MhcPostTileLangKernel(VllmJitKernel["MhcPostTileLangKernel.CompileKey"]):
 
     def dispatch(  # type: ignore[override]
         self,
-        *,
-        num_tokens: int,
-        hidden_size: int,
-        hc_mult: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
-        return self.CompileKey(hidden_size=hidden_size, hc_mult=hc_mult)
+        return self.CompileKey(**compile_key_fields)
 
     def get_warmup_keys(
         self,
-        vllm_config: Any,
         *,
         hidden_size: int,
         hc_mult: int,
     ) -> list[CompileKey]:
-        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         return self._trace_dispatch(self.dispatch)(
-            num_tokens=WarmupIntRange(1, max_tokens + 1),
             hidden_size=hidden_size,
             hc_mult=hc_mult,
         )
@@ -1634,7 +1619,6 @@ class HcHeadFusedTileLangKernel(VllmJitKernel["HcHeadFusedTileLangKernel.Compile
     def dispatch(  # type: ignore[override]
         self,
         *,
-        num_tokens: int,
         hidden_size: int,
         hc_mult: int,
         rms_eps: float,
@@ -1649,16 +1633,13 @@ class HcHeadFusedTileLangKernel(VllmJitKernel["HcHeadFusedTileLangKernel.Compile
 
     def get_warmup_keys(
         self,
-        vllm_config: Any,
         *,
         hidden_size: int,
         hc_mult: int,
         rms_eps: float,
         hc_eps: float,
     ) -> list[CompileKey]:
-        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         return self._trace_dispatch(self.dispatch)(
-            num_tokens=WarmupIntRange(1, max_tokens + 1),
             hidden_size=hidden_size,
             hc_mult=hc_mult,
             rms_eps=rms_eps,
@@ -1714,8 +1695,8 @@ class HcHeadFusedTileLangKernel(VllmJitKernel["HcHeadFusedTileLangKernel.Compile
         )
 
 
-HC_PRENORM_GEMM_TILELANG_KERNEL = HcPrenormGemmTileLangKernel()
-MHC_PRE_BIG_FUSE_TILELANG_KERNEL = MhcPreBigFuseTileLangKernel()
-MHC_POST_TILELANG_KERNEL = MhcPostTileLangKernel()
-MHC_FUSED_TILELANG_KERNEL = MhcFusedTileLangKernel()
-HC_HEAD_FUSED_TILELANG_KERNEL = HcHeadFusedTileLangKernel()
+_HC_PRENORM_GEMM_TILELANG_KERNEL = HcPrenormGemmTileLangKernel()
+_MHC_PRE_BIG_FUSE_TILELANG_KERNEL = MhcPreBigFuseTileLangKernel()
+_MHC_POST_TILELANG_KERNEL = MhcPostTileLangKernel()
+_MHC_FUSED_TILELANG_KERNEL = MhcFusedTileLangKernel()
+_HC_HEAD_FUSED_TILELANG_KERNEL = HcHeadFusedTileLangKernel()

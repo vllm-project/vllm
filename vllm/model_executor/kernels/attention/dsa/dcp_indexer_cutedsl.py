@@ -152,20 +152,12 @@ class PackDCPTopkCandidatesKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
-        dcp_rank: int,
-        dcp_world_size: int,
-        cp_interleave: int,
         has_row_starts: bool,
-        topk: int,
-        block_size: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
-            dcp_rank=dcp_rank,
-            dcp_world_size=dcp_world_size,
-            cp_interleave=cp_interleave,
+            **compile_key_fields,
             has_row_starts=has_row_starts,
-            topk=topk,
-            block_size=block_size,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -552,11 +544,9 @@ class StableTopKFromGatheredCandidatesKernel(
 
     def dispatch(  # type: ignore[override]
         self,
-        *,
-        topk: int,
-        num_candidates: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
-        return self.CompileKey(topk=topk, num_candidates=num_candidates)
+        return self.CompileKey(**compile_key_fields)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
@@ -571,7 +561,7 @@ class StableTopKFromGatheredCandidatesKernel(
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
 
         num_rows = cute.sym_int()

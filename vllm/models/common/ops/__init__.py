@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ops shared across model implementations."""
 
-from .fused_qk_rmsnorm import fused_q_kv_rmsnorm
+from .fused_qk_rmsnorm import _FUSED_Q_KV_RMSNORM_KERNEL
 
 __all__ = [
-    "fused_q_kv_rmsnorm",
+    "_FUSED_Q_KV_RMSNORM_KERNEL",
 ]

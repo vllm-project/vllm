@@ -14,6 +14,9 @@ from vllm.utils.import_utils import has_cutedsl
 if not current_platform.is_cuda_alike():
     pytest.skip("NVIDIA dispatch tests require CUDA", allow_module_level=True)
 
+from vllm.models.common.ops.fused_qk_rmsnorm import (
+    FusedQKVRMSNormKernel,
+)
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     FusedKVCompressNormRopeInsertIndexerTritonKernel,
 )
@@ -23,9 +26,6 @@ from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
 from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
     FusedMTPInputRMSNormKernel,
     MTPSharedHeadRMSNormKernel,
-)
-from vllm.models.deepseek_v4.common.ops.fused_qk_rmsnorm import (
-    FusedQKVRMSNormKernel,
 )
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     SavePartialStatesKernel,
@@ -41,7 +41,7 @@ if _HAS_CUTEDSL:
     from cutlass import BFloat16, Float32
 
     from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
-        DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
+        _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
         DequantGatherKCacheKernel,
     )
     from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
@@ -157,6 +157,7 @@ def test_fused_qkv_rmsnorm_dispatch_matches_legacy_meta() -> None:
         kv_in_stride=1024,
         kv_out_stride=512,
         eps=1.0e-6,
+        launch_pdl=False,
     ) == kernel.CompileKey(
         q_size=1536,
         kv_size=512,
@@ -166,6 +167,7 @@ def test_fused_qkv_rmsnorm_dispatch_matches_legacy_meta() -> None:
         kv_in_stride=1024,
         kv_out_stride=512,
         eps=1.0e-6,
+        launch_pdl=False,
     )
 
 
@@ -254,7 +256,7 @@ def test_save_partial_states_warmup_filters_zipped_compression_cases() -> None:
 def test_dequant_gather_dispatch_matches_legacy_compile_args(
     has_gather_lens: bool,
 ) -> None:
-    kernel = DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL
+    kernel = _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL
     assert isinstance(kernel, DequantGatherKCacheKernel)
 
     assert kernel.dispatch(

@@ -57,10 +57,10 @@ def _hc_prenorm_gemm_outputs(
         tf32_hc_prenorm_gemm(x, fn, out, sqrsum, n_splits)
     else:
         from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-            HC_PRENORM_GEMM_TILELANG_KERNEL,
+            _HC_PRENORM_GEMM_TILELANG_KERNEL,
         )
 
-        HC_PRENORM_GEMM_TILELANG_KERNEL(
+        _HC_PRENORM_GEMM_TILELANG_KERNEL(
             x,
             fn,
             out,
@@ -111,7 +111,7 @@ def mhc_pre_tilelang(
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+        _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
 
     assert residual.dtype == torch.bfloat16
@@ -158,7 +158,7 @@ def mhc_pre_tilelang(
         hidden_size=hidden_size,
         hc_mult=hc_mult,
     )
-    MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
+    _MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
         gemm_out_mul,
         gemm_out_sqrsum,
         hc_scale,
@@ -243,7 +243,7 @@ def mhc_pre_broadcast_tilelang(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """First-layer mHC pre for a residual broadcast from ``(T, H)``."""
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+        _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
 
     assert norm_weight is not None, "broadcast mHC pre currently requires fused RMSNorm"
@@ -292,7 +292,7 @@ def mhc_pre_broadcast_tilelang(
         hc_mult=hc_mult,
         use_tilelang_fallback=False,
     )
-    MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
+    _MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
         gemm_out_mul,
         gemm_out_sqrsum,
         hc_scale,
@@ -325,13 +325,13 @@ def mhc_post_tilelang(
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        MHC_POST_TILELANG_KERNEL,
+        _MHC_POST_TILELANG_KERNEL,
     )
 
     out = torch.empty_like(residual)
     hc_mult = residual.shape[-2]
     hidden_size = residual.shape[-1]
-    MHC_POST_TILELANG_KERNEL(
+    _MHC_POST_TILELANG_KERNEL(
         comb_res_mix,
         residual,
         post_layer_mix.squeeze(-1),
@@ -376,9 +376,9 @@ def mhc_fused_post_pre_tilelang(
     """
 
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        MHC_FUSED_TILELANG_KERNEL,
-        MHC_POST_TILELANG_KERNEL,
-        MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+        _MHC_FUSED_TILELANG_KERNEL,
+        _MHC_POST_TILELANG_KERNEL,
+        _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
 
     assert residual.dtype == torch.bfloat16
@@ -444,7 +444,7 @@ def mhc_fused_post_pre_tilelang(
     )
 
     if use_small_fma:
-        gemm_out_mul, gemm_out_sqrsum, residual_cur = MHC_FUSED_TILELANG_KERNEL(
+        gemm_out_mul, gemm_out_sqrsum, residual_cur = _MHC_FUSED_TILELANG_KERNEL(
             comb_res_mix_flat,
             residual_flat,
             post_layer_mix_flat,
@@ -454,7 +454,7 @@ def mhc_fused_post_pre_tilelang(
             hidden_size,
             hc_mult3,
         )
-        MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
+        _MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
             gemm_out_mul,
             gemm_out_sqrsum,
             hc_scale,
@@ -473,7 +473,7 @@ def mhc_fused_post_pre_tilelang(
         )
     else:
         residual_cur = torch.empty_like(residual_flat)
-        MHC_POST_TILELANG_KERNEL(
+        _MHC_POST_TILELANG_KERNEL(
             comb_res_mix_flat,
             residual_flat,
             post_layer_mix_flat,
@@ -488,7 +488,7 @@ def mhc_fused_post_pre_tilelang(
             hidden_size=hidden_size,
             hc_mult=hc_mult,
         )
-        MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
+        _MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
             gemm_out_mul,
             gemm_out_sqrsum,
             hc_scale,
@@ -586,10 +586,10 @@ def hc_head_fused_kernel_tilelang(
     if num_tokens == 0:
         return out
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        HC_HEAD_FUSED_TILELANG_KERNEL,
+        _HC_HEAD_FUSED_TILELANG_KERNEL,
     )
 
-    HC_HEAD_FUSED_TILELANG_KERNEL(
+    _HC_HEAD_FUSED_TILELANG_KERNEL(
         hs_flat,
         fn,
         hc_scale,

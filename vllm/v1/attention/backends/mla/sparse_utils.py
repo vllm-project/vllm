@@ -194,8 +194,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_INTERLEAVE: int,
     ) -> CompileKey:
         single_tile = (
-            COUNT_VALID
-            and triton.next_power_of_2(NUM_TOPK_TOKENS) == NUM_TOPK_TOKENS
+            COUNT_VALID and triton.next_power_of_2(NUM_TOPK_TOKENS) == NUM_TOPK_TOKENS
         )
         return self.CompileKey(
             block_size=BLOCK_SIZE,

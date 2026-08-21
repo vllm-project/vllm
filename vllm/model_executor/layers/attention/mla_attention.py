@@ -605,16 +605,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.use_sparse = use_sparse
 
         if vllm_config.kernel_config.enable_jit_warmup:
-
             if (
                 self.prefill_backend is not None
                 and type(self.prefill_backend).get_name() == "FLASH_ATTN"
             ):
                 from vllm.v1.attention.backends.mla.prefill.flash_attn import (
-                    FA4_MLA_PREFILL_KERNEL,
+                    _FA4_MLA_PREFILL_KERNEL,
                 )
 
-                FA4_MLA_PREFILL_KERNEL.register_warmup()
+                _FA4_MLA_PREFILL_KERNEL.register_warmup()
 
             if vllm_config.parallel_config.decode_context_parallel_size > 1:
                 from vllm.v1.attention.ops.dcp import (

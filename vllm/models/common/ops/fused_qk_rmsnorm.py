@@ -5,11 +5,11 @@ from typing import Any
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
@@ -86,22 +86,16 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
         *,
         q_size: int,
         kv_size: int,
-        q_in_stride: int,
-        q_out_stride: int,
-        kv_in_stride: int,
-        kv_out_stride: int,
         eps: float,
         launch_pdl: bool,
+        **compile_key_fields: int,
     ) -> CompileKey:
         max_size = q_size if q_size >= kv_size else kv_size
         return self.CompileKey(
+            **compile_key_fields,
             q_size=q_size,
             kv_size=kv_size,
             block_size=next_power_of_2(max_size),
-            q_in_stride=q_in_stride,
-            q_out_stride=q_out_stride,
-            kv_in_stride=kv_in_stride,
-            kv_out_stride=kv_out_stride,
             eps=eps,
             launch_pdl=launch_pdl,
         )

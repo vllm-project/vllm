@@ -390,7 +390,7 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
 
         N = cute.sym_int()
