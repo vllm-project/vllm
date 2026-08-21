@@ -84,3 +84,5 @@ class OffloadingConfig:
     # True when the canonical per-layer host byte layout was requested via
     # kv_connector_extra_config; certified per-layer at worker registration.
     canonical_layout: bool = False
+    # Canonical format id, resolved at config build (needs the config context)
+    canonical_format: str | None = None

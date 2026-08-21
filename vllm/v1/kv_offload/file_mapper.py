@@ -4,9 +4,6 @@
 import hashlib
 import json
 
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
-    canonical_format_id,
-)
 from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadKey,
@@ -94,7 +91,6 @@ class FileMapper:
             for group in config.groups
         ]
         parallel = config.parallel
-        canonical_format = canonical_format_id() if config.canonical_layout else None
         return cls(
             root_dir=root_dir,
             model_name=config.model.name,
@@ -112,7 +108,7 @@ class FileMapper:
                 and (parallel.is_parallelism_agnostic or config.replicated_layout)
             ),
             replicated_layout=(parallel_agnostic and config.replicated_layout),
-            canonical_format=canonical_format,
+            canonical_format=config.canonical_format,
         )
 
     def get_file_name(self, key: OffloadKey) -> str:

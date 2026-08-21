@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -206,8 +207,16 @@ def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
     )
 
 
-def _parallelism_agnostic(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
-    config = _make_vllm_config()
+def _parallelism_agnostic(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    *,
+    canonical: bool = False,
+    v2: bool = False,
+) -> bool:
+    config = _make_vllm_config(
+        extra_config={"canonical_layout": True} if canonical else None
+    )
+    config.use_v2_model_runner = v2
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
@@ -610,59 +619,75 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
     assert not _parallelism_agnostic(kv_cache_groups)
 
 
-def test_canonical_layout_widens_parallelism_agnostic_to_mla():
-    """The canonical layout dedups the TP-replicated MLA latent into one
-    portable copy, so the gate admits MLA — but only when canonical_layout
-    is requested."""
-    mla_groups = [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))]
-    assert not _parallelism_agnostic(mla_groups)
+_SWA_SPEC = SlidingWindowSpec(
+    block_size=16,
+    num_kv_heads=4,
+    head_size=128,
+    dtype=torch.float32,
+    sliding_window=128,
+)
+_SWA_MLA_SPEC = SlidingWindowMLASpec(
+    block_size=16,
+    num_kv_heads=1,
+    head_size=576,
+    dtype=torch.float32,
+    sliding_window=128,
+)
 
-    config = _make_vllm_config(extra_config={"canonical_layout": True})
-    kv_cache_config = KVCacheConfig(
-        num_blocks=0,
-        kv_cache_tensors=[],
-        kv_cache_groups=mla_groups,
-    )
-    offloading_config = build_offloading_config(config, kv_cache_config)
-    assert offloading_config.parallel.is_parallelism_agnostic
-    assert offloading_config.canonical_layout
 
-    # hybrid groupings stay out: their non-full-attention layers can only
-    # derive opaque (exact-topology) mappings
-    hybrid_config = KVCacheConfig(
-        num_blocks=0,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(["l0"], _full_attention_spec()),
-            KVCacheGroupSpec(["l1"], _full_attention_spec()),
-        ],
-    )
-    assert not build_offloading_config(
-        config, hybrid_config
-    ).parallel.is_parallelism_agnostic
+def _groups(*specs: KVCacheSpec) -> list[KVCacheGroupSpec]:
+    return [KVCacheGroupSpec([f"l{i}"], spec) for i, spec in enumerate(specs)]
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_groups", "certified"),
+    [
+        pytest.param(_groups(_mla_spec(head_size=576)), True, id="mla-latent"),
+        pytest.param(
+            _groups(_full_attention_spec(), _SWA_SPEC), True, id="attention-hybrid"
+        ),
+        pytest.param(_groups(_SWA_MLA_SPEC), False, id="swa-mla"),
+        pytest.param(
+            list(_make_mamba_hybrid_kv_cache_config().kv_cache_groups),
+            False,
+            id="mamba-hybrid",
+        ),
+    ],
+)
+def test_canonical_layout_gate(kv_cache_groups, certified):
+    """The canonical layout certifies portability group by group; none of
+    these shapes are portable in the direct layout."""
+    assert not _parallelism_agnostic(kv_cache_groups)
+    assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
 
 def test_canonical_layout_certifies_v2_model_runner():
     """Canonical bytes are certified per layer against live tensor strides at
     registration, so the static gate must not depend on the model-runner
     version — the v2 runner is the case the canonical layout exists for."""
+    groups = [KVCacheGroupSpec(["l0"], _full_attention_spec())]
+    assert not _parallelism_agnostic(groups, v2=True)
+    assert _parallelism_agnostic(groups, canonical=True, v2=True)
+
+
+def test_canonical_format_resolved_at_config_build():
+    """The canonical format id needs the vLLM config context to resolve the
+    KV cache layout; consumers like the scheduler-side FileMapper run outside
+    that context, so build_offloading_config must resolve it eagerly."""
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["l0"], _full_attention_spec())],
     )
 
-    config = _make_vllm_config()
-    config.use_v2_model_runner = True
-    assert not build_offloading_config(
-        config, kv_cache_config
-    ).parallel.is_parallelism_agnostic
+    offloading_config = build_offloading_config(
+        _make_vllm_config(extra_config={"canonical_layout": True}), kv_cache_config
+    )
+    assert offloading_config.canonical_format is not None
+    assert offloading_config.canonical_format.startswith("v1-")
 
-    config = _make_vllm_config(extra_config={"canonical_layout": True})
-    config.use_v2_model_runner = True
-    assert build_offloading_config(
-        config, kv_cache_config
-    ).parallel.is_parallelism_agnostic
+    no_canonical = build_offloading_config(_make_vllm_config(), kv_cache_config)
+    assert no_canonical.canonical_format is None
 
 
 def test_prefer_cross_layer_blocks_yields_to_canonical_layout():
