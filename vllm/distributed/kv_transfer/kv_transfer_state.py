@@ -84,6 +84,7 @@ def ensure_kv_transfer_initialized(
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance:
         _sync_engine_id_across_tp(vllm_config)
+
         _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
             config=vllm_config,
             role=KVConnectorRole.WORKER,

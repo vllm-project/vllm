@@ -173,6 +173,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     local_block_ids = self.get_exchange_clipped_blocks(
                         unhashed_local_block_ids
                     )
+
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
                     self._reqs_need_recv[request.request_id] = (

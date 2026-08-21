@@ -826,6 +826,7 @@ def test_get_block_descs_ids_selects_attention_regions_by_group():
         block_size_ratio=None,
         physical_blocks_per_logical=1,
     )
+
     assert result.tolist() == [1, 2, 11, 12, 27]
 
     remapped = worker._compute_desc_ids(
@@ -840,7 +841,7 @@ def test_get_block_descs_ids_selects_attention_regions_by_group():
 
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_uses_per_region_pool_capacity():
-    """Independent pools use cumulative descriptor offsets."""
+    """Independent host and device pools use cumulative descriptor offsets."""
     from vllm.v1.kv_cache_interface import FullAttentionSpec
 
     worker = _make_mock_worker_for_desc_ids(
@@ -858,6 +859,7 @@ def test_get_block_descs_ids_uses_per_region_pool_capacity():
         physical_blocks_per_logical=1,
         region_num_blocks=[5, 10],
     )
+
     assert result.tolist() == [4, 13]
 
 
