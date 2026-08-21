@@ -16,6 +16,9 @@ import torch
 from tests.v1.attention.utils import MockMambaBuilder
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse_nixl import (
+    HiSparseNixlAdapter,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
     HostReadStager,
@@ -159,6 +162,7 @@ def test_sync_device_after_direct_recv_gates(
     worker.kv_cache_config = SimpleNamespace(
         hisparse_host_num_blocks=1 if has_hisparse else None
     )
+    worker._nixl_adapter = bw.make_hisparse_nixl_adapter(worker.kv_cache_config)
 
     sync_calls = []
     monkeypatch.setattr(base_worker.current_platform, "is_rocm", lambda: is_rocm)
@@ -1830,11 +1834,11 @@ def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
     worker.dst_region_split_ratios = {"prefill": [4, 4]}
     worker.dst_region_num_blocks = {"prefill": [300, 400]}
     worker.dst_num_blocks = {"prefill": 400}
-    worker._hisparse_host_regions = [
+    adapter = HiSparseNixlAdapter(SimpleNamespace(hisparse_host_num_blocks=16))
+    adapter.host_regions = [
         (1_000, 10, 64),
         (2_000, 20, 64),
     ]
-    worker.kv_cache_config = SimpleNamespace(hisparse_host_num_blocks=16)
     worker.block_len_per_layer = [10, 20]
     worker.kv_caches_base_addr = {"decode": {0: [10_000, 20_000]}}
     worker.engine_id = "decode"
@@ -1850,7 +1854,8 @@ def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
     )
     worker.transfer_topo.tp_ratio.return_value = 1
     stager = MagicMock()
-    worker._get_hisparse_host_stager = MagicMock(return_value=stager)
+    adapter.host_stager = stager
+    worker._nixl_adapter = adapter
     plan = SimpleNamespace(all_source_ranks=(0,))
     meta = ReqMeta(
         local_block_ids=([20, 21, 22, 23, 24, 25, 26, 27], [99]),
@@ -1869,7 +1874,7 @@ def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
         hisparse_host_block_ids=[2, 3],
     )
 
-    worker._read_hisparse_host_blocks("request", meta, plan, [0, 0])
+    adapter.read_host_blocks(worker, "request", meta, plan, [0, 0])
 
     call = stager.submit.call_args
     transfers = set(
@@ -1994,7 +1999,7 @@ def test_staged_failure_without_sibling_transfer_is_reported():
     worker = object.__new__(NixlConnectorWorker)
     worker._host_stager = MagicMock()
     worker._host_stager.advance.return_value = (set(), {"request"})
-    worker._hisparse_host_stager = None
+    worker._nixl_adapter = None
     worker._recving_transfers = defaultdict(list)
     worker._failed_recv_lock = threading.Lock()
     worker._failed_recv_pending = set()

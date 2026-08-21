@@ -38,6 +38,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorTransferResults,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse_nixl import (
+    make_hisparse_nixl_adapter,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
     HostReadStager,
@@ -81,14 +84,8 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
-from vllm.v1.core.kv_cache_utils import (
-    HISPARSE_INDEXER_SOURCE_SUFFIX,
-    HISPARSE_RESIDENT_SUFFIX,
-)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    HiSparseResidentSpec,
-    KVCacheGroupRole,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -110,8 +107,6 @@ _SHARED_REGION_GROUP_ID = -1
 
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
     """Sort transfer regions in model-layer order, then by cache name."""
-    if layer_name.endswith(HISPARSE_RESIDENT_SUFFIX):
-        layer_name = layer_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
     return tuple(
         (0, int(part)) if part.isdigit() else (1, part)
         for part in re.split(r"(\d+)", layer_name)
@@ -352,6 +347,7 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
+        self._nixl_adapter = make_hisparse_nixl_adapter(kv_cache_config)
         attention_block_sizes = [
             group.kv_cache_spec.block_size
             for group in kv_cache_config.transfer_groups
@@ -576,7 +572,6 @@ class NixlBaseConnectorWorker:
         # Set when the local KV destination is host memory; see host_staging.
         self._host_stager: HostReadStager | None = None
         self._host_stager_init_attempted = False
-        self._hisparse_host_stager: HostReadStager | None = None
         # A posted READ cannot be aborted, so failure remains pending until
         # every sibling transfer is terminal and its blocks are safe to reuse.
         self._failed_recv_pending: set[ReqId] = set()
@@ -642,11 +637,6 @@ class NixlBaseConnectorWorker:
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
-        # Alternate final destinations for a host-backed HiSparse import.
-        # Entries are (base, physical-page stride, physical-page capacity),
-        # aligned with the ordinary NIXL regions; None means GPU-only.
-        self._hisparse_host_regions: list[tuple[int, int, int] | None] = []
-
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
@@ -1157,7 +1147,8 @@ class NixlBaseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-        self._hisparse_host_regions = []
+        if self._nixl_adapter is not None:
+            self._nixl_adapter.reset_regions()
 
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
@@ -1212,14 +1203,16 @@ class NixlBaseConnectorWorker:
         # single NIXL region whose block transfers as one unit. Mamba layers instead
         # register separate conv/ssm sub-regions (see `_build_mamba_local`).
         def transfer_layer_name(layer_name: str) -> str:
-            if layer_name.endswith(HISPARSE_RESIDENT_SUFFIX):
-                return layer_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
-            return layer_name
+            if self._nixl_adapter is None:
+                return layer_name
+            return self._nixl_adapter.transfer_layer_name(layer_name)
 
         # P and D may allocate equivalent transferable layers in different
         # cache-group orders. Keep their region lists aligned without putting
         # layers.10 before layers.2, which would break PP region slicing.
-        for layer_name in sorted(xfer_buffers, key=_region_sort_key):
+        for layer_name in sorted(
+            xfer_buffers, key=lambda name: _region_sort_key(transfer_layer_name(name))
+        ):
             cache = xfer_buffers[layer_name]
             # NOTE (NickLucche) Hybrid SSM mamba/FA physical page_size may differ when
             # kernel requires a specific block size. This leads to SSM and FA layers
@@ -1251,14 +1244,18 @@ class NixlBaseConnectorWorker:
                     self.kv_cache_config.kv_cache_tensors
                 )
             group = self.kv_cache_config.transfer_groups[group_index]
-            if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
-                logical_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
-                assert logical_num_blocks is not None
+            if group.block_pool_id is None:
+                logical_num_blocks = self._logical_num_blocks
             else:
-                assert group.block_pool_id is not None
                 logical_num_blocks = self.kv_cache_config.num_blocks_by_pool[
                     group.block_pool_id
                 ]
+            if self._nixl_adapter is not None:
+                logical_num_blocks = self._nixl_adapter.logical_num_blocks(
+                    group, logical_num_blocks
+                )
+            elif group.block_pool_id is None:
+                raise ValueError("NIXL transfer group has no block pool")
             num_blocks = (
                 logical_num_blocks
                 if isinstance(layer_spec, MambaSpec)
@@ -1266,8 +1263,10 @@ class NixlBaseConnectorWorker:
             )
             base_addr = cache.data_ptr()
             is_mla_region = isinstance(
-                layer_spec,
-                (HiSparseResidentSpec, MLAAttentionSpec, SlidingWindowMLASpec),
+                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+            ) or (
+                self._nixl_adapter is not None
+                and self._nixl_adapter.is_mla_region(layer_spec)
             )
             region_block_len = (
                 physical_page_size // self._physical_blocks_per_logical_kv_block
@@ -1319,30 +1318,9 @@ class NixlBaseConnectorWorker:
             self.region_names.append(transfer_layer_name(layer_name))
             self.region_num_blocks.append(num_blocks)
             self._region_is_mla.append(is_mla_region)
-            host_layer_name = None
-            if layer_name.endswith(HISPARSE_RESIDENT_SUFFIX):
-                host_layer_name = transfer_layer_name(layer_name)
-            elif group.role is KVCacheGroupRole.HISPARSE_INDEXER:
-                host_layer_name = f"{layer_name}{HISPARSE_INDEXER_SOURCE_SUFFIX}"
-            if host_layer_name is None:
-                self._hisparse_host_regions.append(None)
-            else:
-                host_cache = kv_caches.get(host_layer_name)
-                if host_cache is None:
-                    raise ValueError(
-                        "HiSparse host transfer cache is missing: "
-                        f"layer={layer_name}, source={host_layer_name}"
-                    )
-                assert host_cache.device.type == "cpu"
-                host_stride = host_cache.stride(0) * host_cache.element_size()
-                if host_stride < region_block_len:
-                    raise ValueError(
-                        "HiSparse host page is smaller than its transfer region: "
-                        f"layer={layer_name}, host_stride={host_stride}, "
-                        f"region_block_len={region_block_len}"
-                    )
-                self._hisparse_host_regions.append(
-                    (host_cache.data_ptr(), host_stride, host_cache.shape[0])
+            if self._nixl_adapter is not None:
+                self._nixl_adapter.register_region(
+                    layer_name, group, region_block_len, kv_caches
                 )
 
             # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
@@ -1407,9 +1385,10 @@ class NixlBaseConnectorWorker:
             == len(self.region_group_ids)
             == len(self.region_block_sizes)
             == len(self.region_names)
-            == len(self._hisparse_host_regions)
             == len(self.region_num_blocks)
         )
+        if self._nixl_adapter is not None:
+            assert len(self._nixl_adapter.host_regions) == len(self.region_names)
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(seen_base_addresses)
@@ -2611,8 +2590,7 @@ class NixlBaseConnectorWorker:
     def _sync_device_after_direct_recv(self, done_recving: set[str]) -> None:
         """Make direct NIXL writes visible before model execution."""
         requires_sync = (current_platform.is_rocm() and self._has_mamba) or (
-            current_platform.is_cuda()
-            and self.kv_cache_config.hisparse_host_num_blocks is not None
+            current_platform.is_cuda() and self._nixl_adapter is not None
         )
         if self.use_host_buffer or not done_recving or not requires_sync:
             return
@@ -2695,35 +2673,19 @@ class NixlBaseConnectorWorker:
             self._host_stager = None
         return self._host_stager
 
-    def _get_hisparse_host_stager(self) -> HostReadStager:
-        """Return the bounded GPU landing pipeline for host-backed imports."""
-        if self._hisparse_host_stager is not None:
-            return self._hisparse_host_stager
-        stage_bytes = envs.VLLM_NIXL_HOST_STAGE_BYTES
-        if stage_bytes <= 0:
-            raise RuntimeError(
-                "Host-backed HiSparse P/D imports require "
-                "VLLM_NIXL_HOST_STAGE_BYTES > 0"
-            )
-        lengths = np.asarray(self.block_len_per_layer, dtype=np.int64)
-        self._hisparse_host_stager = HostReadStager(
-            desc_lens=lengths,
-            host_addrs=np.zeros(len(lengths), dtype=np.uint64),
-            device=torch.device(f"cuda:{self.device_id}"),
-            nixl_wrapper=self.nixl_wrapper,
-            memory_type=self.nixl_memory_type,
-            backends=self.nixl_backends,
-            stage_bytes=stage_bytes,
-            num_slots=max(envs.VLLM_NIXL_HOST_STAGE_SLOTS, 1),
-        )
-        return self._hisparse_host_stager
+    def _host_stagers(self) -> Iterator[HostReadStager]:
+        if self._host_stager is not None:
+            yield self._host_stager
+        if (
+            self._nixl_adapter is not None
+            and self._nixl_adapter.host_stager is not None
+        ):
+            yield self._nixl_adapter.host_stager
 
     def _advance_host_staging(self) -> set[str]:
         """Drive the staging pipeline; return req_ids whose KV is fully landed."""
         all_done: set[str] = set()
-        for stager in (self._host_stager, self._hisparse_host_stager):
-            if stager is None:
-                continue
+        for stager in self._host_stagers():
             done, failed = stager.advance()
             all_done.update(done)
             for req_id in done:
@@ -2755,10 +2717,7 @@ class NixlBaseConnectorWorker:
         return all_done
 
     def _is_staging_active(self, req_id: str) -> bool:
-        return any(
-            stager is not None and req_id in stager.active_req_ids
-            for stager in (self._host_stager, self._hisparse_host_stager)
-        )
+        return any(req_id in stager.active_req_ids for stager in self._host_stagers())
 
     def _pop_done_transfers(
         self, transfers: dict[str, list[int]], *, is_recv: bool
@@ -2859,10 +2818,8 @@ class NixlBaseConnectorWorker:
 
     def _report_failed_recv(self, req_id: str) -> None:
         """Report a failed recv exactly once and invalidate its blocks."""
-        if self._host_stager is not None:
-            self._host_stager.abort(req_id)
-        if self._hisparse_host_stager is not None:
-            self._hisparse_host_stager.abort(req_id)
+        for stager in self._host_stagers():
+            stager.abort(req_id)
         if self._is_staging_active(req_id):
             with self._failed_recv_lock:
                 self._failed_recv_pending.add(req_id)
@@ -3242,9 +3199,8 @@ class NixlBaseConnectorWorker:
 
     def _poll_host_staging_shutdown(self, cancel: bool) -> bool:
         done = True
-        for stager in (self._host_stager, self._hisparse_host_stager):
-            if stager is not None:
-                done &= stager.poll_shutdown(cancel)
+        for stager in self._host_stagers():
+            done &= stager.poll_shutdown(cancel)
         return done
 
     def _finish_shutdown(self) -> None:
@@ -3300,9 +3256,8 @@ class NixlBaseConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
-        for stager in (self._host_stager, self._hisparse_host_stager):
-            if stager is not None:
-                stager.begin_shutdown()
+        for stager in self._host_stagers():
+            stager.begin_shutdown()
 
         deadline = time.monotonic() + drain_timeout
         drained = self._poll_host_staging_shutdown(cancel=False)
