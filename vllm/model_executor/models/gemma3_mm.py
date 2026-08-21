@@ -266,13 +266,11 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
             mm_kwargs,
-            tok_kwargs,
         )
 
         # HF processor pops the `num_crops` kwarg, which is needed by vLLM
@@ -372,6 +370,40 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         )
 
         return token_ids, res
+
+    def _apply_token_matches_with_placeholders(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[
+        list[int],
+        MultiModalPromptUpdatesApplyResult,
+        Mapping[str, list[PlaceholderFeaturesInfo]],
+    ]:
+        new_token_ids, match_result = self._apply_token_matches(
+            token_ids,
+            mm_prompt_updates,
+        )
+
+        placeholders: dict[str, list[PlaceholderFeaturesInfo]] = {
+            modality: [] for modality in mm_prompt_updates
+        }
+
+        if all(
+            all(update_idx is not None for update_idx in update_idxs)
+            for update_idxs in match_result.values()
+        ):
+            placeholders = dict(
+                self._find_mm_placeholders(
+                    new_token_ids,
+                    self._matched_updates_from_result(
+                        mm_prompt_updates,
+                        match_result,
+                    ),
+                )
+            )
+
+        return new_token_ids, match_result, placeholders
 
     def _find_mm_placeholders(
         self,
