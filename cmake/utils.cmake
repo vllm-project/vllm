@@ -660,11 +660,8 @@ function (define_extension_target MOD_NAME)
   install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${MOD_NAME})
 endfunction()
 
-#
-# For source files that use CUDA global function templates, disable the
-# static global template stub that CUDA 12.8+ generates by default.
-# This avoids link-time bloat/errors from un-instantiated __global__
-# template stubs in heavily-templated kernels (e.g. Marlin).
+# Disable the CUDA 12.8+ static global template stub for heavily templated
+# kernel sources that don't need it.
 #
 # Usage:
 #   disable_static_global_template_stub(SRCS ${MY_KERNEL_SOURCES})
