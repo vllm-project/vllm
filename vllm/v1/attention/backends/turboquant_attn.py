@@ -206,6 +206,12 @@ class TurboQuantAttentionBackend(AttentionBackend):
             TurboQuantConfig,
         )
 
+        if cache_dtype_str == "auto":
+            # Hybrid models (e.g. Qwen3.8) pass "auto" for layers with
+            # kv_quant_mode=NONE (linear attention layers that don't use
+            # standard KV cache). Fall back to turboquant_4bit_nc so the
+            # slot size matches the tensor already allocated with TQ sizing.
+            cache_dtype_str = "turboquant_4bit_nc"
         tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype_str, head_size)
         return (num_blocks, num_kv_heads, block_size, tq_config.slot_size_aligned)
 
