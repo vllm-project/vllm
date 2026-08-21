@@ -170,6 +170,59 @@ async def test_chat_error_non_stream():
 
 
 @pytest.mark.asyncio
+async def test_required_tool_choice_no_calls_non_stream_finish_reason():
+    """When tool_choice='required' but no tool calls are produced, the
+    non-streaming finish_reason must be 'stop' (not 'tool_calls')."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # A completion output that finished with 'stop' but produced no tool calls
+    completion_output = CompletionOutput(
+        index=0,
+        text="Hello! I'm fine.",
+        token_ids=[],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="stop",
+    )
+
+    request_output = RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[completion_output],
+        finished=True,
+        metrics=None,
+        lora_request=None,
+        encoder_prompt=None,
+        encoder_prompt_token_ids=None,
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield request_output
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=10,
+        stream=False,
+        tool_choice="required",
+    )
+
+    response = await serving_chat.create_chat_completion(request)
+    # Ensure non-streaming path reports 'stop' when no tool calls exist
+    assert response.choices[0].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
 async def test_openai_chat_keeps_mm_cache_for_engine_execution():
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False

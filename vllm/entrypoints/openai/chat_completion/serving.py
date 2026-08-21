@@ -1048,6 +1048,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 request.tool_choice
                 and request.tool_choice == "required"
                 and output.finish_reason == "stop"
+                and bool(tool_calls)
             )
 
             routed_experts_b64 = (
