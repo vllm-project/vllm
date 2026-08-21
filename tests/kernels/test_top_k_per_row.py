@@ -837,6 +837,66 @@ def test_cooperative_topk_512_tie_workspace_is_per_row() -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize(
+    "seq_len",
+    [
+        pytest.param(8 * 1024, id="8k"),
+        pytest.param(32 * 1024, id="32k"),
+        pytest.param(128 * 1024, id="128k"),
+        pytest.param(256 * 1024, id="256k"),
+        pytest.param(512 * 1024, id="512k"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("backend", "num_rows"),
+    [
+        pytest.param("persistent_topk", 1, id="persistent"),
+        pytest.param("persistent_topk", 64, id="filtered"),
+        pytest.param(
+            "cooperative_topk",
+            1,
+            id="cooperative",
+            marks=pytest.mark.skipif(
+                not _has_device_capability(90),
+                reason="cooperative_topk requires SM90+",
+            ),
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_workspace_topk_candidate_overflow(
+    backend: str,
+    num_rows: int,
+    seq_len: int,
+    top_k: int,
+) -> None:
+    """TopK remains exact when one coarse bin exceeds candidate capacity."""
+    torch.set_default_device("cuda:0")
+
+    # These are unequal FP32 values but all map to the same 12-bit FP16
+    # coarse bin, exceeding the candidate capacity at every tested top-k.
+    row = 1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len)
+    logits = row.expand(num_rows, -1).contiguous()
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32)
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32)
+
+    _run_topk_backend(
+        backend,
+        logits,
+        lengths,
+        indices,
+        top_k,
+        seq_len,
+    )
+    torch.accelerator.synchronize()
+
+    actual = logits.gather(1, indices.to(torch.int64)).sort(dim=1).values
+    expected = logits.topk(top_k, dim=1).values.sort(dim=1).values
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize(
     "test_config",
     [
