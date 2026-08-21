@@ -39,6 +39,15 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
+_PACKAGED_BATCH_INVARIANT_KERNEL = (
+    Path(__file__).resolve().parents[4] / "_vllm_batch_invariant_C.so"
+)
+
+
+def _batch_invariant_kernel_path() -> Path:
+    override = os.environ.get("VLLM_BATCH_INVARIANT_KERNEL_LIB")
+    return Path(override).expanduser() if override else _PACKAGED_BATCH_INVARIANT_KERNEL
+
 
 @functools.cache
 def _load_batch_invariant_kernel_library(path: str) -> None:
@@ -49,7 +58,7 @@ def _load_batch_invariant_kernel_library(path: str) -> None:
         )
     try:
         torch.ops.load_library(str(library))
-        torch.ops.vllm_batch_invariant.fused_silu_mul_per_token_group_quant
+        _ = torch.ops.vllm_batch_invariant.fused_silu_mul_per_token_group_quant
     except (OSError, RuntimeError, AttributeError) as exc:
         raise RuntimeError(
             f"failed to load the batch-invariant kernel library: {library}"
@@ -57,22 +66,17 @@ def _load_batch_invariant_kernel_library(path: str) -> None:
 
 
 def is_batch_invariant_quant_kernel_enabled() -> bool:
-    path = os.environ.get("VLLM_BATCH_INVARIANT_KERNEL_LIB")
-    if not path:
+    path = _batch_invariant_kernel_path()
+    if not path.is_file():
         return False
-    _load_batch_invariant_kernel_library(path)
+    _load_batch_invariant_kernel_library(str(path))
     return True
 
 
 def require_batch_invariant_quant_kernel() -> None:
     """Load the BI activation kernel or fail before expert execution."""
-    path = os.environ.get("VLLM_BATCH_INVARIANT_KERNEL_LIB")
-    if not path:
-        raise RuntimeError(
-            "VLLM_BATCH_INVARIANT=1 requires "
-            "VLLM_BATCH_INVARIANT_KERNEL_LIB; refusing a non-BI MoE fallback"
-        )
-    _load_batch_invariant_kernel_library(path)
+    path = _batch_invariant_kernel_path()
+    _load_batch_invariant_kernel_library(str(path))
 
 
 def fused_silu_mul_per_token_group_quant_fp8(
@@ -85,10 +89,8 @@ def fused_silu_mul_per_token_group_quant_fp8(
     group_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the batch-invariant fused SiLU*up and per-token FP8 quant kernel."""
-    path = os.environ.get("VLLM_BATCH_INVARIANT_KERNEL_LIB")
-    if not path:
-        raise RuntimeError("VLLM_BATCH_INVARIANT_KERNEL_LIB is not set")
-    _load_batch_invariant_kernel_library(path)
+    path = _batch_invariant_kernel_path()
+    _load_batch_invariant_kernel_library(str(path))
     if round_scale is None:
         round_scale = use_ue8m0
     if use_ue8m0 and not round_scale:

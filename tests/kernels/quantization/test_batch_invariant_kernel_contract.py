@@ -6,10 +6,12 @@ import pytest
 from vllm.model_executor.layers.quantization.utils import fp8_utils
 
 
-def test_required_batch_invariant_kernel_has_no_fallback(monkeypatch):
+def test_required_batch_invariant_kernel_uses_packaged_default(monkeypatch, tmp_path):
     monkeypatch.delenv("VLLM_BATCH_INVARIANT_KERNEL_LIB", raising=False)
+    packaged = tmp_path / "_vllm_batch_invariant_C.so"
+    monkeypatch.setattr(fp8_utils, "_PACKAGED_BATCH_INVARIANT_KERNEL", packaged)
 
-    with pytest.raises(RuntimeError, match="refusing a non-BI MoE fallback"):
+    with pytest.raises(RuntimeError, match="library does not exist"):
         fp8_utils.require_batch_invariant_quant_kernel()
 
 
