@@ -8,6 +8,11 @@
 # job log before the command phase starts.
 if [[ "${BUILDKITE_STEP_KEY:-}" == "image-build" ]]; then
   echo "HBSAMPLE hook context: $(which buildkite-agent) | bk env vars: $(env | grep -c '^BUILDKITE')"
+  if ! command -v ethtool >/dev/null 2>&1; then
+    sudo -n dnf install -y ethtool >/dev/null 2>&1 || sudo -n yum install -y ethtool >/dev/null 2>&1 || true
+  fi
+  IF0=$(ls /sys/class/net/ 2>/dev/null | grep -E '^(ens|eth)' | head -1)
+  echo "HBSAMPLE ethtool probe: $(command -v ethtool || echo MISSING) | stats lines: $(ethtool -S "$IF0" 2>/dev/null | grep -cE 'allowance|conntrack' || echo 0)"
   echo "hb probe $(date -u +%FT%TZ)" > /tmp/hb-probe.log
   (cd /tmp && buildkite-agent artifact upload hb-probe.log)
   echo "HBSAMPLE foreground probe upload exit=$?"
