@@ -109,7 +109,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import AutoWeightsLoader, flatten_bn, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -1567,6 +1567,10 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
 
 
 class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
+    hf_to_vllm_mapper = WeightsMapper(
+        # The vision-only models have no audio tower or TTS head to load weights into.
+        orig_to_new_prefix={"apm.": None, "audio": None, "tts": None}
+    )
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1660,13 +1664,14 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self._ensure_resampler_device()
         return loaded
 
 
 class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
+    hf_to_vllm_mapper = MiniCPMV2_6.hf_to_vllm_mapper
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1758,13 +1763,14 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self._ensure_resampler_device()
         return loaded
 
 
 class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
+    hf_to_vllm_mapper = MiniCPMV2_6.hf_to_vllm_mapper
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1861,8 +1867,8 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes, all_temporal_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self._ensure_resampler_device()
         return loaded
 
