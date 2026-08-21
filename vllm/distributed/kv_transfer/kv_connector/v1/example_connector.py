@@ -182,11 +182,18 @@ class ExampleConnector(KVConnectorBase_V1):
                 )
                 kv_cache_cpu = safetensors.torch.load_file(filename)["kv_cache"]
                 kv_cache = kv_cache_cpu.to(kv_cache_layer.device, non_blocking=True)
+                # The file may hold fewer tokens than the request's slot
+                # mapping: a store request is only recorded on its first
+                # scheduling step, so a chunked prefill persists just the
+                # blocks allocated by then. Inject what exists; the
+                # scheduler computes the rest because
+                # get_num_new_matched_tokens caps its claim the same way.
+                num_saved = min(kv_cache.shape[0], request.slot_mapping.shape[0])
                 if isinstance(attn_metadata, dict):
                     inject_kv_into_layer(
                         kv_cache_layer,
-                        kv_cache,
-                        request.slot_mapping,
+                        kv_cache[:num_saved],
+                        request.slot_mapping[:num_saved],
                         attn_metadata[layer_name],
                     )
 
@@ -286,7 +293,17 @@ class ExampleConnector(KVConnectorBase_V1):
         token_ids = request.prompt_token_ids or []
         num_tokens_to_check = align_to_block_size(len(token_ids) - 1, self._block_size)
 
-        return num_tokens_to_check - num_computed_tokens, False
+        # Cap the claim at what was actually persisted. A store request is
+        # only recorded on its first scheduling step, so under chunked
+        # prefill the saved files hold just the first chunk; claiming the
+        # full aligned prefix would mark tokens as computed whose KV was
+        # never saved, and the worker-side injection would then fail on the
+        # shape mismatch between the file and the slot mapping.
+        num_saved = self._num_saved_tokens_for_request(request)
+        num_saved_aligned = num_saved // self._block_size * self._block_size
+        num_tokens_to_check = min(num_tokens_to_check, num_saved_aligned)
+
+        return max(num_tokens_to_check - num_computed_tokens, 0), False
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -404,6 +421,38 @@ class ExampleConnector(KVConnectorBase_V1):
             create_folder=False,
         )
         return os.path.exists(foldername)
+
+    def _num_saved_tokens_for_request(self, request: "Request") -> int:
+        """Number of tokens actually present in the saved files for the
+        request's matched folder (0 when it cannot be determined).
+
+        Reads the tensor shape from one layer file's safetensors header,
+        which is cheap: no tensor data is loaded.
+        """
+        prompt_token_ids = list(request.prompt_token_ids or [])
+        num_tokens_to_check = align_to_block_size(
+            len(prompt_token_ids) - 1, self._block_size
+        )
+        foldername = self._generate_foldername_debug(
+            torch.tensor(prompt_token_ids)[:num_tokens_to_check],
+            [f.identifier for f in request.mm_features],
+            create_folder=False,
+        )
+        try:
+            with os.scandir(foldername) as entries:
+                sample = next(
+                    (e.path for e in entries if e.name.endswith(".safetensors")),
+                    None,
+                )
+            if sample is None:
+                return 0
+            with safetensors.safe_open(sample, framework="pt") as f:
+                key = next(iter(f.keys()), None)
+                if key is None:
+                    return 0
+                return f.get_slice(key).get_shape()[0]
+        except (OSError, safetensors.SafetensorError):
+            return 0
 
     def _generate_foldername_debug(
         self,
