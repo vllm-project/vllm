@@ -324,7 +324,9 @@ class ElasticEPScalingExecutor:
     def _warm_target_groups(self, dp_group, ep_group) -> None:
         assert dp_group is not None and ep_group is not None
 
-        if not self.worker.model_config.enforce_eager:
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm() and not self.worker.model_config.enforce_eager:
             return
 
         stream = torch.Stream(device=dp_group.device)
