@@ -1208,8 +1208,10 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             images=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
             image_masks=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
             image_input_idx=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
-            num_crops=MultiModalFieldConfig.batched("image"),
-            img_patch_id=MultiModalFieldConfig.shared("image", num_images),
+            num_crops=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            img_patch_id=MultiModalFieldConfig.shared(
+                "image", num_images, keep_on_cpu=True
+            ),
         )
 
     def _get_prompt_updates(
@@ -1340,15 +1342,14 @@ class MolmoForCausalLM(
 
         self.img_patch_id = None
 
+        self.lm_head = ParallelLMHead(
+            config.embedding_size or config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if self.config.weight_tying:
-            self.lm_head = self.model.transformer.wte
-        else:
-            self.lm_head = ParallelLMHead(
-                config.embedding_size or config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.model.transformer.wte)
 
         self.logits_processor = LogitsProcessor(
             config.embedding_size or config.vocab_size

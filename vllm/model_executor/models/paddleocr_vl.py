@@ -68,6 +68,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45 import Ernie4_5ForCausalLM
@@ -278,7 +279,7 @@ class PaddleOCRVLMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -800,16 +801,18 @@ class SiglipEncoder(nn.Module):
             [height_position_ids, width_position_ids],
             dim=-1,
         )
-        max_grid_size = pids.max() + 1
+        # The ids are built from the grids above, so `h`/`w` bound them
+        # and the table size is known on the host.
+        max_grid_size = max(max(h, w) for _, h, w in flatten_image_grid_thw)
         rope_emb_max_grid = self.rotary_pos_emb(max_grid_size)
         rotary_pos_emb = rope_emb_max_grid[pids].flatten(1)
 
         if cu_seqlens is None:
             raise ValueError("cu_seqlens cannot be None for SiglipEncoder.")
         if not isinstance(cu_seqlens, torch.Tensor):
-            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            cu_seqlens = async_tensor_h2d(cu_seqlens, dtype=torch.int32, device=device)
         else:
-            cu_seqlens = cu_seqlens.to(device=device)
+            cu_seqlens = cu_seqlens.to(device=device, non_blocking=True)
 
         max_seqlen = None
         if self.attn_backend in {
@@ -884,7 +887,16 @@ class SiglipVisionModel(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        # The SigLIP attention pooling head and packing pos embedding are
+        # present in the checkpoint but absent from this vision tower.
+        orig_to_new_substr={
+            "head.attention": None,
+            "head.layernorm": None,
+            "head.mlp": None,
+            "head.probe": None,
+            "packing_position_embedding": None,
+        },
     )
 
     def __init__(
@@ -931,18 +943,7 @@ class SiglipVisionModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Skip the SigLIP attention pooling head and packing pos embedding
-        # present in the checkpoint but absent from this vision tower.
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=[
-                "head.attention",
-                "head.layernorm",
-                "head.mlp",
-                "head.probe",
-                "packing_position_embedding",
-            ],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
@@ -1131,10 +1132,13 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         siglip_position_ids.append(image_position_ids)
         cu_seqlens.append(cu_seqlens[-1] + numel)
 
+        # Both are built on the host; stage them over non-blocking.
         siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
-            pixel_values.device
+            pixel_values.device, non_blocking=True
         )
-        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32).to(pixel_values.device)
+        cu_seqlens = async_tensor_h2d(
+            cu_seqlens, dtype=torch.int32, device=pixel_values.device
+        )
 
         vision_outputs = self.visual(
             pixel_values=pixel_values,

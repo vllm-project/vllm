@@ -27,7 +27,6 @@ copied, so no caller observes partially populated host blocks.
 
 from __future__ import annotations
 
-import contextlib
 import ctypes
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,6 +39,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _CUDA_MEMCPY_DEVICE_TO_HOST = 2
+_CUDA_MEMCPY_DEVICE_TO_DEVICE = 3
 
 
 def _load_cudart() -> ctypes.CDLL | None:
@@ -129,12 +129,17 @@ class _Slot:
 class _ReqState:
     """Per-request pipeline state: chunks waiting, reading, and copying."""
 
-    # (remote_desc_ids, local_desc_ids, remote_handle, desc_len)
-    queued: list[tuple[np.ndarray, np.ndarray, int, int]] = field(default_factory=list)
-    # (xfer_handle, slot, local_desc_ids)
-    reading: list[tuple[int, _Slot, np.ndarray]] = field(default_factory=list)
+    # remote ids, destinations, copy kinds, mirrors, remote handle, descriptor length
+    queued: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]] = (
+        field(default_factory=list)
+    )
+    # xfer handle, slot, destinations, copy kinds, mirrors
+    reading: list[tuple[int, _Slot, np.ndarray, np.ndarray, np.ndarray]] = field(
+        default_factory=list
+    )
     copying: list[_Slot] = field(default_factory=list)
     failed: bool = False
+    aborted: bool = False
 
 
 class HostReadStager:
@@ -180,6 +185,7 @@ class HostReadStager:
         }
         self._copy_stream = torch.cuda.Stream(device=device)
         self._reqs: dict[str, _ReqState] = {}
+        self._closed = False
 
         logger.info(
             "NIXL host read staging enabled: %.2f GiB device staging across "
@@ -200,24 +206,74 @@ class HostReadStager:
         remote_desc_ids: np.ndarray,
         local_desc_ids: np.ndarray,
         remote_handle: int,
+        *,
+        dst_addrs: np.ndarray | None = None,
+        desc_lens: np.ndarray | None = None,
+        copy_kinds: np.ndarray | None = None,
+        mirror_addrs: np.ndarray | None = None,
     ) -> None:
         """Queue a read, split by descriptor length then chunked, and start it."""
         remote_desc_ids = np.asarray(remote_desc_ids)
         local_desc_ids = np.asarray(local_desc_ids)
+        if dst_addrs is None:
+            dst_addrs = self.host_addrs[local_desc_ids]
+        else:
+            dst_addrs = np.asarray(dst_addrs, dtype=np.uint64)
+        if desc_lens is None:
+            desc_lens = self.desc_lens[local_desc_ids]
+        else:
+            desc_lens = np.asarray(desc_lens, dtype=np.int64)
+        if copy_kinds is None:
+            copy_kinds = np.full(
+                len(local_desc_ids), _CUDA_MEMCPY_DEVICE_TO_HOST, dtype=np.int32
+            )
+        else:
+            copy_kinds = np.asarray(copy_kinds, dtype=np.int32)
+        if mirror_addrs is None:
+            mirror_addrs = np.zeros(len(local_desc_ids), dtype=np.uint64)
+        else:
+            mirror_addrs = np.asarray(mirror_addrs, dtype=np.uint64)
+        if not (
+            len(remote_desc_ids)
+            == len(local_desc_ids)
+            == len(dst_addrs)
+            == len(desc_lens)
+            == len(copy_kinds)
+            == len(mirror_addrs)
+        ):
+            raise ValueError("host staging descriptor metadata must have equal lengths")
+        unsupported_lengths = set(np.unique(desc_lens)) - self._pools.keys()
+        if unsupported_lengths:
+            raise ValueError(
+                "host staging has no pool for descriptor lengths "
+                f"{sorted(unsupported_lengths)}"
+            )
+        supported_copy_kinds = {
+            _CUDA_MEMCPY_DEVICE_TO_HOST,
+            _CUDA_MEMCPY_DEVICE_TO_DEVICE,
+        }
+        if not set(np.unique(copy_kinds)) <= supported_copy_kinds:
+            raise ValueError("host staging received an unsupported CUDA copy kind")
         state = self._reqs.setdefault(req_id, _ReqState())
-        lengths = self.desc_lens[local_desc_ids]
+        if state.aborted:
+            raise RuntimeError(f"host staging request {req_id!r} is draining")
+        lengths = desc_lens
         for length, pool in self._pools.items():
             mask = lengths == length
             if not mask.any():
                 continue
             remote_group = remote_desc_ids[mask]
-            local_group = local_desc_ids[mask]
+            dst_group = dst_addrs[mask]
+            kind_group = copy_kinds[mask]
+            mirror_group = mirror_addrs[mask]
             chunk = pool.descs_per_slot
             for i in range(0, len(remote_group), chunk):
                 state.queued.append(
                     (
                         remote_group[i : i + chunk],
-                        local_group[i : i + chunk],
+                        dst_group[i : i + chunk],
+                        kind_group[i : i + chunk],
+                        mirror_group[i : i + chunk],
                         remote_handle,
                         length,
                     )
@@ -226,73 +282,131 @@ class HostReadStager:
 
     def _pump(self, state: _ReqState) -> None:
         """Post queued chunks whose pool has a free slot."""
-        remaining: list[tuple[np.ndarray, np.ndarray, int, int]] = []
+        remaining: list[
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]
+        ] = []
         for entry in state.queued:
-            remote_ids, local_ids, remote_handle, length = entry
+            remote_ids, dst_addrs, copy_kinds, mirror_addrs, remote_handle, length = (
+                entry
+            )
             pool = self._pools[length]
             if not pool.free_slots:
                 remaining.append(entry)
                 continue
             slot = pool.free_slots.pop()
             stage_ids = slot.desc_ids[: len(remote_ids)]
+            handle = None
             try:
                 handle = self.nixl_wrapper.make_prepped_xfer(
                     "READ", pool.handle, stage_ids, remote_handle, remote_ids
                 )
                 self.nixl_wrapper.transfer(handle)
             except Exception:
-                pool.free_slots.append(slot)
                 state.failed = True
                 state.queued = []
+                if handle is None:
+                    pool.free_slots.append(slot)
+                else:
+                    state.reading.append(
+                        (handle, slot, dst_addrs, copy_kinds, mirror_addrs)
+                    )
                 raise
-            state.reading.append((handle, slot, local_ids))
+            state.reading.append((handle, slot, dst_addrs, copy_kinds, mirror_addrs))
         state.queued = remaining
 
-    def _start_copy(self, slot: _Slot, local_ids: np.ndarray) -> None:
+    def _start_copy(
+        self,
+        slot: _Slot,
+        dst_addrs: np.ndarray,
+        copy_kinds: np.ndarray,
+        mirror_addrs: np.ndarray,
+    ) -> None:
         """Copy a completed chunk from staging into its host destinations."""
         stream = self._copy_stream
         pool = slot.pool
         with torch.cuda.stream(stream):
-            for j, local_id in enumerate(local_ids):
-                rc = self._cudart.cudaMemcpyAsync(
-                    ctypes.c_void_p(int(self.host_addrs[local_id])),
-                    ctypes.c_void_p(int(pool.stage_ptrs[slot.desc_ids[j]])),
-                    ctypes.c_size_t(pool.desc_len),
-                    ctypes.c_int(_CUDA_MEMCPY_DEVICE_TO_HOST),
-                    ctypes.c_void_p(stream.cuda_stream),
-                )
-                if rc != 0:
-                    raise RuntimeError(
-                        f"cudaMemcpyAsync failed staging host KV read: rc={rc}"
+            try:
+                for j, dst_addr in enumerate(dst_addrs):
+                    src_addr = int(pool.stage_ptrs[slot.desc_ids[j]])
+                    rc = self._cudart.cudaMemcpyAsync(
+                        ctypes.c_void_p(int(dst_addr)),
+                        ctypes.c_void_p(src_addr),
+                        ctypes.c_size_t(pool.desc_len),
+                        ctypes.c_int(int(copy_kinds[j])),
+                        ctypes.c_void_p(stream.cuda_stream),
                     )
-            slot.event.record(stream)
+                    if rc != 0:
+                        raise RuntimeError(
+                            f"cudaMemcpyAsync failed staging host KV read: rc={rc}"
+                        )
+                    mirror_addr = int(mirror_addrs[j])
+                    if mirror_addr:
+                        rc = self._cudart.cudaMemcpyAsync(
+                            ctypes.c_void_p(mirror_addr),
+                            ctypes.c_void_p(src_addr),
+                            ctypes.c_size_t(pool.desc_len),
+                            ctypes.c_int(_CUDA_MEMCPY_DEVICE_TO_DEVICE),
+                            ctypes.c_void_p(stream.cuda_stream),
+                        )
+                        if rc != 0:
+                            raise RuntimeError(
+                                f"cudaMemcpyAsync failed mirroring staged KV: rc={rc}"
+                            )
+            finally:
+                slot.event.record(stream)
 
     def advance(self) -> tuple[set[str], set[str]]:
         """Drive the pipeline. Returns (fully staged req_ids, failed req_ids)."""
         done: set[str] = set()
         failed: set[str] = set()
         for req_id, state in list(self._reqs.items()):
+            if state.failed or state.aborted:
+                state.queued.clear()
             still_reading = []
-            for handle, slot, local_ids in state.reading:
+            for handle, slot, dst_addrs, copy_kinds, mirror_addrs in state.reading:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 except Exception:
-                    xfer_state = "ERR"
-                if xfer_state == "PROC":
-                    still_reading.append((handle, slot, local_ids))
+                    state.failed = True
+                    state.queued.clear()
+                    try:
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    except Exception:
+                        still_reading.append(
+                            (handle, slot, dst_addrs, copy_kinds, mirror_addrs)
+                        )
+                    else:
+                        slot.pool.free_slots.append(slot)
                     continue
-                with contextlib.suppress(Exception):
+                if xfer_state == "PROC":
+                    still_reading.append(
+                        (handle, slot, dst_addrs, copy_kinds, mirror_addrs)
+                    )
+                    continue
+                try:
                     self.nixl_wrapper.release_xfer_handle(handle)
+                except Exception:
+                    state.failed = True
+                    state.queued.clear()
+                    still_reading.append(
+                        (handle, slot, dst_addrs, copy_kinds, mirror_addrs)
+                    )
+                    continue
                 if xfer_state != "DONE":
                     state.failed = True
+                    state.queued.clear()
+                    slot.pool.free_slots.append(slot)
+                    continue
+                if state.failed or state.aborted:
                     slot.pool.free_slots.append(slot)
                     continue
                 try:
-                    self._start_copy(slot, local_ids)
+                    self._start_copy(slot, dst_addrs, copy_kinds, mirror_addrs)
                 except Exception:
                     logger.exception("host KV staging copy failed for %s", req_id)
                     state.failed = True
-                    slot.pool.free_slots.append(slot)
+                    state.queued.clear()
+                    state.copying.append(slot)
                     continue
                 state.copying.append(slot)
             state.reading = still_reading
@@ -305,25 +419,56 @@ class HostReadStager:
                     still_copying.append(slot)
             state.copying = still_copying
 
-            if not state.failed:
+            if not state.failed and not state.aborted:
                 try:
                     self._pump(state)
                 except Exception:
                     logger.exception("host KV staging read failed for %s", req_id)
                     state.failed = True
+                    state.queued.clear()
 
             if not state.reading and not state.copying and not state.queued:
                 self._reqs.pop(req_id, None)
-                (failed if state.failed else done).add(req_id)
+                if not state.aborted:
+                    (failed if state.failed else done).add(req_id)
         return done, failed
 
     def abort(self, req_id: str) -> None:
-        state = self._reqs.pop(req_id, None)
+        state = self._reqs.get(req_id)
         if state is None:
             return
-        for handle, slot, _ in state.reading:
-            with contextlib.suppress(Exception):
-                self.nixl_wrapper.release_xfer_handle(handle)
-            slot.pool.free_slots.append(slot)
-        for slot in state.copying:
-            slot.pool.free_slots.append(slot)
+        state.aborted = True
+        state.queued.clear()
+
+    def begin_shutdown(self) -> None:
+        """Stop issuing reads and mark all staged requests aborted."""
+        if self._closed:
+            return
+        for req_id in tuple(self._reqs):
+            self.abort(req_id)
+
+    def poll_shutdown(self, cancel: bool = False) -> bool:
+        """Advance shutdown without blocking and return whether it completed."""
+        if self._closed:
+            return True
+        if cancel:
+            for state in self._reqs.values():
+                still_reading = []
+                for read in state.reading:
+                    handle, slot, *_ = read
+                    try:
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    except Exception:
+                        still_reading.append(read)
+                    else:
+                        slot.pool.free_slots.append(slot)
+                state.reading = still_reading
+        self.advance()
+        if self._reqs:
+            return False
+        self._copy_stream.synchronize()
+        for pool in self._pools.values():
+            self.nixl_wrapper.release_dlist_handle(pool.handle)
+            self.nixl_wrapper.deregister_memory(pool.reg_descs)
+        self._closed = True
+        return True

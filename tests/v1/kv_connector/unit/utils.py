@@ -363,6 +363,7 @@ class MockKVConfig:
     matched_tokens: int = 0
     is_async: bool = False
     num_defers_before_matching: int = 0
+    supports_divergent_local_hybrid_hits: bool = False
 
 
 class MockKVConnectorMetadata(KVConnectorMetadata):
@@ -388,10 +389,17 @@ class MockKVConnector(KVConnectorBase_V1):
             num_defers_before_matching=extra_config.get(
                 "num_defers_before_matching", 0
             ),
+            supports_divergent_local_hybrid_hits=extra_config.get(
+                "supports_divergent_local_hybrid_hits", False
+            ),
         )
         self._defers_left: defaultdict[str, int] = defaultdict(
             lambda: self.config.num_defers_before_matching
         )
+
+    @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return self.config.supports_divergent_local_hybrid_hits
 
     def get_num_new_matched_tokens(
         self,
@@ -527,6 +535,7 @@ def make_nixl_scheduler(
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
+        sched._hisparse_host_blocks_to_recv = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()

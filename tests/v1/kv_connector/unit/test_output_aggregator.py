@@ -16,6 +16,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         finished_sending: set[str] | None = None,
         finished_recving: set[str] | None = None,
         invalid_block_ids: set[int] | None = None,
+        failed_recving: set[str] | None = None,
         expected_finished_count: int = 0,
         hisparse_stats: HiSparseStats | None = None,
     ):
@@ -24,6 +25,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             invalid_block_ids=invalid_block_ids or set(),
+            failed_recving=failed_recving or set(),
             expected_finished_count=expected_finished_count,
         )
 
@@ -76,7 +78,9 @@ def test_aggregate_workers_output():
 
     output1 = DummyModelRunnerOutput(invalid_block_ids={3, 4})
     output2 = DummyModelRunnerOutput(
-        finished_recving={"req2"}, invalid_block_ids={4, 5}
+        finished_recving={"req2"},
+        invalid_block_ids={4, 5},
+        failed_recving={"req3"},
     )
 
     aggregated = aggregator.aggregate([output1, output2])
@@ -86,6 +90,7 @@ def test_aggregate_workers_output():
     assert aggregated.finished_sending is None
     assert aggregated.finished_recving == {"req2"}
     assert aggregated.invalid_block_ids == {3, 4, 5}
+    assert aggregated.failed_recving == {"req3"}
 
 
 def test_aggregate_hisparse_stats():

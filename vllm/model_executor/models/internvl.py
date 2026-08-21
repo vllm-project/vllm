@@ -59,7 +59,12 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 
 class InternVLImagePixelInputs(TensorSchema):
@@ -478,7 +483,9 @@ class InternVLMultiModalProcessor(
                 "video", video_num_patches
             ),
             video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-            video_token_id=MultiModalFieldConfig.shared("video", num_videos),
+            video_token_id=MultiModalFieldConfig.shared(
+                "video", num_videos, keep_on_cpu=True
+            ),
         )
 
     def _get_mm_fields_config(
@@ -551,6 +558,25 @@ class InternVLChatModel(
     SupportsEncoderCudaGraph,
 ):
     supports_encoder_tp_data = True
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix=dict.fromkeys(
+            [
+                "action_embed",
+                "temporal_embed",
+                "track_embed",
+                "track_embed_decoder",
+                "box_token",
+                "cg_criterion",
+                "cg_model",
+                "loc_encoder",
+                "loc_decoder",
+                "sam",
+                "temporal_token",
+                "track_token",
+            ]
+        )
+    )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -863,23 +889,8 @@ class InternVLChatModel(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
-        skip_prefixes = [
-            "action_embed",
-            "temporal_embed",
-            "track_embed",
-            "track_embed_decoder",
-            "box_token",
-            "cg_criterion",
-            "cg_model",
-            "loc_encoder",
-            "loc_decoder",
-            "sam",
-            "temporal_token",
-            "track_token",
-        ]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """

@@ -6,8 +6,7 @@ import weakref
 import pytest
 
 from vllm import LLM, PoolingParams
-from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.platforms import current_platform
+from vllm.exceptions import VLLMValidationError
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
@@ -29,30 +28,20 @@ TOKEN_IDS = [
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # ROCm: Use FLEX_ATTENTION backend as it's the only attention backend
-    # that supports encoder-only models on ROCm.
-    attention_config = None
-    if current_platform.is_rocm():
-        attention_config = {"backend": "FLEX_ATTENTION"}
-
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        max_model_len=None,
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
-        attention_config=attention_config,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.mark.skip_global_cleanup
@@ -69,7 +58,7 @@ def test_multiple_pooling_params(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
     # Exception raised, if the size of params does not match the size of prompts
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.encode(
             PROMPTS, pooling_params=pooling_params[:3], pooling_task="embed"
         )

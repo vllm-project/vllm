@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import torch
 from torch import nn
@@ -35,13 +35,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
-from vllm.v1.kv_offload.sparse.hisparse_runtime import (
-    compress_hisparse_slot_mapping,
-    get_indexer_source,
-)
-
-if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.eager_scratch import DeepseekV4EagerScratchPool
+from vllm.v1.kv_offload.sparse.hisparse_runtime import compress_hisparse_slot_mapping
 
 
 def _prefer_two_stage_compressor() -> bool:
@@ -234,7 +228,6 @@ class DeepseekCompressor(nn.Module):
         prefix: str = "",
         k_cache_prefix="",
         use_fp4_cache: bool = False,
-        eager_scratch_pool: "DeepseekV4EagerScratchPool | None" = None,
     ):
         super().__init__()
         self.compress_ratio = compress_ratio
@@ -244,7 +237,6 @@ class DeepseekCompressor(nn.Module):
         self.prefix = prefix
         self.k_cache_prefix = k_cache_prefix
         self.use_fp4_cache = use_fp4_cache
-        self.eager_scratch_pool = eager_scratch_pool
 
         config = vllm_config.model_config.hf_config
         self.rope_head_dim = config.qk_rope_head_dim
@@ -449,10 +441,6 @@ class DeepseekCompressor(nn.Module):
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
             )
-            if not self.overlap and self.eager_scratch_pool is not None:
-                extra_kwargs["compress_scratch"] = (
-                    self.eager_scratch_pool.compressor_scratch(num_actual)
-                )
         elif self._use_two_stage_fused_compressor:
             # head=512 cr>=128 (no overlap): two-pass split compressor on the
             # prefill suffix, single-pass on the decode prefix.
@@ -501,7 +489,7 @@ class DeepseekCompressor(nn.Module):
             )
 
         if self.head_dim == 128:
-            source = get_indexer_source(self.k_cache_prefix)
+            source = k_cache_layer.hisparse_indexer_source
             if source is not None:
                 host_cache, source_slot_mapping = source
                 src_slots = source_k_cache_metadata.slot_mapping

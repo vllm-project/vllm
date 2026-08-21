@@ -140,8 +140,8 @@ class ParallelConfig:
     """Local rank of the data parallel group, set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
-    data_parallel_rpc_port: int = 29550
-    """Port for data parallel messaging."""
+    data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
+    """Fixed port for data parallel messaging, shared by all nodes."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     data_parallel_backend: DataParallelBackend = "mp"
@@ -677,6 +677,7 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "flashinfer_nvlink_one_sided",
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",
@@ -972,7 +973,7 @@ class ParallelConfig:
 
         if self.enable_eplb and self.eplb_config.communicator is None:
             # Prefer NIXL when available: zero-copy RDMA reads, compatible
-            # with both async EPLB and elastic EP (deferred remote setup).
+            # with both async EPLB and elastic EP.
             # Fallbacks: pynccl for elastic EP (stateless groups need it),
             # torch_gloo for static EP.  torch_nccl is avoided because NCCL
             # is incompatible with async EPLB (multi-stream conflicts) and

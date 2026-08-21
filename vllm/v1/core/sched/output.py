@@ -6,6 +6,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
+from vllm.multimodal.utils import strip_covered_mm_data
 
 if TYPE_CHECKING:
     import numpy as np
@@ -53,11 +54,16 @@ class NewRequestData:
         request: Request,
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
+        uses_mrope: bool = False,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            mm_features=request.mm_features,
+            mm_features=strip_covered_mm_data(
+                request.mm_features,
+                request.num_computed_tokens,
+                uses_mrope=uses_mrope,
+            ),
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             block_ids=block_ids,
@@ -67,6 +73,14 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
         )
+
+    @property
+    def prompt_len(self) -> int:
+        if self.prompt_token_ids is not None:
+            return len(self.prompt_token_ids)
+        if self.prompt_embeds is not None:
+            return self.prompt_embeds.shape[0]
+        return 0
 
     def __repr__(self) -> str:
         prompt_embeds_shape = (
@@ -251,12 +265,15 @@ class SchedulerOutput:
     # EC Cache Manager metadata
     ec_manager_metadata: EncoderCacheManagerMetadata | None = None
     # Block IDs freshly allocated from the pool during this scheduling step.
-    # The worker zeros the corresponding GPU memory before the blocks are used,
+    # The worker zeros the corresponding cache memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
-    new_block_ids_to_zero: list[int] | None = None
+    new_block_ids_to_zero: dict[int, list[int]] | None = None
 
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
+
+    # Complete block-table rows that replace incrementally appended block IDs.
+    block_table_updates: dict[str, tuple[list[int], ...]] | None = None
 
     # Producer partial-tail offload hand-off for external KV connectors:
     # {request_id: [(group_id, block_id, boundary_tokens), ...]} pointing at

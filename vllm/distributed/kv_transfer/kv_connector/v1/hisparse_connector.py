@@ -21,7 +21,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
-    MultiKVConnectorMetadata,
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -35,6 +34,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseWorker
+    from vllm.v1.metrics.stats import HiSparseStats
     from vllm.v1.request import Request
 
 
@@ -45,16 +45,25 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
 
 @dataclass
 class HiSparseConnectorWorkerMetadata(KVConnectorWorkerMetadata):
-    completed_transfer_ids: list[int]
+    enqueued_transfer_counts: dict[int, int]
+    completed_transfer_counts: dict[int, int]
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, HiSparseConnectorWorkerMetadata)
+
+        def add_counts(first: dict[int, int], second: dict[int, int]) -> dict[int, int]:
+            combined = first.copy()
+            for transfer_id, count in second.items():
+                combined[transfer_id] = combined.get(transfer_id, 0) + count
+            return combined
+
         return HiSparseConnectorWorkerMetadata(
-            completed_transfer_ids=list(
-                dict.fromkeys(
-                    self.completed_transfer_ids + other.completed_transfer_ids
-                )
-            )
+            enqueued_transfer_counts=add_counts(
+                self.enqueued_transfer_counts, other.enqueued_transfer_counts
+            ),
+            completed_transfer_counts=add_counts(
+                self.completed_transfer_counts, other.completed_transfer_counts
+            ),
         )
 
 
@@ -87,15 +96,27 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def bind_worker(self, worker: HiSparseWorker) -> None:
         self._worker = worker
 
-    def prepare_step(self, scheduler_output: SchedulerOutput) -> None:
+    def apply_scheduler_output(self, scheduler_output: SchedulerOutput) -> None:
         assert self._worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, HiSparseConnectorMetadata)
-        self._worker.prepare_step(metadata.command, scheduler_output)
+        self._worker.apply_scheduler_output(metadata.command, scheduler_output)
+
+    def set_request_state_indices(self, indices: torch.Tensor) -> None:
+        assert self._worker is not None
+        self._worker.set_request_state_indices(indices)
+
+    def reset_hot_state(self) -> None:
+        assert self._worker is not None
+        self._worker.reset_hot_state()
 
     def finish_forward(self) -> None:
         assert self._worker is not None
         self._worker.finish_forward()
+
+    def finish_step(self) -> HiSparseStats | None:
+        assert self._worker is not None
+        return self._worker.finish_step()
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         return
@@ -117,10 +138,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         assert self._worker is not None
-        completed = self._worker.take_completed_transfer_ids()
-        if completed is None:
+        enqueued, completed = self._worker.take_transfer_updates()
+        if not enqueued and not completed:
             return None
-        return HiSparseConnectorWorkerMetadata(completed)
+        return HiSparseConnectorWorkerMetadata(
+            enqueued_transfer_counts={transfer_id: 1 for transfer_id in enqueued},
+            completed_transfer_counts={transfer_id: 1 for transfer_id in completed},
+        )
 
     def shutdown(self) -> None:
         if self._worker is not None:
@@ -144,11 +168,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         assert self._coordinator is not None
-        return HiSparseConnectorMetadata(
-            self._coordinator.build_offload_command(
-                list(scheduler_output.num_scheduled_tokens)
-            )
+        scheduler_output.block_table_updates = (
+            self._coordinator.take_block_table_updates() or None
         )
+        command = self._coordinator.build_offload_command(
+            list(scheduler_output.num_scheduled_tokens)
+        )
+        return HiSparseConnectorMetadata(command)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         assert self._coordinator is not None
@@ -156,7 +182,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         if metadata is None:
             return
         assert isinstance(metadata, HiSparseConnectorWorkerMetadata)
-        self._coordinator.complete_spills(metadata.completed_transfer_ids)
+        self._coordinator.update_spills(
+            metadata.enqueued_transfer_counts,
+            metadata.completed_transfer_counts,
+        )
 
     def request_finished_all_groups(
         self,
@@ -190,22 +219,14 @@ def attach_hisparse_connector(
     )
 
 
-def bind_hisparse_worker(connector: KVConnectorBase_V1, worker: HiSparseWorker) -> None:
+def bind_hisparse_worker(
+    connector: KVConnectorBase_V1, worker: HiSparseWorker
+) -> HiSparseConnector | None:
     if isinstance(connector, HiSparseConnector):
         connector.bind_worker(worker)
-        return
+        return connector
     if isinstance(connector, MultiConnector):
         for child in connector._connectors:
-            bind_hisparse_worker(child, worker)
-
-
-def get_hisparse_connector_metadata(
-    metadata: KVConnectorMetadata | None,
-) -> HiSparseConnectorMetadata | None:
-    if isinstance(metadata, HiSparseConnectorMetadata):
-        return metadata
-    if isinstance(metadata, MultiKVConnectorMetadata):
-        for child in metadata.metadata:
-            if (result := get_hisparse_connector_metadata(child)) is not None:
-                return result
+            if hisparse_connector := bind_hisparse_worker(child, worker):
+                return hisparse_connector
     return None

@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -77,6 +78,10 @@ logger = init_logger(__name__)
 
 class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
+
+    @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return True
 
     @property
     def prefer_cross_layer_blocks(self) -> bool:
@@ -235,6 +240,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""

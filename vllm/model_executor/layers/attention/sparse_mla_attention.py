@@ -23,6 +23,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonPrefillMetadata,
     accumulate_mla_context_chunk,
+    align_mla_chunked_context_workspace_size,
     build_mla_chunked_context_metadata,
     get_mla_dims,
     init_mla_context_partial,
@@ -41,10 +42,12 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     FP8_DS_MLA_ROW_BYTES,
     HiSparseCacheHandle,
+    HiSparseIndexGroupBuilder,
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
     create_hisparse_cache_handle,
@@ -71,6 +74,7 @@ def _topk_mask_shape(
     tile_m = 128 if max_query_len <= 128 else 256
     padded_q_len = triton.cdiv(max_query_len, tile_m) * tile_m
     num_words = triton.cdiv(max_key_len, 32) + int(reserve_key_starts_word)
+    num_words = triton.cdiv(num_words, 4) * 4
     return batch_size, padded_q_len, num_words
 
 
@@ -139,6 +143,7 @@ T = TypeVar("T", bound=SparseMLACommonMetadata)
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     metadata_cls: type[T]
     require_uniform_decodes: ClassVar[bool] = False
+    hisparse_supports_multi_token_decode: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -200,11 +205,39 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 dtype=torch.int32,
                 device=device,
             )
-        layer_prefill_backend = vllm_config.compilation_config.static_forward_context[
+        attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
-        ].prefill_backend
+        ]
+        layer_prefill_backend = attention_layer.prefill_backend
+        self.dcp_manager: MLADCPManager | None = None
+        if self.dcp_world_size > 1:
+            self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
+            assert isinstance(self.dcp_manager, MLADCPManager)
+            if layer_prefill_backend is not None:
+                self.dcp_manager.init_kv_gather(
+                    self.chunked_prefill_workspace,
+                    self.chunked_prefill_workspace_size,
+                )
         self._prefill_backend = (
             layer_prefill_backend.clone() if layer_prefill_backend is not None else None
+        )
+
+    def _init_reorder_batch_threshold(
+        self,
+        reorder_batch_threshold: int | None = 1,
+        supports_spec_as_decode: bool = False,
+        supports_dcp_with_varlen: bool = False,
+    ) -> None:
+        if (
+            self.vllm_config.attention_config.hisparse_config is not None
+            and not self.hisparse_supports_multi_token_decode
+        ):
+            reorder_batch_threshold = 1
+            supports_spec_as_decode = False
+        super()._init_reorder_batch_threshold(
+            reorder_batch_threshold,
+            supports_spec_as_decode,
+            supports_dcp_with_varlen,
         )
 
     @staticmethod
@@ -222,7 +255,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             64 * 1024,
             scheduler_config.max_num_seqs * topk_tokens,
         )
-        return max(workspace_size, cache_config.block_size)
+        workspace_size = max(workspace_size, cache_config.block_size)
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            return align_mla_chunked_context_workspace_size(vllm_config, workspace_size)
+        return workspace_size
 
     def _build_req_id_per_token(
         self,
@@ -270,6 +306,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dcp_world_size=self.dcp_world_size,
             dcp_local_block_size=self.dcp_local_block_size,
             dcp_virtual_block_size=self.dcp_virtual_block_size,
+            dcp_manager=self.dcp_manager,
         )
 
     def build(
@@ -468,12 +505,12 @@ def _build_topk_mask(
     max_seq_len: int,
     out: torch.Tensor,
 ) -> torch.Tensor:
-    """Build a bit-packed top-k mask into ``out[:B, :max_Q, :num_words]``."""
+    """Build a bit-packed top-k mask while preserving padded row storage."""
     batch_size = len(q_lens)
     num_words = (max_seq_len + 31) // 32
     total_rows = batch_size * max_q_len
     if total_rows == 0:
-        return out[:batch_size, :max_q_len, :num_words]
+        return out[:batch_size, :max_q_len]
 
     total_q = sum(q_lens)
     mask_row_stride = out.stride(-2)
@@ -493,7 +530,7 @@ def _build_topk_mask(
             BLOCK_TOPK=triton.next_power_of_2(num_topk),
             BLOCK_WORDS=block_words,
         )
-        return out[:1, :max_q_len, :num_words]
+        return out[:1, :max_q_len]
 
     topk_packed = torch.cat(topk_indices_per_req, dim=0)
     num_topk = topk_packed.shape[1]
@@ -514,7 +551,7 @@ def _build_topk_mask(
         BLOCK_TOPK=triton.next_power_of_2(num_topk),
         BLOCK_WORDS=block_words,
     )
-    return out[:batch_size, :max_q_len, :num_words]
+    return out[:batch_size, :max_q_len]
 
 
 class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
@@ -543,6 +580,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        hisparse_index_group_builder: HiSparseIndexGroupBuilder | None = None,
         q_pad_num_heads: int | None = None,
     ) -> None:
         super().__init__(
@@ -587,14 +625,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             self.hisparse_cache = create_hisparse_cache_handle(
                 vllm_config,
                 model_top_k,
-                index_group_scope=(
-                    self.topk_indices_buffer
-                    if self.topk_indices_buffer is not None
-                    else vllm_config
-                ),
                 is_index_group_leader=indexer is not None,
                 row_width=row_width,
                 kv_dtype=kv_dtype,
+                index_group_builder=hisparse_index_group_builder,
             )
             assert self.hisparse_cache is not None
         self._hisparse_dummy_batch = False
@@ -642,8 +676,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         n = topk_indices.shape[0] if num_decode_tokens is None else num_decode_tokens
         if req_id_per_token is None:
             assert num_decode_tokens is None or n == attn_metadata.num_decodes, (
-                "Multi-token HiSparse decode must resolve one speculative step "
-                "at a time."
+                "Multi-token HiSparse decode must resolve one step at a time."
             )
             req_id_per_token = attn_metadata.req_id_per_token[:n]
         return self.hisparse_cache.resolve_topk(

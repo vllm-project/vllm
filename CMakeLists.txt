@@ -222,7 +222,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # `+PTX` in TORCH_CUDA_ARCH_LIST is not preserved here. If a kernel really
   # needs PTX, add `+PTX` to that kernel's component-specific arch list below.
   #
-  clear_cuda_arches(CUDA_ARCH_FLAGS)
+  clear_cuda_gencode_flags(CUDA_ARCH_FLAGS)
+  warn_if_ptx_arch_requested("${CUDA_ARCH_FLAGS}")
   extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
   # Filter the target architectures by the supported supported archs
@@ -395,6 +396,34 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
+  if(Torch_VERSION VERSION_GREATER_EQUAL "2.13" AND
+     Torch_VERSION VERSION_LESS "2.14")
+    # hotfix for https://github.com/pytorch/pytorch/pull/190493
+    # delete after we bump to 2.14
+    list(GET TORCH_INCLUDE_DIRS 0 TORCH_INCLUDE_DIR)
+    set(_stable_hdr_rel "torch/csrc/stable/stableivalue_conversions.h")
+    file(READ "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
+      TORCH_STABLE_STRING_CONTENTS)
+
+    if(TORCH_STABLE_STRING_CONTENTS MATCHES "auto strptr = new std::string")
+      set(TORCH_SHADOW_INCLUDE_DIR
+        "${CMAKE_CURRENT_BINARY_DIR}/torch_patched_headers")
+
+      file(MAKE_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}/torch/csrc/stable")
+      file(COPY_FILE
+        "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
+        "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}")
+
+      execute_process(
+        COMMAND patch --batch --forward -p1
+          "--input=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
+        WORKING_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}"
+        COMMAND_ERROR_IS_FATAL ANY)
+
+      include_directories(BEFORE "${TORCH_SHADOW_INCLUDE_DIR}")
+    endif()
+  endif()
+
   set(VLLM_STABLE_EXT_SRC
     "csrc/libtorch_stable/torch_bindings.cpp"
     "csrc/libtorch_stable/cuda_view.cu"
@@ -446,10 +475,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
-    # CUDA cache-policy intrinsics in the row copy: CUDA-only.
-    # The op declarations and registrations are guarded by USE_ROCM.
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/libtorch_stable/hisparse_kernels.cu")
+      "csrc/libtorch_stable/hisparse_kernels.cu"
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_a2a_lse_reduce.cu"
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_kv_gather.cu"
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_q_gather.cu")
 
     SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
@@ -1090,6 +1120,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(FUSED_KDA_DECODE_ARCHS
       "9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(FUSED_GDN_DECODE_ARCHS
+      "8.0;8.6;8.9;9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
   endif()
   if(FUSED_KDA_DECODE_ARCHS)
     set(FUSED_KDA_DECODE_SRC
@@ -1102,6 +1134,18 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_KDA_DECODE_SRC}")
     message(STATUS
       "Building fused KDA decode for archs: ${FUSED_KDA_DECODE_ARCHS}")
+  endif()
+  if(FUSED_GDN_DECODE_ARCHS)
+    set(FUSED_GDN_DECODE_SRC
+      "csrc/libtorch_stable/gdn/fused_gdn_decode_kernel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${FUSED_GDN_DECODE_SRC}"
+      CUDA_ARCHS "${FUSED_GDN_DECODE_ARCHS}")
+    set_property(SOURCE ${FUSED_GDN_DECODE_SRC} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_GDN_DECODE_SRC}")
+    message(STATUS
+      "Building fused GDN decode for archs: ${FUSED_GDN_DECODE_ARCHS}")
   endif()
 
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
@@ -1136,6 +1180,24 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # if CUDA endif
   endif()
 
+  # HIP counterpart of the FUSED_KDA_DECODE block above: same `fused_kda_decode`
+  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp. Built for
+  # the CDNA archs the kernel supports (gfx942 / gfx950), so it is only emitted
+  # when one of those is in the arch list. A multi-arch build that includes them
+  # still emits this source for every arch in that list. The runtime gate in
+  # kda_decode.py keeps the kernel off unsupported devices.
+  if(VLLM_GPU_LANG STREQUAL "HIP")
+    set(FUSED_KDA_DECODE_HIP_ARCHS ${VLLM_GPU_ARCHES})
+    list(FILTER FUSED_KDA_DECODE_HIP_ARCHS INCLUDE REGEX "gfx942|gfx950")
+    if(FUSED_KDA_DECODE_HIP_ARCHS)
+      set(FUSED_KDA_DECODE_HIP_SRC
+        "csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu")
+      list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_KDA_DECODE_HIP_SRC}")
+      message(STATUS
+        "Building fused KDA decode for HIP archs: ${FUSED_KDA_DECODE_HIP_ARCHS}")
+    endif()
+  endif()
+
   message(STATUS "Enabling C_stable extension.")
   list(REMOVE_DUPLICATES VLLM_STABLE_EXT_SRC)
   define_extension_target(
@@ -1167,6 +1229,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_KDA_DECODE=1)
     endif()
+    if(FUSED_GDN_DECODE_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_GDN_DECODE=1)
+    endif()
     if(KIMI_K3_ATTN_RES_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_KIMI_K3_ATTN_RES=1)
@@ -1176,6 +1242,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
   elseif(VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_ROCM)
+    if(FUSED_KDA_DECODE_HIP_SRC)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_KDA_DECODE=1)
+    endif()
   endif()
 
   # On ROCm, _C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in

@@ -16,6 +16,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
     FullAttentionSpec,
@@ -29,7 +30,6 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
-    TQFullAttentionSpec,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
@@ -85,11 +85,8 @@ class SingleTypeKVCacheManager(ABC):
         self._max_admission_blocks_per_request = max_admission_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
-        self._record_new_block_ids = needs_kv_cache_zeroing and type(kv_cache_spec) in (
-            FullAttentionSpec,
-            TQFullAttentionSpec,
-            MLAAttentionSpec,
-            HiddenStateCacheSpec,
+        self._record_new_block_ids = needs_kv_cache_zeroing and isinstance(
+            kv_cache_spec, AttentionSpec
         )
         self.new_block_ids: list[int] = []
 
@@ -565,6 +562,11 @@ class SingleTypeKVCacheManager(ABC):
         return an empty list.
         If eagle is enabled, drop the last matched block to force recompute the
         last block to get the required hidden states for eagle drafting head.
+        For multi-module MTP, this recompute also rewrites the dropped block's
+        draft-layer KVs, which depend on up to num_speculative_tokens - 1
+        tokens past the matched prefix (i.e. on the cache writer's
+        continuation, which the block hash does not cover); the coordinator
+        asserts the block size covers that window.
         Need to be customized for each attention type.
 
         Args:
@@ -905,6 +907,18 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
             0,
         )
 
+    def get_num_required_blocks(self, request_id: str) -> int:
+        return max(
+            self.blocks_per_request - len(self.req_to_blocks.get(request_id, ())),
+            0,
+        )
+
+    def get_num_host_import_blocks_to_allocate(self, request_id: str) -> int:
+        return max(
+            self.blocks_per_request - len(self.req_to_blocks.get(request_id, ())),
+            0,
+        )
+
     def add_local_computed_blocks(
         self,
         request_id: str,
@@ -946,12 +960,42 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
-        del num_local_computed_tokens, num_tokens_main_model, apply_admission_cap
+        del num_tokens_main_model, apply_admission_cap
         assert not new_computed_blocks
         existing = len(self.req_to_blocks.get(request_id, ()))
-        host_pages = cdiv(total_computed_tokens, self.block_size)
+        host_pages = cdiv(num_local_computed_tokens, self.block_size)
         required = cdiv(num_tokens, self.block_size)
         return max(required - max(existing, host_pages), 0)
+
+    def get_num_host_import_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> int:
+        """Return the hard resident footprint of a host-backed import."""
+        if num_external_computed_tokens <= 0:
+            return 0
+        num_tokens = num_local_computed_tokens + num_external_computed_tokens
+        tail_page = cdiv(num_tokens, self.block_size) - 1
+        blocks = self.req_to_blocks.get(request_id, ())
+        return int(tail_page >= len(blocks) or blocks[tail_page].is_null)
+
+    def allocate_host_import_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        """Represent CPU history with null pages and retain its writable tail."""
+        assert num_external_computed_tokens > 0
+        num_tokens = num_local_computed_tokens + num_external_computed_tokens
+        tail_page = cdiv(num_tokens, self.block_size) - 1
+        blocks = self.req_to_blocks[request_id]
+        if len(blocks) <= tail_page:
+            blocks.extend([self._null_block] * (tail_page + 1 - len(blocks)))
+        if blocks[tail_page].is_null:
+            blocks[tail_page] = self.block_pool.get_new_blocks(1)[0]
 
     def add_local_computed_blocks(
         self,
@@ -963,10 +1007,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         assert not new_computed_blocks
         req_blocks = self.req_to_blocks[request_id]
         assert not req_blocks
-        num_host_pages = cdiv(
-            num_local_computed_tokens + num_external_computed_tokens,
-            self.block_size,
-        )
+        num_host_pages = cdiv(num_local_computed_tokens, self.block_size)
         req_blocks.extend([self._null_block] * num_host_pages)
         self.num_cached_block[request_id] = 0
 
@@ -998,14 +1039,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             return None
         block = blocks[block_idx]
         return None if block.is_null else block
-
-    def is_fully_resident(self, request_id: str) -> bool:
-        blocks = self.req_to_blocks.get(request_id)
-        return (
-            blocks is not None
-            and bool(blocks)
-            and all(not block.is_null for block in blocks)
-        )
 
     def release_resident_page(
         self,
@@ -1076,6 +1109,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
+        # Extra trailing tokens to retain below the window (never attended) so a
+        # multi-module MTP store-side lag can still reconstruct the window from
+        # cached blocks.
+        self.extra_retained_tokens = kv_cache_spec.extra_retained_tokens
 
     @classmethod
     def _contiguous_blocks_for_hit(
@@ -1271,13 +1308,22 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         attention computation since they are outside the sliding window.
         Thus, get_num_skipped_tokens(7) == 4.
 
+        The trailing edge of the window is extended by ``extra_retained_tokens``
+        so that those extra trailing tokens' blocks are retained (but not
+        attended). This is needed for multi-module spec decoding which can
+        re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
+        of the sequence, and thus needs to delay freeing/caching of blocks.
+
         Args:
             num_computed_tokens: The number of tokens that have been computed.
 
         Returns:
             The number of tokens that will be skipped for attention computation.
         """
-        return max(0, num_computed_tokens - self.sliding_window + 1)
+        return max(
+            0,
+            num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
+        )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
@@ -1756,6 +1802,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
             # over-allocated at last round.
             if num_required_blocks <= len(req_blocks) and not has_partial_hit:
+                self._allocated_block_reqs.add(request_id)
                 return []
             else:
                 prev_block_len = len(req_blocks)
@@ -2119,11 +2166,6 @@ def register_all_kvcache_specs(vllm_config):
     )
 
     # FullAttentionSpec subclasses — grouped with FullAttentionSpec
-    KVCacheSpecRegistry.register(
-        TQFullAttentionSpec,
-        FullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec,
-    )
     KVCacheSpecRegistry.register(
         MLAAttentionSpec, FullAttentionManager, uniform_type_base_spec=FullAttentionSpec
     )

@@ -11,6 +11,10 @@ from vllm.distributed.kv_transfer import (
     kv_transfer_state,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse_connector import (
+    HiSparseConnector,
+    bind_hisparse_worker,
+)
 from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
@@ -24,15 +28,18 @@ from vllm.v1.outputs import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseWorker
+    from vllm.v1.metrics.stats import HiSparseStats
 
 
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
-    def prepare_step(self, scheduler_output: "SchedulerOutput") -> None:
-        pass
-
-    def pre_forward(self) -> None:
+    def pre_forward(
+        self,
+        scheduler_output: "SchedulerOutput",
+        batch_request_indices: torch.Tensor | None = None,
+    ) -> None:
         pass
 
     def finish_forward(self) -> None:
@@ -43,19 +50,34 @@ class KVConnector:
     ) -> KVConnectorOutput | None:
         return None
 
+    def finish_step(self) -> "HiSparseStats | None":
+        return None
+
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         return EMPTY_MODEL_RUNNER_OUTPUT
 
     def set_disabled(self, disabled: bool) -> None:
         pass
 
+    def reset_capture_state(self) -> None:
+        pass
+
 
 class ActiveKVConnector(KVConnector):
     def __init__(
-        self, vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+        self,
+        vllm_config: VllmConfig,
+        kv_caches_dict: dict[str, torch.Tensor],
+        hisparse_worker: "HiSparseWorker | None" = None,
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
+        self.hisparse_connector: HiSparseConnector | None = None
+        if hisparse_worker is not None:
+            self.hisparse_connector = bind_hisparse_worker(
+                self.kv_connector, hisparse_worker
+            )
+            assert self.hisparse_connector is not None
         # Register kv caches with KV Connector if applicable.
         # TODO: support cross_layers_kv_cache
         # (see https://github.com/vllm-project/vllm/pull/27743)
@@ -64,18 +86,22 @@ class ActiveKVConnector(KVConnector):
 
         self._disabled = False
 
-    def prepare_step(self, scheduler_output: "SchedulerOutput") -> None:
+    def pre_forward(
+        self,
+        scheduler_output: "SchedulerOutput",
+        batch_request_indices: torch.Tensor | None = None,
+    ) -> None:
         if self._disabled:
             return
+
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
-        self.kv_connector.prepare_step(scheduler_output)
-
-    def pre_forward(self) -> None:
-        if self._disabled:
-            return
+        if self.hisparse_connector is not None:
+            self.hisparse_connector.apply_scheduler_output(scheduler_output)
+            if batch_request_indices is not None:
+                self.hisparse_connector.set_request_state_indices(batch_request_indices)
 
         # TODO: sort out KV Connectors' use of forward_context
         if is_forward_context_available():
@@ -85,8 +111,12 @@ class ActiveKVConnector(KVConnector):
                 self.kv_connector.start_load_kv(get_forward_context())
 
     def finish_forward(self) -> None:
-        if not self._disabled:
-            self.kv_connector.finish_forward()
+        if not self._disabled and self.hisparse_connector is not None:
+            self.hisparse_connector.finish_forward()
+
+    def reset_capture_state(self) -> None:
+        if self.hisparse_connector is not None:
+            self.hisparse_connector.reset_hot_state()
 
     def post_forward(
         self, finished_req_ids: set[str], wait_for_save: bool = True
@@ -97,9 +127,10 @@ class ActiveKVConnector(KVConnector):
         output = KVConnectorOutput()
         if wait_for_save:
             self.kv_connector.wait_for_save()
-        output.finished_sending, output.finished_recving = (
-            self.kv_connector.get_finished(finished_req_ids)
-        )
+        transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
+        output.finished_sending = transfer_results.finished_sending or None
+        output.finished_recving = transfer_results.finished_recving or None
+        output.failed_recving = transfer_results.failed_recving
         output.invalid_block_ids = self.kv_connector.get_block_ids_with_load_errors()
         output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()
@@ -109,11 +140,17 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.clear_connector_metadata()
         return output
 
+    def finish_step(self) -> "HiSparseStats | None":
+        if self.hisparse_connector is None:
+            return None
+        return self.hisparse_connector.finish_step()
+
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        self.pre_forward()
+        self.pre_forward(scheduler_output)
+        self.finish_forward()
         finished_req_ids = scheduler_output.finished_req_ids
         kv_connector_output = self.post_forward(finished_req_ids, wait_for_save=False)
         return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
@@ -128,10 +165,12 @@ NO_OP_KV_CONNECTOR = KVConnector()
 
 
 def get_kv_connector(
-    vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+    vllm_config: VllmConfig,
+    kv_caches_dict: dict[str, torch.Tensor],
+    hisparse_worker: "HiSparseWorker | None" = None,
 ) -> KVConnector:
     if not has_kv_transfer_group():
         # No-op connector.
         return NO_OP_KV_CONNECTOR
 
-    return ActiveKVConnector(vllm_config, kv_caches_dict)
+    return ActiveKVConnector(vllm_config, kv_caches_dict, hisparse_worker)

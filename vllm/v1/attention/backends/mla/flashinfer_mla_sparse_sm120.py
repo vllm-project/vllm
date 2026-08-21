@@ -32,6 +32,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
     """SM120 FlashInfer sparse-MLA implementation."""
 
     is_sparse = True
+    supports_dense_mha_prefill = False
 
     def __init__(
         self,

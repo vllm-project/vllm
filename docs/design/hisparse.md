@@ -1,6 +1,6 @@
 # HiSparse local KV offload architecture
 
-Status: worktree design draft
+Status: experimental
 
 ## The short version
 
@@ -27,6 +27,14 @@ request ────► HiSparseCoordinator ── source blocks + residency pol
 
 This is a local KV connector. When P/D or another offload connector is also
 configured, `MultiConnector` composes it with `HiSparseConnector`.
+
+`host_pool_gib` is the usable host-cache capacity per data-parallel replica,
+not a node-wide memory budget. Tensor-parallel ranks hold replicated views of
+that logical cache. Those views may use private per-rank backing or one shared
+physical allocation without changing the configured capacity. Physical host
+memory consumption is therefore topology- and implementation-dependent. The
+realized capacity may be slightly smaller because the budget is rounded down
+to complete host blocks.
 
 ## Ownership
 
@@ -62,16 +70,17 @@ HiSparseConnector                          HiSparseConnector
        │ connector metadata                       ├─ host bytes
        │ - page transfers                         ├─ copy scheduling
        │ - block-table replacements               └─ per-layer hot state
-       │ - fully-resident route bit                      │
+       │ - indexer restore readiness                     │
        └───────────────────────────────────────────────►│
        ◄──────── connector worker metadata ─────────────┘
-                    completed transfer IDs
+                    enqueued and completed transfer IDs
 ```
 
-The command travels in `kv_connector_metadata`; completions return in
+The command travels in `kv_connector_metadata`; transfer updates return in
 `KVConnectorOutput.kv_connector_worker_meta`. The model runner does not
-interpret page transfers. The scheduler receives completed transfer IDs and
-only then lets the cache manager release the source leases.
+interpret page transfers. Enqueue acknowledgements let the scheduler release
+source leases in stream order; completion acknowledgements publish the copied
+host pages.
 
 ## Resident device pages
 
@@ -103,12 +112,32 @@ memory profiling. Cache binding only attaches storage; it does not infer
 semantic groups from the physical packed-tensor order. The construction cursor
 is discarded with the worker's pinned state.
 
-For a fully resident batch, `HiSparseCacheHandle` uses the normal paged resident
-cache directly. For a hybrid batch, the fused HiSparse kernel checks resident
-pages first, then hot rows, then pinned host memory. No CPU decision is added
-to the decode path. The resolver consumes the existing graph-stable request
-mapping from attention metadata; neither the worker nor individual cache
-handles keep a duplicate mapping.
+Every HiSparse decode batch uses the same fused resolver. It checks resident
+pages first, then hot rows, then pinned host memory. A resident hit exits inside
+the kernel before hot-LRU lookup or host copying; there is no framework-level
+residency route or separate CUDA graph. No CPU decision is added to the decode
+path. The resolver consumes the existing graph-stable request mapping from
+attention metadata; neither the worker nor individual cache handles keep a
+duplicate mapping.
+
+Speculative decoding resolves and consumes each verification step in order.
+Each step receives distinct replayable plan rows while sharing the request's
+hot-cache state, so a later step cannot reuse a hot row before an earlier step
+has consumed it.
+
+## P/D import target
+
+The decoder chooses the landing target once per request from the normal cache
+admission calculation. If the complete imported prefix fits the device pools,
+NIXL transfers it directly into resident GPU pages. Otherwise, if the fixed
+host-backed GPU footprint and host source blocks fit, the request imports into
+the host tier. There is no context-length threshold or other heuristic, and a
+request waiting for capacity retains its choice across admission retries.
+
+A host import reads through a bounded decoder-GPU staging pool before copying
+into registered host memory. Pages needed immediately are mirrored into their
+resident destinations during that copy. Both landing targets then use the same
+fused decode resolver described above.
 
 ## Spill transaction
 
@@ -121,21 +150,28 @@ HiSparseCoordinator                            HiSparseWorker
           │ pin source and destination leases   │
           │── SparseKVPageTransfer ─────────────►│
           │                                     │ enqueue GPU-to-host copy
-          │◄── completed transfer ID ───────────│
-          │ mark host copy valid                │
+          │◄── enqueued transfer ID ────────────│
           │ replace resident table entry        │
           │ release resident lease to HMA       │
+          │                                     │ copy reaches its event
+          │◄── completed transfer ID ───────────│
+          │ mark host page valid                │
+          │ release destination host lease      │
 ```
 
-“Completed” here means the copy was enqueued in stream order. A host-write
-event protects later CPU readers.
+“Enqueued” means the copy has entered the worker stream. Stream ordering makes
+it safe to reuse the resident GPU block for later work, but the host page is
+not yet published. “Completed” means the worker has observed the copy's event;
+only then does the coordinator publish the host page for prefix reuse and
+release its destination lease. A host-write event separately protects direct
+CPU readers from writes already queued on the accelerator.
 
-The worker transfer contains only its completion ID and physical copy
+The worker transfer contains only its transfer ID and physical copy
 coordinates. Request identity and logical page state remain in the scheduler.
 
 ## Hot lookup and LRU
 
-The NVIDIA and AMD path keeps replacement entirely on the accelerator:
+The NVIDIA CUDA path keeps replacement entirely on the accelerator:
 
 ```text
 top-K logical positions
@@ -150,9 +186,9 @@ hot row? ──────── yes ──► existing hot physical row + upda
 choose GPU LRU victim ──► copy pinned host row ──► hot physical row
 ```
 
-The abstraction does not require another platform to use this GPU LRU. A
-platform-specific worker may implement its own host/hot policy behind the same
-command, output, and cache-resolution boundaries.
+ROCm is not currently supported because the fused HiSparse cache operations are
+implemented only by CUDA kernels. A future platform-specific worker may provide
+the same command, output, and cache-resolution boundaries.
 
 ## Main classes
 
@@ -164,12 +200,12 @@ command, output, and cache-resolution boundaries.
 | `PagedCacheView` | immutable data object | shared resident/hot HMA tensor binding |
 | `HiSparseWorker` | connector-owned worker component | worker-wide transfer scheduling and host-pool lifecycle |
 | `HiSparseRuntime` | plain worker-owned component | per-cache host/hot tensors, GPU LRU, and fused resolution |
-| `HiSparseCacheHandle` | plain attention component | resident view, route, and direct worker registration |
+| `HiSparseCacheHandle` | plain attention component | resident view and fused cache resolution |
 | `SparseKVOffloadCommand` | dataclass | opaque scheduler-to-worker work |
 
 ## Performance invariants
 
-- Fully resident attention still reads ordinary paged GPU KV directly.
+- Resident hits bypass hot-LRU lookup and host copies inside the fused resolver.
 - Hot lookup, victim selection, and LRU updates stay on the GPU.
 - A hot miss still copies directly from registered pinned host memory.
 - Top-K resolution stays inside the attention invocation and remains graph
@@ -187,6 +223,7 @@ command, output, and cache-resolution boundaries.
 
 The command/result and attention-layer boundaries can be shared. The host
 allocator, copy implementation, hot layout, and replacement policy should stay
-platform-specific. NVIDIA and AMD keep the current accelerator LRU and fused
-host/hot kernel. Ascend can implement its own worker without forcing that policy
-into this path.
+platform-specific. NVIDIA uses the current accelerator LRU and fused host/hot
+kernel. ROCm is not currently supported; AMD or other accelerator backends can
+implement their own worker without forcing NVIDIA's policy into the shared
+boundary.

@@ -20,11 +20,12 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
+    MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import HiSparseImportTarget, Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -124,6 +125,7 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
+        num_prefill_lookahead: int = 0,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
@@ -160,6 +162,7 @@ class KVCacheManager:
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
+            num_prefill_lookahead=num_prefill_lookahead,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pools = self.coordinator.block_pools
@@ -246,7 +249,7 @@ class KVCacheManager:
                 - ``shared_prefix_boundary``: the block-aligned token position of
                   a shared prefix that a sparse-retention group (Mamba / sliding
                   window) has not cached yet (Marconi-style APC), or 0 if none.
-                  Pinned so ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` does not drop
+                  Pinned so sparse prefix-cache retention does not drop
                   the junction and defeat cross-request reuse.
         """
         # We skip finding the prefix cache hit when prefix caching is
@@ -349,6 +352,40 @@ class KVCacheManager:
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
 
+    def _lacks_device_capacity(
+        self,
+        required_by_pool: Sequence[int],
+        watermark_by_pool: Sequence[int],
+        reserved_by_pool: Sequence[int],
+    ) -> bool:
+        return any(
+            required + watermark > pool.get_num_free_blocks() - reserved
+            for required, watermark, reserved, pool in zip(
+                required_by_pool,
+                watermark_by_pool,
+                reserved_by_pool,
+                self.block_pools,
+            )
+        )
+
+    def _reclaim_resident_shortage(
+        self,
+        required_by_pool: Sequence[int],
+        watermark_by_pool: Sequence[int],
+        reserved_by_pool: Sequence[int],
+    ) -> None:
+        for pool_id, (required, watermark, reserved, pool) in enumerate(
+            zip(
+                required_by_pool,
+                watermark_by_pool,
+                reserved_by_pool,
+                self.block_pools,
+            )
+        ):
+            shortage = required + watermark + reserved - pool.get_num_free_blocks()
+            if shortage > 0:
+                self.hisparse_coordinator.reclaim_resident_blocks(pool_id, shortage)
+
     def allocate_slots(
         self,
         request: Request,
@@ -363,6 +400,7 @@ class KVCacheManager:
         reserved_blocks: int | Sequence[int] = 0,
         reserved_host_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        allow_hisparse_host_import: bool = False,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -395,6 +433,8 @@ class KVCacheManager:
                 for other in-flight sequences.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
+            allow_hisparse_host_import: If a fully resident external prefix does
+                not fit, allow the fixed HiSparse host-backed allocation instead.
 
         Blocks layout:
         ```
@@ -478,6 +518,13 @@ class KVCacheManager:
         ):
             watermark_blocks = self.watermark_blocks_by_pool
 
+        if isinstance(reserved_blocks, int):
+            reserved_blocks_by_pool = (reserved_blocks,) * len(self.block_pools)
+        else:
+            reserved_blocks_by_pool = tuple(reserved_blocks)
+            assert len(reserved_blocks_by_pool) == len(self.block_pools)
+
+        hisparse_host_import = request.hisparse_host_import
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
@@ -492,6 +539,7 @@ class KVCacheManager:
                     num_local_computed_tokens=num_local_computed_tokens,
                     num_tokens_main_model=full_num_tokens,
                     apply_admission_cap=True,
+                    hisparse_host_import=hisparse_host_import,
                 )
             )
             host_blocks_to_allocate = 0
@@ -507,17 +555,60 @@ class KVCacheManager:
                         apply_admission_cap=True,
                     )
                 )
-            if (
+            host_lacks_capacity = (
                 self.hisparse_coordinator.has_host_cache
                 and not self.hisparse_coordinator.has_host_capacity(
                     host_blocks_to_allocate
                 )
-            ) or any(
-                required + watermark > pool.get_num_free_blocks()
-                for required, watermark, pool in zip(
-                    num_blocks_to_allocate, watermark_blocks, self.block_pools
-                )
-            ):
+            )
+            full_resident_lacks_capacity = self._lacks_device_capacity(
+                num_blocks_to_allocate,
+                watermark_blocks,
+                reserved_blocks_by_pool,
+            )
+            if full_resident_lacks_capacity:
+                if not allow_hisparse_host_import:
+                    self._reclaim_resident_shortage(
+                        num_blocks_to_allocate,
+                        watermark_blocks,
+                        reserved_blocks_by_pool,
+                    )
+                    full_resident_lacks_capacity = self._lacks_device_capacity(
+                        num_blocks_to_allocate,
+                        watermark_blocks,
+                        reserved_blocks_by_pool,
+                    )
+                    if full_resident_lacks_capacity:
+                        return None
+                else:
+                    hisparse_host_import = True
+                    request.hisparse_host_import = True
+                    host_import_blocks = (
+                        self.coordinator.get_num_blocks_to_allocate_by_pool(
+                            request_id=request.request_id,
+                            num_tokens=full_num_tokens,
+                            new_computed_blocks=new_computed_block_list,
+                            num_encoder_tokens=num_encoder_tokens,
+                            total_computed_tokens=total_computed_tokens,
+                            num_local_computed_tokens=num_local_computed_tokens,
+                            num_tokens_main_model=full_num_tokens,
+                            apply_admission_cap=True,
+                            hisparse_host_import=True,
+                        )
+                    )
+                    host_import_lacks_capacity = self._lacks_device_capacity(
+                        host_import_blocks,
+                        watermark_blocks,
+                        reserved_blocks_by_pool,
+                    )
+                    if host_import_lacks_capacity:
+                        self._reclaim_resident_shortage(
+                            host_import_blocks,
+                            watermark_blocks,
+                            reserved_blocks_by_pool,
+                        )
+                        return None
+            if host_lacks_capacity:
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -549,6 +640,7 @@ class KVCacheManager:
             + num_external_computed_tokens,
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
+            hisparse_host_import=hisparse_host_import,
         )
         host_blocks_to_allocate = 0
         if self.hisparse_coordinator.has_host_cache:
@@ -564,50 +656,51 @@ class KVCacheManager:
                     num_tokens_main_model=num_tokens_main_model,
                 )
             )
+        # Keep `reserved_blocks` free for other in-flight sequences, and an
+        # additional watermark of headroom for waiting/preempted admissions.
+        lacks_capacity = self._lacks_device_capacity(
+            num_blocks_to_allocate,
+            watermark_blocks,
+            reserved_blocks_by_pool,
+        )
+        if lacks_capacity and allow_hisparse_host_import and not hisparse_host_import:
+            host_import_blocks = self.coordinator.get_num_blocks_to_allocate_by_pool(
+                request_id=request.request_id,
+                num_tokens=num_tokens_need_slot,
+                new_computed_blocks=new_computed_block_list,
+                num_encoder_tokens=num_encoder_tokens,
+                total_computed_tokens=(
+                    num_local_computed_tokens + num_external_computed_tokens
+                ),
+                num_local_computed_tokens=num_local_computed_tokens,
+                num_tokens_main_model=num_tokens_main_model,
+                hisparse_host_import=True,
+            )
+            host_import_lacks_capacity = self._lacks_device_capacity(
+                host_import_blocks,
+                watermark_blocks,
+                reserved_blocks_by_pool,
+            )
+            hisparse_host_import = True
+            request.hisparse_host_import = True
+            num_blocks_to_allocate = host_import_blocks
+            lacks_capacity = host_import_lacks_capacity
         if self.hisparse_coordinator.has_host_cache and not (
             self.hisparse_coordinator.has_host_capacity(
                 host_blocks_to_allocate + reserved_host_blocks
             )
         ):
             return None
-
-        if isinstance(reserved_blocks, int):
-            reserved_blocks_by_pool = (reserved_blocks,) * len(self.block_pools)
-        else:
-            reserved_blocks_by_pool = tuple(reserved_blocks)
-            assert len(reserved_blocks_by_pool) == len(self.block_pools)
-
-        # Keep `reserved_blocks` free for other in-flight sequences, and an
-        # additional watermark of headroom for waiting/preempted admissions.
-        lacks_capacity = any(
-            required + watermark > pool.get_num_free_blocks() - reserved
-            for required, watermark, reserved, pool in zip(
+        if lacks_capacity:
+            self._reclaim_resident_shortage(
                 num_blocks_to_allocate,
                 watermark_blocks,
                 reserved_blocks_by_pool,
-                self.block_pools,
             )
-        )
-        if lacks_capacity:
-            for pool_id, (required, watermark, reserved, pool) in enumerate(
-                zip(
-                    num_blocks_to_allocate,
-                    watermark_blocks,
-                    reserved_blocks_by_pool,
-                    self.block_pools,
-                )
-            ):
-                shortage = required + watermark + reserved - pool.get_num_free_blocks()
-                if shortage > 0:
-                    self.hisparse_coordinator.reclaim_resident_blocks(pool_id, shortage)
-            lacks_capacity = any(
-                required + watermark > pool.get_num_free_blocks() - reserved
-                for required, watermark, reserved, pool in zip(
-                    num_blocks_to_allocate,
-                    watermark_blocks,
-                    reserved_blocks_by_pool,
-                    self.block_pools,
-                )
+            lacks_capacity = self._lacks_device_capacity(
+                num_blocks_to_allocate,
+                watermark_blocks,
+                reserved_blocks_by_pool,
             )
         if lacks_capacity:
             # Cannot allocate new blocks
@@ -624,7 +717,18 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                hisparse_host_import=hisparse_host_import,
             )
+
+        request.hisparse_host_import = hisparse_host_import
+        if allow_hisparse_host_import and num_external_computed_tokens > 0:
+            request.hisparse_import_target = (
+                HiSparseImportTarget.HOST
+                if hisparse_host_import
+                else HiSparseImportTarget.DEVICE
+            )
+        else:
+            request.hisparse_import_target = HiSparseImportTarget.NONE
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
@@ -888,40 +992,61 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         """Return a lookup-result view truncated at an aligned token endpoint.
 
+        An external hit can supply the final Mamba state even when the local
+        Mamba group ends before this endpoint. Other groups must cover it.
         Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
-        for group_blocks, manager in zip(
+        for group_blocks, manager, group in zip(
             blocks.blocks,
             self.coordinator.single_type_managers,
+            self.kv_cache_config.kv_cache_groups,
             strict=True,
         ):
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            assert num_blocks <= len(group_blocks)
+            if isinstance(group.kv_cache_spec, MambaSpec):
+                num_blocks = min(num_blocks, len(group_blocks))
+            else:
+                assert num_blocks <= len(group_blocks)
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
-    def take_new_block_ids(self) -> list[int]:
-        """Drain and return new attention block IDs for zeroing."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
-            ids.extend(mgr.take_new_block_ids())
-        return ids
+    def take_new_block_ids(self) -> dict[int, list[int]]:
+        """Drain new attention block IDs, preserving their allocator pool."""
+        ids_by_pool: dict[int, list[int]] = {}
+        for group, mgr in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.coordinator.single_type_managers,
+            strict=True,
+        ):
+            ids = mgr.take_new_block_ids()
+            if ids:
+                if group.block_pool_id is None:
+                    continue
+                ids_by_pool.setdefault(group.block_pool_id, []).extend(ids)
+        return ids_by_pool
 
     def get_zeroing_block_ids_in_range(
         self, request_id: str, start_token: int, end_token: int
-    ) -> list[int]:
+    ) -> dict[int, list[int]]:
         """The request's block ids covering [start_token, end_token), from
         the groups whose new blocks are zeroed by the worker."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
+        ids_by_pool: dict[int, list[int]] = {}
+        for group, mgr in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.coordinator.single_type_managers,
+            strict=True,
+        ):
             if mgr.records_new_block_ids:
+                assert group.block_pool_id is not None
                 start_idx = start_token // mgr.block_size
                 end_idx = cdiv(end_token, mgr.block_size)
                 blocks = mgr.req_to_blocks[request_id]
-                ids.extend(blk.block_id for blk in blocks[start_idx:end_idx])
-        return ids
+                ids_by_pool.setdefault(group.block_pool_id, []).extend(
+                    blk.block_id for blk in blocks[start_idx:end_idx]
+                )
+        return ids_by_pool
 
     def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:
         """Re-record the request's blocks from start_token onwards for

@@ -4,6 +4,7 @@
 
 import copy
 from collections.abc import Callable
+from dataclasses import replace
 from math import lcm
 from types import SimpleNamespace
 
@@ -52,6 +53,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.request import HiSparseImportTarget
 
 pytestmark = pytest.mark.cpu_test
 
@@ -113,6 +115,11 @@ def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheMa
         "scheduler_block_size",
         lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
     )
+    if "retention_interval" in kwargs:
+        kv_cache_config = replace(
+            kv_cache_config,
+            prefix_cache_retention_interval=kwargs.pop("retention_interval"),
+        )
     return KVCacheManager(kv_cache_config, **kwargs)
 
 
@@ -134,474 +141,394 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
-def test_independent_block_pool_domains():
-    block_size = 16
-    spec = FullAttentionSpec(
-        block_size=block_size,
+HISPARSE_BLOCK_SIZE = 16
+
+
+def make_hisparse_kv_cache_config(
+    num_blocks: int,
+    host_num_blocks: int,
+    *,
+    transfer_device_cache: bool = False,
+) -> KVCacheConfig:
+    source_spec = FullAttentionSpec(
+        block_size=HISPARSE_BLOCK_SIZE,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
     )
-    config = KVCacheConfig(
-        num_blocks=4,
-        num_blocks_by_pool=[4, 3],
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(["host"], spec, block_pool_id=0),
-            KVCacheGroupSpec(["device"], spec, block_pool_id=1),
-        ],
-    )
-    manager = make_kv_cache_manager(
-        config,
-        max_model_len=128,
-        enable_caching=False,
-        hash_block_size=block_size,
-    )
-    reserved = make_request("reserved", list(range(16)), block_size, sha256)
-    assert (
-        manager.allocate_slots(
-            reserved,
-            num_new_tokens=16,
-            reserved_blocks=(2, 0),
-        )
-        is not None
-    )
-    manager.free(reserved)
-
-    request = make_request("r", list(range(48)), block_size, sha256)
-
-    blocks = manager.allocate_slots(request, num_new_tokens=32)
-    assert blocks is not None
-    block_ids = blocks.get_block_ids()
-    assert [len(ids) for ids in block_ids] == [2, 2]
-    assert all(len(set(ids)) == 2 for ids in block_ids)
-    assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [1, 0]
-
-    request.num_computed_tokens = 32
-    assert manager.allocate_slots(request, num_new_tokens=16) is None
-
-    request_blocks = manager.pop_blocks_for_free(request)
-    assert {block.pool_id for block in request_blocks} == {0, 1}
-    manager.free_blocks(request_blocks)
-    assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [3, 2]
-
-
-def test_hisparse_ephemeral_pool_skips_caching_without_disabling_zeroing():
-    block_size = 16
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    mamba = MambaSpec(
-        block_size=block_size,
-        shapes=((1, 4),),
-        dtypes=(torch.float32,),
-    )
-    hot = HiSparseHotSpec(
-        block_size=block_size,
-        page_size=block_size * 4,
-        blocks_per_request=2,
-    )
-    config = KVCacheConfig(
-        num_blocks=4,
-        num_blocks_by_pool=[4, 4],
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(["full"], full, block_pool_id=0),
-            KVCacheGroupSpec(["mamba"], mamba, block_pool_id=0),
-            KVCacheGroupSpec(
-                ["hot"],
-                hot,
-                block_pool_id=1,
-                enable_prefix_caching=False,
-            ),
-        ],
-    )
-    assert config.needs_kv_cache_zeroing
-    assert config.zeroing_block_pool_ids == {0}
-
-    manager = make_kv_cache_manager(
-        config,
-        max_model_len=128,
-        enable_caching=True,
-        hash_block_size=block_size,
-    )
-    assert [pool.enable_caching for pool in manager.block_pools] == [True, False]
-    assert [
-        group_manager.enable_caching
-        for group_manager in manager.coordinator.single_type_managers
-    ] == [True, True, False]
-    assert [
-        group_manager._record_new_block_ids
-        for group_manager in manager.coordinator.single_type_managers
-    ] == [True, False, False]
-
-
-def test_prefix_cache_source_rebuilds_ephemeral_groups():
-    block_size = 16
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    config = KVCacheConfig(
-        num_blocks=20,
-        num_blocks_by_pool=[20],
-        hisparse_host_num_blocks=10,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                full,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                full,
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                    blocks_per_request=2,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-        ],
-    )
-    assert config.transfer_group_ids == (0,)
-    assert config.transfer_groups == (config.kv_cache_groups[0],)
-    source_blocks = [0]
-    assert config.select_transfer_block_ids((source_blocks, [1], [2])) == (
-        source_blocks,
-    )
-    manager = make_kv_cache_manager(
-        config,
-        max_model_len=128,
-        enable_caching=True,
-        hash_block_size=block_size,
-    )
-    assert [pool.enable_caching for pool in manager.block_pools] == [False]
-    host_pool = manager.hisparse_coordinator.get_host_block_pool()
-    assert host_pool is not None
-    assert host_pool not in manager.block_pools
-    assert host_pool.enable_caching
-    assert [
-        group_manager.enable_caching
-        for group_manager in manager.coordinator.single_type_managers
-    ] == [True, False, False]
-    assert [g.enable_kv_transfer for g in config.kv_cache_groups] == [
-        True,
-        False,
-        False,
+    groups = [
+        KVCacheGroupSpec(
+            ["source"],
+            source_spec,
+            block_pool_id=None,
+            role=KVCacheGroupRole.HISPARSE_SOURCE,
+        ),
+        KVCacheGroupSpec(
+            ["indexer"],
+            source_spec,
+            block_pool_id=0,
+            enable_prefix_caching=False,
+            enable_kv_transfer=transfer_device_cache,
+            role=KVCacheGroupRole.HISPARSE_INDEXER,
+        ),
     ]
-    tokens = list(range(32))
-    request = make_request("source", tokens, block_size, sha256)
-    assert manager.allocate_slots(request, num_new_tokens=32) is not None
-    source_block = manager.get_blocks(request.request_id).blocks[0][0]
-    assert source_block.pool_id is None
-    assert manager.hisparse_coordinator.owns_block(source_block)
-    source_block_id = manager.get_block_ids(request.request_id)[0][0]
-    manager.free(request)
-
-    reused = make_request("reused", list(range(2 * block_size)), block_size, sha256)
-    computed, num_computed, _ = manager.get_computed_blocks(reused)
-    assert num_computed == block_size
-    assert computed.get_block_ids() == ([source_block_id], [], [])
-
-    new_blocks = manager.allocate_slots(
-        reused,
-        num_new_tokens=block_size,
-        num_new_computed_tokens=num_computed,
-        new_computed_blocks=computed,
-    )
-    assert new_blocks is not None
-    assert [len(group) for group in new_blocks.blocks] == [1, 2, 2]
-    assert manager.get_block_ids(reused.request_id)[0][0] == source_block_id
-
-    reserved = host_pool.get_num_free_blocks()
-    blocked = make_request("blocked", list(range(100, 116)), block_size, sha256)
-    assert (
-        manager.allocate_slots(
-            blocked,
-            num_new_tokens=block_size,
-            reserved_host_blocks=reserved,
+    groups.append(
+        KVCacheGroupSpec(
+            ["resident"],
+            HiSparseResidentSpec(
+                block_size=HISPARSE_BLOCK_SIZE,
+                page_size=HISPARSE_BLOCK_SIZE * 4,
+            ),
+            block_pool_id=0,
+            enable_prefix_caching=False,
+            enable_kv_transfer=transfer_device_cache,
         )
-        is None
+    )
+    groups.append(
+        KVCacheGroupSpec(
+            ["hot"],
+            HiSparseHotSpec(
+                block_size=HISPARSE_BLOCK_SIZE,
+                page_size=HISPARSE_BLOCK_SIZE * 4,
+                blocks_per_request=2,
+            ),
+            block_pool_id=0,
+            enable_prefix_caching=False,
+            enable_kv_transfer=False,
+        )
+    )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        num_blocks_by_pool=[num_blocks],
+        hisparse_host_num_blocks=host_num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+
+
+def make_hisparse_kv_cache_manager(
+    num_blocks: int,
+    host_num_blocks: int,
+    *,
+    max_model_len: int = 128,
+    enable_caching: bool = False,
+    **config_kwargs,
+) -> KVCacheManager:
+    config = make_hisparse_kv_cache_config(num_blocks, host_num_blocks, **config_kwargs)
+    return make_kv_cache_manager(
+        config,
+        max_model_len=max_model_len,
+        enable_caching=enable_caching,
+        hash_block_size=HISPARSE_BLOCK_SIZE,
+    )
+
+
+def allocate_external_prefix(
+    manager: KVCacheManager, request: Request, num_tokens: int
+) -> KVCacheBlocks | None:
+    return manager.allocate_slots(
+        request,
+        num_new_tokens=0,
+        num_external_computed_tokens=num_tokens,
+        delay_cache_blocks=True,
+        full_sequence_must_fit=True,
+        allow_hisparse_host_import=True,
     )
 
 
 def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
-    block_size = 16
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    config = KVCacheConfig(
-        num_blocks=18,
-        num_blocks_by_pool=[18],
-        hisparse_host_num_blocks=18,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                full,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                full,
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                    blocks_per_request=2,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-        ],
-    )
-    manager = make_kv_cache_manager(
-        config,
+    manager = make_hisparse_kv_cache_manager(
+        18,
+        18,
         max_model_len=160,
-        enable_caching=False,
-        hash_block_size=block_size,
     )
-    first = make_request("first", list(range(128)), block_size, sha256)
+    first = make_request("first", list(range(128)), HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(first, num_new_tokens=128) is not None
-    assert manager.hisparse_coordinator.are_requests_fully_resident(["first"])
     assert manager.block_pools[0].get_num_free_blocks() == 1
 
-    second = make_request("second", list(range(16)), block_size, sha256)
-    assert manager.allocate_slots(second, num_new_tokens=16) is None
+    second = make_request(
+        "second", list(range(HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert (
+        manager.allocate_slots(
+            second,
+            num_new_tokens=16,
+            full_sequence_must_fit=True,
+        )
+        is None
+    )
     assert manager.hisparse_coordinator.has_pending_reclamation()
     spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
-    assert len(spills) == 4
-    manager.hisparse_coordinator.complete_spills(
-        [transfer.transfer_id for transfer in spills]
-    )
+    assert spills
+    spill_counts = {transfer.transfer_id: 1 for transfer in spills}
+    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
     assert not manager.hisparse_coordinator.has_pending_reclamation()
-    assert not manager.hisparse_coordinator.are_requests_fully_resident(["first"])
-    assert manager.allocate_slots(second, num_new_tokens=16) is not None
+    assert (
+        manager.allocate_slots(
+            second,
+            num_new_tokens=16,
+            full_sequence_must_fit=True,
+        )
+        is not None
+    )
 
     first_blocks = manager.get_block_ids("first")
-    assert first_blocks[2][:4] == [0, 0, 0, 0]
-    assert all(block_id != 0 for block_id in first_blocks[2][4:])
-    assert len(first_blocks[3]) == 2
-    command = manager.hisparse_coordinator.build_offload_command([])
-    assert command.block_table_updates == {"first": first_blocks}
+    block_table_updates = manager.hisparse_coordinator.take_block_table_updates()
+    assert block_table_updates.get("first") == first_blocks
 
     first.num_computed_tokens = 128
     assert manager.allocate_slots(first, num_new_tokens=16) is None
     assert manager.hisparse_coordinator.has_pending_reclamation()
     spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
-    assert len(spills) == 2
-    manager.hisparse_coordinator.complete_spills(
-        [transfer.transfer_id for transfer in spills]
-    )
+    assert spills
+    spill_counts = {transfer.transfer_id: 1 for transfer in spills}
+    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
     assert not manager.hisparse_coordinator.has_pending_reclamation()
     assert manager.allocate_slots(first, num_new_tokens=16) is not None
 
 
-def test_hisparse_reclamation_caps_each_worker_spill_batch():
-    block_size = 16
-    max_model_len = 160
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    config = KVCacheConfig(
-        num_blocks=34,
-        num_blocks_by_pool=[34],
-        hisparse_host_num_blocks=34,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                full,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                full,
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                    blocks_per_request=2,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-        ],
-    )
-    manager = make_kv_cache_manager(
-        config,
-        max_model_len=max_model_len,
-        enable_caching=False,
-        hash_block_size=block_size,
-    )
-    for request_id in ("first", "second"):
-        request = make_request(request_id, list(range(128)), block_size, sha256)
-        assert manager.allocate_slots(request, num_new_tokens=128) is not None
-
-    manager.hisparse_coordinator.reclaim_resident_blocks(0, 100)
-    spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
-    assert len(spills) * block_size == max_model_len
-    assert manager.hisparse_coordinator.has_pending_reclamation()
-
-    manager.hisparse_coordinator.complete_spills(
-        [transfer.transfer_id for transfer in spills]
-    )
-    assert not manager.hisparse_coordinator.has_pending_reclamation()
-
-
 def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
-    block_size = 16
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    config = KVCacheConfig(
-        num_blocks=32,
-        num_blocks_by_pool=[32],
-        hisparse_host_num_blocks=16,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                full,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                full,
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                    blocks_per_request=2,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-        ],
-    )
-    manager = make_kv_cache_manager(
-        config,
-        max_model_len=128,
+    """A host prefix becomes visible only when every page is durable.
+
+    Completing a later page first must not expose a prefix with a hole.
+    """
+    manager = make_hisparse_kv_cache_manager(
+        32,
+        16,
         enable_caching=True,
-        hash_block_size=block_size,
     )
-    tokens = list(range(block_size))
-    request = make_request("resident", tokens, block_size, sha256)
-    assert manager.allocate_slots(request, num_new_tokens=block_size) is not None
+    tokens = list(range(2 * HISPARSE_BLOCK_SIZE))
+    request = make_request("resident", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, num_new_tokens=len(tokens)) is not None
     blocks = manager.get_block_ids(request.request_id)
-    assert len(blocks[2]) == 1
+    assert len(blocks[2]) == 2
     assert blocks[3] == []
-    assert manager.hisparse_coordinator.are_requests_fully_resident(
-        [request.request_id]
-    )
 
     spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
-    assert len(spills) == 1
-    assert spills[0].after_forward
-    manager.hisparse_coordinator.complete_spills([spills[0].transfer_id])
+    assert len(spills) == 2
+    assert all(spill.after_forward for spill in spills)
+    spill_counts = {spill.transfer_id: 1 for spill in spills}
+    duplicate = make_request(
+        "duplicate",
+        list(range(3 * HISPARSE_BLOCK_SIZE)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+    _, num_computed, _ = manager.get_computed_blocks(duplicate)
+    assert num_computed == 0
+
+    manager.hisparse_coordinator.update_spills(spill_counts, {})
+    _, num_computed, _ = manager.get_computed_blocks(duplicate)
+    assert num_computed == 0
+
+    manager.hisparse_coordinator.update_spills({}, {spills[1].transfer_id: 1})
+    _, num_computed, _ = manager.get_computed_blocks(duplicate)
+    assert num_computed == 0
+
+    manager.hisparse_coordinator.update_spills({}, {spills[0].transfer_id: 1})
+    _, num_computed, _ = manager.get_computed_blocks(duplicate)
+    assert num_computed == 2 * HISPARSE_BLOCK_SIZE
     blocks = manager.get_block_ids(request.request_id)
-    assert len(blocks[2]) == 1
+    assert len(blocks[2]) == 2
     assert blocks[3] == []
 
-    manager.free(request)
-    reused = make_request("reused", list(range(2 * block_size)), block_size, sha256)
-    computed, num_computed, _ = manager.get_computed_blocks(reused)
-    assert num_computed == block_size
-    assert (
-        manager.allocate_slots(
-            reused,
-            num_new_tokens=1,
-            num_new_computed_tokens=num_computed,
-            new_computed_blocks=computed,
-        )
-        is not None
+
+def test_hisparse_materialization_respects_per_step_spill_budget():
+    """Prefix publication must not bypass the configured spill batch limit."""
+    manager = make_hisparse_kv_cache_manager(
+        32,
+        16,
+        enable_caching=True,
     )
-    reused_blocks = manager.get_block_ids(reused.request_id)
-    assert reused_blocks[2][0] == 0
-    assert len(reused_blocks[3]) == 2
-    assert not manager.hisparse_coordinator.are_requests_fully_resident(
-        [reused.request_id]
+    coordinator = manager.hisparse_coordinator
+    coordinator.max_spill_pages = 1
+    tokens = list(range(2 * HISPARSE_BLOCK_SIZE))
+    request = make_request("bounded", tokens, HISPARSE_BLOCK_SIZE, sha256)
+
+    assert manager.allocate_slots(request, num_new_tokens=len(tokens)) is not None
+    first = coordinator.build_offload_command([]).page_transfers
+    assert len(first) == 1
+
+    coordinator.plan_prefix_materialization(request.request_id, len(tokens))
+    second = coordinator.build_offload_command([]).page_transfers
+    assert len(second) == 1
+    assert first[0].transfer_id != second[0].transfer_id
+
+
+def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
+    """Host-only copy-on-write work must reach the worker copy queue."""
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    source_manager = manager.coordinator.single_type_managers[0]
+    source_block = source_manager.block_pool.get_new_blocks(1)[0]
+    source_manager.req_to_blocks["cow"] = [source_block]
+    source_manager._partial_hit_reqs["cow"] = (0, source_block)
+
+    new_blocks = source_manager.allocate_new_blocks(
+        "cow", HISPARSE_BLOCK_SIZE, HISPARSE_BLOCK_SIZE
     )
+    new_block_ids = manager.take_new_block_ids()
+    copies, retained = manager.take_kv_cache_block_copies()
+
+    assert new_blocks and new_block_ids == {}
+    assert len(copies) == 1
+    assert copies[0].block_pool_id is None
+    assert copies[0].src_block_id == source_block.block_id
+    assert copies[0].dst_block_id == new_blocks[0].block_id
+    assert retained == [source_block, new_blocks[0]]
+
+
+def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
+    """An in-flight host import must reserve its unwritten resident pages."""
+    manager = make_hisparse_kv_cache_manager(
+        10,
+        16,
+        transfer_device_cache=True,
+    )
+    request = make_request(
+        "partial-import",
+        list(range(6 * HISPARSE_BLOCK_SIZE)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+    imported_tokens = 4 * HISPARSE_BLOCK_SIZE
+
+    assert allocate_external_prefix(manager, request, imported_tokens) is not None
+    assert request.hisparse_host_import
+
+    required = manager.coordinator.get_num_blocks_to_allocate_by_pool(
+        request_id=request.request_id,
+        num_tokens=request.num_tokens,
+        new_computed_blocks=manager.empty_kv_cache_blocks.blocks,
+        num_encoder_tokens=0,
+        total_computed_tokens=imported_tokens,
+        num_local_computed_tokens=imported_tokens,
+        num_tokens_main_model=request.num_tokens,
+        apply_admission_cap=True,
+        hisparse_host_import=True,
+    )
+
+    assert required == (4,)
+
+
+def test_hisparse_host_import_keeps_partial_page_gpu_only():
+    """A partial imported page must not become readable from stale host data."""
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    coordinator = manager.hisparse_coordinator
+
+    coordinator.complete_host_import("partial", HISPARSE_BLOCK_SIZE + 1)
+
+    state = coordinator.request_states["partial"]
+    assert state.valid_pages == {0}
+    assert state.ready_prefix_pages == 1
+
+
+def test_hisparse_capacity_query_does_not_require_hot_blocks():
+    """A read-only capacity query must not mutate hot-block requirements."""
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    coordinator = manager.hisparse_coordinator
+    host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
+    computed: tuple[list[KVCacheBlock], ...] = (
+        [host_pool.blocks[1]],
+        [],
+        [],
+        [],
+    )
+
+    manager.coordinator.get_num_blocks_to_allocate_by_pool(
+        request_id="query-only",
+        num_tokens=HISPARSE_BLOCK_SIZE,
+        new_computed_blocks=computed,
+        num_encoder_tokens=0,
+        total_computed_tokens=HISPARSE_BLOCK_SIZE,
+        num_local_computed_tokens=HISPARSE_BLOCK_SIZE,
+        num_tokens_main_model=HISPARSE_BLOCK_SIZE,
+    )
+
+    assert all(
+        "query-only" not in hot_manager.hot_required
+        for hot_manager in coordinator.hot_managers
+    )
+
+
+@pytest.mark.parametrize("ends_on_page_boundary", [False, True])
+def test_hisparse_external_import_falls_back_to_hard_gpu_footprint(
+    ends_on_page_boundary: bool,
+):
+    """An external prefix larger than resident capacity must remain admissible.
+
+    This guards the admission boundary where indexer + one writable resident
+    page + the fixed hot allocation fit, but indexer + full resident history do
+    not. Requiring one more resident page would silently strand long P/D inputs.
+    """
+    num_prompt_blocks = 4
+    num_prompt_tokens = num_prompt_blocks * HISPARSE_BLOCK_SIZE
+    if not ends_on_page_boundary:
+        num_prompt_tokens -= 1
+    manager = make_hisparse_kv_cache_manager(
+        8,
+        9,
+        transfer_device_cache=True,
+    )
+    request = make_request(
+        "host-import",
+        list(range(num_prompt_tokens)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+
+    allocated = allocate_external_prefix(manager, request, num_prompt_tokens)
+
+    assert allocated is not None
+    assert request.hisparse_host_import
+    assert request.hisparse_import_target is HiSparseImportTarget.HOST
+    source, indexer, resident, hot = manager.get_blocks(request.request_id).blocks
+    assert len(source) == num_prompt_blocks
+    assert len(indexer) == num_prompt_blocks
+    assert len(resident) == num_prompt_blocks
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
+    assert len(hot) == 2
+    assert manager.block_pools[0].get_num_free_blocks() == 0
+
+    if not ends_on_page_boundary:
+        request.num_computed_tokens = num_prompt_tokens
+        request.append_output_token_ids(0)
+        assert manager.allocate_slots(request, num_new_tokens=1) is not None
+        assert request.hisparse_host_import
+
+
+def test_hisparse_host_import_decision_survives_capacity_retry():
+    """A waiting external import must not flip back to full residency.
+
+    A full-resident request can leave less than the fixed host-backed footprint
+    free. Once the next request selects host-backed landing, freeing the first
+    request must not make the retry consume a full prefix-sized GPU allocation.
+    """
+    manager = make_hisparse_kv_cache_manager(
+        9,
+        7,
+        transfer_device_cache=True,
+    )
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    first = make_request("first", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    second = make_request("second", tokens, HISPARSE_BLOCK_SIZE, sha256)
+
+    assert allocate_external_prefix(manager, first, len(tokens)) is not None
+    assert not first.hisparse_host_import
+    assert first.hisparse_import_target is HiSparseImportTarget.DEVICE
+
+    assert allocate_external_prefix(manager, second, len(tokens)) is None
+    assert second.hisparse_import_target is HiSparseImportTarget.NONE
+
+    manager.free(first)
+    assert allocate_external_prefix(manager, second, len(tokens)) is not None
+    assert second.hisparse_host_import
+    assert second.hisparse_import_target is HiSparseImportTarget.HOST
+    _, _, resident, hot = manager.get_blocks(second.request_id).blocks
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
+    assert len(hot) == 2
 
 
 def make_kv_cache_config_hybrid_model(
@@ -3592,9 +3519,8 @@ def test_hybrid_cache_blocks_clamped_to_lcm():
     )
 
 
-def test_hybrid_local_kv_retention_interval_aligns_in_manager(monkeypatch):
+def test_hybrid_local_kv_retention_interval_aligns_in_manager():
     """Verify fixed intervals retain sparse tails plus the latest replay tail."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "64")
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -3626,6 +3552,7 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager(monkeypatch):
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
+        retention_interval=64,
     )
 
     # The SWA manager uses the configured 64-token interval (a multiple of the
@@ -3657,18 +3584,15 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager(monkeypatch):
     "interval, expected_match",
     [
         # scheduler_block_size is 32 (= lcm(4*8, 8)); 33 is not a multiple of it.
-        ("33", "multiple of scheduler_block_size"),
+        (33, "multiple of scheduler_block_size"),
         # A negative multiple (-32 % 32 == 0) must still be rejected explicitly,
         # otherwise it would pass the modulo check and silently degrade to dense.
-        ("-32", "non-negative"),
+        (-32, "non-negative"),
     ],
 )
-def test_hybrid_local_kv_retention_interval_rejects_invalid(
-    monkeypatch, interval, expected_match
-):
+def test_hybrid_local_kv_retention_interval_rejects_invalid(interval, expected_match):
     """A retention interval that is negative or not a multiple of
     scheduler_block_size errors out at construction time."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", interval)
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -3701,12 +3625,36 @@ def test_hybrid_local_kv_retention_interval_rejects_invalid(
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
+            retention_interval=interval,
         )
 
 
-def test_hybrid_local_kv_retention_interval_survives_recycling(monkeypatch):
+def test_zero_retention_is_ignored_for_full_attention():
+    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=10)
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=16,
+        retention_interval=0,
+    )
+    assert manager.coordinator.retention_interval == 0
+
+
+def test_positive_retention_rejects_full_attention():
+    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=10)
+    with pytest.raises(ValueError, match="no sliding-window or Mamba"):
+        make_kv_cache_manager(
+            kv_cache_config,
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=16,
+            retention_interval=16,
+        )
+
+
+def test_hybrid_local_kv_retention_interval_survives_recycling():
     """Verify retained local checkpoints are reused after block recycling."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "1024")
     hash_block_size = 4
     kv_cache_config = KVCacheConfig(
         num_blocks=800,
@@ -3759,6 +3707,7 @@ def test_hybrid_local_kv_retention_interval_survives_recycling(monkeypatch):
         max_model_len=4096,
         enable_caching=True,
         hash_block_size=hash_block_size,
+        retention_interval=1024,
     )
 
     def fill_request(request_id: str, token_offset: int) -> list[int]:
@@ -3787,9 +3736,8 @@ def test_hybrid_local_kv_retention_interval_survives_recycling(monkeypatch):
     assert [len(blocks) for blocks in computed_blocks.blocks] == [4, 16, 128, 256]
 
 
-def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary(monkeypatch):
+def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
     """Verify latest-only retention reuses only the replayable prompt boundary."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -3821,6 +3769,7 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary(monkeypatc
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
+        retention_interval=0,
     )
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
@@ -3861,14 +3810,13 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary(monkeypatc
     assert len(computed_blocks.blocks[1]) == 0
 
 
-def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
+def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
     """Verify MTP/EAGLE SWA retention keeps the extra proof block.
 
     EAGLE/MTP lookup matches one additional local block after the returned
     prefix and then drops it. Sparse retention must therefore cache the normal
     local tail at the latest replay boundary plus one extra SWA block.
     """
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -3901,6 +3849,7 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
+        retention_interval=0,
         use_eagle=True,
     )
 
@@ -4297,12 +4246,11 @@ def test_cache_hit_local_and_external_two_groups_preempt_and_reallocate():
     assert manager.get_blocks("test").get_block_ids() != ([], [])
 
 
-def test_swa_free_split_keeps_cached_tail_ahead_of_scratch(monkeypatch):
-    """Default path (no retention): freeing an SWA request must place its
+def test_swa_free_split_keeps_cached_tail_ahead_of_scratch():
+    """Dense retention: freeing an SWA request must place its
     uncached scratch blocks at the front of the free queue (recycled first)
     and keep its cached checkpoint blocks at the back (retained for prefix
     hits). This split is always-on, independent of the retention interval."""
-    monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -4410,13 +4358,14 @@ def _make_pure_swa_manager(block_size, sliding_window, num_blocks=100, **kwargs)
     )
 
 
-def test_pure_swa_retention_interval_caches_sparse_tails(monkeypatch):
+def test_pure_swa_retention_interval_caches_sparse_tails():
     """Sparse retention must work for a pure-SWA single-group model, not just
     hybrid models: only the per-interval tails plus the latest replay tail are
     cached, and a replay still hits the latest replayable boundary."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "64")
     block_size = 16
-    manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
+    manager = _make_pure_swa_manager(
+        block_size, sliding_window=block_size, retention_interval=64
+    )
     assert type(manager.coordinator).__name__ == "UnitaryKVCacheCoordinator"
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
@@ -4449,11 +4398,12 @@ def test_pure_swa_retention_interval_caches_sparse_tails(monkeypatch):
     assert num_computed == 240
 
 
-def test_pure_swa_retention_latest_only(monkeypatch):
+def test_pure_swa_retention_latest_only():
     """`=0` on a pure-SWA model keeps only the latest replay tail."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     block_size = 16
-    manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
+    manager = _make_pure_swa_manager(
+        block_size, sliding_window=block_size, retention_interval=0
+    )
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
@@ -4481,10 +4431,9 @@ def test_pure_swa_retention_latest_only(monkeypatch):
     assert num_computed == 240
 
 
-def test_pure_swa_retention_dense_default_caches_all(monkeypatch):
-    """With retention unset, a pure-SWA model must keep the dense behavior:
+def test_pure_swa_dense_retention_caches_all():
+    """With retention set to ``None``, a pure-SWA model keeps dense behavior:
     every block boundary is a potential hit, so all blocks are cached."""
-    monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
     block_size = 16
     manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
 
@@ -4510,7 +4459,7 @@ def test_pure_swa_retention_dense_default_caches_all(monkeypatch):
 
 
 def test_mamba_reachable_block_mask_sparsifies_retention():
-    """Mamba state-snapshot retention: with VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+    """Mamba state-snapshot retention: with a configured retention interval,
     the manager keeps one cached state per interval-sized segment (plus the
     latest replay boundary) instead of a snapshot per block, which is what
     lets a small attention block_size avoid Mamba dominating the KV pool."""
@@ -4536,7 +4485,7 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
         )
         return None if m is None else {i for i, v in enumerate(m) if v}
 
-    # Dense default (None) -> no mask, every block cached (unchanged behavior).
+    # Dense retention (None) -> no mask, every block cached.
     assert retained(None) is None
     # interval == block_size -> every block is a boundary -> stays dense.
     assert retained(block_size) is None
@@ -4584,7 +4533,7 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     assert retained(0, 100) == {5, 14}
     # Coexists with segment tails (interval 64 -> {3,7,11,15} + replay 14).
     assert retained(64, 96) == {3, 5, 7, 11, 14, 15}
-    # Dense default ignores the hint (nothing to sparsify).
+    # Dense retention ignores the hint (nothing to sparsify).
     assert retained(None, 96) is None
     # Out-of-range boundary is a no-op (only replay 14 remains).
     assert retained(0, 16 * block_size * 2) == {14}
@@ -4593,14 +4542,13 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     assert retained(0, None) == {14}
 
 
-def test_mamba_shared_prefix_survives_zero_retention(monkeypatch):
+def test_mamba_shared_prefix_survives_zero_retention():
     """Manager-level check of the full wiring: a pinned shared-prefix boundary
     (``Request.shared_prefix_boundary``, set by the scheduler on Marconi-style
     detection) keeps its Mamba state block cached under
-    ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``, which otherwise retains only the
+    ``prefix_cache_retention_interval=0``, which otherwise retains only the
     end-of-prompt replay boundary. Without this, a shared prefix (junction
     before ``num_prompt``) would be recomputed by every sharing request."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     block_size = 16
 
     # 16-block (256-token) prompt; replay boundary is block 240 // 16 - 1 = 14.
@@ -4613,6 +4561,7 @@ def test_mamba_shared_prefix_survives_zero_retention(monkeypatch):
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
+            retention_interval=0,
         )
         req = make_request("r", token_ids, block_size, sha256)
         req.shared_prefix_boundary = shared_prefix_boundary
@@ -4636,24 +4585,21 @@ def test_mamba_shared_prefix_survives_zero_retention(monkeypatch):
     assert cached_mamba_blocks(96) == {5, 14}
 
 
-def test_mamba_shared_prefix_reuse_under_zero_retention(monkeypatch):
+def test_mamba_shared_prefix_reuse_under_zero_retention():
     """Full cross-request Marconi flow: a partial shared prefix cached by the
     detecting request must stay reusable by a later request under
-    ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``. Without the pin the junction is
+    ``prefix_cache_retention_interval=0``. Without the pin the junction is
     masked out and the later request misses; with it (and under dense) the reuse
     is preserved."""
     block_size = 16
 
     def last_req_hit(retention, pin):
-        if retention is None:
-            monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
-        else:
-            monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", str(retention))
         manager = make_kv_cache_manager(
             _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba_align"]),
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
+            retention_interval=retention,
         )
         shared = [7 for _ in range(2 * block_size)]  # 2-block shared prefix
 
@@ -4734,23 +4680,20 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
     assert retained(0, 0, block_size) == {14}
 
 
-def test_swa_shared_prefix_reuse_under_zero_retention(monkeypatch):
+def test_swa_shared_prefix_reuse_under_zero_retention():
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
-    must stay reusable under ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``. Without
+    must stay reusable under ``prefix_cache_retention_interval=0``. Without
     the pin the junction window is masked out and a later request misses; with
     it (and under dense) reuse is preserved."""
     block_size = 16
 
     def last_req_hit(retention, pin):
-        if retention is None:
-            monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
-        else:
-            monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", str(retention))
         manager = make_kv_cache_manager(
             _make_hybrid_kv_cache_config(block_size, 200, ["full", "sliding_window"]),
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
+            retention_interval=retention,
         )
         shared = [7 for _ in range(4 * block_size)]  # 4-block shared prefix
 
