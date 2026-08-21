@@ -88,7 +88,8 @@ from .vision import (
 
 try:
     # Note: vLLM does not install xformers by default.
-    from xformers import ops as xops
+    # xFormers's fmha module is now provided by MSLK
+    from mslk.attention import fmha as mslk_fmha
 
     if current_platform.is_cuda() and current_platform.has_device_capability(100):
         # Xformers FA is not compatible with B200
@@ -761,7 +762,8 @@ class Attention(nn.Module):
         q, k = apply_rotary_emb_vit(q, k, freqs_cis=freqs_cis)
 
         if USE_XFORMERS_OPS:
-            out = xops.memory_efficient_attention(q, k, v, attn_bias=mask)
+            # xFormers's fmha module is now provided by MSLK
+            out = mslk_fmha.memory_efficient_attention(q, k, v, attn_bias=mask)
         else:
             q = q.transpose(1, 2)
             k = k.transpose(1, 2)
@@ -950,7 +952,8 @@ class VisionTransformer(nn.Module):
 
         # pass through Transformer with a block diagonal mask delimiting images
         if USE_XFORMERS_OPS:
-            mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(
+            # xFormers's fmha module is now provided by MSLK
+            mask = mslk_fmha.attn_bias.BlockDiagonalMask.from_seqlens(
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
             )
         else:
@@ -1241,10 +1244,13 @@ class PixtralHFAttention(nn.Module):
         q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=0)
 
         if USE_XFORMERS_OPS:
+            # xFormers's fmha module is now provided by MSLK
             # Transpose q and k back for attention
             q = q.transpose(1, 2).contiguous()
             k = k.transpose(1, 2).contiguous()
-            out = xops.memory_efficient_attention(q, k, v, attn_bias=attention_mask)
+            out = mslk_fmha.memory_efficient_attention(
+                q, k, v, attn_bias=attention_mask
+            )
         else:
             v = v.transpose(1, 2)
             out = nn.functional.scaled_dot_product_attention(
@@ -1431,7 +1437,8 @@ class PixtralHFVisionModel(nn.Module):
         position_embedding = self.patch_positional_embedding(patch_embeds, position_ids)
 
         if USE_XFORMERS_OPS:
-            attention_mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(
+            # xFormers's fmha module is now provided by MSLK
+            attention_mask = mslk_fmha.attn_bias.BlockDiagonalMask.from_seqlens(
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
             )
         else:
