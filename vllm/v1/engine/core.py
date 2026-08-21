@@ -902,11 +902,14 @@ class EngineCore:
         pause_future.add_done_callback(pause_complete)
         return future
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep.
 
         Args:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
+
+        Returns:
+            Whether all executor memory is resident again (fully awake).
         """
         if tags is not None and "scheduling" in tags:
             # Remove "scheduling" from tags if there are other tags to process.
@@ -917,8 +920,10 @@ class EngineCore:
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
-        if not self.model_executor.is_sleeping:
+        fully_awake = not self.model_executor.is_sleeping
+        if fully_awake:
             self.resume_scheduler()
+        return fully_awake
 
     def release_kv_cache_memory(self) -> None:
         """Discard KV cache physical memory. Requires a completed pause:

@@ -983,12 +983,9 @@ class AsyncLLM(EngineClient):
             self.logger_manager.record_sleep_state(1, 0)
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
-        await self.engine_core.wake_up_async(tags)
+        fully_awake = await self.engine_core.wake_up_async(tags)
 
-        if (
-            self.logger_manager is not None
-            and not await self.engine_core.is_sleeping_async()
-        ):
+        if self.logger_manager is not None and fully_awake:
             self.logger_manager.record_sleep_state(0, 0)
 
     async def checkpoint_prepare(self) -> None:
