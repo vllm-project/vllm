@@ -21,17 +21,22 @@ class SpanAttributes:
     """
 
     # Attribute names copied from OTel semantic conventions to avoid version conflicts
-    GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
-    GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
+    # Deprecated fields: https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/
+    GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"  # deprecated
+    GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+    GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"  # deprecated
+    GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
     GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
     GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
     GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
     GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+    GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
 
     # Custom attributes added until they are standardized
     GEN_AI_REQUEST_ID = "gen_ai.request.id"
     GEN_AI_REQUEST_N = "gen_ai.request.n"
     GEN_AI_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
+    GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = "gen_ai.usage.cache_read.input_tokens"
     GEN_AI_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
     GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
     GEN_AI_LATENCY_E2E = "gen_ai.latency.e2e"
