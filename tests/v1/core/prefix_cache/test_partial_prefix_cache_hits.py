@@ -517,6 +517,32 @@ def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
     assert mamba_blocks[3].block_id == running_block_id
 
 
+def test_internal_checkpoint_requires_block_aligned_start():
+    hash_block_size = 2
+    mamba_block_size = 16
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+    request = make_request("producer", list(range(50)), hash_block_size, sha256)
+    assert manager.allocate_slots(request, 1) is not None
+    request.num_computed_tokens = 1
+    manager.new_step_starts()
+
+    new_blocks = manager.allocate_slots(request, 49)
+
+    assert new_blocks is not None
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    checkpoint_block_idx = 48 // mamba_block_size - 1
+    assert mamba_blocks[checkpoint_block_idx].is_null
+    assert not mamba_blocks[-1].is_null
+    checkpoint_hash = request.block_hashes[48 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
+
+
 def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     """An external mid-block hit must become a running request even when its
     first continuation does not need another Mamba block."""
