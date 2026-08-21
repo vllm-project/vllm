@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
+    convert_flashinfer_moe_output,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -219,6 +220,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
             weight_layout=WeightLayout.BlockMajorK,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
         # FlashInfer's BF16 routed wrapper does not expose an output= argument.
         output.copy_(result[0] if isinstance(result, list) else result)
@@ -277,13 +279,13 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         num_tokens = hidden_states.shape[0]
         # The runner divides by the token count on the host, so an idle rank's
         # dummy 0-token forward has to keep the finalized (empty) form.
-        defer = self.moe_config.use_deferred_moe_finalize and num_tokens > 0
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
 
         routing_replay_out = self._maybe_make_routing_replay_buffer(
             num_tokens=num_tokens,
             device=hidden_states.device,
         )
-        out = flashinfer.fused_moe.trtllm_bf16_moe(
+        flashinfer_output = flashinfer.fused_moe.trtllm_bf16_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
@@ -303,17 +305,11 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             routing_replay_out=routing_replay_out,
             do_finalize=not defer,
         )
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=not defer,
+            num_tokens=num_tokens,
+            top_k=self.topk,
+        )
         self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
-        if defer:
-            # flashinfer returns a flat permute map; the protocol wants
-            # [num_tokens, top_k] so consumers can read top_k from its shape.
-            return UnfinalizedMoEOutput(
-                gemm2_permuted=out[0],
-                expert_weights=out[1],
-                expanded_idx_to_permuted_idx=out[2]
-                .to(torch.int32)
-                .view(num_tokens, self.topk),
-            )
-        # do_finalize=True yields the finalized states (a bare tensor on some
-        # FlashInfer versions, a single-element list on others).
-        return out[0] if isinstance(out, (list, tuple)) else out
+        return routed_output

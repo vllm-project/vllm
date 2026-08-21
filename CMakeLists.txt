@@ -1180,11 +1180,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   # HIP counterpart of the FUSED_KDA_DECODE block above: same `fused_kda_decode`
-  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp. Built for
-  # the CDNA archs the kernel supports (gfx942 / gfx950), so it is only emitted
-  # when one of those is in the arch list. A multi-arch build that includes them
-  # still emits this source for every arch in that list. The runtime gate in
-  # kda_decode.py keeps the kernel off unsupported devices.
+  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp 
+  # Built for the CDNA archs the kernel supports 
+  # (gfx942 / gfx950), so it is only emitted when one of those is in the arch 
+  # list. A multi-arch build that includes them still emits this source for 
+  # every arch in that list. The runtime gate in kda_decode.py keeps the kernel
+  # off unsupported devices. Fused prefill KDA kernels is Only measured on 
+  # gfx950, so it is only built when gfx950 is in the arch list.
   if(VLLM_GPU_LANG STREQUAL "HIP")
     set(FUSED_KDA_DECODE_HIP_ARCHS ${VLLM_GPU_ARCHES})
     list(FILTER FUSED_KDA_DECODE_HIP_ARCHS INCLUDE REGEX "gfx942|gfx950")
@@ -1194,6 +1196,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_KDA_DECODE_HIP_SRC}")
       message(STATUS
         "Building fused KDA decode for HIP archs: ${FUSED_KDA_DECODE_HIP_ARCHS}")
+    endif()
+
+    set(FUSED_KDA_CHUNK_HIP_ARCHS ${VLLM_GPU_ARCHES})
+    list(FILTER FUSED_KDA_CHUNK_HIP_ARCHS INCLUDE REGEX "gfx950")
+    if(FUSED_KDA_CHUNK_HIP_ARCHS)
+      set(FUSED_KDA_CHUNK_HIP_SRC
+        "csrc/libtorch_stable/kimi_k3/fused_kda_chunk_kernel_rocm.cu")
+      list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_KDA_CHUNK_HIP_SRC}")
+      message(STATUS
+        "Building fused KDA chunk for HIP archs: ${FUSED_KDA_CHUNK_HIP_ARCHS}")
     endif()
   endif()
 
@@ -1244,6 +1256,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(FUSED_KDA_DECODE_HIP_SRC)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_KDA_DECODE=1)
+    endif()
+    if(FUSED_KDA_CHUNK_HIP_SRC)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_KDA_CHUNK=1)
     endif()
   endif()
 
