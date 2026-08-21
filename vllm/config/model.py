@@ -30,6 +30,7 @@ from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
+    checkpoint_has_lm_head,
     get_config,
     get_hf_image_processor_config,
     get_hf_text_config,
@@ -185,6 +186,10 @@ class ModelConfig:
     """The Hugging Face config of the model."""
     hf_text_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
+    word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
+    """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
+    contains an `lm_head` of its own. The two may still turn out to be identical, in
+    which case they are re-tied once the weights have been loaded."""
     hf_config_path: str | None = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
@@ -262,6 +267,12 @@ class ModelConfig:
     equivalent exponential-race sampling. FP64 preserves lower-tail sampling
     events that fp32 uniform/exponential draws can truncate, at the cost of
     significantly lower throughput on most GPUs."""
+    enable_trace_replay: bool = False
+    """Whether to allow requests to set
+    `SamplingParams.trace_decode_token_ids`, which forces decoding to follow a
+    predetermined token sequence while still computing real logprobs. Reserved
+    for debugging and RL workflows: enabling it reserves a per-request trace
+    buffer, so it is off by default."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -424,6 +435,7 @@ class ModelConfig:
             "return_sampling_mask",
             "logprobs_mode",
             "use_fp64_gumbel",
+            "enable_trace_replay",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
@@ -1101,6 +1113,34 @@ class ModelConfig:
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
         return get_sentence_transformer_tokenizer_config(self.model, self.revision)
+
+    def maybe_untie_word_embeddings(self) -> None:
+        """Stop trusting `tie_word_embeddings` when the checkpoint disagrees.
+
+        A config may claim the word embeddings are tied while the checkpoint
+        ships an `lm_head` of its own. Tying regardless would silently discard
+        that tensor, so build the `lm_head` as if untied and let it load. The
+        two are compared once loaded, and re-tied if they turn out to match, by
+        [maybe_retie_word_embeddings][vllm.model_executor.model_loader.weight_tying.maybe_retie_word_embeddings].
+
+        Transformers makes the same decision in `PreTrainedModel.tie_weights`,
+        where it can compare the two tensors directly.
+        """
+        if not getattr(self.hf_config, "tie_word_embeddings", False):
+            return
+        if not checkpoint_has_lm_head(self.model, revision=self.revision):
+            return
+
+        logger.debug(
+            "The config for %s says the word embeddings are tied, but the checkpoint "
+            "contains an lm_head. Loading it to find out whether they really are tied.",
+            self.model,
+        )
+        # Both levels must be updated: `VllmConfig.with_hf_config` reads the top
+        # level, and the text config is what the language model itself sees.
+        self.hf_config.tie_word_embeddings = False
+        self.hf_config.get_text_config().tie_word_embeddings = False
+        self.word_embeddings_untied_by_checkpoint = True
 
     def _get_default_runner_type(
         self,
