@@ -85,19 +85,17 @@ class PackSeqTritonKernel(VllmJitKernel["PackSeqTritonKernel.CompileKey"]):
         *,
         dtype: torch.dtype,
         pad_value: float | int,
-        block_t: int,
-        block_d: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         is_uint8 = dtype == torch.uint8
         return self.CompileKey(
+            **compile_key_fields,
             dtype=dtype,
             pad_value=int(pad_value) if is_uint8 else float(pad_value),
             pad_is_uint8=is_uint8,
-            block_t=block_t,
-            block_d=block_d,
         )
 
-    def get_warmup_keys(self, _vllm_config: Any) -> list[CompileKey]:
+    def get_warmup_keys(self) -> list[CompileKey]:
         # SparseAttnIndexer uses this for packed decode Q. FP8 uses the current
         # platform FP8 dtype; FP4 uses uint8 values/scales with zero padding.
         return self._trace_dispatch(self.dispatch)(
@@ -287,12 +285,11 @@ class UnpackSeqTritonKernel(VllmJitKernel["UnpackSeqTritonKernel.CompileKey"]):
         self,
         *,
         dtype: torch.dtype,
-        block_t: int,
-        block_d: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
-        return self.CompileKey(dtype=dtype, block_t=block_t, block_d=block_d)
+        return self.CompileKey(**compile_key_fields, dtype=dtype)
 
-    def get_warmup_keys(self, _vllm_config: Any) -> list[CompileKey]:
+    def get_warmup_keys(self) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
             dtype=torch.int32,
             block_t=64,

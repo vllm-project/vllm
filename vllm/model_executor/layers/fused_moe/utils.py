@@ -592,7 +592,7 @@ class PackTopkIdsWeightsKernel(VllmJitKernel["PackTopkIdsWeightsKernel.CompileKe
     ) -> CompileKey:
         return self.CompileKey(block_size=block_size, use_gdc=use_gdc)
 
-    def get_warmup_keys(self, _vllm_config: Any) -> list[CompileKey]:
+    def get_warmup_keys(self) -> list[CompileKey]:
         use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(
             90
         )
@@ -755,18 +755,16 @@ class SwigluLimitPadAwareKernel(VllmJitKernel["SwigluLimitPadAwareKernel.Compile
         self,
         *,
         num_tokens: int,
-        has_limit: bool,
-        has_expert_map: bool,
         block_size: int,
+        **compile_key_fields: bool,
     ) -> CompileKey:
         return self.CompileKey(
+            **compile_key_fields,
             num_tokens=triton_scalar_specialization_rep(num_tokens),
-            has_limit=has_limit,
-            has_expert_map=has_expert_map,
             block_size=block_size,
         )
 
-    def get_warmup_keys(self, _vllm_config: Any) -> list[CompileKey]:
+    def get_warmup_keys(self) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
             num_tokens=(1, 2, 16),
             has_limit=(False, True),

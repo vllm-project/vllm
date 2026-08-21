@@ -212,13 +212,11 @@ class TrtLlmLoraFinalizeKernel(VllmJitKernel["TrtLlmLoraFinalizeKernel.CompileKe
         self,
         *,
         dtype: torch.dtype,
-        hidden_size: int,
-        top_k: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
+            **compile_key_fields,
             dtype=dtype,
-            hidden_size=hidden_size,
-            top_k=top_k,
             block_k=512,
         )
 

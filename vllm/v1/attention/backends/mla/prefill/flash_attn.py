@@ -422,7 +422,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
-        attn_out = FA4_MLA_PREFILL_KERNEL(
+        attn_out = _FA4_MLA_PREFILL_KERNEL(
             q=q,
             k=k,
             v=maybe_padded_v,
@@ -494,4 +494,4 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         )
 
 
-FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()
+_FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()

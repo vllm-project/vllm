@@ -323,7 +323,7 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
 
         host_entrypoint = self.kernel(compile_key)
@@ -391,4 +391,4 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
         )
 
 
-DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL = DequantGatherKCacheKernel()
+_DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL = DequantGatherKCacheKernel()

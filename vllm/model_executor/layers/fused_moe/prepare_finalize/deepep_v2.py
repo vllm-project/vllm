@@ -494,15 +494,13 @@ class GlobalizeRecvTopkIdxKernel(
         num_tokens: int,
         topk: int,
         P: int,
-        rank_expert_offset: int,
-        num_experts: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
+            **compile_key_fields,
             n_elements=num_tokens * topk,
             topk=topk,
             p=P,
-            rank_expert_offset=rank_expert_offset,
-            num_experts=num_experts,
             block=1024,
         )
 

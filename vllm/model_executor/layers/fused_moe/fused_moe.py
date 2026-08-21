@@ -571,8 +571,7 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             else:
                 a = tl.load(
                     a_ptrs,
-                    mask=token_mask[:, None]
-                    & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                    mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                     other=0.0,
                 )
                 b = tl.load(
@@ -675,11 +674,8 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         use_int8_w8a8: bool,
         use_int8_w8a16: bool,
         use_int4_w4a16: bool,
-        per_channel_quant: bool,
         group_n: int,
         group_k: int,
-        mul_routed_weight: bool,
-        has_bias: bool,
         naive_block_assignment: bool,
         use_td: bool = False,
         runtime_a_rows: int | None = None,
@@ -694,6 +690,7 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         runtime_swap_ab: bool | None = None,
         runtime_num_warps: int | None = None,
         runtime_num_stages: int | None = None,
+        **compile_key_fields: bool,
     ) -> CompileKey:
         config_dtype = _get_config_dtype_str(
             use_fp8_w8a8=use_fp8_w8a8,
@@ -769,15 +766,11 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         )
         use_td = (
             use_td
-            and not (
-                use_fp8_w8a8
-                or use_int8_w8a8
-                or use_int8_w8a16
-                or use_int4_w4a16
-            )
+            and not (use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16 or use_int4_w4a16)
             and launch_k % block_size_k == 0
         )
         return self.CompileKey(
+            **compile_key_fields,
             dtype=dtype,
             n=launch_n,
             k=launch_k,
@@ -792,14 +785,11 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             block_size_k=block_size_k,
             group_size_m=group_size_m,
             split_k=split_k,
-            mul_routed_weight=mul_routed_weight,
             top_k=top_k,
             compute_type=compute_type,
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
-            per_channel_quant=per_channel_quant,
-            has_bias=has_bias,
             swap_ab=swap_ab,
             use_td=use_td,
             num_warps=num_warps,
@@ -1033,24 +1023,7 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         N: int,
         K: int,
         EM: int,
-        num_valid_tokens: int,
-        stride_am: int,
-        stride_ak: int,
-        stride_be: int,
-        stride_bk: int,
-        stride_bn: int,
-        stride_cm: int,
-        stride_cn: int,
-        stride_asm: int,
-        stride_ask: int,
-        stride_bse: int,
-        stride_bsk: int,
-        stride_bsn: int,
-        stride_bbe: int,
-        stride_bbn: int,
-        group_n: int,
-        group_k: int,
-        *,
+        *args: Any,
         dtype: torch.dtype,
         A_ROWS: int,
         naive_block_assignment: bool,
@@ -1090,23 +1063,7 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             N,
             K,
             EM,
-            num_valid_tokens,
-            stride_am,
-            stride_ak,
-            stride_be,
-            stride_bk,
-            stride_bn,
-            stride_cm,
-            stride_cn,
-            stride_asm,
-            stride_ask,
-            stride_bse,
-            stride_bsk,
-            stride_bsn,
-            stride_bbe,
-            stride_bbn,
-            group_n,
-            group_k,
+            *args,
             MUL_ROUTED_WEIGHT=MUL_ROUTED_WEIGHT,
             top_k=top_k,
             compute_type=compute_type,
@@ -1570,13 +1527,10 @@ class ComputeIdentityKernel(VllmJitKernel["ComputeIdentityKernel.CompileKey"]):
 
     def dispatch(  # type: ignore[override]
         self,
-        *,
-        top_k: int,
-        hidden_dim: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
-            top_k=top_k,
-            hidden_dim=hidden_dim,
+            **compile_key_fields,
             block_size=256,
         )
 

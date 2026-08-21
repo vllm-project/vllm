@@ -436,18 +436,9 @@ class BuildC128ATopkMetadataKernel(
 
     def dispatch(  # type: ignore[override]
         self,
-        *,
-        compress_ratio: int,
-        max_compressed_tokens: int,
-        block_size: int,
-        triton_block_size: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
-        return self.CompileKey(
-            compress_ratio=compress_ratio,
-            max_compressed_tokens=max_compressed_tokens,
-            block_size=block_size,
-            triton_block_size=triton_block_size,
-        )
+        return self.CompileKey(**compile_key_fields)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         hf_config = vllm_config.model_config.hf_config

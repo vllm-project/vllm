@@ -1225,15 +1225,15 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-                HC_PRENORM_GEMM_TILELANG_KERNEL,
-                MHC_FUSED_TILELANG_KERNEL,
-                MHC_POST_TILELANG_KERNEL,
-                MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+                _HC_PRENORM_GEMM_TILELANG_KERNEL,
+                _MHC_FUSED_TILELANG_KERNEL,
+                _MHC_POST_TILELANG_KERNEL,
+                _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
             )
             from vllm.utils.deep_gemm import is_deep_gemm_supported
 
             include_pre_gemm_splits = is_deep_gemm_supported()
-            MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
+            _MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
                 vllm_config,
                 hidden_size=self.hidden_size,
                 hc_mult=self.hc_mult,
@@ -1254,18 +1254,17 @@ class DeepseekV4DecoderLayer(nn.Module):
                 broadcast_norm_eps=float(self.attn_norm.variance_epsilon),
             )
             if not include_pre_gemm_splits:
-                HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
+                _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
                     vllm_config,
                     hidden_size=self.hidden_size,
                     hc_mult=self.hc_mult,
                     n_out=self.hc_mult * (2 + self.hc_mult),
                 )
-            MHC_POST_TILELANG_KERNEL.register_warmup(
-                vllm_config,
+            _MHC_POST_TILELANG_KERNEL.register_warmup(
                 hidden_size=self.hidden_size,
                 hc_mult=self.hc_mult,
             )
-            MHC_FUSED_TILELANG_KERNEL.register_warmup(
+            _MHC_FUSED_TILELANG_KERNEL.register_warmup(
                 vllm_config,
                 hidden_size=self.hidden_size,
                 hc_mult=self.hc_mult,
@@ -1465,11 +1464,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-                HC_HEAD_FUSED_TILELANG_KERNEL,
+                _HC_HEAD_FUSED_TILELANG_KERNEL,
             )
 
-            HC_HEAD_FUSED_TILELANG_KERNEL.register_warmup(
-                vllm_config,
+            _HC_HEAD_FUSED_TILELANG_KERNEL.register_warmup(
                 hidden_size=int(config.hidden_size),
                 hc_mult=int(self.hc_mult),
                 rms_eps=float(self.rms_norm_eps),

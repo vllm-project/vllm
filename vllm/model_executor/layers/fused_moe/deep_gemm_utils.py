@@ -581,7 +581,7 @@ class DeepGemmEPScatterCopyKernel(
         )
 
 
-class DeepGemmEPScatterKernel:
+class DeepGemmEPScatter:
     def __init__(
         self,
         *,
@@ -831,7 +831,7 @@ def ep_scatter(
     assert m_indices.shape[0] % align_m == 0
     assert expert_start_loc.shape[0] == num_experts
 
-    _DEEPGEMM_EP_SCATTER_KERNEL(
+    _DEEPGEMM_EP_SCATTER(
         recv_x,
         recv_x_scale,
         recv_topk,
@@ -982,7 +982,7 @@ def deepgemm_unpermute_and_reduce(
 
 _DEEPGEMM_EP_SCATTER_START_KERNEL = DeepGemmEPScatterStartKernel()
 _DEEPGEMM_EP_SCATTER_COPY_KERNEL = DeepGemmEPScatterCopyKernel()
-_DEEPGEMM_EP_SCATTER_KERNEL = DeepGemmEPScatterKernel(
+_DEEPGEMM_EP_SCATTER = DeepGemmEPScatter(
     start=_DEEPGEMM_EP_SCATTER_START_KERNEL,
     copy=_DEEPGEMM_EP_SCATTER_COPY_KERNEL,
 )

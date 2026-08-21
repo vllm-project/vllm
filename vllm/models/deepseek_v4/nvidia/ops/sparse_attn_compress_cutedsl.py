@@ -440,7 +440,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
         head_size = compile_key.head_size
         state_width = compile_key.state_width
@@ -947,7 +947,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
         head_size = compile_key.head_size
         state_width = compile_key.state_width
@@ -1377,9 +1377,9 @@ class SparseAttnCompressC128Block8Kernel(
         return host_entrypoint
 
     def dispatch(  # type: ignore[override]
-        self, *, head_size: int, state_width: int
+        self, **compile_key_fields: int
     ) -> CompileKey:
-        return self.CompileKey(head_size=head_size, state_width=state_width)
+        return self.CompileKey(**compile_key_fields)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         hf_config = vllm_config.model_config.hf_config
@@ -1391,7 +1391,7 @@ class SparseAttnCompressC128Block8Kernel(
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
         head_size = compile_key.head_size
         state_width = compile_key.state_width
@@ -1693,9 +1693,8 @@ class SparseAttnNormRopeStoreKernel(
         cache_block_size: int,
         cache_alignment: int,
         norm_weight_dtype: type[cutlass.Numeric],
-        head_size: int,
-        rope_head_dim: int,
         runtime_kv_block_stride: int | None = None,
+        **compile_key_fields: int,
     ) -> CompileKey:
         raw_kv_cache_block_size = cache_block_size // compress_ratio
         kv_cache_block_size = (
@@ -1704,8 +1703,7 @@ class SparseAttnNormRopeStoreKernel(
         token_stride = 576
         scale_dim = 8
         return self.CompileKey(
-            head_size=head_size,
-            rope_head_dim=rope_head_dim,
+            **compile_key_fields,
             fp8_max=448.0,
             quant_block=64,
             token_stride=token_stride,
@@ -1754,7 +1752,7 @@ class SparseAttnNormRopeStoreKernel(
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
         head_size = compile_key.head_size
         rope_head_dim = compile_key.rope_head_dim
@@ -2056,18 +2054,14 @@ class SparseAttnNormRopeStoreFullKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
-        compress_ratio: int,
         store_full_fp8: bool,
         norm_weight_dtype: type[cutlass.Numeric],
-        head_size: int,
-        rope_head_dim: int,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
-            head_size=head_size,
-            rope_head_dim=rope_head_dim,
+            **compile_key_fields,
             fp8_max=448.0,
             quant_block=64,
-            compress_ratio=compress_ratio,
             store_full_fp8=store_full_fp8,
             norm_weight_dtype=norm_weight_dtype,
         )
@@ -2090,7 +2084,7 @@ class SparseAttnNormRopeStoreFullKernel(
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
+        if compile_key in self._compiled_cache:
             return
         head_size = compile_key.head_size
         rope_head_dim = compile_key.rope_head_dim

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -114,7 +115,7 @@ class PrepareUniformDecodeKernel(
     def dispatch(self, *, block_size: int) -> CompileKey:  # type: ignore[override]
         return self.CompileKey(block_size=block_size)
 
-    def get_warmup_keys(self, _vllm_config: VllmConfig) -> list[CompileKey]:
+    def get_warmup_keys(self) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(block_size=self.block_size)
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -386,18 +387,16 @@ class BuildPrefillChunkMetadataKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
-        query_slice_start: int,
-        query_slice_stop: int,
         DCP_RANK: int,
         DCP_WORLD: int,
         DCP_INTERLEAVE: int,
         BLOCK_SIZE: int,
         COMPRESS_RATIO: int,
         input_variant: TritonPointerInputVariant,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
-            query_slice_start=query_slice_start,
-            query_slice_stop=query_slice_stop,
+            **compile_key_fields,
             dcp_rank=DCP_RANK,
             dcp_world=DCP_WORLD,
             dcp_interleave=DCP_INTERLEAVE,
@@ -418,7 +417,8 @@ class BuildPrefillChunkMetadataKernel(
             for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
         )
         return self._trace_dispatch(self.dispatch)(
-            query_slice_start=WarmupIntRange(0, 2),
+            # Cover Triton's divisible, exact-one, and generic i32 classes.
+            query_slice_start=(0, 1, 2),
             query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
             DCP_RANK=dcp_rank,
             DCP_WORLD=dcp_world,
@@ -455,35 +455,12 @@ class BuildPrefillChunkMetadataKernel(
 
     def __call__(
         self,
-        query_start_loc: torch.Tensor,
-        uncompressed_seq_lens: torch.Tensor,
-        cu_compressed_seq_lens: torch.Tensor,
-        row_start_cu_compressed_seq_lens: torch.Tensor,
-        token_to_seq: torch.Tensor,
-        cu_compressed_seq_len_ks: torch.Tensor,
-        cu_compressed_seq_len_ke: torch.Tensor,
-        query_slice_start: int,
-        query_slice_stop: int,
-        DCP_RANK: int,
-        DCP_WORLD: int,
-        DCP_INTERLEAVE: int,
-        *,
+        *args: Any,
         num_reqs: int,
         COMPRESS_RATIO: int,
     ) -> None:
         self.kernel[(num_reqs,)](
-            query_start_loc,
-            uncompressed_seq_lens,
-            cu_compressed_seq_lens,
-            row_start_cu_compressed_seq_lens,
-            token_to_seq,
-            cu_compressed_seq_len_ks,
-            cu_compressed_seq_len_ke,
-            query_slice_start,
-            query_slice_stop,
-            DCP_RANK,
-            DCP_WORLD,
-            DCP_INTERLEAVE,
+            *args,
             BLOCK_SIZE=self.block_size,
             COMPRESS_RATIO=COMPRESS_RATIO,
         )

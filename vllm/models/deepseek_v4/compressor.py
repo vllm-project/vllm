@@ -322,7 +322,6 @@ class DeepseekCompressor(nn.Module):
             )
 
         if vllm_config.kernel_config.enable_jit_warmup:
-
             _SAVE_PARTIAL_STATES_KERNEL.register_warmup()
             if current_platform.is_cuda() and self.head_dim == 512:
                 from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
