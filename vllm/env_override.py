@@ -45,6 +45,10 @@ def _get_torch_cuda_version():
     return _get_torch_version_attr("cuda")
 
 
+def get_torch_xpu_version() -> str | None:
+    return cast(str | None, _get_torch_version_attr("xpu"))
+
+
 def _maybe_set_cuda_compatibility_path():
     """Set LD_LIBRARY_PATH for CUDA forward compatibility if enabled.
 

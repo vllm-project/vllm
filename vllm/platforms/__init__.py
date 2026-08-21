@@ -8,6 +8,7 @@ from itertools import chain
 from typing import TYPE_CHECKING
 
 from vllm import envs
+from vllm.env_override import get_torch_xpu_version
 from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -149,6 +150,8 @@ def rocm_platform_plugin() -> str | None:
 def xpu_platform_plugin() -> str | None:
     is_xpu = False
     logger.debug("Checking if XPU platform is available.")
+    if get_torch_xpu_version() is None:
+        return None
     try:
         import torch
 
@@ -234,7 +237,7 @@ builtin_platform_plugins = {
 }
 
 
-def resolve_current_platform_cls_qualname() -> str:
+def _resolve_current_platform() -> tuple[str, str]:
     # An explicit CPU target is authoritative. Native CPU-only CI jobs reuse
     # an accelerator wheel and can run on accelerator hosts, so probing every
     # plugin would otherwise activate both CPU and the host accelerator.
@@ -242,7 +245,7 @@ def resolve_current_platform_cls_qualname() -> str:
         cpu_platform_cls_qualname = cpu_platform_plugin()
         assert cpu_platform_cls_qualname is not None
         logger.debug("Explicitly selected CPU platform.")
-        return cpu_platform_cls_qualname
+        return "cpu", cpu_platform_cls_qualname
 
     platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
 
@@ -268,22 +271,43 @@ def resolve_current_platform_cls_qualname() -> str:
             f"{activated_oot_plugins}"
         )
     elif len(activated_oot_plugins) == 1:
-        platform_cls_qualname = platform_plugins[activated_oot_plugins[0]]()
-        logger.info("Platform plugin %s is activated", activated_oot_plugins[0])
+        platform_name = activated_oot_plugins[0]
+        platform_cls_qualname = platform_plugins[platform_name]()
+        logger.info("Platform plugin %s is activated", platform_name)
     elif len(activated_builtin_plugins) >= 2:
         raise RuntimeError(
             "Only one platform plugin can be activated, but got: "
             f"{activated_builtin_plugins}"
         )
     elif len(activated_builtin_plugins) == 1:
-        platform_cls_qualname = builtin_platform_plugins[activated_builtin_plugins[0]]()
-        logger.debug(
-            "Automatically detected platform %s.", activated_builtin_plugins[0]
-        )
+        platform_name = activated_builtin_plugins[0]
+        platform_cls_qualname = builtin_platform_plugins[platform_name]()
+        logger.debug("Automatically detected platform %s.", platform_name)
     else:
+        platform_name = "unspecified"
         platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"
         logger.debug("No platform detected, vLLM is running on UnspecifiedPlatform")
-    return platform_cls_qualname
+    assert platform_cls_qualname is not None
+    return platform_name, platform_cls_qualname
+
+
+def resolve_current_platform_cls_qualname() -> str:
+    return _resolve_current_platform()[1]
+
+
+def get_current_platform_device_type() -> str:
+    platform_name, platform_cls_qualname = _resolve_current_platform()
+    device_types = {
+        "cuda": "cuda",
+        "rocm": "cuda",
+        "xpu": "xpu",
+        "tpu": "tpu",
+        "cpu": "cpu",
+        "unspecified": "",
+    }
+    if platform_name in device_types:
+        return device_types[platform_name]
+    return resolve_obj_by_qualname(platform_cls_qualname)().device_type
 
 
 _current_platform = None

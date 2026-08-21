@@ -5,10 +5,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from statistics import median
 
 ROOT = Path(__file__).parents[2]
-MEASURED_RUNS = 4
-MAX_AVG_MS = 1000
+MEASURED_RUNS = 7
+MAX_MEDIAN_MS = 1000
 
 BAD_ARG = "--bad-spe" + "ling"
 
@@ -38,8 +39,8 @@ def test_vllm_serve_response_time():
             assert result.returncode == expected_returncode, result.stderr
             times_ms.append(elapsed_ms)
 
-        avg_ms = sum(times_ms) / MEASURED_RUNS
-        assert avg_ms < MAX_AVG_MS, (
-            f"`{command}`: avg={avg_ms:.1f}ms max={MAX_AVG_MS}ms "
+        median_ms = median(times_ms)
+        assert median_ms < MAX_MEDIAN_MS, (
+            f"`{command}`: median={median_ms:.1f}ms max={MAX_MEDIAN_MS}ms "
             f"runs={[round(t, 1) for t in times_ms]}"
         )

@@ -1396,14 +1396,16 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
-        from vllm.platforms import current_platform
+        from vllm.platforms import get_current_platform_device_type
+
+        platform_device_type = get_current_platform_device_type()
 
         multimodal_group.add_argument(
             "--mm-processor-device",
             choices=["auto", "cpu"]
             + (
-                [current_platform.device_type]
-                if current_platform.device_type not in ("", "cpu")
+                [platform_device_type]
+                if platform_device_type not in ("", "cpu")
                 else []
             ),
             default="auto",
@@ -1647,6 +1649,8 @@ class EngineArgs:
                 "additional_config",
                 "attention_config",
                 "compilation_config",
+                "diffusion_config",
+                "ec_manager_config",
                 "ec_transfer_config",
                 "kernel_config",
                 "kv_events_config",

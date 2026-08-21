@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypedDict, cast, final
 
-import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
@@ -406,6 +405,8 @@ class MultiModalConfig:
         device = (self.mm_processor_kwargs or {}).get("device")
         if device is None:
             return None
+        import torch
+
         try:
             return torch.device(device).type  # type: ignore[arg-type]
         except (RuntimeError, TypeError, ValueError):
