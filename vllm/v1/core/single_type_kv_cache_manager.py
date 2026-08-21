@@ -1287,7 +1287,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self._allocated_block_reqs: set[str] = set()
             # Number of internal checkpoint blocks required by each request's
             # current allocation.
-            self.num_checkpoint_blocks: dict[str, int] = {}
+            self._num_checkpoint_blocks: dict[str, int] = {}
             # Requests that registered their own last-prompt-boundary partial
             # tail (producers). On the next step's CoW the boundary state moves
             # into a private cow_block; we record that block for connector
@@ -1552,7 +1552,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 )
             )
             if not apply_admission_cap:
-                self.num_checkpoint_blocks[request_id] = checkpoint_block
+                self._num_checkpoint_blocks[request_id] = checkpoint_block
             if num_new_blocks > 0:
                 num_new_blocks = 1 + int(has_partial_hit) + checkpoint_block
                 if request_id not in self._allocated_block_reqs:
@@ -1588,7 +1588,7 @@ class MambaManager(SingleTypeKVCacheManager):
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
-            checkpoint_block = self.num_checkpoint_blocks.get(request_id, 0)
+            checkpoint_block = self._num_checkpoint_blocks.get(request_id, 0)
             partial_hit = self._partial_hit_reqs.get(request_id)
             has_partial_hit = partial_hit is not None
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
@@ -1688,7 +1688,7 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
-            self.num_checkpoint_blocks.pop(request_id, None)
+            self._num_checkpoint_blocks.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
             # A hand-off whose request died in this same scheduling pass must
             # not reach the connector: its unpin hook (free) has already run.
