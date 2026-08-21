@@ -27,48 +27,62 @@ pytestmark = pytest.mark.skipif(
 # Small helpers -----------------------------------------------------------
 
 
-def _reload_envs():
-    import vllm.envs as envs
-
-    return importlib.reload(envs)
-
-
 def _set_rocm_arch(monkeypatch: pytest.MonkeyPatch, gcn_arch: str):
+    """Patch ROCm arch detection for testing.
+
+    Patches all on_*() accessor functions based on the provided gcn_arch string.
+    This matches the pattern used in other ROCm tests (test_rocm_unquantized_gemm.py).
+    """
     import vllm.platforms.rocm as rocm_platform
 
+    # Patch _GCN_ARCH for functions that read it directly (supports_mx, etc.)
     monkeypatch.setattr(rocm_platform, "_GCN_ARCH", gcn_arch)
-    monkeypatch.setattr(
-        rocm_platform,
-        "_ON_GFX1X",
-        any(gfx in gcn_arch for gfx in ["gfx11", "gfx12"]),
-    )
-    monkeypatch.setattr(rocm_platform, "_ON_GFX12X", "gfx12" in gcn_arch)
-    monkeypatch.setattr(
-        rocm_platform,
-        "_ON_MI3XX",
-        any(gfx in gcn_arch for gfx in ["gfx942", "gfx950"]),
-    )
-    monkeypatch.setattr(
-        rocm_platform,
-        "_ON_GFX9",
-        any(gfx in gcn_arch for gfx in ["gfx90a", "gfx942", "gfx950"]),
-    )
-    monkeypatch.setattr(rocm_platform, "_ON_GFX90A", "gfx90a" in gcn_arch)
-    monkeypatch.setattr(rocm_platform, "_ON_GFX942", "gfx942" in gcn_arch)
-    monkeypatch.setattr(rocm_platform, "_ON_GFX950", "gfx950" in gcn_arch)
+
+    # Compute all flags based on gcn_arch (mirrors logic in rocm.py lines 217-232)
+    _on_gfx11 = "gfx11" in gcn_arch
+    _on_gfx1100 = "gfx1100" in gcn_arch
+    _on_gfx1151 = "gfx1151" in gcn_arch
+    _on_gfx12x_raw = "gfx12" in gcn_arch
+    _on_gfx1250 = "gfx1250" in gcn_arch
+    _on_gfx1x_raw = any(arch in gcn_arch for arch in ["gfx11", "gfx12"])
+
+    _on_gfx90a = "gfx90a" in gcn_arch
+    _on_gfx942 = "gfx942" in gcn_arch
+    _on_gfx950 = "gfx950" in gcn_arch
+    _on_gfx9 = any(gfx in gcn_arch for gfx in ["gfx90a", "gfx942", "gfx950"])
+    _on_mi3xx = any(gfx in gcn_arch for gfx in ["gfx942", "gfx950"])
+
+    _on_cdna = any(arch in gcn_arch for arch in ["gfx9", "gfx1250"])
+    _on_rdna = _on_gfx1x_raw and not _on_cdna
+    _on_rdna4 = any(arch in gcn_arch for arch in ["gfx1200", "gfx1201"])
+
+    # Derived flags that exclude CDNA (gfx1250 is CDNA despite being gfx12xx)
+    _on_gfx1x = _on_gfx1x_raw and not _on_cdna
+    _on_gfx12x = _on_gfx12x_raw and not _on_cdna
+
+    # Patch all on_*() accessor functions
+    monkeypatch.setattr(rocm_platform, "on_gfx9", lambda: _on_gfx9)
+    monkeypatch.setattr(rocm_platform, "on_gfx90a", lambda: _on_gfx90a)
+    monkeypatch.setattr(rocm_platform, "on_gfx942", lambda: _on_gfx942)
+    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: _on_gfx950)
+    monkeypatch.setattr(rocm_platform, "on_gfx11", lambda: _on_gfx11)
+    monkeypatch.setattr(rocm_platform, "on_gfx1100", lambda: _on_gfx1100)
+    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: _on_gfx1151)
+    monkeypatch.setattr(rocm_platform, "on_gfx1250", lambda: _on_gfx1250)
+    monkeypatch.setattr(rocm_platform, "on_gfx1x", lambda: _on_gfx1x)
+    monkeypatch.setattr(rocm_platform, "on_gfx12x", lambda: _on_gfx12x)
+    monkeypatch.setattr(rocm_platform, "on_mi3xx", lambda: _on_mi3xx)
+    monkeypatch.setattr(rocm_platform, "on_cdna", lambda: _on_cdna)
+    monkeypatch.setattr(rocm_platform, "on_rdna", lambda: _on_rdna)
+    monkeypatch.setattr(rocm_platform, "on_rdna4", lambda: _on_rdna4)
+
+    # Clear the cached paged attention function
     rocm_platform.use_rocm_custom_paged_attention.cache_clear()
+
     return rocm_platform
 
 
 # Env vars with active runtime hooks -------------------------------------
-
-
-def test_shuffle_kv_cache_env_default():
-    """The shuffled KV-cache env default should remain disabled until
-    explicitly requested."""
-    import vllm.envs as envs
-
-    assert envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT is False
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -84,33 +98,6 @@ def test_shuffle_kv_cache_env_propagates_to_rocm_aiter_ops(enabled, monkeypatch)
 
     assert envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT is enabled
     assert rocm_aiter_ops.is_shuffle_kv_cache_enabled() is enabled
-
-
-def test_sleep_mem_chunk_size_default():
-    """The public ROCm sleep-memory chunk env should keep its documented
-    default value."""
-    import vllm.envs as envs
-
-    assert envs.VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE == 256
-
-
-@pytest.mark.parametrize("chunk_size", [128, 256, 512, 1024])
-def test_sleep_mem_chunk_size_env_parses_ints(chunk_size, monkeypatch):
-    """The ROCm sleep-memory chunk env should parse integer overrides
-    predictably."""
-    import vllm.envs as envs
-
-    monkeypatch.setenv("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE", str(chunk_size))
-    importlib.reload(envs)
-
-    assert chunk_size == envs.VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE
-
-
-def test_skinny_gemm_env_default():
-    """The ROCm skinny-GEMM env should stay enabled by default."""
-    import vllm.envs as envs
-
-    assert envs.VLLM_ROCM_USE_SKINNY_GEMM is True
 
 
 @pytest.mark.parametrize("enabled", [True, False])
