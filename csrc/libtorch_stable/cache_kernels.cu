@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cfloat>
+#include <cstdlib>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -75,6 +76,31 @@ void swap_blocks(torch::stable::Tensor& src, torch::stable::Tensor& dst,
                     block_size_in_bytes, memcpy_type, stream);
   }
 }
+
+namespace {
+// ROCm hipMemcpyBatchAsync faults for count > 8192 (MI350X/gfx950), so chunk
+// at that ceiling.
+constexpr int64_t kRocmDefaultMaxBatchDescriptors = 8192;
+
+constexpr const char* kMaxBatchDescriptorsEnv =
+    "VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS";
+
+// Max copy descriptors per batch-memcpy call (0 = unlimited). ROCm caps and
+// chunks; CUDA is uncapped. The env var (>0) overrides on any platform.
+int64_t resolve_max_batch_descriptors() {
+  static const int64_t cached = []() -> int64_t {
+    const char* val = std::getenv(kMaxBatchDescriptorsEnv);
+    const int64_t override_val = val ? std::atoll(val) : 0;
+    if (override_val > 0) return override_val;
+#if defined(USE_ROCM)
+    return kRocmDefaultMaxBatchDescriptors;
+#else
+    return 0;
+#endif
+  }();
+  return cached;
+}
+}  // namespace
 
 void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
                        const torch::stable::Tensor& dst_ptrs,
@@ -142,32 +168,63 @@ void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
                               : CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
     size_t attrs_idx = 0;
     size_t fail_idx = 0;
-    CUresult result = batch_fn(reinterpret_cast<CUdeviceptr*>(dst_data),
-                               reinterpret_cast<CUdeviceptr*>(src_data),
-                               reinterpret_cast<size_t*>(size_data),
-                               static_cast<size_t>(n), &attr, &attrs_idx, 1,
-                               &fail_idx, static_cast<CUstream>(stream));
-    STD_TORCH_CHECK(result == CUDA_SUCCESS,
-                    "cuMemcpyBatchAsync failed at index ", fail_idx,
-                    " with error ", result);
+    // Uncapped on CUDA (max_desc == 0 -> single call) unless overridden by
+    // VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS; chunk to honor the override.
+    const int64_t max_desc = resolve_max_batch_descriptors();
+    const int64_t step = max_desc <= 0 ? n : max_desc;
+    for (int64_t off = 0; off < n; off += step) {
+      const int64_t cnt = std::min(step, n - off);
+      CUresult result = batch_fn(reinterpret_cast<CUdeviceptr*>(dst_data + off),
+                                 reinterpret_cast<CUdeviceptr*>(src_data + off),
+                                 reinterpret_cast<size_t*>(size_data + off),
+                                 static_cast<size_t>(cnt), &attr, &attrs_idx, 1,
+                                 &fail_idx, static_cast<CUstream>(stream));
+      STD_TORCH_CHECK(result == CUDA_SUCCESS,
+                      "cuMemcpyBatchAsync failed at index ", fail_idx,
+                      " with error ", result);
+    }
     return;
   }
 #elif defined(USE_ROCM) && defined(HIP_VERSION) && HIP_VERSION >= 70100000
-  // ROCm 7.1+ exposes hipMemcpyBatchAsync. The 7.2.1 implementation early-
-  // returns hipErrorNotSupported whenever numAttrs > 0 (see ROCm/clr @
-  // rocm-7.2.1 hipamd/src/hip_memory.cpp:2819-2822), so call with
-  // numAttrs=0.
+  // ROCm 7.1+ exposes hipMemcpyBatchAsync. ROCm 7.2.1-7.2.3 early-return
+  // hipErrorNotSupported whenever numAttrs > 0 (see ROCm/clr @ rocm-7.2.1
+  // hipamd/src/hip_memory.cpp:2819-2822), so those releases must call with
+  // numAttrs=0. ROCm 7.13+ accepts numAttrs > 0.
+  // rocm-7.14+ has better performance.
   {
     hipMemcpyAttributes attr = {};
     size_t attrs_idx = 0;
     size_t fail_idx = 0;
-    hipError_t result = hipMemcpyBatchAsync(
-        reinterpret_cast<void**>(dst_data), reinterpret_cast<void**>(src_data),
-        reinterpret_cast<size_t*>(size_data), static_cast<size_t>(n), &attr,
-        &attrs_idx, 0, &fail_idx, static_cast<hipStream_t>(stream));
-    STD_TORCH_CHECK(result == hipSuccess,
-                    "hipMemcpyBatchAsync failed at index ", fail_idx,
-                    " with error ", result);
+    size_t num_attrs = 0;
+  #if HIP_VERSION >= 71300000
+    static const bool runtime_accepts_attrs = []() {
+      int runtime_version = 0;
+      return hipRuntimeGetVersion(&runtime_version) == hipSuccess &&
+             runtime_version >= 71300000;
+    }();
+    if (runtime_accepts_attrs) {
+      attr.srcAccessOrder = is_src_access_order_any
+                                ? hipMemcpySrcAccessOrderAny
+                                : hipMemcpySrcAccessOrderStream;
+      num_attrs = 1;
+    }
+  #endif
+    // hipMemcpyBatchAsync faults (GPU memory access fault) above 8192
+    // descriptors/call on ROCm 7.15, so chunk the batch at the resolved cap.
+    const int64_t max_desc = resolve_max_batch_descriptors();
+    const int64_t step = max_desc <= 0 ? n : max_desc;
+    for (int64_t off = 0; off < n; off += step) {
+      const int64_t cnt = std::min(step, n - off);
+      hipError_t result = hipMemcpyBatchAsync(
+          reinterpret_cast<void**>(dst_data + off),
+          reinterpret_cast<void**>(src_data + off),
+          reinterpret_cast<size_t*>(size_data + off), static_cast<size_t>(cnt),
+          &attr, &attrs_idx, num_attrs, &fail_idx,
+          static_cast<hipStream_t>(stream));
+      STD_TORCH_CHECK(result == hipSuccess,
+                      "hipMemcpyBatchAsync failed at index ", fail_idx,
+                      " with error ", result);
+    }
     return;
   }
 #endif

@@ -73,6 +73,7 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
+    log2_lse_to_ln,
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.dcp import (
@@ -370,7 +371,7 @@ class BatchDCPPrefillWrapper:
             get_dcp_group(),
             return_lse=True,
         )
-        lse_context = lse_context.transpose(0, 1).contiguous()
+        lse_context = log2_lse_to_ln(lse_context.transpose(0, 1).contiguous())
 
         output_query, lse_query = self._new_tokens.run(
             prefill_query,
@@ -378,7 +379,7 @@ class BatchDCPPrefillWrapper:
             value,
             return_lse=True,
         )
-        lse_query = lse_query.transpose(0, 1).contiguous()
+        lse_query = log2_lse_to_ln(lse_query.transpose(0, 1).contiguous())
 
         merge_attn_states(
             out,
@@ -838,6 +839,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if can_use_xqa_or_trtllm_gen_decode
             else None
         )
+        # The dedicated FlashInfer XQA API accepts head dimensions in
+        # [16, 256] that are divisible by 16. Some hybrid-attention models
+        # (for example Gemma 4) use XQA-compatible sliding-attention groups
+        # alongside global-attention groups with head_dim=512. Resolve the
+        # backend per KV-cache group so the eligible groups still use XQA and
+        # the wider groups fall back to native FlashInfer decode.
+        if (
+            self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
+            and not (16 <= self.head_dim <= 256 and self.head_dim % 16 == 0)
+        ):
+            logger.warning_once(
+                "FlashInfer XQA decode does not support head_dim=%d; "
+                "reverting this KV-cache group to native FlashInfer decode.",
+                self.head_dim,
+            )
+            self.use_trtllm_decode_attention = False
+            self.flashinfer_trtllm_api_decode_kernel = None
         if (
             self.use_dcp
             and self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
