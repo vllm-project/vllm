@@ -62,6 +62,8 @@ def is_aiter_mxfp8_moe_available() -> bool:
 class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
     """MXFP8 MoE through AITER's FlyDSL two-stage grouped GEMM (gfx950)."""
 
+    consumes_expert_mask = True
+
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
         return self.quant_config.quant_dtype
@@ -145,29 +147,12 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        # Re-tag the preshuffled weights: replace_parameter drops the
-        # is_shuffled flag, without which aiter picks a broken CK kernel.
-        w1.is_shuffled = True
-        w2.is_shuffled = True
-
         limit = self.quant_config.gemm1_clamp_limit
         swiglu_limit = 0.0 if limit is None else float(limit)
 
-        # Under EP, aiter expects ``expert_mask``: a 0/1 *local-expert* mask over
-        # global ids with a trailing fake-expert sentinel slot (shape
-        # ``[global_num_experts + 1]``), from which it derives the global->local
-        # compaction. What ``RoutedExperts.expert_map`` hands us depends on the
-        # aiter master switch (``rocm_aiter_fmoe_enabled``).
-        # Branching on the (static) master flag — not the tensor contents —
-        # keeps this HIP-graph/torch.compile safe (no data-dependent sync).
-        # ``None`` under pure TP.
-        if expert_map is None:
-            expert_mask = None
-        elif self.moe_config.rocm_aiter_fmoe_enabled:
-            expert_mask = expert_map
-        else:
-            local_mask = (expert_map >= 0).to(torch.int32)
-            expert_mask = torch.cat([local_mask, local_mask.new_zeros(1)])
+        # RoutedExperts.expert_map hands AITER experts the precomputed 0/1
+        # expert_mask (with trailing sentinel) instead of the vLLM expert_map.
+        expert_mask = expert_map
 
         # Route through the graph-safe ``rocm_aiter_fused_moe`` custom op so the
         # call is captured under HIP graphs / torch.compile (a direct
