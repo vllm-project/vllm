@@ -34,10 +34,11 @@ if TYPE_CHECKING:
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
-    def bind_metadata(self, scheduler_output: "SchedulerOutput") -> None:
-        pass
-
-    def pre_forward(self, batch_request_indices: torch.Tensor | None = None) -> None:
+    def pre_forward(
+        self,
+        scheduler_output: "SchedulerOutput",
+        batch_request_indices: torch.Tensor | None = None,
+    ) -> None:
         pass
 
     def finish_forward(self) -> None:
@@ -81,22 +82,22 @@ class ActiveKVConnector(KVConnector):
 
         self._disabled = False
 
-    def bind_metadata(self, scheduler_output: "SchedulerOutput") -> None:
+    def pre_forward(
+        self,
+        scheduler_output: "SchedulerOutput",
+        batch_request_indices: torch.Tensor | None = None,
+    ) -> None:
         if self._disabled:
             return
+
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
         if self.hisparse_connector is not None:
             self.hisparse_connector.apply_scheduler_output(scheduler_output)
-
-    def pre_forward(self, batch_request_indices: torch.Tensor | None = None) -> None:
-        if self._disabled:
-            return
-
-        if self.hisparse_connector is not None and batch_request_indices is not None:
-            self.hisparse_connector.set_request_state_indices(batch_request_indices)
+            if batch_request_indices is not None:
+                self.hisparse_connector.set_request_state_indices(batch_request_indices)
 
         # TODO: sort out KV Connectors' use of forward_context
         if is_forward_context_available():
@@ -139,7 +140,7 @@ class ActiveKVConnector(KVConnector):
         if self._disabled:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        self.pre_forward()
+        self.pre_forward(scheduler_output)
         self.finish_forward()
         finished_req_ids = scheduler_output.finished_req_ids
         kv_connector_output = self.post_forward(finished_req_ids, wait_for_save=False)

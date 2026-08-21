@@ -57,6 +57,8 @@ def test_no_forward_enqueues_deferred_hisparse_transfers():
     connector.finish_forward = MagicMock()
     connector.post_forward = MagicMock(return_value=None)
 
-    connector.no_forward(SimpleNamespace(finished_req_ids=set()))
+    scheduler_output = SimpleNamespace(finished_req_ids=set())
+    connector.no_forward(scheduler_output)
 
+    connector.pre_forward.assert_called_once_with(scheduler_output)
     connector.finish_forward.assert_called_once_with()
