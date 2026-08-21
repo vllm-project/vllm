@@ -141,6 +141,14 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 return False
         return self.moe_kernel.is_monolithic
 
+    @property
+    def supports_invalid_expert_routes(self) -> bool:
+        """Whether invalid expert-map routes are omitted without dummy GEMMs."""
+        if self.moe_kernel is not None:
+            return self.moe_kernel.supports_invalid_expert_routes()
+        experts_cls = getattr(self, "experts_cls", None)
+        return experts_cls is not None and experts_cls.supports_invalid_expert_routes()
+
     def apply(
         self,
         layer: "RoutedExperts",
