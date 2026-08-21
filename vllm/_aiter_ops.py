@@ -2076,9 +2076,9 @@ class rocm_aiter_ops:
         return "gate_mode" in inspect.signature(fused_moe).parameters
 
     @staticmethod
-    def _probe_dsv4_i384_fhmoe_capability(required_max_tokens: int) -> bool:
+    def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
         """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
-        if type(required_max_tokens) is not int or required_max_tokens <= 0:
+        if type(num_tokens) is not int or num_tokens <= 0:
             return False
 
         try:
@@ -2091,11 +2091,11 @@ class rocm_aiter_ops:
             supports_dsv4_i384_fhmoe = getattr(fhmoe, "supports_dsv4_i384_fhmoe", None)
             if not callable(supports_dsv4_i384_fhmoe):
                 return False
-            supports_required_tokens = supports_dsv4_i384_fhmoe(required_max_tokens)
+            supports_num_tokens = supports_dsv4_i384_fhmoe(num_tokens)
         except Exception:
             return False
 
-        return supports_required_tokens is True and all(
+        return supports_num_tokens is True and all(
             name in params
             for name in (
                 "shared_w1",
@@ -2109,11 +2109,9 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     @functools.cache
-    def fused_moe_supports_heterogeneous_shared_expert(
-        cls, required_max_tokens: int
-    ) -> bool:
+    def fused_moe_supports_heterogeneous_shared_expert(cls, num_tokens: int) -> bool:
         """Whether AITER has DSV4 native-I384 configs through the given M."""
-        return cls._probe_dsv4_i384_fhmoe_capability(required_max_tokens)
+        return cls._probe_dsv4_i384_fhmoe_capability(num_tokens)
 
     @staticmethod
     def register_ops_once() -> None:

@@ -172,11 +172,11 @@ class DeepseekV4MLP(nn.Module):
         return x
 
 
-_FHMOE_MAX_TOKENS = 2048
-
-
 def _use_heterogeneous_fhmoe(num_tokens: int) -> bool:
-    return 0 < num_tokens <= _FHMOE_MAX_TOKENS
+    return num_tokens > 0 and (
+        rocm_aiter_ops.fused_moe_supports_heterogeneous_shared_expert(num_tokens)
+        is True
+    )
 
 
 def _validate_heterogeneous_routes(
@@ -228,12 +228,9 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         reasons.append("the model dtype is not BF16")
     if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
         reasons.append("AITER shared-expert fusion is not enabled")
-    if not rocm_aiter_ops.fused_moe_supports_heterogeneous_shared_expert(
-        _FHMOE_MAX_TOKENS
-    ):
+    if not rocm_aiter_ops.fused_moe_supports_heterogeneous_shared_expert(1):
         reasons.append(
-            "AITER lacks DSV4 I384 heterogeneous shared-expert support through "
-            f"{_FHMOE_MAX_TOKENS} input rows"
+            "AITER lacks CSV-backed DSV4 I384 heterogeneous shared-expert support"
         )
 
     expected_model = {
@@ -285,9 +282,8 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         return False
 
     logger.info_once(
-        "Using AITER DeepSeek V4 heterogeneous MoE for up to %d MoE input rows "
-        "(M) per invocation (native intermediate width 384).",
-        _FHMOE_MAX_TOKENS,
+        "Using AITER DeepSeek V4 heterogeneous MoE for CSV-covered MoE input "
+        "rows (M) per invocation (native intermediate width 384)."
     )
     return True
 

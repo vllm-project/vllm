@@ -447,24 +447,40 @@ def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> No
 
 
 @pytest.mark.parametrize(
-    ("num_tokens", "expected"),
+    ("num_tokens", "supported_through", "expected"),
     [
-        (0, False),
-        (1, True),
-        (2, True),
-        (8, True),
-        (16, True),
-        (1536, True),
-        (2048, True),
-        (2049, False),
+        (0, 4096, False),
+        (1, 4096, True),
+        (1536, 4096, True),
+        (2048, 4096, True),
+        (2049, 4096, True),
+        (4096, 4096, True),
+        (4097, 4096, False),
+        (1536, 0, False),
     ],
 )
 def test_deepseek_v4_heterogeneous_fhmoe_token_policy(
-    num_tokens: int, expected: bool
+    monkeypatch: pytest.MonkeyPatch,
+    num_tokens: int,
+    supported_through: int,
+    expected: bool,
 ) -> None:
-    from vllm.models.deepseek_v4.amd.model import _use_heterogeneous_fhmoe
+    from vllm.models.deepseek_v4.amd import model as deepseek_v4_model
 
-    assert _use_heterogeneous_fhmoe(num_tokens) is expected
+    checked_tokens: list[int] = []
+
+    def supports(num_tokens: int) -> bool:
+        checked_tokens.append(num_tokens)
+        return num_tokens <= supported_through
+
+    monkeypatch.setattr(
+        deepseek_v4_model.rocm_aiter_ops,
+        "fused_moe_supports_heterogeneous_shared_expert",
+        supports,
+    )
+
+    assert deepseek_v4_model._use_heterogeneous_fhmoe(num_tokens) is expected
+    assert checked_tokens == ([] if num_tokens == 0 else [num_tokens])
 
 
 def _supported_fhmoe_signature(
@@ -513,6 +529,10 @@ def _supports_fhmoe_through_2048(max_tokens: int) -> bool:
     return max_tokens <= 2048
 
 
+def _supports_fhmoe_through_4096(max_tokens: int) -> bool:
+    return max_tokens <= 4096
+
+
 def _raises_fhmoe_config_error(max_tokens: int) -> bool:
     raise OSError
 
@@ -522,7 +542,7 @@ def _returns_truthy_non_bool(max_tokens: int) -> int:
 
 
 @pytest.mark.parametrize(
-    ("required_max_tokens", "capability", "fused_moe", "expected"),
+    ("num_tokens", "capability", "fused_moe", "expected"),
     [
         (0, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
         (True, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
@@ -534,11 +554,13 @@ def _returns_truthy_non_bool(max_tokens: int) -> int:
         (2048, _supports_fhmoe_through_2048, _incomplete_fhmoe_signature, False),
         (2048, _supports_fhmoe_through_2048, _supported_fhmoe_signature, True),
         (2049, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
+        (4096, _supports_fhmoe_through_4096, _supported_fhmoe_signature, True),
+        (4097, _supports_fhmoe_through_4096, _supported_fhmoe_signature, False),
     ],
 )
 def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability(
     monkeypatch: pytest.MonkeyPatch,
-    required_max_tokens: object,
+    num_tokens: object,
     capability: object,
     fused_moe: object,
     expected: bool,
@@ -548,7 +570,7 @@ def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability(
     _install_fake_aiter_fhmoe(monkeypatch, capability, fused_moe)
 
     assert (
-        rocm_aiter_ops._probe_dsv4_i384_fhmoe_capability(cast(int, required_max_tokens))
+        rocm_aiter_ops._probe_dsv4_i384_fhmoe_capability(cast(int, num_tokens))
         is expected
     )
 
@@ -592,6 +614,7 @@ def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability_catches_signature_erro
         ("data_parallel_size", 2, False),
         ("prefill_context_parallel_size", 2, False),
         ("topk_method", "greedy", False),
+        ("fhmoe_supported", False, False),
     ],
 )
 def test_deepseek_v4_heterogeneous_fhmoe_compatibility_gates(
@@ -621,7 +644,7 @@ def test_deepseek_v4_heterogeneous_fhmoe_compatibility_gates(
     )
     if setting == "topk_method":
         hf_config.topk_method = value
-    else:
+    elif setting != "fhmoe_supported":
         setattr(parallel_config, setting, value)
 
     quant_config = SimpleNamespace(
@@ -651,10 +674,17 @@ def test_deepseek_v4_heterogeneous_fhmoe_compatibility_gates(
         "is_fusion_moe_shared_experts_enabled",
         lambda: True,
     )
+    checked_tokens: list[int] = []
+    fhmoe_supported = setting != "fhmoe_supported" or value is True
+
+    def supports(num_tokens: int) -> bool:
+        checked_tokens.append(num_tokens)
+        return fhmoe_supported
+
     monkeypatch.setattr(
         deepseek_v4_model.rocm_aiter_ops,
         "fused_moe_supports_heterogeneous_shared_expert",
-        lambda _: True,
+        supports,
     )
 
     assert (
@@ -663,6 +693,7 @@ def test_deepseek_v4_heterogeneous_fhmoe_compatibility_gates(
         )
         is expected
     )
+    assert checked_tokens == [1]
 
 
 @pytest.mark.parametrize(
