@@ -2046,6 +2046,7 @@ class Scheduler(SchedulerInterface):
                             if finish_reason is not None
                             else None
                         ),
+                        weight_version=request.weight_version,
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
@@ -2082,6 +2083,7 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
+                        weight_version=request.weight_version,
                     )
                 )
 
