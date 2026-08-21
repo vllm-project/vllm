@@ -66,9 +66,9 @@ class TestBasicWriteLifecycle:
         assert manager._total_available_blocks == 3
 
     def test_close_write_with_open_read(self, manager, item_small):
-        """When open_read=True, the item is automatically opened for reading."""
+        """When open_read, the item is automatically opened for reading."""
         [alloc] = manager.open_write([item_small])
-        manager.close_write("small", open_read=True)
+        manager.close_write("small", open_n_reads=1)
         item = manager._all_items["small"]
         assert item.ref_count == 1
         assert "small" not in manager._lru_cache

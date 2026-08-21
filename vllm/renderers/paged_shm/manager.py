@@ -107,23 +107,23 @@ class PagedShmManager:
         self._total_available_blocks -= total_need
         return allocated
 
-    def close_write(self, uuid: str, open_read: bool = False):
+    def close_write(self, uuid: str, open_n_reads: int = 0):
         """
         Finalize a write operation. If open_read is False, the item becomes idle
-        and may be cached; if open_read is True, it gets one reader reference.
+        and may be cached.
         """
         item = self._get_item(uuid)
         if item.ref_count != REF_WRITING:
             raise ValueError(f"UUID {uuid} not being written")
 
-        if not open_read:
+        if open_n_reads <= 0:
             item.ref_count = REF_IDLE
             # Insert into LRU cache if caching is enabled and item is not pinned
             if item.use_cache and uuid not in self._pinned_items:
                 self._total_available_blocks += item.n_block()
                 self._lru_cache.put(uuid, item)
         else:
-            item.ref_count = 1  # start with one reader
+            item.ref_count = open_n_reads
 
     def open_read(self, uuid: str) -> ShmSlot:
         """
