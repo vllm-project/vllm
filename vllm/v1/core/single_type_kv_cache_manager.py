@@ -1471,7 +1471,7 @@ class MambaManager(SingleTypeKVCacheManager):
         self,
         request_id: str,
         num_tokens: int,
-        checkpoint_offset: int | None,
+        num_computed_tokens: int,
     ) -> bool:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
@@ -1479,9 +1479,7 @@ class MambaManager(SingleTypeKVCacheManager):
         return (
             self.kv_cache_spec.num_prefill_checkpoint_blocks > 0
             and num_tokens % self.block_size != 0
-            and checkpoint_offset is not None
-            and checkpoint_offset > 0
-            and checkpoint_offset % self.block_size == 0
+            and num_computed_tokens % self.block_size == 0
             and checkpoint_idx >= 0
             and (checkpoint_idx >= len(blocks) or blocks[checkpoint_idx].is_null)
         )
@@ -1548,11 +1546,9 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             if has_partial_hit:
                 num_new_blocks = max(num_new_blocks, 0) + 1
-            checkpoint_boundary = num_tokens // self.block_size * self.block_size
-            checkpoint_offset = checkpoint_boundary - total_computed_tokens
             checkpoint_block = int(
                 self._needs_internal_checkpoint(
-                    request_id, num_tokens, checkpoint_offset
+                    request_id, num_tokens, total_computed_tokens
                 )
             )
             if not apply_admission_cap:
