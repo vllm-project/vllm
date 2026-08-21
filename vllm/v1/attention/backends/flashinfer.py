@@ -73,6 +73,7 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
+    log2_lse_to_ln,
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.dcp import (
@@ -370,7 +371,7 @@ class BatchDCPPrefillWrapper:
             get_dcp_group(),
             return_lse=True,
         )
-        lse_context = lse_context.transpose(0, 1).contiguous()
+        lse_context = log2_lse_to_ln(lse_context.transpose(0, 1).contiguous())
 
         output_query, lse_query = self._new_tokens.run(
             prefill_query,
@@ -378,7 +379,7 @@ class BatchDCPPrefillWrapper:
             value,
             return_lse=True,
         )
-        lse_query = lse_query.transpose(0, 1).contiguous()
+        lse_query = log2_lse_to_ln(lse_query.transpose(0, 1).contiguous())
 
         merge_attn_states(
             out,
