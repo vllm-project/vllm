@@ -142,6 +142,73 @@ cache allocation, recurrent-state handling, and generation. Random dummy
 weights cannot establish model quality; use the perplexity harness with real
 weights when storage and hardware permit.
 
+The validator accepts `baseline`, `no-op`, `serial`, and `wavefront` modes.
+Use the same `--seed` across separate processes to compare generated token IDs
+and selected-token log probabilities. Pass `--ramp-tokens 10` to exercise
+position-dependent mixing, including MRoPE text positions.
+
+## RTX 3080 validation snapshot
+
+The following results were collected on an NVIDIA GeForce RTX 3080 10 GB after
+rebasing onto `main` on August 20, 2026. The dummy-model runs use four layers,
+BF16, random weights, seed 1234, eight decode tokens, and no downloaded weights
+or tokenizer. Their elapsed times include process startup and JIT work, so they
+are compatibility evidence rather than performance measurements.
+
+For the compiled Gemma 3 dummy model, no-op output was bit-identical to the
+baseline. Serial and wavefront generated the same token IDs; their maximum
+selected-token log-probability difference was `1.235e-4`, consistent with BF16
+execution-order differences.
+
+| Mode | Token IDs | Log-probability sum | Peak PyTorch GPU MiB | Elapsed s |
+| --- | --- | ---: | ---: | ---: |
+| Baseline | 8 x 227 | -44.174433 | 145.590 | 25.386 |
+| No-op | 8 x 227 | -44.174433 | 145.590 | 6.997 |
+| Serial | 8 x 227 | -44.168809 | 145.594 | 12.571 |
+| Wavefront | 8 x 227 | -44.169186 | 145.584 | 15.139 |
+
+Every documented adapter also completed generation through the real GPU
+engine. `ramp=10` was used for both MRoPE Qwen 3.5 adapters.
+
+| Family | Mode | Ramp | Result |
+| --- | --- | ---: | --- |
+| DeepSeek V3 | Serial | 0 | Pass |
+| Gemma 3 | Wavefront, compiled | 0 | Pass |
+| Gemma 4 | Wavefront | 0 | Pass |
+| GLM-4 MoE | Wavefront | 0 | Pass |
+| GLM-4 MoE Lite | Serial | 0 | Pass |
+| GPT-OSS | Serial | 0 | Pass |
+| Llama | Wavefront | 0 | Pass |
+| Llama 4 | Wavefront | 0 | Pass |
+| MiMo-V2 | Wavefront | 0 | Pass |
+| MiniMax-M2 | Wavefront | 0 | Pass |
+| MiniMax-M3 | Serial | 0 | Pass |
+| Mistral | Wavefront | 0 | Pass |
+| Mixtral | Wavefront | 0 | Pass |
+| Qwen 2 | Wavefront | 0 | Pass |
+| Qwen 3 | Wavefront | 0 | Pass |
+| Qwen 3 MoE | Wavefront | 0 | Pass |
+| Qwen3-Next | Serial | 0 | Pass |
+| Qwen 3.5 | Serial | 10 | Pass |
+| Qwen 3.5 MoE | Serial | 10 | Pass |
+| Step-3.5 | Wavefront | 0 | Pass |
+
+MiniMax-M3 sparse attention was disabled in its tiny fixture, so this validates
+its residual/MoE adapter but not that optional custom sparse-attention kernel.
+
+A real-weight, compiled Gemma 3 1B PT comparison used the same 16 fixed C4
+windows (16,368 scored tokens) for both modes:
+
+| Mode | Perplexity | Mean prefill latency s | Decode tokens/s | Peak GPU delta GiB |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline | 19.1576 | 7.9496 | 194.97 | 7.661 |
+| Wavefront | 16.9613 | 8.4007 | 181.90 | 7.593 |
+
+For this small sample, wavefront reduced perplexity by 11.46%, increased mean
+prefill latency by 5.67%, and reduced decode throughput by 6.70%. Treat the
+quality delta as promising validation rather than a statistically complete
+model evaluation.
+
 ## Reproducible evaluation
 
 `benchmarks/benchmark_recirculation.py` scores deterministic, pre-tokenized
@@ -165,6 +232,24 @@ uv pip install 'datasets>=3.3.0,<=3.6.0'
   --wavefront \
   --windows-file results/recirculation-windows.json \
   --output results/recirculation-wavefront.json
+```
+
+The harness keeps baseline and Recirculation on Model Runner V1 for a fair
+comparison. Peak memory uses `nvidia-ml-py` when available and otherwise falls
+back to PyTorch accelerator peak-memory statistics.
+
+For the paper's Gemma 3 4B configuration, select the model explicitly and pass
+the non-convex beta. Revisions are model-specific; omit `--model-revision` to
+use the repository default or provide a checkpoint revision explicitly.
+
+```bash
+.venv/bin/python benchmarks/benchmark_recirculation.py \
+  --mode recirculation \
+  --model google/gemma-3-4b-pt \
+  --source-layer 18 --destination-layer 9 \
+  --alpha 0.15 --beta 1.0 --ramp-tokens 0 \
+  --windows-file results/gemma-3-4b-windows.json \
+  --output results/gemma-3-4b-recirculation.json
 ```
 
 Use `--num-windows 50` for a larger sample. For a normal-scheduler baseline
@@ -201,8 +286,12 @@ assuming one value is universally optimal.
   Model Runner V1 automatically; explicitly setting
   `VLLM_USE_V2_MODEL_RUNNER=1` is rejected.
 - Only fixed scalar coefficients and source norm matching are implemented.
-- Qwen3-Next and Qwen 3.5 reject speculative decoding and sequence-parallel
-  MoE execution. Their recurrent-state adapter is serial only.
+- All Recirculation execution rejects speculative decoding, EAGLE/DFlash
+  auxiliary hidden-state extraction, and other speculative configurations.
+  Defining recurrence over draft-token blocks and auxiliary states requires a
+  separate design. Qwen3-Next and Qwen 3.5 additionally reject
+  sequence-parallel MoE execution; their recurrent-state adapter is serial
+  only.
 - MiniMax-M3 currently requires tensor-parallel size 1. Its sparse-attention
   backend is serial only.
 - Gemma 4 YOCO fast prefill is unsupported. Gemma 4 per-layer embeddings are

@@ -7,6 +7,7 @@ import hashlib
 import importlib.metadata
 import json
 import math
+import os
 import platform
 import subprocess
 import threading
@@ -15,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+DEFAULT_MODEL = "google/gemma-3-1b-pt"
 DEFAULT_MODEL_REVISION = "fcf18a2a879aab110ca39f8bffbccd5d49d8eb29"
 DEFAULT_DATASET_REVISION = "1588ec454efa1a09f29cd18ddd04fe05fc8653a2"
 
@@ -122,30 +124,67 @@ def load_or_build_windows(args: argparse.Namespace) -> dict[str, Any]:
 
 class PeakGpuMemory:
     def __init__(self, device_index: int) -> None:
-        import pynvml
-
-        self._pynvml = pynvml
-        pynvml.nvmlInit()
-        self._handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
-        memory = pynvml.nvmlDeviceGetMemoryInfo(self._handle)
-        self.start_bytes = memory.used
-        self.peak_bytes = memory.used
-        self.total_bytes = memory.total
-        self.name = pynvml.nvmlDeviceGetName(self._handle)
-        self.driver = pynvml.nvmlSystemGetDriverVersion()
+        self.device_index = device_index
+        self._pynvml = self._load_pynvml()
         self._stopped = threading.Event()
-        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self._thread: threading.Thread | None = None
+        if self._pynvml is not None:
+            self.source = "nvml"
+            self._pynvml.nvmlInit()
+            self._handle = self._pynvml.nvmlDeviceGetHandleByIndex(device_index)
+            memory = self._pynvml.nvmlDeviceGetMemoryInfo(self._handle)
+            self.start_bytes = memory.used
+            self.peak_bytes = memory.used
+            self.total_bytes = memory.total
+            self.name = self._pynvml.nvmlDeviceGetName(self._handle)
+            self.driver = self._pynvml.nvmlSystemGetDriverVersion()
+            self._thread = threading.Thread(target=self._poll, daemon=True)
+            return
+
+        import torch
+
+        if not torch.accelerator.is_available():
+            raise RuntimeError("GPU memory measurement requires an accelerator")
+        self.source = "torch"
+        self._torch = torch
+        device_module = torch.get_device_module(torch.accelerator.current_accelerator())
+        properties = device_module.get_device_properties(device_index)
+        self.start_bytes = torch.accelerator.memory_allocated(device_index)
+        self.peak_bytes = self.start_bytes
+        self.total_bytes = properties.total_memory
+        self.name = properties.name
+        self.driver = None
+
+    @staticmethod
+    def _load_pynvml() -> Any | None:
+        try:
+            import pynvml
+        except ModuleNotFoundError:
+            return None
+        return pynvml
 
     def _poll(self) -> None:
+        assert self._pynvml is not None
         while not self._stopped.wait(0.01):
             used = self._pynvml.nvmlDeviceGetMemoryInfo(self._handle).used
             self.peak_bytes = max(self.peak_bytes, used)
 
     def __enter__(self) -> "PeakGpuMemory":
-        self._thread.start()
+        if self._thread is not None:
+            self._thread.start()
+        else:
+            self._torch.accelerator.reset_peak_memory_stats(self.device_index)
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        if self._thread is None:
+            self._torch.accelerator.synchronize(self.device_index)
+            self.peak_bytes = max(
+                self.peak_bytes,
+                self._torch.accelerator.max_memory_allocated(self.device_index),
+            )
+            return
+        assert self._pynvml is not None
         self._stopped.set()
         self._thread.join()
         used = self._pynvml.nvmlDeviceGetMemoryInfo(self._handle).used
@@ -286,20 +325,30 @@ def environment_metadata() -> dict[str, Any]:
     }
 
 
+def build_recirculation_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "source_layer": args.source_layer,
+        "destination_layer": args.destination_layer,
+        "alpha": args.alpha,
+        "beta": args.beta,
+        "ramp_tokens": args.ramp_tokens,
+        "wavefront": args.wavefront,
+    }
+
+
 def run(args: argparse.Namespace, window_data: dict[str, Any]) -> dict[str, Any]:
+    # Recirculation currently selects the V1 runner. Keep the baseline on the
+    # same runner and avoid a separate engine process so comparisons exercise
+    # the same execution path (and work on systems without CUDA UVA support).
+    os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
     from vllm import LLM
 
     hf_overrides = None
     if args.mode == "recirculation":
-        hf_overrides = {
-            "recirculation_config": {
-                "source_layer": args.source_layer,
-                "destination_layer": args.destination_layer,
-                "alpha": args.alpha,
-                "ramp_tokens": args.ramp_tokens,
-                "wavefront": args.wavefront,
-            }
-        }
+        hf_overrides = {"recirculation_config": build_recirculation_config(args)}
     start = time.perf_counter()
     llm = LLM(
         model=args.model,
@@ -345,8 +394,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--windows-file", type=Path, required=True)
     parser.add_argument("--num-windows", type=int, default=16)
     parser.add_argument("--window-size", type=int, default=1024)
-    parser.add_argument("--model", default="google/gemma-3-1b-pt")
-    parser.add_argument("--model-revision", default=DEFAULT_MODEL_REVISION)
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--model-revision",
+        help="Checkpoint revision; defaults to the pinned Gemma 3 1B revision only.",
+    )
     parser.add_argument("--dataset", default="allenai/c4")
     parser.add_argument("--dataset-config", default="en")
     parser.add_argument("--dataset-revision", default=DEFAULT_DATASET_REVISION)
@@ -366,6 +418,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-layer", type=int, default=11)
     parser.add_argument("--destination-layer", type=int, default=4)
     parser.add_argument("--alpha", type=float, default=0.15)
+    parser.add_argument("--beta", type=float)
     parser.add_argument("--ramp-tokens", type=int, default=10)
     parser.add_argument(
         "--wavefront",
@@ -375,6 +428,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device-index", type=int, default=0)
     parser.add_argument("--performance-only", action="store_true")
     args = parser.parse_args()
+    if args.model_revision is None and args.model == DEFAULT_MODEL:
+        args.model_revision = DEFAULT_MODEL_REVISION
     if args.window_size != args.max_model_len:
         parser.error("--window-size must equal --max-model-len")
     if not 0 < args.decode_tokens < args.max_model_len:
@@ -408,16 +463,7 @@ def main() -> None:
             "long_prefill_token_threshold": args.long_prefill_token_threshold,
             "gpu_memory_utilization": args.gpu_memory_utilization,
             "recirculation_config": (
-                None
-                if args.mode == "baseline"
-                else {
-                    "source_layer": args.source_layer,
-                    "destination_layer": args.destination_layer,
-                    "alpha": args.alpha,
-                    "beta": None,
-                    "ramp_tokens": args.ramp_tokens,
-                    "wavefront": args.wavefront,
-                }
+                None if args.mode == "baseline" else build_recirculation_config(args)
             ),
         },
         "window_spec": {
@@ -428,6 +474,7 @@ def main() -> None:
         "window_hashes": [window["sha256"] for window in window_data["windows"]],
         "environment": environment_metadata(),
         "gpu": {
+            "memory_measurement_source": gpu_memory.source,
             "name": gpu_memory.name,
             "driver": gpu_memory.driver,
             "total_bytes": gpu_memory.total_bytes,

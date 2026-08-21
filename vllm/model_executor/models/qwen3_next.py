@@ -599,13 +599,6 @@ class Qwen3NextModel(RecirculationDecoderMixin, nn.Module, EagleModelMixin):
             raise ValueError(
                 "Recirculation does not support sequence-parallel Qwen3-Next"
             )
-        if (
-            self.recirculation_config is not None
-            and vllm_config.speculative_config is not None
-        ):
-            raise ValueError(
-                "Recirculation does not support speculative Qwen3-Next decoding"
-            )
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             Qwen3NextSparseMoeBlock,

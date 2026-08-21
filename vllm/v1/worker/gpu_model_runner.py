@@ -31,6 +31,7 @@ from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
+    RecirculationConfig,
     VllmConfig,
     get_layers_from_vllm_config,
     set_current_vllm_config,
@@ -96,7 +97,6 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
-from vllm.model_executor.models.recirculation import RecirculationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.offloader import (
     create_offloader,

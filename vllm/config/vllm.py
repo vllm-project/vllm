@@ -46,6 +46,7 @@ from .offload import OffloadConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .reasoning import ReasoningConfig
+from .recirculation import RecirculationConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
@@ -649,6 +650,11 @@ class VllmConfig:
     def use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         recirculation_requested = self._recirculation_requested()
+        if recirculation_requested and self.speculative_config is not None:
+            raise ValueError(
+                "Recirculation does not support speculative decoding or "
+                "auxiliary hidden-state extraction"
+            )
         if use_v2_model_runner is not None:
             if use_v2_model_runner and recirculation_requested:
                 raise ValueError(
@@ -705,19 +711,8 @@ class VllmConfig:
     def _recirculation_requested(self) -> bool:
         if self.model_config is None:
             return False
-        hf_config = self.model_config.hf_config
-        raw_config = getattr(hf_config, "recirculation_config", None)
-        get_text_config = getattr(hf_config, "get_text_config", None)
-        if raw_config is None and callable(get_text_config):
-            text_config = get_text_config()
-            raw_config = getattr(text_config, "recirculation_config", None)
-        if raw_config is None:
-            return False
-        if not isinstance(raw_config, dict):
-            return True
-        return not (
-            raw_config.get("alpha", 0.15) == 0.0
-            and raw_config.get("beta") in (None, 1.0)
+        return (
+            RecirculationConfig.from_hf_config(self.model_config.hf_config) is not None
         )
 
     def _dflash_needs_multi_kv_group(self) -> bool:
@@ -1135,6 +1130,12 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+
+        if self._recirculation_requested() and self.speculative_config is not None:
+            raise ValueError(
+                "Recirculation does not support speculative decoding or "
+                "auxiliary hidden-state extraction"
+            )
 
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)

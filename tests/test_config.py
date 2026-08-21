@@ -131,8 +131,15 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
 def test_recirculation_forces_v1_model_runner(monkeypatch):
     config = SimpleNamespace(
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(recirculation_config={"source_layer": 2})
-        )
+            hf_config=SimpleNamespace(
+                num_hidden_layers=4,
+                recirculation_config={
+                    "source_layer": 2,
+                    "destination_layer": 1,
+                },
+            )
+        ),
+        speculative_config=None,
     )
     config._recirculation_requested = lambda: VllmConfig._recirculation_requested(
         config
@@ -147,6 +154,42 @@ def test_recirculation_forces_v1_model_runner(monkeypatch):
 
     config.model_config.hf_config.recirculation_config.update(alpha=0.0)
     assert VllmConfig.use_v2_model_runner.fget(config)
+
+
+def test_invalid_identity_recirculation_config_cannot_bypass_validation() -> None:
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                num_hidden_layers=4,
+                recirculation_config={"source_layer": 2, "alpha": 0.0},
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="destination_layer"):
+        VllmConfig._recirculation_requested(config)
+
+
+def test_recirculation_rejects_all_speculative_methods(monkeypatch) -> None:
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                num_hidden_layers=4,
+                recirculation_config={
+                    "source_layer": 2,
+                    "destination_layer": 1,
+                },
+            )
+        ),
+        speculative_config=SimpleNamespace(method="extract_hidden_states"),
+    )
+    config._recirculation_requested = lambda: VllmConfig._recirculation_requested(
+        config
+    )
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+
+    with pytest.raises(ValueError, match="auxiliary hidden-state extraction"):
+        VllmConfig.use_v2_model_runner.fget(config)
 
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):

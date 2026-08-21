@@ -271,13 +271,6 @@ class Qwen3_5Model(Qwen3NextModel):
         )
         if self.recirculation_config is not None and self.use_sequence_parallel:
             raise ValueError("Recirculation does not support sequence-parallel Qwen3.5")
-        if (
-            self.recirculation_config is not None
-            and vllm_config.speculative_config is not None
-        ):
-            raise ValueError(
-                "Recirculation does not support speculative Qwen3.5 decoding"
-            )
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             Qwen3NextSparseMoeBlock,

@@ -43,6 +43,26 @@ def test_recirculation_mix_ramps_convex_coefficients_by_position() -> None:
     torch.testing.assert_close(mixed, expected)
 
 
+def test_recirculation_mix_uses_first_mrope_position_row() -> None:
+    config = RecirculationConfig(
+        source_layer=2,
+        destination_layer=0,
+        alpha=0.2,
+        ramp_tokens=10,
+    )
+    source = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+    destination = torch.tensor([[0.0, 1.0], [0.0, 1.0]])
+    positions = torch.tensor([[5, 10], [50, 60], [70, 80]])
+
+    mixed = config.mix(source, destination, positions)
+
+    assert mixed.shape == source.shape
+    torch.testing.assert_close(
+        mixed,
+        torch.tensor([[0.1, 0.9], [0.2, 0.8]]),
+    )
+
+
 def test_recirculation_mix_supports_nonconvex_beta() -> None:
     config = RecirculationConfig(
         source_layer=2,
@@ -194,6 +214,30 @@ def test_gemma3_recirculation_overwrites_only_upper_layer_cache(
     assert calls == [0, 1, 2, 1, 2]
 
 
+def test_identity_config_uses_baseline_stack_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model, calls = _make_wavefront_model(monkeypatch)
+    hf_config = SimpleNamespace(
+        num_hidden_layers=3,
+        recirculation_config={
+            "source_layer": 1,
+            "destination_layer": 0,
+            "alpha": 0.0,
+        },
+    )
+    model.recirculation_config = RecirculationConfig.from_hf_config(hf_config)
+
+    output = model.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        inputs_embeds=torch.zeros(1, 2),
+    )
+
+    torch.testing.assert_close(output, torch.full((1, 2), 6.0))
+    assert calls == [0, 1, 2]
+
+
 def _make_wavefront_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Gemma3Model, list[int]]:
@@ -256,3 +300,71 @@ def test_gemma3_wavefront_batches_previous_and_current_upper_stacks(
     assert kv_cache[1].shape[0] == 2
     assert kv_cache[2].shape[0] == 2
     assert calls == [0, 1, 2]
+
+
+def test_serial_and_wavefront_match_outputs_and_effective_upper_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serial, _ = _make_wavefront_model(monkeypatch)
+    serial.recirculation_config = RecirculationConfig(
+        source_layer=1,
+        destination_layer=0,
+        alpha=0.2,
+    )
+    wavefront, _ = _make_wavefront_model(monkeypatch)
+    serial_cache: dict[int, torch.Tensor] = {}
+    wavefront_cache: dict[int, torch.Tensor] = {}
+    inputs = [
+        torch.tensor([[1.0, 0.0]]),
+        torch.tensor([[0.0, 1.0]]),
+        torch.tensor([[2.0, 1.0]]),
+    ]
+
+    serial.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        inputs_embeds=inputs[0],
+        kv_cache=serial_cache,
+    )
+    serial_output = serial.forward(
+        input_ids=None,
+        positions=torch.tensor([1]),
+        inputs_embeds=inputs[1],
+        kv_cache=serial_cache,
+    )
+    serial_upper_cache = {
+        layer_idx: serial_cache[layer_idx].clone() for layer_idx in (1, 2)
+    }
+
+    warmup = wavefront.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        inputs_embeds=inputs[0],
+        recirculation_wavefront_warmup=True,
+        kv_cache=wavefront_cache,
+    )
+    wavefront_output = wavefront.forward(
+        input_ids=None,
+        positions=torch.tensor([1]),
+        inputs_embeds=inputs[1],
+        recirculation_wavefront_warmup=False,
+        recirculation_wavefront_positions=torch.tensor([0, 1]),
+        recirculation_wavefront_pending=warmup[1:],
+        kv_cache=wavefront_cache,
+    )
+    wavefront.forward(
+        input_ids=None,
+        positions=torch.tensor([2]),
+        inputs_embeds=inputs[2],
+        recirculation_wavefront_warmup=False,
+        recirculation_wavefront_positions=torch.tensor([1, 2]),
+        recirculation_wavefront_pending=wavefront_output[1:],
+        kv_cache=wavefront_cache,
+    )
+
+    torch.testing.assert_close(wavefront_output[:1], serial_output)
+    for layer_idx in (1, 2):
+        torch.testing.assert_close(
+            wavefront_cache[layer_idx][0:1],
+            serial_upper_cache[layer_idx],
+        )

@@ -24,13 +24,19 @@ os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
 import torch
 from transformers import (
     DeepseekV3Config,
+    Gemma3TextConfig,
+    Glm4MoeConfig,
     Glm4MoeLiteConfig,
     GptOssConfig,
     Llama4TextConfig,
     LlamaConfig,
+    MiniMaxM2Config,
+    MistralConfig,
     MixtralConfig,
     PretrainedConfig,
+    Qwen2Config,
     Qwen3Config,
+    Qwen3MoeConfig,
 )
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
@@ -41,6 +47,65 @@ from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.transformers_utils.configs.step3p5 import Step3p5Config
 
 ConfigBuilder = Callable[[], PretrainedConfig]
+
+
+def gemma3_config() -> PretrainedConfig:
+    return Gemma3TextConfig(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        query_pre_attn_scalar=32,
+        max_position_embeddings=128,
+        sliding_window=64,
+        layer_types=["sliding_attention"] * 3 + ["full_attention"],
+        tie_word_embeddings=False,
+    )
+
+
+def llama_config() -> PretrainedConfig:
+    return LlamaConfig(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        max_position_embeddings=128,
+        tie_word_embeddings=False,
+    )
+
+
+def mistral_config() -> PretrainedConfig:
+    return MistralConfig(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        max_position_embeddings=128,
+        sliding_window=64,
+        tie_word_embeddings=False,
+    )
+
+
+def qwen2_config() -> PretrainedConfig:
+    return Qwen2Config(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=128,
+        tie_word_embeddings=False,
+    )
 
 
 def deepseek_v3_config() -> PretrainedConfig:
@@ -78,6 +143,22 @@ def qwen3_config() -> PretrainedConfig:
         num_key_value_heads=2,
         head_dim=32,
         max_position_embeddings=128,
+        tie_word_embeddings=False,
+    )
+
+
+def qwen3_moe_config() -> PretrainedConfig:
+    return Qwen3MoeConfig(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=128,
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=64,
         tie_word_embeddings=False,
     )
 
@@ -246,6 +327,52 @@ def minimax_m3_config() -> PretrainedConfig:
     )
 
 
+def minimax_m2_config() -> PretrainedConfig:
+    config = MiniMaxM2Config(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        head_dim=128,
+        max_position_embeddings=128,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        bos_token_id=None,
+        eos_token_id=None,
+        tie_word_embeddings=False,
+    )
+    # Current checkpoint configs include this field, but the corresponding
+    # Transformers config class does not expose it yet.
+    config.rotary_dim = 64
+    config.scoring_func = "sigmoid"
+    config.use_routing_bias = True
+    return config
+
+
+def glm4_moe_config() -> PretrainedConfig:
+    config = Glm4MoeConfig(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=256,
+        moe_intermediate_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        n_shared_experts=1,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        first_k_dense_replace=1,
+        max_position_embeddings=128,
+        tie_word_embeddings=False,
+    )
+    # The vLLM implementation follows newer checkpoints that persist an
+    # explicit head_dim, while the installed Transformers config derives it.
+    config.head_dim = 32
+    return config
+
+
 def glm4_moe_lite_config() -> PretrainedConfig:
     config = Glm4MoeLiteConfig(
         vocab_size=256,
@@ -319,22 +446,29 @@ def step3p5_config() -> PretrainedConfig:
 
 FAMILIES: dict[str, tuple[str, ConfigBuilder, bool]] = {
     "deepseek-v3": ("DeepseekV3ForCausalLM", deepseek_v3_config, False),
+    "gemma3": ("Gemma3ForCausalLM", gemma3_config, True),
     "gemma4": ("Gemma4ForCausalLM", gemma4_config, True),
+    "glm4-moe": ("Glm4MoeForCausalLM", glm4_moe_config, True),
     "glm4-moe-lite": (
         "Glm4MoeLiteForCausalLM",
         glm4_moe_lite_config,
         False,
     ),
     "gpt-oss": ("GptOssForCausalLM", gpt_oss_config, False),
+    "llama": ("LlamaForCausalLM", llama_config, True),
     "llama4": ("Llama4ForCausalLM", llama4_config, True),
+    "minimax-m2": ("MiniMaxM2ForCausalLM", minimax_m2_config, True),
     "minimax-m3": (
         "MiniMaxM3SparseForCausalLM",
         minimax_m3_config,
         False,
     ),
     "mimo-v2": ("MiMoV2ForCausalLM", mimo_v2_config, True),
+    "mistral": ("MistralForCausalLM", mistral_config, True),
     "mixtral": ("MixtralForCausalLM", mixtral_config, True),
+    "qwen2": ("Qwen2ForCausalLM", qwen2_config, True),
     "qwen3": ("Qwen3ForCausalLM", qwen3_config, True),
+    "qwen3-moe": ("Qwen3MoeForCausalLM", qwen3_moe_config, True),
     "qwen3.5": ("Qwen3_5ForCausalLM", qwen3_5_config, False),
     "qwen3.5-moe": (
         "Qwen3_5MoeForCausalLM",
@@ -350,18 +484,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     from vllm import LLM, SamplingParams
 
     architecture, build_config, supports_wavefront = FAMILIES[args.family]
+    recirculation = args.mode != "baseline"
     wavefront = args.mode == "wavefront"
     if wavefront and not supports_wavefront:
         raise ValueError(f"{args.family} only supports serial Recirculation")
 
     config = build_config()
     config.architectures = [architecture]
-    config.recirculation_config = {
-        "source_layer": 2,
-        "destination_layer": 1,
-        "alpha": 0.15,
-        "wavefront": wavefront,
-    }
+    if recirculation:
+        config.recirculation_config = {
+            "source_layer": 2,
+            "destination_layer": 1,
+            "alpha": 0.0 if args.mode == "no-op" else 0.15,
+            "ramp_tokens": args.ramp_tokens,
+            "wavefront": wavefront,
+        }
 
     torch.accelerator.reset_peak_memory_stats()
     started = time.perf_counter()
@@ -380,14 +517,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             enforce_eager=not args.compile,
             gpu_memory_utilization=0.25,
             kv_cache_memory_bytes=args.kv_cache_mib * 1024 * 1024,
+            seed=args.seed,
         )
         try:
             output = llm.generate(
                 [{"prompt_token_ids": list(range(1, 9))}],
-                SamplingParams(temperature=0.0, max_tokens=8, ignore_eos=True),
+                SamplingParams(
+                    temperature=0.0,
+                    max_tokens=8,
+                    logprobs=1,
+                    ignore_eos=True,
+                ),
                 use_tqdm=False,
             )[0]
             token_ids = list(output.outputs[0].token_ids)
+            token_logprobs = [
+                entries[token_id].logprob
+                for token_id, entries in zip(
+                    token_ids,
+                    output.outputs[0].logprobs or [],
+                )
+            ]
         finally:
             llm.llm_engine.engine_core.shutdown()
 
@@ -401,18 +551,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "num_layers": 4,
         "hidden_size": 128,
         "kv_cache_mib": args.kv_cache_mib,
+        "seed": args.seed,
+        "ramp_tokens": args.ramp_tokens,
         "peak_torch_gpu_mib": torch.accelerator.max_memory_allocated() / (1024 * 1024),
         "elapsed_s": time.perf_counter() - started,
         "output_token_ids": token_ids,
+        "output_token_logprobs": token_logprobs,
     }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--family", choices=sorted(FAMILIES), required=True)
-    parser.add_argument("--mode", choices=("serial", "wavefront"), required=True)
+    parser.add_argument(
+        "--mode",
+        choices=("baseline", "no-op", "serial", "wavefront"),
+        required=True,
+    )
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--kv-cache-mib", type=int, default=128)
+    parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--ramp-tokens", type=int, default=0)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
