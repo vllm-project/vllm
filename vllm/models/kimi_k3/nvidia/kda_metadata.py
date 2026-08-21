@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -46,7 +45,6 @@ if TYPE_CHECKING:
 
 
 FLASHKDA_CHUNK_SIZE = 16
-logger = init_logger(__name__)
 
 
 @cache
@@ -591,15 +589,11 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 seq_len = seq_lens[row]
                 offset = seq_len // block_size * block_size - (seq_len - query_len)
                 # offset should be less than query_len
-                valid = seq_len % block_size != 0 and 0 < offset < query_len
-                if valid and offset % FLASHKDA_CHUNK_SIZE != 0:
-                    logger.warning(
-                        "Skipping a K3 Mamba checkpoint at offset %d because "
-                        "FlashKDA checkpoints must align to %d-token chunks",
-                        offset,
-                        FLASHKDA_CHUNK_SIZE,
-                    )
-                    valid = False
+                valid = (
+                    seq_len % block_size != 0
+                    and 0 < offset < query_len
+                    and offset % FLASHKDA_CHUNK_SIZE == 0
+                )
                 offset = offset if valid else 0
                 first_len = offset or query_len
                 checkpoint_splits.append((first_len, query_len - first_len))
