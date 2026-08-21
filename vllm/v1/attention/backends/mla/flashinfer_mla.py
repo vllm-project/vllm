@@ -122,7 +122,13 @@ def _get_multi_ctas_kv_counter_buffer(
 class FlashInferMLADecodeMetadata(MLACommonDecodeMetadata):
     flattened_block_table: torch.Tensor | None = None
     flattened_seq_lens: torch.Tensor | None = None
+    # Row count the flattened tensors were built for (0 = not built yet). A row
+    # count, not a query length: the flattened layout is ragged per request.
     query_len: int = 0
+    # DEVICE per-request query offsets, always kept: the non-causal flattening
+    # below needs the true ragged lengths even when the kernel gets no ragged
+    # trace. Distinct from cum_seq_lens_q, which also flags "kernel gets ragged".
+    query_start_loc_device: torch.Tensor | None = None
     # Ragged decode (flashinfer #3238): DEVICE per-request query offsets, plus a
     # CPU max_query_len the kernel tolerates over-estimating. Both unset for pure
     # single-token decode.
@@ -168,20 +174,20 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[FlashInferMLAMetadat
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashInferMLADecodeMetadata:
-        # CPU offsets are an even-split upper bound (no D2H sync); the DEVICE ones
-        # carry the real per-request lengths adaptive verification trimmed. Only
-        # spec-decode blocks need the ragged path, so single-token decode keeps its
-        # dense reshape.
-        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        max_query_len = (
-            int(query_lens_cpu.max().item()) if query_lens_cpu.numel() else 1
-        )
+        # max_query_len is the promised bound from CommonAttentionMetadata, not a
+        # measured one: the CPU offsets understate what the GPU holds (adaptive
+        # spreads the budget evenly; a capture dummy puts one token per request),
+        # so measuring here would bake an undersized max_q_len + the dense branch
+        # into a graph that real k+1 batches replay. cum_seq_lens_q is set only
+        # when the batch may be ragged (max_query_len > 1).
         return FlashInferMLADecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            query_start_loc_device=query_start_loc_device,
             cum_seq_lens_q=query_start_loc_device if max_query_len > 1 else None,
             max_query_len=max_query_len,
         )
@@ -344,7 +350,16 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
 
         block_table = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens
-        query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
+        # Whether any request may carry more than one query token. Led by the
+        # PROMISED bound because it is baked into a CUDA graph: a varlen capture
+        # dummy puts one token per request, so a measured count says single-token
+        # and the flattening below never enters the graph that real k+1 batches
+        # replay. Never num_decode_tokens // num_decodes -- that average is a
+        # per-request length only for uniform batches, which ragged decode breaks.
+        multi_token_decode = (
+            attn_metadata.decode.max_query_len > 1
+            or attn_metadata.num_decode_tokens > attn_metadata.num_decodes
+        )
 
         # Set only on the causal varlen path below.
         cum_seq_lens_q: torch.Tensor | None = None
@@ -354,19 +369,19 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             # Non-causal DSpark block: flatten to single-token decode rows with
             # per-row context seq_lens (trtllm-gen has no causal flag and would
             # otherwise mask the block causally).
-            q = q.unsqueeze(1)
-            if query_len > 1:
+            if multi_token_decode:
                 block_table, seq_lens = self._prepare_flattened_decode_metadata(
                     attn_metadata,
-                    query_len,
+                    q.shape[0],
                     causal=False,
                 )
-        elif self.dcp_world_size > 1 and query_len > 1:
+            q = q.unsqueeze(1)
+        elif self.dcp_world_size > 1 and multi_token_decode:
             # Causal DCP block: flatten to single-token decode rows with
             # per-row rank-local seq_lens for each query's visible prefix.
             block_table, seq_lens = self._prepare_flattened_decode_metadata(
                 attn_metadata,
-                query_len,
+                q.shape[0],
                 causal=True,
             )
             q = q.unsqueeze(1)
@@ -470,7 +485,7 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
     def _prepare_flattened_decode_metadata(
         self,
         attn_metadata: FlashInferMLAMetadata,
-        query_len: int,
+        num_rows: int,
         *,
         causal: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -478,24 +493,38 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         decode = attn_metadata.decode
         assert decode is not None
         if decode.query_len:
-            assert decode.query_len == query_len
+            assert decode.query_len == num_rows
             assert decode.flattened_block_table is not None
             assert decode.flattened_seq_lens is not None
             return decode.flattened_block_table, decode.flattened_seq_lens
 
-        block_table = decode.block_table.repeat_interleave(query_len, dim=0)
+        # One kernel row per query token, paired with the block table and seq_len
+        # of the request it belongs to. Mapped via searchsorted on the device
+        # offsets, not repeat_interleave(uniform_len): a uniform repeat only lines
+        # up for uniform batches, so ragged lengths would hand rows past the first
+        # short request another request's KV (silent garbage). searchsorted keeps
+        # the shape static (num_rows) -- CUDA-graph capturable, no D2H sync. Padding
+        # rows clamp onto the last request; their outputs are discarded downstream.
+        cu = decode.query_start_loc_device
+        assert cu is not None, (
+            "FlashInferMLA flattened decode needs the device query offsets; "
+            "_build_decode must keep them even when the kernel gets no ragged trace."
+        )
+        rows = torch.arange(num_rows, device=cu.device, dtype=cu.dtype)
+        row_req = torch.searchsorted(cu[1:], rows, right=True).clamp_(
+            max=decode.block_table.shape[0] - 1
+        )
+        block_table = decode.block_table[row_req]
         if causal:
             global_seq_lens = decode.dcp_tot_seq_lens
             assert global_seq_lens is not None
-            offsets = torch.arange(
-                query_len - 1,
-                -1,
-                -1,
-                device=global_seq_lens.device,
-                dtype=global_seq_lens.dtype,
-            )
+            # Each query sees its request's prefix up to its own position, so the
+            # trailing offset is measured from that request's own length rather
+            # than from a batch-wide one.
+            req_lens = cu[row_req + 1] - cu[row_req]
+            local_pos = rows - cu[row_req]
             per_query_global_lens = torch.clamp(
-                (global_seq_lens.unsqueeze(1) - offsets).reshape(-1), min=0
+                global_seq_lens[row_req] - (req_lens - 1 - local_pos), min=0
             )
             interleave = self.cp_kv_cache_interleave_size
             dcp_span = self.dcp_world_size * interleave
@@ -506,9 +535,9 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             )
             seq_lens = per_query_global_lens // dcp_span * interleave + remainder
         else:
-            seq_lens = decode.seq_lens.repeat_interleave(query_len)
+            seq_lens = decode.seq_lens[row_req]
 
         decode.flattened_block_table = block_table
         decode.flattened_seq_lens = seq_lens
-        decode.query_len = query_len
+        decode.query_len = num_rows
         return block_table, seq_lens

@@ -328,6 +328,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 device=device,
             )
 
+    # No build_for_cudagraph_capture override needed: build() now routes every
+    # active decode through the spec path (see active_decode_mask below), so the
+    # inherited GDN uniform capture bakes the same branch ragged replay hits.
+
     def _get_recoverssm_context(self) -> "KDARecoverSSMCommitContext":
         context = self.recoverssm_context
         if context is not None:
@@ -375,25 +379,27 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_sequence_masks_cpu = None
             num_spec_decodes = 0
         else:
+            # Route EVERY active decode through the spec path, whatever its draft
+            # count. Adaptive verification hands out ragged draft budgets (some
+            # requests get 0 drafts, others 1..k); classifying by draft count lets
+            # a decode-only batch flip between the spec and plain-decode branches
+            # step to step. Under FULL cudagraph that corrupts the KDA SSM state
+            # (NaN, 0% acceptance): capture bakes one branch + its num_decodes == 0
+            # persistent staging, ragged replay hits the other and skips it. A
+            # query_len == 1 spec row equals a plain decode, so this only unifies
+            # the path; RecoverSSM already relied on it, native KDA now shares it.
             spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
-            if self.use_recoverssm:
-                assert m.is_prefilling is not None
-                assert m.is_prefilling.device.type == "cpu"
-                active_decode_mask_cpu = (~m.is_prefilling) & (
-                    query_start_loc_cpu.diff() > 0
-                )
-                spec_sequence_masks_cpu |= active_decode_mask_cpu
-            # Native KDA can use its regular decode path when no draft token
-            # was scheduled. RecoverSSM must preserve its extended conv window.
-            if (
-                not self.use_recoverssm
-                and num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
-                == 0
-            ):
+            assert m.is_prefilling is not None
+            assert m.is_prefilling.device.type == "cpu"
+            active_decode_mask_cpu = (~m.is_prefilling) & (
+                query_start_loc_cpu.diff() > 0
+            )
+            spec_sequence_masks_cpu |= active_decode_mask_cpu
+            num_spec_decodes = int(spec_sequence_masks_cpu.sum().item())
+            if num_spec_decodes == 0:
+                # No active decode and no drafts (e.g. a pure-prefill batch):
+                # fall through to the non-spec branch below.
                 spec_sequence_masks_cpu = None
-                num_spec_decodes = 0
-            else:
-                num_spec_decodes = spec_sequence_masks_cpu.sum().item()
 
         spec_request_indices = None
         if num_spec_decodes == 0:

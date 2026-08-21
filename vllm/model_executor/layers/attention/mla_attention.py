@@ -2209,6 +2209,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
@@ -2368,6 +2369,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
+                # The batch's promised bound, clamped to the decode side: it spans
+                # prefills too, while reorder_batch_threshold is by definition the
+                # longest query the decode split can hold.
+                max_query_len=min(
+                    common_attn_metadata.max_query_len, self.reorder_batch_threshold
+                ),
                 dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
             )
 

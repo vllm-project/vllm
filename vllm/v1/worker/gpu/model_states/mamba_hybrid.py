@@ -227,7 +227,12 @@ class MambaHybridModelState(DefaultModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        # Prefer the batch's promised bound (default.py does the same): measuring it
+        # from a capture dummy reports that dummy's even split, not the length the
+        # graph is expected to replay, so builders bake the wrong branch/tiling in.
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
             # Capture with worst-case max_seq_len so the graph is valid at any replay.
@@ -256,9 +261,13 @@ class MambaHybridModelState(DefaultModelState):
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
             if num_draft_tokens_per_req is not None:
                 # A row is a spec-decode row only when its whole prompt is already
-                # computed, i.e. exactly one non-draft (decode) token is scheduled.
-                is_decode = (
-                    input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
+                # computed. Test the request state, not num_scheduled_tokens ==
+                # draft_count + 1: adaptive verification rewrites num_scheduled_tokens
+                # to its own even split of the budget, so that equality almost never
+                # holds and every verification row would be demoted to plain decode.
+                # The > 0 test still guards zero-length rows under either mode.
+                is_decode = (~input_batch.is_prefilling_np) & (
+                    input_batch.num_scheduled_tokens > 0
                 )
                 spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
