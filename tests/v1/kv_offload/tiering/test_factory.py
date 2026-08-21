@@ -42,7 +42,7 @@ def _make_mock_args():
 
 
 def test_pre_registered_tiers_can_be_imported():
-    """CI sentinel: example/fs/obj paths must import and yield SecondaryTierManager."""
+    """CI sentinel: registered tiers import and yield SecondaryTierManager."""
     for tier_type in SecondaryTierFactory._registry:
         cls = SecondaryTierFactory._registry[tier_type]()
         assert issubclass(cls, SecondaryTierManager)
