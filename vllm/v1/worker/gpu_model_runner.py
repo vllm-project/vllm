@@ -7582,6 +7582,7 @@ class GPUModelRunner(
                         kv_cache_stride_order,
                         kernel_num_blocks,
                         packing,
+                        num_blocks_per_kv_block=num_blocks_per_kv_block,
                     )
 
                 elif isinstance(kv_cache_spec, MambaSpec):

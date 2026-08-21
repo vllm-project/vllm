@@ -3,7 +3,9 @@
 import copy
 import hashlib
 import importlib
+import math
 from collections.abc import Callable
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -3011,6 +3013,82 @@ def test_unify_kv_cache_spec_page_size_mamba():
         "attn_layer": new_kv_cache_spec(),
     }
     assert kv_cache_utils.unify_kv_cache_spec_page_size(specs) == specs
+
+
+def test_unify_kv_cache_spec_page_size_keeps_block_sizes_commensurate():
+    """Byte-exact block scaling must not break token commensurability.
+
+    A hybrid MLA + mamba target (block 1536 tokens, 1152 B/token MLA) with an
+    SWA draft model at 512 B/token: the page-exact scaled draft block would be
+    1769472 / 512 = 3456 tokens, which is not a multiple or divisor of 1536,
+    so the LCM of group block sizes (scheduler_block_size, the prefix-cache
+    hit alignment) would explode to 13824 tokens. When the draft backend
+    tolerates padded pages, prefer the largest commensurate block size (1536)
+    with the page padded to the shared page.
+    """
+    mla_spec = MLAAttentionSpec(
+        block_size=1536, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+    )
+    assert mla_spec.page_size_bytes == 1536 * 1152
+    mamba_spec = new_mamba_spec(
+        block_size=1536,
+        shapes=((576,),),
+        dtypes=(torch.bfloat16,),
+        page_size_padded=mla_spec.page_size_bytes,
+    )
+    # 512 B/token; block starts at the backend's smallest kernel block.
+    draft_swa_spec = new_sliding_window_spec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=2048,
+        indexes_kv_by_block_stride=True,
+    )
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "mla_layer": mla_spec,
+            "mamba_layer": mamba_spec,
+            "draft_swa_layer": draft_swa_spec,
+        }
+    )
+    unified_draft = unified["draft_swa_layer"]
+    assert unified_draft.block_size == 1536
+    assert unified_draft.page_size_padded == mla_spec.page_size_bytes
+    assert unified_draft.page_size_bytes == mla_spec.page_size_bytes
+    block_sizes = [spec.block_size for spec in unified.values()]
+    assert math.lcm(*block_sizes) == 1536
+
+    # Without padded-page backend support, byte-exact scaling is kept.
+    draft_swa_no_stride = replace(draft_swa_spec, indexes_kv_by_block_stride=False)
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "mla_layer": mla_spec,
+            "mamba_layer": mamba_spec,
+            "draft_swa_layer": draft_swa_no_stride,
+        }
+    )
+    assert unified["draft_swa_layer"].block_size == 3456
+
+    # Commensurate byte-exact scaling (e.g. Gemma-style 2:1 pages) is
+    # preferred over padding even when the backend supports it.
+    full_spec = new_kv_cache_spec(
+        block_size=16, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
+    )
+    swa_spec = new_sliding_window_spec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=1024,
+        indexes_kv_by_block_stride=True,
+    )
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"full_layer": full_spec, "swa_layer": swa_spec}
+    )
+    assert unified["swa_layer"].block_size == 32
+    assert unified["swa_layer"].page_size_padded is None
 
 
 def test_hma_not_disabled_when_kv_events_enabled():

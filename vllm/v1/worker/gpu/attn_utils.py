@@ -276,6 +276,7 @@ def _reshape_attention_kv_cache(
     num_blocks: int,
     packing: tuple[int, int] | None,
     page_aligned_blocks: bool = False,
+    num_blocks_per_kv_block: int = 1,
 ) -> torch.Tensor:
     permuted_kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
     inv_order = [
@@ -307,7 +308,24 @@ def _reshape_attention_kv_cache(
             "kv-first layouts are not supported."
         )
         dtype_size = get_dtype_size(kv_cache_spec.dtype)
-        page_stride = kv_cache_spec.page_size_bytes // dtype_size
+        page_size_bytes = kv_cache_spec.page_size_bytes
+        if num_blocks_per_kv_block > 1:
+            # The manager block is split into several kernel blocks whose
+            # pages are all addressed through this view's block dim, so the
+            # page padding must be distributed evenly across the kernel
+            # blocks to keep them uniformly strided.
+            assert page_size_bytes % num_blocks_per_kv_block == 0, (
+                f"Padded page size ({page_size_bytes} bytes) is not evenly "
+                f"divisible across the {num_blocks_per_kv_block} kernel "
+                "blocks per KV cache block."
+            )
+            page_size_bytes //= num_blocks_per_kv_block
+        real_kernel_page_bytes = prod(kv_cache_shape[1:]) * dtype_size
+        assert real_kernel_page_bytes <= page_size_bytes, (
+            f"Kernel block page ({real_kernel_page_bytes} bytes) exceeds its "
+            f"share of the padded page ({page_size_bytes} bytes)."
+        )
+        page_stride = page_size_bytes // dtype_size
 
         num_blocks_dim = inv_order[0]
         strides = list(torch.empty(permuted_kv_cache_shape, device="meta").stride())
@@ -431,6 +449,7 @@ def _reshape_kv_cache(
                     kernel_num_blocks,
                     packing,
                     page_aligned_blocks=layer_name in page_aligned_layers,
+                    num_blocks_per_kv_block=num_blocks_per_kv_block,
                 )
 
             elif isinstance(kv_cache_spec, MambaSpec):
