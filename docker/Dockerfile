@@ -674,7 +674,7 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
 # source. The `cuda-checkpoint`-compatible helper is built from NVIDIA Dynamo's
 # Apache-2.0 source against the public CUDA Driver checkpoint APIs instead of
 # redistributing NVIDIA's proprietary cuda-checkpoint binary.
-COPY docker/install_snapshot_runtime.sh /usr/local/bin/install_snapshot_runtime.sh
+COPY tools/install_snapshot_runtime.sh /usr/local/bin/install_snapshot_runtime.sh
 RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
         MAX_JOBS="${max_jobs}" /usr/local/bin/install_snapshot_runtime.sh; \
     else \
