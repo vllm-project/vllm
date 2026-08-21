@@ -150,6 +150,29 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary():
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_internal_checkpoint_metadata_skips_unaligned_offset(caplog):
+    device = torch.device("cuda")
+    # The checkpoint block boundary is 48, but this query starts at token 1,
+    # making the real checkpoint offset 47, which is not FlashKDA-aligned.
+    batch = BatchSpec(seq_lens=[50], query_lens=[49])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    ).replace(is_prefilling=torch.tensor([True]))
+    with caplog.at_level("WARNING"):
+        actual = _make_builder(
+            KimiK3KDAMetadataBuilder,
+            num_speculative_tokens=0,
+            full_cuda_graph=False,
+            mamba_cache_mode="align",
+            num_prefill_checkpoint_blocks=1,
+            device=device,
+        ).build(0, common_attn_metadata)
+
+    assert actual.checkpoint is None
+    assert "Skipping a K3 Mamba checkpoint at offset 47" in caplog.text
+
+
 @pytest.mark.parametrize(
     (
         "batch",

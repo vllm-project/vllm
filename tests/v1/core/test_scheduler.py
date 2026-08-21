@@ -3690,6 +3690,80 @@ def test_mamba_align_encoder_cache_cap_makes_progress():
     assert output.scheduled_encoder_inputs[request.request_id] == [1]
 
 
+def test_mamba_checkpoint_encoder_cap_hash_aligns_and_makes_progress():
+    """Checkpoint prefills hash-align encoder caps without stalling."""
+    block_size = 1536
+    encoder_cache_size = 600
+    scheduler = create_scheduler(
+        max_num_batched_tokens=8192,
+        block_size=block_size,
+        enable_prefix_caching=True,
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler.mamba_has_prefill_checkpoint_blocks = True
+    scheduler.mamba_partial_cache_hit = True
+    scheduler.hash_block_size = 128
+    scheduler.max_num_encoder_input_tokens = encoder_cache_size
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=encoder_cache_size)
+
+    first_image_end = 510
+    request = create_requests(
+        num_requests=1,
+        num_tokens=1024,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=500),
+                PlaceholderRange(offset=first_image_end, length=500),
+            ]
+        ],
+        max_tokens=1,
+        block_size=block_size,
+        req_ids=["req"],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    first_hash_boundary = 384
+    assert output.num_scheduled_tokens[request.request_id] == first_hash_boundary
+    assert output.scheduled_encoder_inputs[request.request_id] == [0]
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == (
+        first_image_end - first_hash_boundary
+    )
+    assert request.request_id not in output.scheduled_encoder_inputs
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == (
+        request.num_prompt_tokens - first_image_end
+    )
+    assert output.scheduled_encoder_inputs[request.request_id] == [1]
+
+
 def test_mamba_align_eagle_schedules_encoder_at_boundary():
     """EAGLE lookahead at an aligned MM boundary requires encoder cache."""
     block_size = 512

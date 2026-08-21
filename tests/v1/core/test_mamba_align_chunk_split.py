@@ -128,6 +128,35 @@ def test_internal_checkpoint_split(
         assert all(not block.is_null for block in blocks)  # checkpoint + running state
 
 
+@pytest.mark.parametrize(
+    ("num_computed_tokens", "encoder_cap", "cap_before_encoder", "expected"),
+    [
+        (15360, 1259, 4096, 1152),
+        (16512, 107, 4096, 107),
+        (16512, 0, 4096, 0),
+    ],
+)
+def test_internal_checkpoint_hash_aligns_encoder_cap_without_blocking_progress(
+    num_computed_tokens: int,
+    encoder_cap: int,
+    cap_before_encoder: int,
+    expected: int,
+) -> None:
+    stub = SimpleNamespace(
+        mamba_has_prefill_checkpoint_blocks=True,
+        hash_block_size=128,
+    )
+
+    actual = Scheduler._align_encoder_cap_to_hash_block(
+        stub,
+        num_computed_tokens,
+        encoder_cap,
+        cap_before_encoder,
+    )
+
+    assert actual == expected
+
+
 def _run_chunked_prefill(
     manager: KVCacheManager, request: Request, budgets: list[int]
 ) -> dict[int, int]:
