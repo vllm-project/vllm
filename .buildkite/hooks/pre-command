@@ -1,17 +1,24 @@
 #!/bin/bash
-# Branch-scoped diagnostic: sample host pressure/service/network state during the
-# CPU image build so the job log carries heartbeat-loss discrimination evidence.
-# Not for merge.
+# Branch-scoped diagnostic: sample host CPU/cgroup/pressure/service/network state
+# during the CPU image build so the job log carries heartbeat-loss discrimination
+# evidence (starvation vs restart vs network vs I/O). Not for merge.
 if [[ "${BUILDKITE_STEP_KEY:-}" == *image-build* ]]; then
+  AGENT_CG=$(systemctl show buildkite-agent -p ControlGroup --value 2>/dev/null)
+  BKD_CG=$(systemctl show buildkitd -p ControlGroup --value 2>/dev/null)
   (
     while true; do
       echo "HBSAMPLE t=$(date -u +%FT%TZ) up=$(cut -d' ' -f1 /proc/uptime) load=$(cut -d' ' -f1-3 /proc/loadavg)"
+      echo "HBSAMPLE stat=$(head -1 /proc/stat)"
       echo "HBSAMPLE cpu_psi=$(tr '\n' ' ' < /proc/pressure/cpu 2>/dev/null)"
       echo "HBSAMPLE io_psi=$(tr '\n' ' ' < /proc/pressure/io 2>/dev/null)"
       echo "HBSAMPLE mem_psi=$(tr '\n' ' ' < /proc/pressure/memory 2>/dev/null)"
-      echo "HBSAMPLE agent=$(systemctl show buildkite-agent -p NRestarts,ActiveEnterTimestamp,SubState 2>/dev/null | tr '\n' ' ')"
-      echo "HBSAMPLE buildkitd=$(systemctl show buildkitd -p NRestarts,ActiveEnterTimestamp,SubState,CPUWeight,Nice 2>/dev/null | tr '\n' ' ')"
-      echo "HBSAMPLE net=$(curl -s -o /dev/null -w '%{http_code}:%{time_total}' --max-time 3 https://agent.buildkite.com/v3 2>/dev/null || echo FAIL)"
+      echo "HBSAMPLE agent_svc=$(systemctl show buildkite-agent -p NRestarts,ActiveEnterTimestamp,SubState,Nice,CPUWeight,ControlGroup 2>/dev/null | tr '\n' ' ')"
+      echo "HBSAMPLE bkd_svc=$(systemctl show buildkitd -p NRestarts,ActiveEnterTimestamp,SubState,Nice,CPUWeight,ControlGroup 2>/dev/null | tr '\n' ' ')"
+      [ -n "$AGENT_CG" ] && echo "HBSAMPLE agent_cpustat=$(tr '\n' ' ' < "/sys/fs/cgroup${AGENT_CG}/cpu.stat" 2>/dev/null) agent_weight=$(cat "/sys/fs/cgroup${AGENT_CG}/cpu.weight" 2>/dev/null)"
+      [ -n "$BKD_CG" ] && echo "HBSAMPLE bkd_cpustat=$(tr '\n' ' ' < "/sys/fs/cgroup${BKD_CG}/cpu.stat" 2>/dev/null) bkd_weight=$(cat "/sys/fs/cgroup${BKD_CG}/cpu.weight" 2>/dev/null)"
+      echo "HBSAMPLE net_http=$(curl -s -o /dev/null -w '%{http_code}:%{time_total}' --max-time 3 https://agent.buildkite.com/v3 2>/dev/null || echo FAIL)"
+      echo "HBSAMPLE net_dev=$(grep -E 'ens|eth' /proc/net/dev 2>/dev/null | head -1 | tr -s ' ')"
+      echo "HBSAMPLE cgroup_type=$(stat -fc %T /sys/fs/cgroup 2>/dev/null)"
       sleep 10
     done
   ) &
