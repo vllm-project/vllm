@@ -1750,13 +1750,15 @@ steps:
   - vllm/models/kimi_k3/nvidia/kda_metadata.py
   - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
   - vllm/models/kimi_k3/amd/
+  - csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu
   - tests/models/kimi_k3/test_amd_attn_res.py
+  - tests/models/kimi_k3/test_amd_kda_decode.py
   - tests/models/kimi_k3/test_kda.py
   - tests/models/kimi_k3/test_kda_metadata.py
   - vllm/platforms/rocm.py
   commands:
-  # Run the ROCm AttnRes counterpart plus the existing KDA coverage.
-  - pytest -v -s models/kimi_k3/test_amd_attn_res.py models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
+  # Run the ROCm AttnRes/KDA decode counterparts plus existing KDA coverage.
+  - pytest -v -s models/kimi_k3/test_amd_attn_res.py models/kimi_k3/test_amd_kda_decode.py models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
 
 - label: ":amd: (MI300) Mamba Kernels" # TBD
   timeout_in_minutes: 180
@@ -3484,6 +3486,8 @@ steps:
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
   - vllm/third_party/flash_linear_attention/ops/
+  - tests/evals/gsm8k/configs/models-qwen35-mi355.txt
+  - tests/evals/gsm8k/configs/Qwen3.5-35B-A3B-FP8-DEP2.yaml
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
