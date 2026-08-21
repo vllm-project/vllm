@@ -22,6 +22,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_unpad_output,
     should_use_atomic_add_reduce,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    cutlass_fp4_supported,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.math_utils import round_up
@@ -351,12 +354,20 @@ def prepare_nvfp4_moe_layer_for_marlin(
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
-    logger.warning_once(
-        "Your GPU does not have native support for FP4 computation but "
-        "FP4 quantization is being used. Weight-only FP4 compression will "
-        "be used leveraging the Marlin kernel. This may degrade "
-        "performance for compute-heavy workloads."
-    )
+    if not cutlass_fp4_supported():
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation but "
+            "FP4 quantization is being used. Weight-only FP4 compression will "
+            "be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads."
+        )
+    else:
+        logger.info_once(
+            "Using Marlin weight-only FP4 MoE kernels. This GPU supports native "
+            "FP4 computation, but the checkpoint is weight-only quantized (no FP4 "
+            "activation scales), so native FP4 GEMM kernels do not apply. A W4A4 "
+            "NVFP4 checkpoint would use the cutlass path on this device."
+        )
 
     input_dtype = get_marlin_input_dtype(prefix="")
     if input_dtype is not None and input_dtype.itemsize == 1:
