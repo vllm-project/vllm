@@ -140,3 +140,31 @@ def test_dflash_context_rope_cache_matches_k_dtype_and_reuses_storage():
     fp32_cache = fp32_model._get_context_rope_cache(fp32_k)
     assert fp32_cache.dtype is torch.float32
     assert fp32_cache.data_ptr() == original_data_ptr
+
+
+def test_dflash_context_rope_cache_rejects_device_mismatch():
+    """DFlash cache placement errors are reported before the custom op call."""
+    model = DFlashQwen3Model.__new__(DFlashQwen3Model)
+    torch.nn.Module.__init__(model)
+    model._rope_cos_sin_cache = torch.randn(16, 8, dtype=torch.float32)
+
+    with pytest.raises(
+        RuntimeError,
+        match="RoPE cache and projected K must be on the same device",
+    ):
+        model._get_context_rope_cache(torch.empty(2, 8, device="meta"))
+
+
+def test_dflash_context_rope_cache_does_not_mutate_during_compile(monkeypatch):
+    """Compile tracing receives a converted cache without mutating the model."""
+    model = DFlashQwen3Model.__new__(DFlashQwen3Model)
+    torch.nn.Module.__init__(model)
+    original_cache = torch.randn(16, 8, dtype=torch.float32)
+    model._rope_cos_sin_cache = original_cache
+    k = torch.randn(2, 8, dtype=torch.bfloat16)
+
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    cache = model._get_context_rope_cache(k)
+
+    assert cache.dtype is torch.bfloat16
+    assert model._rope_cos_sin_cache is original_cache

@@ -590,13 +590,18 @@ class DFlashQwen3Model(nn.Module):
     def _get_context_rope_cache(self, k: torch.Tensor) -> torch.Tensor:
         """Return the context RoPE cache matched to the projected K tensor."""
         cos_sin_cache = self._rope_cos_sin_cache
-        if (
-            cos_sin_cache.device == k.device
-            and cos_sin_cache.dtype == k.dtype
-        ):
+        if cos_sin_cache.device != k.device:
+            raise RuntimeError(
+                "DFlash RoPE cache and projected K must be on the same device"
+            )
+
+        if cos_sin_cache.dtype == k.dtype:
             return cos_sin_cache
 
-        cos_sin_cache = cos_sin_cache.to(device=k.device, dtype=k.dtype)
+        cos_sin_cache = cos_sin_cache.to(dtype=k.dtype)
+        if torch.compiler.is_compiling():
+            return cos_sin_cache
+
         self._rope_cos_sin_cache = cos_sin_cache
         return cos_sin_cache
 
