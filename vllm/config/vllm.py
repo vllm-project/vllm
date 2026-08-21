@@ -1147,18 +1147,7 @@ class VllmConfig:
                     "connectors (PD disaggregation, KV cache offload)."
                 )
 
-        if (
-            self.model_config is not None
-            and self.model_config.multimodal_config is not None
-            and self.model_config.multimodal_config.language_model_only
-            and self.compilation_config.cudagraph_mm_encoder
-        ):
-            raise ValueError(
-                "--language-model-only is incompatible with "
-                "cudagraph_mm_encoder=True, since it disables all multimodal "
-                "inputs and the multimodal encoder is never run. Please "
-                "disable one of them."
-            )
+        self._validate_mm_encoder_cudagraph()
 
         self._verify_sampling_replay_config()
         self._verify_trace_replay_config()
@@ -2413,6 +2402,39 @@ class VllmConfig:
             return
 
         mm_config.validate_mm_processor_device(self.ec_transfer_config)
+
+    def _validate_mm_encoder_cudagraph(self) -> None:
+        if not self.compilation_config.cudagraph_mm_encoder:
+            return
+
+        model_config = self.model_config
+        if model_config is None or model_config.multimodal_config is None:
+            return
+
+        mm_config = model_config.multimodal_config
+        if mm_config.language_model_only:
+            raise ValueError(
+                "--language-model-only is incompatible with "
+                "cudagraph_mm_encoder=True, since it disables all multimodal "
+                "inputs and the multimodal encoder is never run. Please "
+                "disable one of them."
+            )
+
+        if not mm_config.enable_mm_embeds:
+            return
+
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+
+        if (
+            MULTIMODAL_REGISTRY.supports_multimodal_inputs(model_config)
+            and not MULTIMODAL_REGISTRY.uses_multimodal_encoder(model_config)
+        ):
+            raise ValueError(
+                "cudagraph_mm_encoder=True is incompatible with embedding-only "
+                "mode, since no multimodal encoder is run. Please disable "
+                "cudagraph_mm_encoder or enable at least one raw multimodal "
+                "input."
+            )
 
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""

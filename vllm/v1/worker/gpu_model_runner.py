@@ -6738,9 +6738,7 @@ class GPUModelRunner(
     @torch.inference_mode()
     def _create_encoder_cudagraph_manager(self) -> "EncoderCudaGraphManager | None":
         if not (
-            self.compilation_config.cudagraph_mm_encoder
-            and self.supports_mm_inputs
-            and self.mm_registry.uses_multimodal_encoder(self.model_config)
+            self.compilation_config.cudagraph_mm_encoder and self.supports_mm_inputs
         ):
             return None
 

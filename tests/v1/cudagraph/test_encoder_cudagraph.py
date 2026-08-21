@@ -12,16 +12,12 @@ Test organization:
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
 """
 
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 import torch
-import torch.nn as nn
 
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import (
     EncoderCudaGraphManager,
@@ -32,9 +28,6 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphReplayBuffers,
     EncoderItemSpec,
 )
-from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -103,99 +96,6 @@ class _MockModel(SupportsEncoderCudaGraph):
 
     def get_encoder_cudagraph_budget_range(self, vllm_config):
         return (self._min_budget, self._max_budget)
-
-
-class _ModelStateForTest(ModelState):
-    def prepare_inputs_embeds(self, *args: Any, **kwargs: Any) -> torch.Tensor | None:
-        return None
-
-    def prepare_inputs(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return {}
-
-    def prepare_dummy_inputs(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return {}
-
-    def prepare_attn(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return {}
-
-
-def _make_embedding_only_model_config():
-    mm_config = SimpleNamespace(
-        enable_mm_embeds=True,
-        get_limit_per_prompt=lambda modality: 0,
-    )
-    return SimpleNamespace(
-        dtype=torch.float32,
-        enforce_eager=False,
-        get_inputs_embeds_size=lambda: 4,
-        get_multimodal_config=lambda: mm_config,
-        is_multimodal_model=True,
-        max_model_len=128,
-    )
-
-
-def _make_model_state_vllm_config():
-    return SimpleNamespace(
-        model_config=_make_embedding_only_model_config(),
-        scheduler_config=SimpleNamespace(
-            max_num_seqs=1,
-            max_num_batched_tokens=8,
-        ),
-        compilation_config=SimpleNamespace(cudagraph_mm_encoder=True),
-        observability_config=None,
-    )
-
-
-@pytest.mark.cpu_test
-def test_embedding_only_mode_skips_encoder_cudagraph_manager():
-    """Embedding-only inputs must not create an encoder CUDA graph manager."""
-    vllm_config = _make_model_state_vllm_config()
-    model = nn.Module()
-    encoder_cache = EncoderCache()
-
-    with (
-        patch.object(
-            MULTIMODAL_REGISTRY,
-            "_create_processing_info",
-            return_value=SimpleNamespace(supported_mm_limits={"image"}),
-        ),
-        patch(
-            "vllm.v1.worker.gpu.model_states.interface.supports_encoder_cudagraph",
-            return_value=True,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.model_states.interface.EncoderCudaGraphManager",
-        ) as manager,
-    ):
-        state = _ModelStateForTest(
-            vllm_config,
-            model,
-            encoder_cache,
-            torch.device("cpu"),
-        )
-
-    manager.assert_not_called()
-    assert state.encoder_cache is encoder_cache
-    assert not state.encoder_runner.has_cudagraph()
-
-
-@pytest.mark.cpu_test
-def test_legacy_runner_skips_encoder_cudagraph_manager_for_embedding_only_mode():
-    """The legacy runner must apply the same embedding-only guard."""
-    runner = object.__new__(GPUModelRunner)
-    runner.compilation_config = SimpleNamespace(cudagraph_mm_encoder=True)
-    runner.mm_registry = MULTIMODAL_REGISTRY
-    runner.model_config = _make_embedding_only_model_config()
-    runner.supports_mm_inputs = True
-
-    with patch.object(
-        MULTIMODAL_REGISTRY,
-        "_create_processing_info",
-        return_value=SimpleNamespace(supported_mm_limits={"image"}),
-    ):
-        manager = runner._create_encoder_cudagraph_manager()
-
-    assert manager is None
 
 
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:

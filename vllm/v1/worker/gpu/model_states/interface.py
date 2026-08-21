@@ -12,7 +12,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
     supports_encoder_cudagraph,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
@@ -71,7 +70,6 @@ class ModelState(ABC):
             enable_encoder_cuda_graph = (
                 not self.model_config.enforce_eager
                 and vllm_config.compilation_config.cudagraph_mm_encoder
-                and MULTIMODAL_REGISTRY.uses_multimodal_encoder(self.model_config)
                 and supports_encoder_cudagraph(model)
             )
             cudagraph_manager = (
