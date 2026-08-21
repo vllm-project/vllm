@@ -140,7 +140,13 @@ class Sampler:
         if self.trace_replay_state is not None:
             # Overwrite sampled tokens with the replay trace up-front so that
             # computed logprobs reflect the real distribution of the forced token.
-            self.trace_replay_state.apply_trace(sampled, idx_mapping)
+            # Non-spec batches may omit unfinished prefill rows from sampled.
+            trace_idx_mapping = (
+                expanded_idx_mapping
+                if input_batch.num_draft_tokens_per_req is None
+                else idx_mapping
+            )
+            self.trace_replay_state.apply_trace(sampled, trace_idx_mapping)
 
         if return_logprobs:
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
