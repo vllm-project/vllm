@@ -268,6 +268,17 @@ def select_unquantized_moe_backend(
             "deployment configuration."
         )
 
+    def _is_supported_kernel_cls(
+        kernel_cls: type[mk.FusedMoEExperts],
+        config: FusedMoEConfig,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if config.require_decomposed_backend and kernel_cls.is_monolithic():
+            return False, "the deployment requires a decomposed MoE backend"
+        return kernel_cls.is_supported_config(
+            kernel_cls, config, None, None, activation_format
+        )
+
     def _return_or_raise(
         backend: UnquantizedMoeBackend,
         config: FusedMoEConfig,
@@ -275,8 +286,8 @@ def select_unquantized_moe_backend(
     ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
         reason = None
         for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, None, None, activation_format
+            supported, reason = _is_supported_kernel_cls(
+                k_cls, config, activation_format
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
@@ -312,8 +323,8 @@ def select_unquantized_moe_backend(
 
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, moe_config, None, None, activation_format
+            supported, reason = _is_supported_kernel_cls(
+                k_cls, moe_config, activation_format
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))

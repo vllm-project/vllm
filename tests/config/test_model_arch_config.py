@@ -212,6 +212,34 @@ def test_legacy_modelopt_config_without_producer_is_normalized():
     assert convertor.get_quantization_config()["quant_method"] == "modelopt_fp4"
 
 
+def test_transform_only_compression_config_is_not_quantization():
+    compression_config = {
+        "producer": {"name": "llm-compressor"},
+        "transform_config": {"expert_substitution": {"version": 1}},
+    }
+    hf_config = PretrainedConfig(compression_config=compression_config)
+
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    assert convertor.get_quantization_config() is None
+    assert "quant_method" not in compression_config
+
+
+def test_compression_config_can_compose_transform_and_quantization():
+    compression_config = {
+        "quant_method": "compressed_tensors",
+        "config_groups": {},
+        "transform_config": {"expert_substitution": {"version": 1}},
+    }
+    hf_config = PretrainedConfig(compression_config=compression_config)
+
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    quantization_config = convertor.get_quantization_config()
+    assert quantization_config is not None
+    assert quantization_config["quant_method"] == "compressed-tensors"
+
+
 def _layer(**overrides) -> ModelArchitectureConfig:
     fields = dict(
         architectures=["X"],
