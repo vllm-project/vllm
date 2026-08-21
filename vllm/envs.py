@@ -1997,10 +1997,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Defers the MoE top-k reduction into the fused all-reduce + RMSNorm that
     # follows it, instead of letting the MoE kernel finalize its own output.
-    # Off by default: measured on MiniMax-M3 NVFP4 / TP=4 / GB200 it wins 1.6%
-    # TPOT at concurrency 1, breaks even at 8 and loses 3.4% at 32, and the
-    # fused pattern is trtllm-only, so enabling it also gives up mnnvl
-    # all-reduce (another 3.6% at concurrency 1 on an NVL node).
+   
     "VLLM_ENABLE_MOE_TAIL_FUSION": lambda: bool(
         int(os.getenv("VLLM_ENABLE_MOE_TAIL_FUSION", "0"))
     ),

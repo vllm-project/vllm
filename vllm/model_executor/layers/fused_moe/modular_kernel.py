@@ -930,10 +930,14 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ) -> None:
+    ) -> UnfinalizedMoEOutput | None:
         """
         This function computes the intermediate result of a Mixture of Experts
         (MoE) layer using two sets of weights, w1 and w2.
+
+        Writes into `output` and returns None, unless the implementation stopped
+        after GEMM2 and left the top-k reduction to a fused consumer, in which
+        case `output` is untouched and the unfinalized result is returned.
 
         Parameters:
         - output: (torch.Tensor): The unweighted, unreduced output tensor.
