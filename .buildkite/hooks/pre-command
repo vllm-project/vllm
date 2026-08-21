@@ -1,0 +1,19 @@
+#!/bin/bash
+# Branch-scoped diagnostic: sample host pressure/service/network state during the
+# CPU image build so the job log carries heartbeat-loss discrimination evidence.
+# Not for merge.
+if [[ "${BUILDKITE_STEP_KEY:-}" == *image-build* ]]; then
+  (
+    while true; do
+      echo "HBSAMPLE t=$(date -u +%FT%TZ) up=$(cut -d' ' -f1 /proc/uptime) load=$(cut -d' ' -f1-3 /proc/loadavg)"
+      echo "HBSAMPLE cpu_psi=$(tr '\n' ' ' < /proc/pressure/cpu 2>/dev/null)"
+      echo "HBSAMPLE io_psi=$(tr '\n' ' ' < /proc/pressure/io 2>/dev/null)"
+      echo "HBSAMPLE mem_psi=$(tr '\n' ' ' < /proc/pressure/memory 2>/dev/null)"
+      echo "HBSAMPLE agent=$(systemctl show buildkite-agent -p NRestarts,ActiveEnterTimestamp,SubState 2>/dev/null | tr '\n' ' ')"
+      echo "HBSAMPLE buildkitd=$(systemctl show buildkitd -p NRestarts,ActiveEnterTimestamp,SubState,CPUWeight,Nice 2>/dev/null | tr '\n' ' ')"
+      echo "HBSAMPLE net=$(curl -s -o /dev/null -w '%{http_code}:%{time_total}' --max-time 3 https://agent.buildkite.com/v3 2>/dev/null || echo FAIL)"
+      sleep 10
+    done
+  ) &
+  echo "HBSAMPLE sampler started pid=$!"
+fi
