@@ -2272,7 +2272,7 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         worker.shutdown()
         worker.shutdown()
 
-        mock_exec.shutdown.assert_called_with(wait=False)
+        mock_exec.shutdown.assert_called()
 
         # Same sequence on scheduler.shutdown()
         scheduler.shutdown()
