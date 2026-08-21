@@ -246,8 +246,8 @@ async def test_renderer_only_chat_request_skips_mm_cache():
 
 
 @pytest.mark.asyncio
-async def test_chat_error_stream():
-    """test finish_reason='error' returns 500 InternalServerError (streaming)"""
+async def test_chat_error_stream_first_chunk():
+    """An error before the first token must reach the streaming client."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -256,43 +256,21 @@ async def test_chat_error_stream():
 
     serving_chat = _build_serving_chat(mock_engine)
 
-    completion_output_1 = CompletionOutput(
+    completion_output = CompletionOutput(
         index=0,
-        text="Hello",
-        token_ids=[100],
-        cumulative_logprob=None,
-        logprobs=None,
-        finish_reason=None,
-    )
-
-    request_output_1 = RequestOutput(
-        request_id="test-id",
-        prompt="Test prompt",
-        prompt_token_ids=[1, 2, 3],
-        prompt_logprobs=None,
-        outputs=[completion_output_1],
-        finished=False,
-        metrics=None,
-        lora_request=None,
-        encoder_prompt=None,
-        encoder_prompt_token_ids=None,
-    )
-
-    completion_output_2 = CompletionOutput(
-        index=0,
-        text="Hello",
-        token_ids=[100],
+        text="",
+        token_ids=[],
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="error",
     )
 
-    request_output_2 = RequestOutput(
+    request_output = RequestOutput(
         request_id="test-id",
         prompt="Test prompt",
         prompt_token_ids=[1, 2, 3],
         prompt_logprobs=None,
-        outputs=[completion_output_2],
+        outputs=[completion_output],
         finished=True,
         metrics=None,
         lora_request=None,
@@ -301,8 +279,7 @@ async def test_chat_error_stream():
     )
 
     async def mock_generate(*args, **kwargs):
-        yield request_output_1
-        yield request_output_2
+        yield request_output
 
     mock_engine.generate = MagicMock(side_effect=mock_generate)
 
