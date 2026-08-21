@@ -552,7 +552,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor qg, Tensor w, Tensor u, Tensor kg_t, Tensor aqk, Tensor decay, "
       "Tensor? initial_state, Tensor(a!)? final_state, Tensor! out, "
       "Tensor cu_seqlens, Tensor chunk_offsets, float scale, "
-      "Tensor(b!)? group_state, int groups) -> ()");
+      "Tensor(b!)? group_state, int groups, "
+      "Tensor(c!)? checkpoint_state=None, Tensor? checkpoint_offsets=None, "
+      "Tensor? checkpoint_state_indices=None) -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

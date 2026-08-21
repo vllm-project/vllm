@@ -118,6 +118,17 @@ struct Params {
   // so one scan fragment is a single 16 B load and consecutive lanes are
   // consecutive addresses.
   bf16_t* mgT;
+  // Prefill checkpoint export, mirroring FlashKDA's `checkpoint_state` /
+  // `checkpoint_offsets`.  `ckoff[n]` is a token offset relative to sequence
+  // n's first query token; 0 disables the export for that sequence.  The walk
+  // snapshots the state it holds at that offset into `ckpt`, so a later
+  // prefix-cache hit can resume from a mamba block boundary instead of
+  // replaying the tail as a second model forward.  `ckidx`, when present,
+  // redirects sequence n's snapshot to row `ckidx[n]`, which lets the store go
+  // straight into the paged state cache; a negative row disables it.
+  float* ckpt;
+  const int* ckoff;
+  const int* ckidx;
   int G;
   int NHv;
   __device__ __forceinline__ int64_t NH() const { return NHv; }
@@ -470,6 +481,26 @@ __global__ __launch_bounds__(64 * WAVES, 1) void kda_chunk_fused(Params p) {
   }
   const bool last_group = (c0 + nt == nt_all);
 
+  // Local chunk after which this block owns the checkpoint snapshot, or -1.
+  // Pass one walks from a zero state, so only pass two ever holds the real
+  // state at an interior boundary.  A non-aligned offset cannot be honoured --
+  // the walk only passes through multiples of kBT -- and is dropped here; the
+  // metadata builder is the enforcement point, so that a position the kernel
+  // will not write is never hashed as a cache block.
+  int ck_local = -1;
+  int64_t ck_dst = 0;
+  if constexpr (PASS2) {
+    if (p.ckpt != nullptr) {
+      const int off = p.ckoff[n];
+      const int ck = off / kBT - 1;
+      const int row = p.ckidx != nullptr ? p.ckidx[n] : n;
+      if (off > 0 && off % kBT == 0 && ck >= c0 && ck < c0 + nt && row >= 0) {
+        ck_local = ck - c0;
+        ck_dst = (static_cast<int64_t>(row) * p.H + h) * kV;
+      }
+    }
+  }
+
   const int64_t ld_k = static_cast<int64_t>(p.H) * kK;
   const int64_t ld_v = static_cast<int64_t>(p.H) * kV;
   const int64_t ld_a = static_cast<int64_t>(p.H) * kBT;
@@ -531,6 +562,14 @@ __global__ __launch_bounds__(64 * WAVES, 1) void kda_chunk_fused(Params p) {
     for (int kt = 0; kt < kNKT; ++kt)
       for (int vt = 0; vt < kNV; ++vt) S[kt][vt] = f32x4{0.f, 0.f, 0.f, 0.f};
   }
+
+  // Same store as `ht` below, at an interior boundary instead of the last one.
+  auto store_checkpoint = [&]() {
+    float* dst = p.ckpt + (ck_dst + v0 + lrow) * kK + 4 * lgrp;
+    for (int vt = 0; vt < kNV; ++vt)
+      for (int kt = 0; kt < kNKT; ++kt)
+        *reinterpret_cast<f32x4*>(dst + vt * 16 * kK + kt * 16) = S[kt][vt];
+  };
 
   const int tail = last_group ? T - (nt_all - 1) * kBT : kBT;
   const bool ragged = tail != kBT;
@@ -645,6 +684,8 @@ __global__ __launch_bounds__(64 * WAVES, 1) void kda_chunk_fused(Params p) {
       stage_decay(dn, nxt);
     }
 
+    if (c == ck_local) store_checkpoint();
+
     bf16_t* op = out + static_cast<int64_t>(c) * kBT * ld_v;
     if constexpr (PASS2)
       for (int vt = 0; vt < kNV; ++vt)
@@ -663,6 +704,7 @@ __global__ __launch_bounds__(64 * WAVES, 1) void kda_chunk_fused(Params p) {
     chunk_phase_a<BVW, PASS2, kNThread>(cur, S, uptr, kStrU, accO, vnf, p.scale,
                                         off_fk);
     chunk_phase_b<BVW, PASS2, kNThread>(cur, S, dl, accO, vnf, off_ft);
+    if (c == ck_local) store_checkpoint();
     bf16_t* op = out + static_cast<int64_t>(c) * kBT * ld_v;
     if constexpr (PASS2)
       for (int vt = 0; vt < kNV; ++vt)
@@ -1594,7 +1636,10 @@ void fused_kda_chunk(
     std::optional<torch::stable::Tensor> final_state,
     torch::stable::Tensor& out, torch::stable::Tensor const& cu_seqlens,
     torch::stable::Tensor const& chunk_offsets, double scale,
-    std::optional<torch::stable::Tensor> group_state, int64_t groups) {
+    std::optional<torch::stable::Tensor> group_state, int64_t groups,
+    std::optional<torch::stable::Tensor> checkpoint_state,
+    std::optional<torch::stable::Tensor> checkpoint_offsets,
+    std::optional<torch::stable::Tensor> checkpoint_state_indices) {
   using torch::headeronly::ScalarType;
   STD_TORCH_CHECK(w.dim() == 4 && w.size(0) == 1 && w.size(3) == kK,
                   "w must have shape [1, T, H, 128]");
@@ -1672,6 +1717,50 @@ void fused_kda_chunk(
     ht_ptr = static_cast<float*>(final_state->data_ptr());
   }
 
+  // Prefill checkpoint export. `checkpoint_state` is either a [N, H, V, K]
+  // staging buffer, as FlashKDA takes, or the paged state cache itself when
+  // `checkpoint_state_indices` says which row each sequence owns.
+  float* ckpt_ptr = nullptr;
+  int const* ckoff_ptr = nullptr;
+  int const* ckidx_ptr = nullptr;
+  if (checkpoint_state.has_value() || checkpoint_offsets.has_value()) {
+    STD_TORCH_CHECK(
+        checkpoint_state.has_value() && checkpoint_offsets.has_value(),
+        "checkpoint_state and checkpoint_offsets must be given together");
+    STD_TORCH_CHECK(
+        checkpoint_state->is_cuda() &&
+            checkpoint_state->scalar_type() == ScalarType::Float &&
+            checkpoint_state->is_contiguous() && checkpoint_state->dim() == 4 &&
+            checkpoint_state->size(1) == num_heads &&
+            checkpoint_state->size(2) == kV && checkpoint_state->size(3) == kK,
+        "checkpoint_state must be a contiguous fp32 [rows, H, 128, 128] "
+        "tensor");
+    STD_TORCH_CHECK(checkpoint_offsets->is_cuda() &&
+                        checkpoint_offsets->is_contiguous() &&
+                        checkpoint_offsets->scalar_type() == ScalarType::Int &&
+                        checkpoint_offsets->numel() == num_seqs,
+                    "checkpoint_offsets must be a contiguous int32 GPU tensor "
+                    "with one entry per sequence");
+    if (checkpoint_state_indices.has_value()) {
+      STD_TORCH_CHECK(
+          checkpoint_state_indices->is_cuda() &&
+              checkpoint_state_indices->is_contiguous() &&
+              checkpoint_state_indices->scalar_type() == ScalarType::Int &&
+              checkpoint_state_indices->numel() == num_seqs,
+          "checkpoint_state_indices must be a contiguous int32 GPU tensor "
+          "with one entry per sequence");
+      ckidx_ptr = static_cast<int const*>(checkpoint_state_indices->data_ptr());
+    } else {
+      STD_TORCH_CHECK(checkpoint_state->size(0) >= num_seqs,
+                      "checkpoint_state needs one row per sequence when no "
+                      "checkpoint_state_indices are given, got ",
+                      checkpoint_state->size(0), " rows for ", num_seqs,
+                      " sequences");
+    }
+    ckpt_ptr = static_cast<float*>(checkpoint_state->data_ptr());
+    ckoff_ptr = static_cast<int const*>(checkpoint_offsets->data_ptr());
+  }
+
   Params params{static_cast<const bf16_t*>(qg.data_ptr()),
                 static_cast<const bf16_t*>(w.data_ptr()),
                 static_cast<const bf16_t*>(u.data_ptr()),
@@ -1700,6 +1789,9 @@ void fused_kda_chunk(
                   nh_total * G);
   params.G = G;
   params.NHv = static_cast<int>(nh_total);
+  params.ckpt = ckpt_ptr;
+  params.ckoff = ckoff_ptr;
+  params.ckidx = ckidx_ptr;
 
   // Wave growth is chosen after G, because the split multiplies the workgroup
   // count by G and only one workgroup is resident per CU at this LDS

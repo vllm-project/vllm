@@ -19,6 +19,7 @@ from vllm.third_party.flash_linear_attention.ops.index import (
 
 CHUNK_SIZE = 64
 HEAD_DIM = 128
+KDA_CHECKPOINT_ALIGNMENT = CHUNK_SIZE
 # Chunk-group split policy constants; see _chunk_groups.
 _BLOCKS_P1 = 2  # (kV + kK) / kBV
 _BLOCKS_P2 = 1  # kV / kBV
@@ -201,6 +202,9 @@ def fused_kda_chunk(
     initial_state: torch.Tensor | None,
     output_final_state: bool,
     chunk_offsets: torch.Tensor | None = None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
+    checkpoint_state_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run the chunk recurrence and the output projection in one launch.
 
@@ -209,6 +213,18 @@ def fused_kda_chunk(
         kg_t: chunk-major transposed gated keys, ``[chunks, H, 128, 64]``.
         decay: ``exp2`` of each chunk's last gate row, ``[chunks, H, 128]``.
         out: output buffer, ``[1, T, H, 128]``; may alias ``u``'s source.
+        checkpoint_state: destination for the mid-prefill state snapshots,
+            fp32 ``[rows, H, 128, 128]``. Without
+            ``checkpoint_state_indices`` it is a staging buffer indexed by
+            sequence; with them it can be the paged state cache itself.
+        checkpoint_offsets: int32 ``[N]`` token offsets, each relative to its
+            sequence's first query token, at which to snapshot the recurrent
+            state. ``0`` disables the export for that sequence. A non-zero
+            offset must be a multiple of :data:`KDA_CHECKPOINT_ALIGNMENT`;
+            the kernel skips any that is not, so the caller has to filter
+            rather than rely on the store happening.
+        checkpoint_state_indices: optional int32 ``[N]`` destination row per
+            sequence. A negative row disables the export for that sequence.
     """
     num_seqs = cu_seqlens.numel() - 1
     final_state = None
@@ -247,5 +263,10 @@ def fused_kda_chunk(
         scale,
         group_state,
         groups,
+        checkpoint_state,
+        None if checkpoint_offsets is None else checkpoint_offsets.to(torch.int32),
+        None
+        if checkpoint_state_indices is None
+        else checkpoint_state_indices.to(torch.int32),
     )
     return out, final_state

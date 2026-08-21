@@ -430,7 +430,10 @@ void fused_kda_chunk(
     std::optional<torch::stable::Tensor> final_state,
     torch::stable::Tensor& out, torch::stable::Tensor const& cu_seqlens,
     torch::stable::Tensor const& chunk_offsets, double scale,
-    std::optional<torch::stable::Tensor> group_state, int64_t groups);
+    std::optional<torch::stable::Tensor> group_state, int64_t groups,
+    std::optional<torch::stable::Tensor> checkpoint_state,
+    std::optional<torch::stable::Tensor> checkpoint_offsets,
+    std::optional<torch::stable::Tensor> checkpoint_state_indices);
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

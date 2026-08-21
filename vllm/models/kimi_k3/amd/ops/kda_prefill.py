@@ -39,6 +39,9 @@ def chunk_kda_prefill(
     chunk_offsets: torch.Tensor | None = None,
     use_fused_chunk: bool = False,
     out: torch.Tensor | None = None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
+    checkpoint_state_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run chunk KDA from raw gate and beta projections.
 
@@ -48,6 +51,12 @@ def chunk_kda_prefill(
             runs unchanged.
         out: buffer the result must land in. Honoured by both backends, so the
             caller can hand in a slice of its own output and skip a copy.
+        checkpoint_state: destination for mid-prefill recurrent state
+            snapshots, letting a later prefix-cache hit resume from a mamba
+            block boundary. See :func:`fused_kda_chunk`.
+        checkpoint_offsets: per-sequence token offset to snapshot at, ``0``
+            for none.
+        checkpoint_state_indices: optional per-sequence destination row.
 
     Returns:
         The output and, when requested, the final recurrent state.
@@ -66,6 +75,12 @@ def chunk_kda_prefill(
         and g_bias is not None
         and can_use_fused_kda_chunk(k.shape[-1], v.shape[-1], k.dtype, FLA_CHUNK_SIZE)
     )
+
+    if checkpoint_offsets is not None and not fused:
+        raise NotImplementedError(
+            "The KDA prefill checkpoint export needs kda_prefill_backend=fused for "
+            "ROCm"
+        )
 
     if fused:
         # Restated for the type checker; `fused` already implies all three.
@@ -101,6 +116,9 @@ def chunk_kda_prefill(
             initial_state=initial_state,
             output_final_state=output_final_state,
             chunk_offsets=chunk_offsets,
+            checkpoint_state=checkpoint_state,
+            checkpoint_offsets=checkpoint_offsets,
+            checkpoint_state_indices=checkpoint_state_indices,
         )
 
     o, final_state = chunk_kda_with_fused_gate(

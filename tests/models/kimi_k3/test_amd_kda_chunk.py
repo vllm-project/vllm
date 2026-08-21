@@ -424,3 +424,181 @@ def test_accepts_chunk_metadata_from_the_attention_builder(
 
     torch.testing.assert_close(o_got.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(state_got, state_ref, rtol=1e-3, atol=1e-3)
+
+
+def _checkpoint_buffer(rows: int) -> torch.Tensor:
+    """A destination filled with NaN, so an unwritten row is unmistakable."""
+    return torch.full(
+        (rows, NUM_HEADS, HEAD_DIM, HEAD_DIM),
+        float("nan"),
+        device="cuda",
+        dtype=torch.float32,
+    )
+
+
+def _prefix_inputs(inp: dict, seq: int, num_tokens: int) -> dict:
+    """Sequence ``seq`` truncated to its first ``num_tokens`` tokens."""
+    bos = int(inp["cu"][seq])
+    tokens = slice(bos, bos + num_tokens)
+    prefix = dict(inp)
+    for key in ("q", "k", "v", "raw_g", "raw_beta"):
+        prefix[key] = inp[key][:, tokens].contiguous()
+    prefix["h0"] = inp["h0"][seq : seq + 1].contiguous()
+    prefix["cu"] = torch.tensor([0, num_tokens], device="cuda", dtype=torch.int32)
+    return prefix
+
+
+def _run_with_checkpoints(
+    inp: dict, offsets: list[int], rows: int | None = None, **kw
+) -> tuple[torch.Tensor, tuple]:
+    ckpt = _checkpoint_buffer(len(offsets) if rows is None else rows)
+    result = _run(
+        inp,
+        use_fused=True,
+        checkpoint_state=ckpt,
+        checkpoint_offsets=torch.tensor(offsets, device="cuda", dtype=torch.int32),
+        **kw,
+    )
+    return ckpt, result
+
+
+@pytest.mark.parametrize(
+    "seqlens,offsets",
+    [
+        ([256], [64]),  # the first interior boundary
+        ([256], [192]),  # the last one
+        ([1024], [512]),
+        ([320, 320], [64, 256]),  # every sequence checkpoints
+        ([513, 64, 1, 1200], [448, 0, 0, 640]),  # ragged, most opted out
+    ],
+)
+def test_checkpoint_matches_a_prefill_that_stops_at_the_offset(
+    seqlens: list[int], offsets: list[int], monkeypatch
+) -> None:
+    """A checkpoint is only useful if resuming from it is indistinguishable.
+
+    The scheduler serves the exported state on a later prefix-cache hit as if
+    the prompt had been prefilled up to that block and no further, so the
+    kernel has to hand back exactly what a prefill truncated there produces --
+    not merely something close. The walk passes through that state anyway, so
+    equality is bit-exact and the test asserts it as such.
+
+    Sequences with offset 0 opt out, and their rows must stay untouched.
+    """
+    _requires_kernel()
+    _force_groups(monkeypatch, 1)
+
+    inp = _inputs(seqlens, seed=23 + len(seqlens))
+    ckpt, _ = _run_with_checkpoints(inp, offsets)
+
+    for i, offset in enumerate(offsets):
+        if offset == 0:
+            assert ckpt[i].isnan().all()
+            continue
+        _, truncated = _run(_prefix_inputs(inp, i, offset), use_fused=True)
+        torch.testing.assert_close(ckpt[i], truncated[0], rtol=0, atol=0)
+
+
+def test_checkpoint_leaves_the_output_and_final_state_alone() -> None:
+    """Exporting a checkpoint must not perturb the walk it is taken from."""
+    _requires_kernel()
+
+    seqlens = [768, 320]
+    inp = _inputs(seqlens, seed=29)
+    o_ref, state_ref = _run(inp, use_fused=True)
+    _, (o_got, state_got) = _run_with_checkpoints(inp, [512, 128])
+
+    torch.testing.assert_close(o_got.float(), o_ref.float(), rtol=0, atol=0)
+    torch.testing.assert_close(state_got, state_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("offset", [100, 63, 65, 1024])
+def test_unusable_checkpoint_offsets_write_nothing(offset: int) -> None:
+    """Offsets the walk never reaches must leave the destination untouched.
+
+    The recurrent state only exists at chunk boundaries, so an offset that is
+    not a multiple of ``KDA_CHECKPOINT_ALIGNMENT`` -- or that lies past the end
+    of the sequence -- cannot be honoured. Rounding it to a nearby boundary
+    would hand the scheduler a state for the wrong token count, so the kernel
+    stores nothing and leaves the caller to filter these out before the block
+    is hashed.
+    """
+    _requires_kernel()
+
+    from vllm.models.kimi_k3.amd.ops.kda_chunk import KDA_CHECKPOINT_ALIGNMENT
+
+    assert offset % KDA_CHECKPOINT_ALIGNMENT != 0 or offset > 512
+    inp = _inputs([512], seed=31)
+    ckpt, _ = _run_with_checkpoints(inp, [offset])
+
+    assert ckpt.isnan().all()
+
+
+def test_checkpoint_state_indices_pick_the_destination_row() -> None:
+    """With indices the export lands straight in the paged state cache.
+
+    FlashKDA writes one row per sequence into a staging buffer that the caller
+    then scatters. The ROCm walk holds the state in registers already, so it
+    can be told which cache block each sequence owns and skip the staging
+    buffer and its scatter launch entirely. A negative row opts a sequence out,
+    the same way a zero offset does.
+    """
+    _requires_kernel()
+
+    seqlens = [256, 256, 256]
+    rows = 8
+    inp = _inputs(seqlens, seed=37)
+    indices = [5, -1, 2]
+    ckpt, _ = _run_with_checkpoints(
+        inp,
+        [64, 64, 128],
+        rows=rows,
+        checkpoint_state_indices=torch.tensor(
+            indices, device="cuda", dtype=torch.int32
+        ),
+    )
+
+    written = {5: (0, 64), 2: (2, 128)}
+    for row in range(rows):
+        if row not in written:
+            assert ckpt[row].isnan().all(), f"row {row} was written"
+            continue
+        seq, offset = written[row]
+        _, truncated = _run(_prefix_inputs(inp, seq, offset), use_fused=True)
+        torch.testing.assert_close(ckpt[row], truncated[0], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("groups", [2, 4])
+def test_checkpoint_survives_the_group_split(groups: int, monkeypatch) -> None:
+    """The split walks each group from a composed state, not from zero.
+
+    Only the second pass holds the true state at an interior boundary, so a
+    checkpoint taken from the first pass would be the group-local state and
+    silently wrong.
+    """
+    _requires_kernel()
+
+    inp = _inputs([1024], seed=41)
+    _force_groups(monkeypatch, 1)
+    _, serial = _run(_prefix_inputs(inp, 0, 512), use_fused=True)
+    _force_groups(monkeypatch, groups)
+    ckpt, _ = _run_with_checkpoints(inp, [512])
+
+    torch.testing.assert_close(ckpt[0], serial[0], rtol=1e-3, atol=1e-3)
+
+
+def test_triton_fallback_refuses_a_checkpoint_export() -> None:
+    """Dropping the export silently would serve an unwritten state.
+
+    The scheduler allocates and hashes the checkpoint block on the strength of
+    the layer opting in, so a backend that cannot write it has to say so rather
+    than return a plausible output.
+    """
+    inp = _inputs([256], seed=43)
+    with pytest.raises(NotImplementedError):
+        _run(
+            inp,
+            use_fused=False,
+            checkpoint_state=_checkpoint_buffer(1),
+            checkpoint_offsets=torch.tensor([64], device="cuda", dtype=torch.int32),
+        )
