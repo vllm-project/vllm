@@ -4,6 +4,7 @@
 Define KV connector functionality mixin for model runners.
 """
 
+import enum
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING
@@ -14,7 +15,11 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
@@ -30,8 +35,183 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class KVConnectorStepState(enum.Enum):
+    """Lifecycle state of a :class:`KVConnectorStep`."""
+
+    OPEN = enum.auto()
+    FINISHED = enum.auto()
+    ABORTED = enum.auto()
+
+
+class KVConnectorStep:
+    """Handle for one imperative KV-connector step.
+
+    Returned by :meth:`KVConnectorModelRunnerMixin.begin_kv_connector_step` and
+    passed back to :meth:`finish_kv_connector_step` (normal completion) or
+    :meth:`abort_kv_connector_step` (exceptional completion). Carries only the
+    per-step scalars the finish/abort halves need; holds no device, backend, or
+    connector knowledge. Runners that split a step across two calls (e.g. an
+    async ``execute_model`` that submits the forward and a later
+    ``sample_tokens`` that completes it) keep this handle between the two calls.
+
+    The ``state`` field enforces single, correct finalization: a step is
+    ``OPEN`` from ``begin`` until exactly one of ``finish``/``abort`` moves it to
+    ``FINISHED``/``ABORTED``. Re-finalizing (double finish/abort, finish after
+    abort, etc.) is a programming error and raises.
+    """
+
+    __slots__ = (
+        "scheduler_output",
+        "output",
+        "wait_for_save",
+        "defer_finalize",
+        "state",
+    )
+
+    def __init__(
+        self,
+        scheduler_output: "SchedulerOutput",
+        *,
+        wait_for_save: bool,
+        defer_finalize: bool,
+    ) -> None:
+        self.scheduler_output = scheduler_output
+        self.output = KVConnectorOutput()
+        self.wait_for_save = wait_for_save
+        self.defer_finalize = defer_finalize
+        self.state = KVConnectorStepState.OPEN
+
+
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
+    @staticmethod
+    def begin_kv_connector_step(
+        scheduler_output: "SchedulerOutput",
+        *,
+        wait_for_save: bool = True,
+        defer_finalize: bool = False,
+    ) -> KVConnectorStep:
+        """Start one KV-connector step: bind metadata and kick off loads.
+
+        Generic imperative counterpart to the first half of
+        :meth:`_get_kv_connector_output`. Device- and connector-agnostic: it
+        only calls the public ``KVConnectorBase`` SPI. Use this (paired with
+        :meth:`finish_kv_connector_step` on success, or
+        :meth:`abort_kv_connector_step` on an exception) when a runner cannot
+        wrap the forward in the :meth:`_get_kv_connector_output` context manager
+        because the step spans two separate engine calls (submit in
+        ``execute_model``, complete in ``sample_tokens``).
+
+        Returns an ``OPEN`` step handle. The caller must eventually finish or
+        abort it exactly once.
+
+        ``start_load_kv`` receives the active forward context when one is set,
+        else ``None`` -- determined explicitly via
+        :func:`is_forward_context_available`, never by catching exceptions.
+        """
+        kv_connector = get_kv_transfer_group()
+        assert isinstance(kv_connector, KVConnectorBase)
+        assert scheduler_output.kv_connector_metadata is not None
+        kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
+
+        # Background KV cache transfers start here. They are designed to be
+        # async and may involve requests disjoint from the running ones.
+        forward_context = (
+            get_forward_context() if is_forward_context_available() else None
+        )
+        kv_connector.start_load_kv(forward_context)
+
+        return KVConnectorStep(
+            scheduler_output,
+            wait_for_save=wait_for_save,
+            defer_finalize=defer_finalize,
+        )
+
+    @staticmethod
+    def finish_kv_connector_step(step: KVConnectorStep) -> KVConnectorOutput:
+        """Complete one KV-connector step normally and return its output.
+
+        Generic imperative counterpart to the success path of the ``finally`` in
+        :meth:`_get_kv_connector_output`: optional ``wait_for_save``, collect
+        finished send/recv, invalid block ids, stats, cache events and worker
+        metadata, then clear connector metadata exactly once (unless the step
+        deferred finalization). Device- and connector-agnostic. Any connector
+        error propagates to the caller; nothing is swallowed here.
+
+        The step must be ``OPEN``; finishing a finished or aborted step raises
+        ``RuntimeError``.
+        """
+        if step.state is not KVConnectorStepState.OPEN:
+            raise RuntimeError(
+                f"finish_kv_connector_step called on a step in state "
+                f"{step.state.name}; a step may be finalized exactly once."
+            )
+        kv_connector = get_kv_transfer_group()
+        assert isinstance(kv_connector, KVConnectorBase)
+
+        if step.wait_for_save and not step.defer_finalize:
+            kv_connector.wait_for_save()
+
+        KVConnectorModelRunnerMixin._assemble_kv_connector_output(kv_connector, step)
+
+        if not step.defer_finalize:
+            kv_connector.clear_connector_metadata()
+
+        step.state = KVConnectorStepState.FINISHED
+        return step.output
+
+    @staticmethod
+    def abort_kv_connector_step(step: KVConnectorStep) -> None:
+        """Abort one KV-connector step after an exception between begin/finish.
+
+        Clears connector metadata exactly once so the next scheduler step does
+        not inherit stale metadata, and marks the step ``ABORTED``. Does NOT
+        assemble or return a success ``KVConnectorOutput`` (the step did not
+        complete). The caller is responsible for re-raising the original
+        exception; this method does not swallow it.
+
+        Note on in-flight transfers: the generic ``KVConnectorBase`` SPI has no
+        cancellation primitive for an already-submitted async load. Aborting
+        clears this step's bound metadata so a partially-started transfer cannot
+        be associated with the next step's metadata; whether the transfer itself
+        continues in the background is connector-defined. Connectors that need
+        hard cancellation should surface it through their own API.
+
+        The step must be ``OPEN``; aborting a finished or aborted step raises
+        ``RuntimeError``.
+        """
+        if step.state is not KVConnectorStepState.OPEN:
+            raise RuntimeError(
+                f"abort_kv_connector_step called on a step in state "
+                f"{step.state.name}; a step may be finalized exactly once."
+            )
+        # Clear exactly once (unless finalization was deferred to a later
+        # finalize_kv_connector call, matching finish semantics).
+        if not step.defer_finalize and has_kv_transfer_group():
+            get_kv_transfer_group().clear_connector_metadata()
+        step.state = KVConnectorStepState.ABORTED
+
+    @staticmethod
+    def _assemble_kv_connector_output(
+        kv_connector: KVConnectorBase, step: KVConnectorStep
+    ) -> None:
+        """Populate ``step.output`` from the connector (single shared impl).
+
+        The one place that builds a ``KVConnectorOutput`` for both the context
+        manager and the imperative paths: finished send/recv, invalid block ids,
+        stats, cache events and worker metadata. Does not wait_for_save or clear
+        metadata (the callers own lifecycle ordering).
+        """
+        output = step.output
+        scheduler_output = step.scheduler_output
+        output.finished_sending, output.finished_recving = kv_connector.get_finished(
+            scheduler_output.finished_req_ids
+        )
+        output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
+        output.kv_connector_stats = kv_connector.get_kv_connector_stats()
+        output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
+        output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
+
     @staticmethod
     def kv_connector_no_forward(
         scheduler_output: "SchedulerOutput", vllm_config: VllmConfig
@@ -72,7 +252,12 @@ class KVConnectorModelRunnerMixin:
             kv_connector.clear_connector_metadata()
 
     # This context manager must be used within an active forward context.
-    # It encapsulates the entire KV connector lifecycle within execute_model
+    # It encapsulates the entire KV connector lifecycle within execute_model.
+    # It is a thin wrapper over the generic begin/finish/abort step helpers so
+    # the in-forward path and the split (execute_model/sample_tokens) path share
+    # one canonical lifecycle implementation. On success it finishes the step;
+    # if the body raises, it aborts the step (clear metadata once, no fake
+    # output) and re-raises the original exception.
     @staticmethod
     @contextmanager
     def _get_kv_connector_output(
@@ -80,36 +265,18 @@ class KVConnectorModelRunnerMixin:
         wait_for_save: bool = True,
         defer_finalize: bool = False,
     ) -> Generator[KVConnectorOutput, None, None]:
-        output = KVConnectorOutput()
-
-        # Update KVConnector with the KVConnector metadata forward().
-        kv_connector = get_kv_transfer_group()
-        assert isinstance(kv_connector, KVConnectorBase)
-        assert scheduler_output.kv_connector_metadata is not None
-        kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
-
-        # Background KV cache transfers happen here.
-        # These transfers are designed to be async and the requests
-        # involved may be disjoint from the running requests.
-        # Do this here to save a collective_rpc.
-        kv_connector.start_load_kv(get_forward_context())
+        step = KVConnectorModelRunnerMixin.begin_kv_connector_step(
+            scheduler_output,
+            wait_for_save=wait_for_save,
+            defer_finalize=defer_finalize,
+        )
         try:
-            yield output
-        finally:
-            if wait_for_save and not defer_finalize:
-                kv_connector.wait_for_save()
-
-            output.finished_sending, output.finished_recving = (
-                kv_connector.get_finished(scheduler_output.finished_req_ids)
-            )
-            output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
-
-            output.kv_connector_stats = kv_connector.get_kv_connector_stats()
-            output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
-            output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
-
-            if not defer_finalize:
-                kv_connector.clear_connector_metadata()
+            yield step.output
+        except BaseException:
+            KVConnectorModelRunnerMixin.abort_kv_connector_step(step)
+            raise
+        else:
+            KVConnectorModelRunnerMixin.finish_kv_connector_step(step)
 
     @staticmethod
     def use_uniform_kv_cache(
