@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -34,7 +35,7 @@ from flashinfer.fp4_quantization import fp4_quantize
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
-from tests.kernels.utils import torch_experts
+from tests.kernels.utils import torch_experts, torch_moe
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import fused_topk
@@ -83,7 +84,14 @@ def _quantize_nvfp4_linear_sf(w_bf16: torch.Tensor):
 
 
 def _torch_ref(
-    a, w13_bf16, w2_bf16, topk_weights, topk_ids, activation, alpha=SWIGLU_ALPHA
+    a,
+    w13_bf16,
+    w2_bf16,
+    topk_weights,
+    topk_ids,
+    activation,
+    alpha=SWIGLU_ALPHA,
+    limit=SWIGLU_LIMIT,
 ):
     """BF16 reference on the original [gate, up] weights."""
     if activation == MoEActivation.SILU:
@@ -91,7 +99,9 @@ def _torch_ref(
             a, w13_bf16, w2_bf16, topk_weights, topk_ids, activation=activation
         )
     assert activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
-    act = SiluAndMulWithClamp(SWIGLU_LIMIT, alpha, SWIGLU_BETA)
+    act = SiluAndMulWithClamp(
+        float("inf") if limit is None else limit, alpha, SWIGLU_BETA
+    )
     m, k = a.shape
     topk = topk_ids.shape[1]
     a_rep = a.view(m, 1, k).repeat(1, topk, 1).reshape(-1, k)
@@ -114,8 +124,12 @@ def _torch_ref(
 @pytest.mark.parametrize("topk", [1, 2, 4])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize(
-    "activation",
-    [MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE],
+    "activation,swiglu_limit",
+    [
+        (MoEActivation.SILU, None),
+        (MoEActivation.SWIGLUOAI_UNINTERLEAVE, SWIGLU_LIMIT),
+        (MoEActivation.SWIGLUOAI_UNINTERLEAVE, None),
+    ],
 )
 @torch.inference_mode()
 def test_flashinfer_b12x_moe(
@@ -126,6 +140,7 @@ def test_flashinfer_b12x_moe(
     topk: int,
     dtype: torch.dtype,
     activation: MoEActivation,
+    swiglu_limit: float | None,
     workspace_init,
 ):
     """Test FlashInferB12xExperts against a BF16 torch reference.
@@ -176,7 +191,7 @@ def test_flashinfer_b12x_moe(
             activation=activation,
             swiglu_alpha=SWIGLU_ALPHA if is_swigluoai else None,
             swiglu_beta=SWIGLU_BETA if is_swigluoai else None,
-            swiglu_limit=SWIGLU_LIMIT if is_swigluoai else None,
+            swiglu_limit=swiglu_limit,
         )
 
         layer = torch.nn.Module()
@@ -245,7 +260,7 @@ def test_flashinfer_b12x_moe(
         )
 
         torch_output = _torch_ref(
-            a, w13_bf16, w2_bf16, topk_weights, topk_ids, activation
+            a, w13_bf16, w2_bf16, topk_weights, topk_ids, activation, limit=swiglu_limit
         )
 
         # NVFP4 error is proportional to the signal, so an elementwise
@@ -261,7 +276,14 @@ def test_flashinfer_b12x_moe(
             # quantisation noise is common to both, so whichever reference
             # matches the kernel's actual alpha wins.
             wrong_alpha_ref = _torch_ref(
-                a, w13_bf16, w2_bf16, topk_weights, topk_ids, activation, alpha=1.0
+                a,
+                w13_bf16,
+                w2_bf16,
+                topk_weights,
+                topk_ids,
+                activation,
+                alpha=1.0,
+                limit=swiglu_limit,
             )
             wrong_diff = sm12x_output.float() - wrong_alpha_ref.float()
             wrong_rel_fro = (wrong_diff.norm() / wrong_alpha_ref.float().norm()).item()
@@ -270,3 +292,132 @@ def test_flashinfer_b12x_moe(
                 f"alpha={SWIGLU_ALPHA} ({wrong_rel_fro:.3f} <= {rel_fro:.3f}); "
                 f"swiglu_alpha is likely not reaching the kernel"
             )
+
+
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
+@pytest.mark.parametrize("e", [8, 16])
+@pytest.mark.parametrize("topk", [1, 2, 4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@torch.inference_mode()
+def test_flashinfer_b12x_moe_relu2(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    workspace_init,
+):
+    """Test FlashInferB12xExperts with ReLU2 (non-gated) activation.
+
+    ReLU2 is used by Nemotron-H style models.  Unlike the gated SiLU
+    path, w1 has shape [E, N, K] (not [E, 2N, K]) and the activation
+    is relu(x)^2 without a gate/up split.
+    """
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+
+        # Non-gated: w1 shape is (e, n, k), not (e, 2n, k).
+        w1_bf16 = torch.randn((e, n, k), device="cuda", dtype=dtype) / 15
+        w2_bf16 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 15
+
+        gs = torch.ones(1, device="cuda", dtype=torch.float32)
+        sf_vec_size = 16
+
+        # W1: no gate/up reordering for non-gated.
+        w1_flat = w1_bf16.reshape(e * n, k)
+        w1_q_flat, w1_sf_flat = fp4_quantize(
+            w1_flat,
+            global_scale=gs,
+            sf_vec_size=sf_vec_size,
+            is_sf_swizzled_layout=True,
+        )
+        w1_q = w1_q_flat.view(e, n, k // 2)
+        w1_blockscale = w1_sf_flat.view(e, n, w1_sf_flat.shape[1])
+
+        w2_flat = w2_bf16.reshape(e * k, n)
+        w2_q_flat, w2_sf_flat = fp4_quantize(
+            w2_flat,
+            global_scale=gs,
+            sf_vec_size=sf_vec_size,
+            is_sf_swizzled_layout=True,
+        )
+        w2_q = w2_q_flat.view(e, k, n // 2)
+        w2_blockscale = w2_sf_flat.view(e, k, w2_sf_flat.shape[1])
+
+        ones_e = torch.ones(e, device="cuda", dtype=torch.float32)
+
+        quant_config = nvfp4_moe_quant_config(
+            g1_alphas=ones_e,
+            g2_alphas=ones_e,
+            a1_gscale=ones_e,
+            a2_gscale=ones_e,
+            w1_scale=w1_blockscale,
+            w2_scale=w2_blockscale,
+        )
+
+        moe_config = make_dummy_moe_config(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            in_dtype=dtype,
+            activation=MoEActivation.RELU2_NO_MUL,
+        )
+
+        experts = FlashInferB12xExperts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        )
+        experts.process_weights_after_loading(
+            SimpleNamespace(
+                w13_weight_scale=w1_blockscale,
+                w13_weight_scale_2=ones_e,
+                w2_weight_scale=w2_blockscale,
+                w2_weight_scale_2=ones_e,
+            )
+        )
+
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
+            experts,
+        )
+
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+
+        b12x_output = kernel.apply(
+            hidden_states=a,
+            w1=w1_q,
+            w2=w2_q,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=e,
+            activation=MoEActivation.RELU2_NO_MUL,
+            apply_router_weight_on_input=False,
+            expert_map=None,
+        )
+
+        torch_output = torch_moe(
+            a,
+            w1_bf16,
+            w2_bf16,
+            score,
+            topk,
+            activation=MoEActivation.RELU2_NO_MUL,
+        )
+
+        torch.testing.assert_close(
+            b12x_output,
+            torch_output,
+            atol=2e-1,
+            rtol=2e-1,
+        )
