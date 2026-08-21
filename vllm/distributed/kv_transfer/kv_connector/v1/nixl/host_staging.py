@@ -1,29 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stage host-memory KV reads through device memory.
+"""Stage writes to host-memory KV through device memory.
 
-When a connector's local KV destination is host memory, UCX has no efficient
-same-node path from a remote device buffer to a local host buffer and falls
-back to TCP loopback. Device staging composes a fast device-to-device read with
-a fast local device-to-host copy.
-
-Both legs are fast in isolation: the remote read is fast when its destination is
-device memory, and a local device-to-host copy of the same bytes runs at ~50
-GB/s. This module composes them. Reads land in a device staging buffer, then a
-copy stream moves each completed chunk into the real host destination. Chunks
-pipeline across a small number of slots so the network leg and the copy leg
-overlap.
-
-A NIXL prepared descriptor list fixes each descriptor's length. Staging keeps
-one pool per distinct descriptor length and splits each request across them.
-
-The request is only reported complete once every chunk has been both read and
-copied, so no caller observes partially populated host blocks.
+Direct same-node device-to-host transfers may fall back to TCP loopback. This
+module instead reads into device staging buffers, then copies into the host
+destination. Requests complete only after every chunk reaches host memory.
 """
 
 from __future__ import annotations
 
 import ctypes
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,6 +24,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _CUDA_MEMCPY_DEVICE_TO_HOST = 2
+_SHUTDOWN_TIMEOUT_S = 2.0
+_SHUTDOWN_POLL_INTERVAL_S = 0.001
 
 
 def _load_cudart() -> ctypes.CDLL | None:
@@ -177,6 +168,7 @@ class HostWriteStager:
         self._copy_stream = torch.cuda.Stream(device=device)
         self._reqs: dict[str, _ReqState] = {}
         self._closed = False
+        self._shutdown_thread: threading.Thread | None = None
 
         logger.info(
             "NIXL host write staging enabled: %.2f GiB device staging across "
@@ -351,14 +343,14 @@ class HostWriteStager:
         state.aborted = True
         state.queued.clear()
 
-    def begin_shutdown(self) -> None:
+    def _begin_shutdown(self) -> None:
         """Stop issuing reads and mark all staged requests aborted."""
         if self._closed:
             return
         for req_id in tuple(self._reqs):
             self.abort(req_id)
 
-    def poll_shutdown(self, cancel: bool = False) -> bool:
+    def _poll_shutdown(self, cancel: bool = False) -> bool:
         """Advance shutdown without blocking and return whether it completed."""
         if self._closed:
             return True
@@ -383,3 +375,51 @@ class HostWriteStager:
             self.nixl_wrapper.deregister_memory(pool.reg_descs)
         self._closed = True
         return True
+
+    def _reap_shutdown(self, on_complete: Callable[[], None] | None) -> None:
+        try:
+            while not self._poll_shutdown(cancel=True):
+                time.sleep(_SHUTDOWN_POLL_INTERVAL_S)
+            if on_complete is not None:
+                on_complete()
+            logger.info("Deferred NIXL host-staging cleanup completed.")
+        finally:
+            self._shutdown_thread = None
+
+    def shutdown(
+        self,
+        drain_timeout: float | None = None,
+        on_complete: Callable[[], None] | None = None,
+    ) -> bool:
+        """Bound shutdown and defer cleanup while transfers remain active."""
+        if self._shutdown_thread is not None:
+            return False
+        if self._closed:
+            return True
+        if drain_timeout is None:
+            drain_timeout = _SHUTDOWN_TIMEOUT_S
+
+        self._begin_shutdown()
+        deadline = time.monotonic() + drain_timeout
+        drained = self._poll_shutdown()
+        while not drained and time.monotonic() < deadline:
+            time.sleep(_SHUTDOWN_POLL_INTERVAL_S)
+            drained = self._poll_shutdown()
+        if not drained:
+            drained = self._poll_shutdown(cancel=True)
+        if drained:
+            return True
+
+        logger.warning(
+            "NIXL host-staging shutdown timed out after %.1fs; retaining "
+            "registered memory until active operations become terminal.",
+            drain_timeout,
+        )
+        self._shutdown_thread = threading.Thread(
+            target=self._reap_shutdown,
+            args=(on_complete,),
+            name="vllm-nixl-host-staging-shutdown",
+            daemon=True,
+        )
+        self._shutdown_thread.start()
+        return False
