@@ -25,6 +25,9 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -336,6 +339,59 @@ def test_routed_experts_attention_group_is_shared_and_fail_closed(monkeypatch):
 
     with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
         get_routed_experts_attn_gid(SimpleNamespace(kv_cache_groups=[]))
+
+
+def test_routed_experts_attention_group_unwraps_uniform_type_specs():
+    """DeepSeek-V4-shaped groups wrap their specs in ``UniformTypeKVCacheSpecs``.
+
+    The wrapper is not a ``FullAttentionSpec``, so a bare isinstance check finds
+    no group and fails closed on every worker. Sliding-window wrappers must stay
+    unmatched: their blocks are recycled, so their slot layout cannot key the
+    routing data.
+    """
+    common = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
+    swa_spec = SlidingWindowMLASpec(block_size=4, sliding_window=8, **common)
+    mla_spec = MLAAttentionSpec(block_size=4, **common)
+    config = SimpleNamespace(
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["swa_layer"],
+                UniformTypeKVCacheSpecs(
+                    block_size=4, kv_cache_specs={"swa_layer": swa_spec}
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mla_layer"],
+                UniformTypeKVCacheSpecs(
+                    block_size=4, kv_cache_specs={"mla_layer": mla_spec}
+                ),
+            ),
+        ]
+    )
+
+    assert get_routed_experts_attn_gid(config) == 1
+
+    swa_only = SimpleNamespace(kv_cache_groups=[config.kv_cache_groups[0]])
+    with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
+        get_routed_experts_attn_gid(swa_only)
+
+    # A wrapper is only matched when *every* layer is full attention. Grouping
+    # forbids mixing today, but the wrapper is also built directly (e.g. when
+    # projecting groups onto a PP worker), so stay fail-closed rather than
+    # keying routing data off a group that recycles blocks.
+    mixed = SimpleNamespace(
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["swa_layer", "mla_layer"],
+                UniformTypeKVCacheSpecs(
+                    block_size=4,
+                    kv_cache_specs={"swa_layer": swa_spec, "mla_layer": mla_spec},
+                ),
+            )
+        ]
+    )
+    with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
+        get_routed_experts_attn_gid(mixed)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

@@ -17,7 +17,12 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import RoutedExpertsTensors
 
 logger = logging.getLogger(__name__)
@@ -304,10 +309,28 @@ def bind_routed_experts_capturer(
         raise ValueError("No supported MoE router found for routed-experts capture.")
 
 
+def _is_full_attention_group(spec: KVCacheSpec) -> bool:
+    """Whether a KV-cache group spec is (or wraps) a full-attention group.
+
+    Models whose layers differ per-spec -- DeepSeek-V4's MLA layers, or any
+    model taking the ``UniformTypeKVCacheSpecs.from_specs`` path -- carry a
+    ``UniformTypeKVCacheSpecs`` wrapper, which is *not* itself a
+    ``FullAttentionSpec``. Unwrap it so the full-attention group is still
+    found. Require *every* wrapped layer to be full attention: a group holding
+    any recycling (sliding-window) layer does not have the stable slot layout
+    the routing data is keyed by.
+    """
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return all(
+            isinstance(s, FullAttentionSpec) for s in spec.kv_cache_specs.values()
+        )
+    return isinstance(spec, FullAttentionSpec)
+
+
 def get_routed_experts_attn_gid(kv_cache_config: KVCacheConfig) -> int:
     """Return the full-attention KV cache group used for routed experts."""
     for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-        if isinstance(group.kv_cache_spec, FullAttentionSpec):
+        if _is_full_attention_group(group.kv_cache_spec):
             return gid
     raise ValueError("Routed-experts capture requires a full-attention KV cache group.")
 
