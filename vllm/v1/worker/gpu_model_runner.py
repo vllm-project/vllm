@@ -21,6 +21,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
@@ -6850,6 +6851,9 @@ class GPUModelRunner(
                 self._freeze_gc(),
                 graph_capture(device=self.device, graph_capture_context=cap_ctx),
             ):
+                # The gfx9 opus split-K workspace is per-stream and must be
+                # registered before anything captures on this stream.
+                rocm_aiter_ops.init_opus_gemm_workspace()
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
 
@@ -6999,6 +7003,9 @@ class GPUModelRunner(
             )
 
         with self._freeze_gc(), graph_capture(device=self.device):
+            # The gfx9 opus split-K workspace is per-stream and must be
+            # registered before anything captures on this stream.
+            rocm_aiter_ops.init_opus_gemm_workspace()
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
             start_free_gpu_memory = torch.accelerator.get_memory_info()[0]

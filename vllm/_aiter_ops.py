@@ -1670,6 +1670,22 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def init_opus_gemm_workspace(cls) -> None:
+        """Register the opus split-K GEMM workspace for the current stream.
+
+        The gfx9 a16w16 split-K kernels keep their partial-sum buffer in a
+        per-stream registry that has to be populated eagerly. A graph capture
+        that is the first thing to touch it aborts with "splitk workspace not
+        initialized for the current CUDA stream".
+        """
+        try:
+            from aiter.ops.opus.gemm_op_a16w16 import opus_gemm_workspace_init
+        except ImportError:
+            return
+        opus_gemm_workspace_init()
+
+    @classmethod
+    @if_aiter_supported
     def get_moe_dispatch_policy(cls) -> int:
         """Cached MoE sorting dispatch policy."""
         if cls._MOE_DISPATCH_POLICY is None:
