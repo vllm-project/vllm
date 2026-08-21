@@ -57,6 +57,7 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh v1'
+    parallelism: 2
   - label: "XPU W8A8 FP8 Linear Examples"
     depends_on:
       - image-build-xpu
