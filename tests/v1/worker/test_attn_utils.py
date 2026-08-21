@@ -1,16 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
 from vllm.v1.kv_cache_interface import (
+    CrossAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheTensor,
     KVQuantMode,
     MambaSpec,
 )
-from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
+from vllm.v1.worker.gpu.attn_utils import (
+    _align_mixed_attention_kv_cache_views,
+    _reshape_kv_cache,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -31,6 +36,10 @@ class FakeFlashAttentionBackend:
     ) -> tuple[int, ...]:
         assert not include_num_layers_dimension
         return (0, 1, 2, 3, 4)
+
+    @staticmethod
+    def get_kv_cache_block_dim(*args, **kwargs) -> int:
+        return 0
 
 
 class FakeHNDFlashAttentionBackend(FakeFlashAttentionBackend):
@@ -153,6 +162,75 @@ class FakeDiffKVBackend:
     ) -> tuple[int, ...]:
         assert not include_num_layers_dimension
         return (0, 1, 2, 3)
+
+
+class FakeKVFirstBackend:
+    @staticmethod
+    def get_kv_cache_block_dim(*args, **kwargs) -> int:
+        return 1
+
+
+def _align_shared_mixed_layout(blocks_first_spec):
+    num_blocks = 3
+    kv_first_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float32,
+    )
+    raw_tensor = torch.zeros(2 * num_blocks * 16 * 2 * 2)
+    blocks_first_shape = (
+        (num_blocks, 2, 16, 2, 2)
+        if isinstance(blocks_first_spec, CrossAttentionSpec)
+        else (num_blocks, 2, 16, 4)
+    )
+    kv_caches = {
+        "blocks_first": raw_tensor.view(blocks_first_shape),
+        "kv_first": raw_tensor.view(2, num_blocks, 16, 2, 2),
+    }
+    attn_groups = [
+        AttentionGroup(
+            FakeFlashAttentionBackend, ["blocks_first"], blocks_first_spec, 0
+        ),
+        AttentionGroup(FakeKVFirstBackend, ["kv_first"], kv_first_spec, 1),
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(size=raw_tensor.nbytes, shared_by=list(kv_caches))
+        ],
+        kv_cache_groups=[],
+    )
+    _align_mixed_attention_kv_cache_views(
+        attn_groups,
+        kv_caches,
+        [16, 16],
+        "auto",
+        kv_cache_config,
+    )
+    return kv_caches["blocks_first"]
+
+
+def test_align_rejects_mixed_decoder_kv_cache_layouts():
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float32,
+    )
+    with pytest.raises(ValueError, match="speculative_config.attention_backend"):
+        _align_shared_mixed_layout(spec)
+
+
+def test_aligns_mixed_encoder_decoder_kv_cache_layouts():
+    spec = CrossAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float32,
+    )
+    kv_cache = _align_shared_mixed_layout(spec)
+    assert kv_cache.stride() == (64, 192, 4, 2, 1)
 
 
 def test_reshape_padded_diff_kv_cache_does_not_infer_kv_dim():
