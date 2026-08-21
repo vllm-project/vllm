@@ -200,6 +200,170 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
+def ref_paged_clamped_mm_attn(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    query_lens: list[int],
+    kv_lens: list[int],
+    block_tables: torch.Tensor,
+    mm_ranges: list[list[tuple[int, int]]],
+    scale: float,
+    sliding_window: int,
+    chunk_lookback: int,
+) -> torch.Tensor:
+    block_tables_cpu = block_tables.cpu().numpy()
+    _, block_size, num_kv_heads, head_size = key_cache.shape
+    chunk_size = sliding_window // (chunk_lookback + 1)
+
+    outputs: list[torch.Tensor] = []
+    query_start = 0
+    for req_idx, (query_len, kv_len) in enumerate(zip(query_lens, kv_lens)):
+        query_i = query[query_start : query_start + query_len].float()
+        context_len = kv_len - query_len
+        query_pos = torch.arange(query_len, device=query.device) + context_len
+        key_pos = torch.arange(kv_len, device=query.device)
+
+        num_kv_blocks = (kv_len + block_size - 1) // block_size
+        block_indices = block_tables_cpu[req_idx, :num_kv_blocks]
+        key_i = key_cache[block_indices].view(-1, num_kv_heads, head_size)[:kv_len]
+        value_i = value_cache[block_indices].view(-1, num_kv_heads, head_size)[:kv_len]
+        if query_i.shape[1] != key_i.shape[1]:
+            repeats = query_i.shape[1] // key_i.shape[1]
+            key_i = torch.repeat_interleave(key_i, repeats, dim=1)
+            value_i = torch.repeat_interleave(value_i, repeats, dim=1)
+
+        delta = query_pos[:, None] - key_pos[None, :]
+        keep = (delta >= 0) & (
+            query_pos[:, None] // chunk_size - key_pos[None, :] // chunk_size
+            <= chunk_lookback
+        )
+        for range_start, range_end in mm_ranges[req_idx]:
+            q_in_range = (query_pos >= range_start) & (query_pos <= range_end)
+            k_in_range = (key_pos >= range_start) & (key_pos <= range_end)
+            mm_mask = q_in_range[:, None] & k_in_range[None, :]
+            keep |= mm_mask & (delta < sliding_window)
+
+        scores = torch.einsum("qhd,khd->hqk", query_i, key_i.float()) * scale
+        scores.masked_fill_(~keep[None], float("-inf"))
+        probs = scores.softmax(-1).to(value_i.dtype)
+        outputs.append(torch.einsum("hqk,khd->qhd", probs, value_i))
+        query_start += query_len
+
+    return torch.cat(outputs)
+
+
+@torch.inference_mode()
+def test_triton_unified_attn_clamped_mm_matches_dense_reference() -> None:
+    set_random_seed(0)
+    query_lens = [384, 96]
+    kv_lens_list = [384, 320]
+    mm_ranges = [[(32, 351)], [(160, 287)]]
+    sliding_window = 128
+    chunk_lookback = 0
+    block_size = 16
+    num_query_heads = 4
+    num_kv_heads = 2
+    head_size = 128
+    scale = head_size**-0.5
+
+    query = torch.randn(
+        sum(query_lens),
+        num_query_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=DEVICE_TYPE,
+    )
+    num_blocks_per_req = [
+        (kv_len + block_size - 1) // block_size for kv_len in kv_lens_list
+    ]
+    total_blocks = sum(num_blocks_per_req)
+    key_cache = torch.randn(
+        total_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=DEVICE_TYPE,
+    )
+    value_cache = torch.randn_like(key_cache)
+
+    block_tables = torch.zeros(
+        len(query_lens),
+        max(num_blocks_per_req),
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
+    block_start = 0
+    for req_idx, num_blocks in enumerate(num_blocks_per_req):
+        block_tables[req_idx, :num_blocks] = torch.arange(
+            block_start,
+            block_start + num_blocks,
+            dtype=torch.int32,
+            device=DEVICE_TYPE,
+        )
+        block_start += num_blocks
+
+    cu_seqlens_q = torch.tensor(
+        [0] + query_lens, dtype=torch.int32, device=DEVICE_TYPE
+    ).cumsum(0, dtype=torch.int32)
+    kv_lens = torch.tensor(kv_lens_list, dtype=torch.int32, device=DEVICE_TYPE)
+    mm_prefix_range = torch.tensor(
+        [[[32, 351]], [[160, 287]]], dtype=torch.int32, device=DEVICE_TYPE
+    )
+    actual = torch.empty_like(query)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=actual,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max(query_lens),
+        seqused_k=kv_lens,
+        max_seqlen_k=max(kv_lens_list),
+        softmax_scale=scale,
+        causal=True,
+        window_size=(sliding_window - 1, 0),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        mm_prefix_range=mm_prefix_range,
+        chunk_lookback=chunk_lookback,
+        mm_prefix_clamp_sliding_window=True,
+    )
+
+    expected = ref_paged_clamped_mm_attn(
+        query,
+        key_cache,
+        value_cache,
+        query_lens,
+        kv_lens_list,
+        block_tables,
+        mm_ranges,
+        scale,
+        sliding_window,
+        chunk_lookback,
+    )
+    chunk_only = ref_paged_clamped_mm_attn(
+        query,
+        key_cache,
+        value_cache,
+        query_lens,
+        kv_lens_list,
+        block_tables,
+        [[], []],
+        scale,
+        sliding_window,
+        chunk_lookback,
+    )
+
+    torch.testing.assert_close(actual.float(), expected.float(), atol=2e-2, rtol=2e-2)
+    assert not torch.allclose(expected, chunk_only, atol=2e-2, rtol=2e-2)
+
+
 @pytest.mark.parametrize(
     "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
 )
