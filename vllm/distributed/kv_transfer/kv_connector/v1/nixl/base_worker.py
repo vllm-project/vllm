@@ -100,8 +100,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_HOST_STAGING_SHUTDOWN_TIMEOUT_S = 2.0
-_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S = 0.001
 _SHARED_REGION_GROUP_ID = -1
 
 
@@ -323,7 +321,6 @@ class NixlBaseConnectorWorker:
 
         # Config.
         self.vllm_config = vllm_config
-        self._host_staging_shutdown_thread: threading.Thread | None = None
         # mypy will complain on re-assignment otherwise.
         self.block_size: int = cast(int, vllm_config.cache_config.block_size)
 
@@ -2628,13 +2625,7 @@ class NixlBaseConnectorWorker:
                 )
 
     def _maybe_init_host_stager(self, remote_host: str) -> HostWriteStager | None:
-        """Enable device staging for same-host, all-host KV reads.
-
-        UCX falls back to TCP loopback for a remote-device to local-host read,
-        which measures ~0.20 GB/s against ~22 GB/s for the device-to-device read
-        the same stack performs. Staging through device memory composes the fast
-        remote read with a fast local device-to-host copy.
-        """
+        """Enable device staging for same-host host-buffer reads."""
         if remote_host != envs.VLLM_NIXL_SIDE_CHANNEL_HOST:
             return None
         if self._host_stager is not None or self._host_stager_init_attempted:
@@ -3199,12 +3190,6 @@ class NixlBaseConnectorWorker:
         with contextlib.suppress(Exception):
             self.shutdown(drain_timeout=0)
 
-    def _poll_host_staging_shutdown(self, cancel: bool) -> bool:
-        done = True
-        for stager in self._host_stagers():
-            done &= stager.poll_shutdown(cancel)
-        return done
-
     def _finish_shutdown(self) -> None:
         self._recving_transfers.clear()
         try:
@@ -3237,49 +3222,35 @@ class NixlBaseConnectorWorker:
             # model_runner.shutdown()).
             self.device_kv_caches = {}
             self.host_xfer_buffers = {}
-        self._host_staging_shutdown_thread = None
-
-    def _reap_host_staging_shutdown(self) -> None:
-        while not self._poll_host_staging_shutdown(cancel=True):
-            time.sleep(_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S)
-        self._finish_shutdown()
-        logger.info("Deferred NIXL host-staging cleanup completed.")
 
     def shutdown(self, drain_timeout: float | None = None) -> None:
         """Stop new work and bound the wait for host-staged reads."""
         if not hasattr(self, "_handshake_initiation_executor"):
             return
-        if self._host_staging_shutdown_thread is not None:
-            return
-        if drain_timeout is None:
-            drain_timeout = _HOST_STAGING_SHUTDOWN_TIMEOUT_S
         self._handshake_initiation_executor.shutdown(wait=False, cancel_futures=True)
         for handles in self._recving_transfers.values():
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
-        for stager in self._host_stagers():
-            stager.begin_shutdown()
-
-        deadline = time.monotonic() + drain_timeout
-        drained = self._poll_host_staging_shutdown(cancel=False)
-        while not drained and time.monotonic() < deadline:
-            time.sleep(_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S)
-            drained = self._poll_host_staging_shutdown(cancel=False)
-        if not drained:
-            drained = self._poll_host_staging_shutdown(cancel=True)
-        if drained:
+        stagers = list(self._host_stagers())
+        if not stagers:
             self._finish_shutdown()
             return
 
-        logger.warning(
-            "NIXL host-staging shutdown timed out after %.1fs; retaining "
-            "registered memory until active operations become terminal.",
-            drain_timeout,
-        )
-        self._host_staging_shutdown_thread = threading.Thread(
-            target=self._reap_host_staging_shutdown,
-            daemon=True,
-            name="nixl-host-staging-shutdown",
-        )
-        self._host_staging_shutdown_thread.start()
+        remaining = len(stagers)
+        shutdown_lock = threading.Lock()
+
+        def stager_done() -> None:
+            nonlocal remaining
+            with shutdown_lock:
+                remaining -= 1
+                all_done = remaining == 0
+            if all_done:
+                self._finish_shutdown()
+
+        for stager in stagers:
+            if stager.shutdown(
+                drain_timeout=drain_timeout,
+                on_complete=stager_done,
+            ):
+                stager_done()
