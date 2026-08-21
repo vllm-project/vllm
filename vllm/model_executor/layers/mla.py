@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -9,6 +10,11 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_offload.sparse.hisparse_runtime import (
+        HiSparseIndexGroupBuilder,
+    )
 
 
 @dataclass
@@ -29,6 +35,7 @@ class MLAModules:
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
     g_proj: torch.nn.Module | None = None
+    hisparse_index_group_builder: "HiSparseIndexGroupBuilder | None" = None
 
 
 # --8<-- [start:multi_head_latent_attention]
@@ -123,6 +130,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
+            hisparse_index_group_builder=mla_modules.hisparse_index_group_builder,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
         indexer_op = getattr(self.indexer, "indexer_op", None)

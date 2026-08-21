@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
 from functools import cached_property
 from math import prod
@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import MultipleOf
 
 logger = init_logger(__name__)
 
@@ -139,6 +140,11 @@ class KVCacheSpecKind(str, Enum):
     UNKNOWN = "unknown"
 
 
+class SparseCacheRole(str, Enum):
+    SPARSE = "sparse"
+    INDEXER = "indexer"
+
+
 @dataclass(frozen=True)
 class KVCacheSpec:
     """
@@ -161,6 +167,10 @@ class KVCacheSpec:
     @property
     def storage_block_size(self) -> int:
         return self.block_size
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return 128
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
@@ -216,6 +226,47 @@ class KVCacheSpec:
 
 
 @dataclass(frozen=True, kw_only=True)
+class HiSparseHotSpec(KVCacheSpec):
+    """Ephemeral per-request HiSparse hot-cache allocation."""
+
+    page_size: int
+    blocks_per_request: int
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.page_size
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return None
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return self.blocks_per_request * self.page_size
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return self.blocks_per_request
+
+
+@dataclass(frozen=True, kw_only=True)
+class HiSparseResidentSpec(KVCacheSpec):
+    """Reclaimable GPU-resident pages for host-backed HiSparse KV."""
+
+    page_size: int
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.page_size
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return cdiv(vllm_config.model_config.max_model_len, self.block_size) * (
+            self.page_size
+        )
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return cdiv(max_len, self.block_size)
+
+
+@dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
@@ -224,6 +275,7 @@ class AttentionSpec(KVCacheSpec):
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
     indexes_kv_by_block_stride: bool = False
+    supported_kernel_block_sizes: tuple[int | MultipleOf, ...] = ()
     num_head_slots: int | None = None
     """H of the logical ``[B, H, N, C]`` page when packing diverges from one
     slot per KV head. None means one slot per KV head. Published by the backend.
@@ -347,6 +399,7 @@ class FullAttentionSpec(AttentionSpec):
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
+            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             sliding_window=cls.merge_window_sizes(sliding_window),
@@ -387,6 +440,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     alignment: int | None = None  # Default to None for no padding.
     compress_ratio: int = 1  # Default to 1 for no compression.
     model_version: str | None = None
+    cache_role: SparseCacheRole = SparseCacheRole.SPARSE
+    is_index_group_leader: bool = False
     # Marks draft groups that flatten a non-causal query block into decode rows.
     non_causal_multi_token_decode: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
@@ -408,16 +463,20 @@ class MLAAttentionSpec(FullAttentionSpec):
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
+        cache_role_set = {spec.cache_role for spec in specs}
+        index_group_leader_set = {spec.is_index_group_leader for spec in specs}
         block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
+            and len(cache_role_set) == 1
+            and len(index_group_leader_set) == 1
             and len(block_stride_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version, and KV block "
-            "stride indexing."
+            "quantization method, compress ratio, model version, cache role, "
+            "index-sharing role, and KV block stride indexing."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -429,9 +488,12 @@ class MLAAttentionSpec(FullAttentionSpec):
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             indexes_kv_by_block_stride=block_stride_set.pop(),
+            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            cache_role=cache_role_set.pop(),
+            is_index_group_leader=index_group_leader_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),
@@ -485,6 +547,7 @@ class RSWASpec(FullAttentionSpec):
             kv_quant_mode=base.kv_quant_mode,
             page_size_padded=base.page_size_padded,
             indexes_kv_by_block_stride=base.indexes_kv_by_block_stride,
+            supported_kernel_block_sizes=base.supported_kernel_block_sizes,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
             sliding_window=base.sliding_window,
@@ -648,6 +711,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             indexes_kv_by_block_stride=block_stride_set.pop(),
+            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
             sliding_window=sliding_window_set.pop(),
             extra_retained_tokens=extra_retained_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
@@ -684,6 +748,10 @@ class MambaSpec(KVCacheSpec):
             assert self.page_size_padded >= page_size
             return self.page_size_padded
         return page_size
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return None
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":
@@ -773,6 +841,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
+            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             sliding_window=cls.merge_window_sizes(sliding_window),
@@ -808,6 +877,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return next(iter(self.kv_cache_specs.values())).block_table_token_alignment
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(
@@ -936,6 +1009,14 @@ class KVCacheTensor:
     shared_by: list[str]  # layer names that share the same KV cache tensor
     offset: int = 0  # byte offset of this layer within a contiguous block
     block_stride: int = 0  # total bytes per block in a packed layout (0 = not packed)
+    host_resident: bool = False  # allocate in host rather than device memory
+    block_pool_id: int | None = 0
+
+
+class KVCacheGroupRole(str, Enum):
+    DEFAULT = "default"
+    HISPARSE_SOURCE = "hisparse_source"
+    HISPARSE_INDEXER = "hisparse_indexer"
 
 
 @dataclass
@@ -951,8 +1032,20 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
+    # Physical block-pool domain used by this group. Groups in the same domain
+    # share block IDs and may overlap in a packed HMA layout. Groups in
+    # different domains have independent block-ID spaces. None identifies a
+    # group owned by a dedicated non-device manager.
+    block_pool_id: int | None = 0
+    # Whether this group participates in persistent prefix-cache lookup.
+    # Ephemeral accelerator-side replicas set this to False; their source
+    # group remains authoritative and they are rebuilt when a prefix is reused.
+    enable_prefix_caching: bool = True
     # Whether this group is part of the externally transferable KV state.
+    # Ephemeral accelerator-side replicas are rebuilt from their transferable
+    # source group after a connector load.
     enable_kv_transfer: bool = True
+    role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
 
 
 @dataclass
@@ -975,6 +1068,15 @@ class KVCacheConfig:
     """
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
+
+    num_blocks_by_pool: list[int] = field(default_factory=list)
+    """Number of blocks in each physical block-pool domain.
+
+    An omitted list preserves the traditional single pool of ``num_blocks`` blocks.
+    """
+
+    hisparse_host_num_blocks: int | None = None
+    """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
@@ -1012,6 +1114,55 @@ class KVCacheConfig:
             )
         return tuple(block_ids[group_id] for group_id in self.transfer_group_ids)
 
+    def __post_init__(self) -> None:
+        if not self.num_blocks_by_pool:
+            self.num_blocks_by_pool = [self.num_blocks]
+        if any(n < 0 for n in self.num_blocks_by_pool):
+            raise ValueError("KV cache block-pool sizes must be non-negative.")
+        if self.hisparse_host_num_blocks is not None and (
+            self.hisparse_host_num_blocks < 0
+        ):
+            raise ValueError("HiSparse host block-pool size must be non-negative.")
+        if self.num_blocks != self.num_blocks_by_pool[0]:
+            raise ValueError(
+                "KVCacheConfig.num_blocks must equal num_blocks_by_pool[0]."
+            )
+        num_pools = len(self.num_blocks_by_pool)
+        for group in self.kv_cache_groups:
+            if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
+                if (
+                    group.block_pool_id is not None
+                    or self.hisparse_host_num_blocks is None
+                ):
+                    raise ValueError(
+                        "HiSparse source groups require a dedicated host block pool."
+                    )
+                continue
+            if group.block_pool_id is None or not (
+                0 <= group.block_pool_id < num_pools
+            ):
+                raise ValueError(
+                    f"Invalid block_pool_id={group.block_pool_id}; "
+                    f"configuration has {num_pools} block pools."
+                )
+        for tensor in self.kv_cache_tensors:
+            if tensor.host_resident:
+                if (
+                    tensor.block_pool_id is not None
+                    or self.hisparse_host_num_blocks is None
+                ):
+                    raise ValueError(
+                        "Host-resident tensors require the HiSparse host pool."
+                    )
+                continue
+            if tensor.block_pool_id is None or not (
+                0 <= tensor.block_pool_id < num_pools
+            ):
+                raise ValueError(
+                    f"Invalid tensor block_pool_id={tensor.block_pool_id}; "
+                    f"configuration has {num_pools} block pools."
+                )
+
     @property
     def has_mamba_layers(self) -> bool:
         return any(isinstance(g.kv_cache_spec, MambaSpec) for g in self.kv_cache_groups)
@@ -1035,6 +1186,37 @@ class KVCacheConfig:
         return len(kv_cache_precisions) > 1
 
     @property
+    def zeroing_block_pool_ids(self) -> frozenset[int]:
+        """Physical pools whose newly allocated blocks require zeroing."""
+        pool_precisions: dict[int, set[tuple[torch.dtype, KVQuantMode]]] = {}
+        zeroing_pools = {
+            group.block_pool_id
+            for group in self.kv_cache_groups
+            if group.block_pool_id is not None
+            and isinstance(group.kv_cache_spec, MambaSpec)
+        }
+        for group in self.kv_cache_groups:
+            if group.block_pool_id is None:
+                continue
+            group_spec = group.kv_cache_spec
+            specs = (
+                group_spec.kv_cache_specs.values()
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else (group_spec,)
+            )
+            pool_precisions.setdefault(group.block_pool_id, set()).update(
+                (spec.dtype, spec.kv_quant_mode)
+                for spec in specs
+                if isinstance(spec, AttentionSpec)
+            )
+        zeroing_pools.update(
+            pool_id
+            for pool_id, precisions in pool_precisions.items()
+            if len(precisions) > 1
+        )
+        return frozenset(zeroing_pools)
+
+    @property
     def needs_kv_cache_zeroing(self) -> bool:
         """Whether newly allocated KV cache blocks must be zeroed before use.
 
@@ -1043,4 +1225,4 @@ class KVCacheConfig:
         groups can be reinterpreted under a different precision and decode stale
         bytes to NaN/Inf. Uniform-precision caches skip zeroing.
         """
-        return self.has_mamba_layers or self.has_mixed_precision_kv_cache
+        return bool(self.zeroing_block_pool_ids)

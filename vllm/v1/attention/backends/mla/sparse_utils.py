@@ -20,6 +20,7 @@ def _convert_req_index_to_global_index_kernel(
     # shapes (compile-time where possible)
     max_num_blocks_per_req: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    PHYSICAL_BLOCK_STRIDE: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     COUNT_VALID: tl.constexpr,  # whether to count valid indices
@@ -86,7 +87,7 @@ def _convert_req_index_to_global_index_kernel(
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     is_invalid_tok |= ~valid_block | is_remote
     base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
-    out_val = base * BLOCK_SIZE + inblock_off
+    out_val = base * PHYSICAL_BLOCK_STRIDE + inblock_off
 
     # Override with prefill output if prefill is enabled
     if HAS_PREFILL:
@@ -162,6 +163,7 @@ def triton_convert_req_index_to_global_index(
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
     return_valid_counts: bool = False,
+    PHYSICAL_BLOCK_STRIDE: int | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     out[token_id, indice_id] =
@@ -205,6 +207,8 @@ def triton_convert_req_index_to_global_index(
         assert prefill_workspace_starts.dtype == torch.int32
 
     num_tokens = req_id.shape[0]
+    if PHYSICAL_BLOCK_STRIDE is None:
+        PHYSICAL_BLOCK_STRIDE = BLOCK_SIZE
     max_num_blocks_per_req = block_table.shape[1]
 
     single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
@@ -249,6 +253,7 @@ def triton_convert_req_index_to_global_index(
         # shapes / constexprs
         max_num_blocks_per_req,
         BLOCK_SIZE,
+        PHYSICAL_BLOCK_STRIDE,
         block_n,
         HAS_PREFILL_WORKSPACE,
         return_valid_counts,
@@ -364,6 +369,7 @@ def triton_filter_and_convert_dcp_index(
         None,
         None,
         max_num_blocks_per_req,
+        BLOCK_SIZE,
         BLOCK_SIZE,
         block_n,
         False,  # HAS_PREFILL

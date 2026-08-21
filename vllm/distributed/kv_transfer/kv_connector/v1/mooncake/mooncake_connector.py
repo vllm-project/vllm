@@ -673,11 +673,11 @@ class MooncakeConnectorScheduler:
         """Clip per-group block IDs to sliding window size."""
         if len(block_ids) == 0:
             return []
-        if len(block_ids) == len(self.kv_cache_config.transfer_groups):
+        if len(block_ids) == len(self.kv_cache_config.transfer_group_ids):
             selected = list(block_ids)
         else:
             selected = list(self.kv_cache_config.select_transfer_block_ids(block_ids))
-        if not self._is_hma_required:
+        if len(selected) == 0 or not self._is_hma_required:
             return selected
         return [
             blocks[-self.blocks_per_sw[i] :] if self.blocks_per_sw[i] > 0 else blocks
@@ -1046,11 +1046,6 @@ class MooncakeConnectorWorker:
                 self._layer_specs[layer_name] = specs_by_layer.get(
                     layer_name, group_spec
                 )
-        self._layer_group_indices: dict[str, int] = {
-            layer: group_index
-            for group_index, group in enumerate(kv_cache_config.transfer_groups)
-            for layer in group.layer_names
-        }
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
@@ -1714,7 +1709,7 @@ class MooncakeConnectorWorker:
                 self.registered_layer_names.append(layer_name)
                 self.registered_layer_indices.append(layer_index)
                 self.registered_group_indices.append(
-                    self._layer_group_indices[layer_name]
+                    self.kv_cache_config.transfer_group_index_by_layer[layer_name]
                 )
                 storage = cache.untyped_storage()
                 storage_addr = storage.data_ptr()
@@ -2059,7 +2054,7 @@ class MooncakeConnectorWorker:
     ) -> list[TransferRegion]:
         if not group_indices:
             group_indices = [
-                self._layer_group_indices.get(layer_name, 0)
+                self.kv_cache_config.transfer_group_index_by_layer.get(layer_name, 0)
                 for layer_name in layer_names
             ]
         split_kv_regions = None

@@ -289,8 +289,8 @@ def warmup_kernels(
 
     # The KV-block zeroing kernel is driven by the scheduler's
     # new_block_ids_to_zero, so none of the steps below reach it.
-    if model_runner.kv_block_zeroer is not None:
-        model_runner.kv_block_zeroer.warmup(model_runner.kv_cache_config.num_blocks)
+    for pool_id, zeroer in model_runner.kv_block_zeroers.items():
+        zeroer.warmup(model_runner.kv_cache_config.num_blocks_by_pool[pool_id])
 
     # Step 1: Prefill all requests with 1 + decode_query_len prompt tokens each.
     new_reqs = [

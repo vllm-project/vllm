@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for per-KV-group attention backend selection (backend_per_kind)."""
+"""Tests for attention configuration and per-KV-group backend selection."""
+
+from types import SimpleNamespace
 
 import pytest
 
-from vllm.config.attention import AttentionConfig
+from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_spec_kind
 from vllm.v1.kv_cache_interface import KVCacheSpecKind
+from vllm.v1.kv_offload.sparse.hisparse_runtime import ResolvedHiSparseConfig
 
 
 @pytest.mark.parametrize(
@@ -65,3 +68,33 @@ def test_backend_per_kind_rejects_unknown_kind():
 
 def test_backend_per_kind_defaults_empty():
     assert AttentionConfig().backend_per_kind == {}
+
+
+def test_hisparse_device_buffer_size_boundaries():
+    vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+        )
+    )
+    resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    assert resolved is not None
+    assert resolved.device_buffer_size == 256
+
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        host_pool_gib=1.0, device_buffer_size=127
+    )
+    with pytest.raises(ValueError, match="expected at least 128"):
+        ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        host_pool_gib=1.0, device_buffer_size=32768
+    )
+    resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    assert resolved is not None
+    assert resolved.device_buffer_size == 32768
+
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        host_pool_gib=1.0, device_buffer_size=32769
+    )
+    with pytest.raises(ValueError, match="int16 slot-index limit"):
+        ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)

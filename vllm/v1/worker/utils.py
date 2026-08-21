@@ -22,12 +22,14 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadataBuilder,
-    MultipleOf,
+    select_common_block_size_from_constraints,
 )
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -113,6 +115,7 @@ class KVBlockZeroer:
         cache_dtype: str,
         static_forward_context: dict[str, Any],
         runner_only_attn_layers: set[str] | None = None,
+        zeroing_group_ids: set[int] | None = None,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
 
@@ -125,6 +128,9 @@ class KVBlockZeroer:
         physical block stride and zeroed page span remain independent.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
+        When ``zeroing_group_ids`` is provided, groups in other physical
+        block-pool domains are excluded because their numeric block IDs may
+        overlap.
         """
         self.device = device
         self._meta: (
@@ -139,6 +145,11 @@ class KVBlockZeroer:
         seg_page_sizes: list[int] = []
 
         for group in attn_groups_iter:
+            if (
+                zeroing_group_ids is not None
+                and group.kv_cache_group_id not in zeroing_group_ids
+            ):
+                continue
             spec = group.kv_cache_spec
             if not isinstance(spec, AttentionSpec):
                 continue
@@ -237,6 +248,34 @@ class KVBlockZeroer:
             self.zero_block_ids([0])
 
 
+def build_kv_block_zeroers(
+    *,
+    device: torch.device,
+    attn_groups: list[list["AttentionGroup"]],
+    kernel_block_sizes: list[int],
+    cache_dtype: str,
+    static_forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    runner_only_attn_layers: set[str] | None = None,
+) -> dict[int, KVBlockZeroer]:
+    return {
+        pool_id: KVBlockZeroer(
+            device,
+            attn_groups_iter=(group for groups in attn_groups for group in groups),
+            kernel_block_sizes=kernel_block_sizes,
+            cache_dtype=cache_dtype,
+            static_forward_context=static_forward_context,
+            runner_only_attn_layers=runner_only_attn_layers,
+            zeroing_group_ids={
+                group_id
+                for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+                if group.block_pool_id == pool_id
+            },
+        )
+        for pool_id in kv_cache_config.zeroing_block_pool_ids
+    }
+
+
 @dataclass
 class AttentionGroup:
     backend: type[AttentionBackend]
@@ -320,51 +359,13 @@ def select_common_block_size(
         ValueError: If no valid block size found.
     """
 
-    def block_size_is_supported(
-        backends: list[type[AttentionBackend]], block_size: int
-    ) -> bool:
-        """Check if the block size is supported by all backends."""
-        for backend in backends:
-            is_supported = False
-            for supported_size in backend.get_supported_kernel_block_sizes():
-                if isinstance(supported_size, int):
-                    if block_size == supported_size:
-                        is_supported = True
-                elif isinstance(supported_size, MultipleOf):
-                    if block_size % supported_size.base == 0:
-                        is_supported = True
-                else:
-                    raise ValueError(f"Unknown supported size: {supported_size}")
-            if not is_supported:
-                return False
-        return True
-
-    # Case 1: if the block_size of kv cache manager is supported by all backends,
-    # return it directly.
-    if block_size_is_supported(backends, kv_manager_block_size):
+    if not backends:
         return kv_manager_block_size
 
-    # Case 2: otherwise, the block_size must be an `int`-format supported size of
-    # at least one backend. Iterate over all `int`-format supported sizes in
-    # descending order and return the first one that is supported by all backends.
-    # Simple proof:
-    # If the supported size b is in MultipleOf(x_i) format for all attention
-    # backends i, and b a factor of kv_manager_block_size, then
-    # kv_manager_block_size also satisfies MultipleOf(x_i) for all i. We will
-    # return kv_manager_block_size in case 1.
-    all_int_supported_sizes = set(
-        supported_size
-        for backend in backends
-        for supported_size in backend.get_supported_kernel_block_sizes()
-        if isinstance(supported_size, int)
+    return select_common_block_size_from_constraints(
+        kv_manager_block_size,
+        [backend.get_supported_kernel_block_sizes() for backend in backends],
     )
-
-    for supported_size in sorted(all_int_supported_sizes, reverse=True):
-        if kv_manager_block_size % supported_size != 0:
-            continue
-        if block_size_is_supported(backends, supported_size):
-            return supported_size
-    raise ValueError(f"No common block size for {kv_manager_block_size}. ")
 
 
 def prepare_kernel_block_sizes(
@@ -403,6 +404,8 @@ def prepare_kernel_block_sizes(
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):
             # This is likely Mamba or other non-attention cache, no splitting.
+            kernel_block_sizes.append(kv_cache_spec.block_size)
+        elif isinstance(kv_cache_spec, (HiSparseHotSpec, HiSparseResidentSpec)):
             kernel_block_sizes.append(kv_cache_spec.block_size)
         else:
             raise NotImplementedError(
@@ -550,10 +553,42 @@ def bind_kv_cache(
         forward_context[layer_name].bind_kv_cache(kv_cache)
 
 
+class DeviceKVCacheBlockCopier:
+    def __init__(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_caches: Mapping[str, torch.Tensor | list[torch.Tensor]],
+    ) -> None:
+        self._num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
+        self._caches_by_pool: dict[int, list[torch.Tensor | list[torch.Tensor]]] = (
+            defaultdict(list)
+        )
+        for group in kv_cache_config.kv_cache_groups:
+            pool_id = group.block_pool_id
+            if pool_id is None:
+                continue
+            self._caches_by_pool[pool_id].extend(
+                kv_caches[name] for name in group.layer_names if name in kv_caches
+            )
+
+    def copy(self, copies: Sequence[KVCacheBlockCopy]) -> None:
+        copies_by_pool: dict[int, list[KVCacheBlockCopy]] = defaultdict(list)
+        for copy in copies:
+            if copy.block_pool_id is not None:
+                copies_by_pool[copy.block_pool_id].append(copy)
+        for pool_id, pool_copies in copies_by_pool.items():
+            copy_kv_cache_blocks_inplace(
+                self._caches_by_pool[pool_id],
+                self._num_blocks_by_pool[pool_id],
+                pool_copies,
+            )
+
+
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor | list[torch.Tensor]],
     num_blocks: int,
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+    host_write_event: torch.Event | None = None,
 ) -> None:
     if not kv_cache_block_copies:
         return
@@ -573,20 +608,38 @@ def copy_kv_cache_blocks_inplace(
 
     if not storage_tensors:
         return
-    device = storage_tensors[0].device
-    indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
-    indices = async_tensor_h2d(indices_np, device=device)
-    src_indices, dst_indices = indices.unbind(dim=1)
+    indices_np = np.array(
+        [(copy.src_block_id, copy.dst_block_id) for copy in kv_cache_block_copies],
+        dtype=np.int64,
+    )
+    for device in {tensor.device for tensor in storage_tensors}:
+        if device.type == "cpu":
+            # Pinned host pages may still be read or written by HiSparse's
+            # compute stream from the prior step.
+            if host_write_event is not None:
+                host_write_event.synchronize()
+            indices = torch.from_numpy(indices_np)
+            src_indices, dst_indices = indices.unbind(dim=1)
+            for tensor in storage_tensors:
+                if tensor.device == device:
+                    assert tensor.numel() % num_blocks == 0
+                    blocks = tensor.view(num_blocks, -1)
+                    blocks[dst_indices] = blocks[src_indices]
+            continue
+        else:
+            indices = async_tensor_h2d(indices_np, device=device)
+        src_indices, dst_indices = indices.unbind(dim=1)
 
-    for tensor in storage_tensors:
-        assert tensor.device == device
-        blocks = torch.empty(0, dtype=torch.uint8, device=device)
-        blocks.set_(tensor.untyped_storage())
-        # Block-major backing storage: block i owns the contiguous byte range
-        # [i * page_size, (i + 1) * page_size).
-        assert blocks.numel() % num_blocks == 0
-        blocks = blocks.view(num_blocks, -1)
-        blocks[dst_indices] = blocks[src_indices]
+        for tensor in storage_tensors:
+            if tensor.device != device:
+                continue
+            blocks = torch.empty(0, dtype=torch.uint8, device=device)
+            blocks.set_(tensor.untyped_storage())
+            # Block-major backing storage: block i owns the contiguous byte range
+            # [i * page_size, (i + 1) * page_size).
+            assert blocks.numel() % num_blocks == 0
+            blocks = blocks.view(num_blocks, -1)
+            blocks[dst_indices] = blocks[src_indices]
 
 
 def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> bool:
