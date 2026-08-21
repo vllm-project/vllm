@@ -43,7 +43,7 @@ Moreover, since the tokenized text has not passed through the HF processor, we h
 
 ### Dummy text
 
-Most HF processors can process multi-modal inputs without any text, so we simply call them without passing text. Some processors however throw an error if the text does not contain an input placeholder token per multi-modal input. For those, each model defines how to generate dummy text based on the number of multi-modal inputs, via [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text], which its override of [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main] passes to the HF processor together with the multi-modal inputs to obtain the processed multi-modal data.
+Most HF processors can process multi-modal inputs without any text, so we simply call them without passing text. Some processors however throw an error if the text does not contain an input placeholder token per multi-modal input. For those, each model defines how to generate dummy text based on the number of multi-modal inputs, via [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text], which its override of [_get_hf_processor_text][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_processor_text] returns so that [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main] passes it to the HF processor together with the multi-modal inputs to obtain the processed multi-modal data.
 
 ### Automatic prompt updating
 

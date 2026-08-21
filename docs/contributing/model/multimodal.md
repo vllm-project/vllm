@@ -496,9 +496,14 @@ return a schema of the tensors outputted by the HF processor that are related to
     [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main]
     calls the HF processor on the multi-modal data without passing any text.
     If the HF processor instead requires text corresponding to the multi-modal items,
-    pass the dummy text from
-    [BaseDummyInputsBuilder.get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text]
-    like in the example above.
+    you should override
+    [_get_hf_processor_text][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_processor_text]
+    to return the dummy text from
+    [BaseDummyInputsBuilder.get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text].
+    If you need additional control over how the HF processor is called or its
+    outputs are post-processed, you can override
+    [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main]
+    directly like in the example above.
 
     Since `pixel_values` is now a list with one tensor per image, we can override
     [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
