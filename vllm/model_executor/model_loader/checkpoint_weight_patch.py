@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 
@@ -25,8 +25,7 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True)
-class CheckpointWeightPatch:
+class CheckpointWeightPatch(NamedTuple):
     """Describe one dense or sparse checkpoint-coordinate update.
 
     Attributes:
