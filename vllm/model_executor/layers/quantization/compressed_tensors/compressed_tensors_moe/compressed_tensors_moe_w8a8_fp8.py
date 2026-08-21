@@ -11,6 +11,7 @@ from compressed_tensors.quantization import (
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEParallelConfig,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
     SharedExperts,
@@ -21,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
+    fp8_round_up_hidden_size_and_intermediate_size,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
@@ -108,6 +110,23 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             weight_key=weight_key,
             activation_key=activation_key,
             allow_vllm_cutlass=True,
+        )
+
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        return fp8_round_up_hidden_size_and_intermediate_size(
+            self.fp8_backend, hidden_size, intermediate_size_per_partition
         )
 
     def create_weights(
