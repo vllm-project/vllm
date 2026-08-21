@@ -51,6 +51,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import (
@@ -243,7 +244,6 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not (images := mm_data.get("images", [])):
@@ -259,7 +259,6 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
             prompt,
             mm_data,
             mm_kwargs,
-            tok_kwargs,
         )
 
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
@@ -443,11 +442,12 @@ class Idefics3Model(nn.Module):
         real_images_inds = (pixel_values == 0.0).sum(
             dim=(-1, -2, -3)
         ) != nb_values_per_image
-        pixel_values = pixel_values[real_images_inds].contiguous()
+        with gpu_sync_allowed():
+            pixel_values = pixel_values[real_images_inds].contiguous()
 
-        # Handle the vision attention mask
-        # Remove padding images from the mask
-        pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
+            # Handle the vision attention mask
+            # Remove padding images from the mask
+            pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
 
         patch_size = self.config.vision_config.patch_size
         patches_subgrid = pixel_attention_mask.unfold(
@@ -539,7 +539,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.text_config.tie_word_embeddings:
-            self.lm_head.weight = self.model.text_model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.text_model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> ImageInputs | None:

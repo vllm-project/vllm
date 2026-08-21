@@ -140,7 +140,6 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingIn
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             prompt_ids = self.info.get_tokenizer().encode(prompt)
@@ -151,7 +150,6 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingIn
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
     def _apply_hf_processor_tokens_only(
@@ -977,7 +975,7 @@ class ChameleonForConditionalGeneration(
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
@@ -1059,6 +1057,5 @@ class ChameleonForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
