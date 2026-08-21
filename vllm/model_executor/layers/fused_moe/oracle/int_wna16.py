@@ -1104,9 +1104,21 @@ def _humming_wna16_weight_schema(
             "desc_act": quant_config.desc_act,
             "sym": quant_config.is_sym,
         }
+    if isinstance(quant_config, QuantizationArgs):
+        quant_type = getattr(quant_config.type, "value", quant_config.type)
+        quant_strategy = getattr(quant_config.strategy, "value", quant_config.strategy)
+        return {
+            "quant_method": "compressed-tensors",
+            "format": "pack-quantized",
+            "type": str(quant_type),
+            "num_bits": quant_config.num_bits,
+            "strategy": str(quant_strategy),
+            "group_size": quant_config.group_size,
+            "symmetric": quant_config.symmetric,
+        }
     raise TypeError(
-        "Humming WNA16 checkpoint schema requires AutoAWQConfig or "
-        "AutoGPTQConfig, "
+        "Humming WNA16 checkpoint schema requires AutoAWQConfig, "
+        "AutoGPTQConfig or QuantizationArgs, "
         f"got {type(quant_config).__name__}."
     )
 
@@ -1649,6 +1661,42 @@ def convert_to_wna16_moe_kernel_format(
             w2_uint8 = w2.transpose(1, 2).contiguous().view(torch.uint8)
             w13_scale = w13_scale.transpose(1, 2).contiguous()
             w2_scale = w2_scale.transpose(1, 2).contiguous()
+            # Zero points from compressed-tensors checkpoints are K-first int32
+            # with 8 int4 ZPs packed per element: shape (E, K//gs, N//8).
+            # fused_moe_kernel_gptq_awq expects N-first uint8 with 2 int4 ZPs
+            # per byte: shape (E, N//2, K//gs), indexed as
+            # (offs_bn // 2) * stride_bzn + offs_k_group * stride_bzk.
+            # Conversion steps:
+            #   (E, K//gs, N//8) int32
+            #   → transpose(1,2) → (E, N//8, K//gs) int32
+            #   → view(uint8)    → (E, N//8, K//gs*4)  [each int32 → 4 bytes]
+            #   → reshape(…,4)   → (E, N//8, K//gs, 4) [isolate byte index]
+            #   → permute(0,1,3,2) → (E, N//8, 4, K//gs) [byte index before K]
+            #   → reshape         → (E, N//2, K//gs)   [kernel expected layout]
+            # After this, element [e, offs_bn//2, k_group] is the uint8 byte
+            # holding the two int4 ZPs for output channels offs_bn and offs_bn+1.
+            if w13_qzeros is not None:
+                E13, Kg13, Np13 = w13_qzeros.shape
+                w13_qzeros = (
+                    w13_qzeros.transpose(1, 2)
+                    .contiguous()
+                    .view(torch.uint8)
+                    .reshape(E13, Np13, Kg13, 4)
+                    .permute(0, 1, 3, 2)
+                    .reshape(E13, Np13 * 4, Kg13)
+                    .contiguous()
+                )
+            if w2_qzeros is not None:
+                E2, Kg2, Np2 = w2_qzeros.shape
+                w2_qzeros = (
+                    w2_qzeros.transpose(1, 2)
+                    .contiguous()
+                    .view(torch.uint8)
+                    .reshape(E2, Np2, Kg2, 4)
+                    .permute(0, 1, 3, 2)
+                    .reshape(E2, Np2 * 4, Kg2)
+                    .contiguous()
+                )
         else:
             # MoeWNA16 uses N-first uint8 weights and scales.
             w13_uint8 = w13.view(torch.uint8)
