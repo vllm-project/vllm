@@ -886,79 +886,54 @@ def test_tokenspeed_mla_noncausal_capability():
     assert tokenspeed_mla_module.TokenspeedMLABackend.supports_non_causal()
 
 
-def test_flashinfer_mla_dcp_multi_token_decode_uses_per_query_bounds(monkeypatch):
+def test_flashinfer_mla_dspark_support_is_tp_only(monkeypatch):
     flashinfer_mla_module = pytest.importorskip(
         "vllm.v1.attention.backends.mla.flashinfer_mla"
     )
-
-    decode_call = None
-
-    def fake_decode(**kwargs):
-        nonlocal decode_call
-        decode_call = kwargs
-        query = kwargs["query"]
-        output = torch.empty(*query.shape[:-1], 512, dtype=torch.bfloat16)
-        lse = torch.empty(query.shape[0], query.shape[-2], dtype=torch.float32)
-        return output, lse
-
-    monkeypatch.setattr(
-        flashinfer_mla_module,
-        "trtllm_batch_decode_with_kv_cache_mla",
-        fake_decode,
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="dspark"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+        model_config=None,
     )
     monkeypatch.setattr(
         flashinfer_mla_module,
-        "_get_workspace_buffer",
-        lambda return_lse: torch.empty(1, dtype=torch.int8),
+        "get_current_vllm_config",
+        lambda: vllm_config,
     )
 
-    impl = object.__new__(flashinfer_mla_module.FlashInferMLAImpl)
-    impl.dcp_world_size = 2
-    impl.dcp_rank = 1
-    impl.cp_kv_cache_interleave_size = 1
-    impl.need_to_return_lse_for_decode = True
-    impl.kv_lora_rank = 512
-    impl.qk_nope_head_dim = 128
-    impl.qk_rope_head_dim = 64
-    impl.bmm1_scale = 1.0
-    impl.bmm2_scale = 1.0
-
-    block_table = torch.tensor([[1], [2]], dtype=torch.int32)
-    metadata = SimpleNamespace(
-        num_decodes=2,
-        num_decode_tokens=6,
-        max_seq_len=7,
-        causal=True,
-        decode=SimpleNamespace(
-            block_table=block_table,
-            seq_lens=torch.tensor([5, 6], dtype=torch.int32),
-            dcp_tot_seq_lens=torch.tensor([10, 13], dtype=torch.int32),
-            flattened_block_table=None,
-            flattened_seq_lens=None,
-            query_len=0,
-        ),
-    )
-    query = torch.empty(6, 2, 576, dtype=torch.bfloat16)
-    kv_cache = torch.empty(3, 16, 576, dtype=torch.bfloat16)
-
-    output, lse = impl.forward_mqa(
-        query,
-        kv_cache,
-        metadata,
-        SimpleNamespace(),
+    backend = flashinfer_mla_module.FlashInferMLABackend
+    builder = flashinfer_mla_module.FlashInferMLAMetadataBuilder
+    reason = backend.supports_combination(
+        head_size=576,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="fp8",
+        block_size=64,
+        use_mla=True,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        device_capability=SimpleNamespace(),
     )
 
-    assert output.shape == (6, 2, 512)
-    assert lse is not None
-    assert lse.shape == (6, 2)
-    assert decode_call is not None
-    assert decode_call["query"].shape == (6, 1, 2, 576)
-    torch.testing.assert_close(
-        decode_call["seq_lens"],
-        torch.tensor([4, 4, 5, 5, 6, 6], dtype=torch.int32),
-    )
-    torch.testing.assert_close(
-        decode_call["block_tables"], block_table.repeat_interleave(3, dim=0)
+    assert reason == "FlashInfer MLA does not support DSpark with DCP"
+    assert backend.supports_non_causal()
+    assert builder.supports_non_causal_multi_token_decode
+    assert not backend.supports_non_causal_dcp()
+
+    vllm_config.parallel_config.decode_context_parallel_size = 1
+    assert (
+        backend.supports_combination(
+            head_size=576,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="fp8",
+            block_size=64,
+            use_mla=True,
+            has_sink=False,
+            use_sparse=False,
+            use_mm_prefix=False,
+            device_capability=SimpleNamespace(),
+        )
+        is None
     )
 
 
