@@ -146,7 +146,11 @@ class DSparkSpeculator(DFlashSpeculator):
         step: int,
     ) -> torch.Tensor:
         if self.draft_logits is None:
-            return self.model.map_draft_to_target(logits.argmax(dim=-1))
+            draft_ids = logits.argmax(dim=-1)
+            self._maybe_score_confidence(
+                logits, idx_map, self._step_cols[step], draft_ids
+            )
+            return self.model.map_draft_to_target(draft_ids)
 
         # Probabilistic sampling and rejection operate in target-vocabulary
         # space. A reduced draft vocabulary is scattered into its target rows.
@@ -158,7 +162,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
         # sample_pos is the predicted token's position Q; the target verifies
         # it with the predecessor's Gumbel key (Q-1). Pass Q-1.
-        return gumbel_sample(
+        draft_ids = gumbel_sample(
             logits,
             idx_map,
             self.temperature,
@@ -169,6 +173,12 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
         )
+        # Scored here rather than by the caller: the log q feature indexes the
+        # drafted token into the row it was drawn from, which is the scattered
+        # target-vocabulary row above when the draft vocabulary is reduced. The
+        # scatter leaves non-draft columns at -inf, so log q is unchanged by it.
+        self._maybe_score_confidence(logits, idx_map, self._step_cols[step], draft_ids)
+        return draft_ids
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:
@@ -200,9 +210,6 @@ class DSparkSpeculator(DFlashSpeculator):
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
-            # Draft vocabulary: the top-2 margin is unchanged by the scatter into
-            # target vocabulary that _sample_logits may do, and cheaper to scan.
-            self._maybe_score_confidence(logits_i, idx_map[:, i], self._step_cols[i])
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
             )
@@ -247,7 +254,6 @@ class DSparkSpeculator(DFlashSpeculator):
             )
             # Top-2 over the truncated row: both entries are real candidates as
             # long as _draft_topk >= 2, which load_draft_model enforces here.
-            self._maybe_score_confidence(logits_i, idx_map[:, i], self._step_cols[i])
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
             )

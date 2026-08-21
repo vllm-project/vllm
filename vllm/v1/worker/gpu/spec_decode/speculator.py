@@ -152,7 +152,12 @@ class DraftModelSpeculator(BaseSpeculator):
                     "materializes. Disable one of them."
                 )
             self.acceptance_estimator = OnlineAcceptanceEstimator(
-                self.max_num_reqs, self.num_speculative_steps, device
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                device,
+                use_log_q=(
+                    self.speculative_config.draft_sample_method == "probabilistic"
+                ),
             )
 
         self.draft_logits: torch.Tensor | None = None
@@ -355,8 +360,9 @@ class DraftModelSpeculator(BaseSpeculator):
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
         logits = self.model.compute_logits(hidden_states)
-        self._maybe_score_confidence(logits, idx_mapping, draft_step)
-        return logits.argmax(dim=-1)
+        draft_tokens = logits.argmax(dim=-1)
+        self._maybe_score_confidence(logits, idx_mapping, draft_step, draft_tokens)
+        return draft_tokens
 
     def sample_draft(
         self,
@@ -370,10 +376,9 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            self._maybe_score_confidence(logits, idx_mapping, draft_step)
             # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
             # used for draft and target sampling.
-            return gumbel_sample(
+            draft_tokens = gumbel_sample(
                 logits,
                 idx_mapping,
                 temperature,
@@ -384,6 +389,9 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
+            # Scored after sampling: the log q feature reads the drafted token.
+            self._maybe_score_confidence(logits, idx_mapping, draft_step, draft_tokens)
+            return draft_tokens
         return self._greedy_sample(hidden_states, idx_mapping, draft_step)
 
     def _maybe_score_confidence(
@@ -391,6 +399,7 @@ class DraftModelSpeculator(BaseSpeculator):
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
         draft_step: torch.Tensor,
+        draft_tokens: torch.Tensor | None = None,
     ) -> None:
         if self.acceptance_estimator is not None:
             self.acceptance_estimator.predict(
@@ -398,6 +407,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 idx_mapping,
                 draft_step,
                 self.draft_token_confidence_probs,
+                draft_tokens,
             )
 
     @final

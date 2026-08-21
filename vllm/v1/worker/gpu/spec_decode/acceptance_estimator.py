@@ -53,6 +53,9 @@ logger = init_logger(__name__)
 _MIN_LOGIT = -1.0e30
 # A row with a single finite entry would emit an unbounded margin.
 _MAX_MARGIN = 40.0
+# Floor on -log q before the Gumbel transform, so a draw with q indistinguishable
+# from 1 lands at a finite feature value instead of -inf.
+_MIN_NEG_LOG_Q = 1e-3
 
 
 @triton.jit
@@ -231,12 +234,15 @@ def _predict_kernel(
     idx_mapping_ptr,
     idx_mapping_stride,
     step_ptr,
+    tokens_ptr,
     num_tokens,
     vocab_size,
     per_token_step: tl.constexpr,
+    USE_LOG_Q: tl.constexpr,
     NUM_SPECULATIVE_STEPS: tl.constexpr,
     MIN_LOGIT: tl.constexpr,
     MAX_MARGIN: tl.constexpr,
+    MIN_NEG_LOG_Q: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
@@ -283,14 +289,45 @@ def _predict_kernel(
         step = tl.load(step_ptr).to(tl.int64)
         batch_idx = token_idx
 
-    # Compute the top-2 margin: max1 - max2.
-    margin = tl.minimum(max1 - max2, MAX_MARGIN)
-    tl.store(margins_ptr + req_state_idx * margins_stride + step, margin)
+    if USE_LOG_Q:
+        # Probabilistic drafting accepts with min(1, p(x)/q(x)) for the token it
+        # actually drew, so the drafted token's own log-probability is the term in
+        # the mechanism; the top-2 margin describes the mode, which is often not
+        # the token drawn. log q = logit(x) - logsumexp, computed with max1 as the
+        # shift for stability, so it needs one more pass over the row.
+        lane_sum = tl.zeros((BLOCK_SIZE,), tl.float32)
+        for start in tl.range(0, vocab_size, BLOCK_SIZE):
+            block = start + lane
+            mask = block < vocab_size
+            block_logits = tl.load(logits_row + block, mask=mask, other=MIN_LOGIT).to(
+                tl.float32
+            )
+            lane_sum += tl.where(mask, tl.exp(block_logits - max1), 0.0)
+        log_sum_exp = max1 + tl.log(tl.sum(lane_sum, axis=0))
+        token = tl.load(tokens_ptr + token_idx).to(tl.int64)
+        sampled_logit = tl.load(logits_row + token).to(tl.float32)
+        # log q is <= 0; clamp the tail so one astronomically unlikely draw cannot
+        # dominate the IRLS fit.
+        log_q = tl.maximum(sampled_logit - log_sum_exp, -MAX_MARGIN)
+        # q goes on the Gumbel scale rather than being used directly. The drafter
+        # samples by argmax over logits + Gumbel noise, so acceptance is an
+        # extremum event, and -log(-log q) is the Gumbel quantile of q: the scale
+        # on which that noise is additive and a linear predictor is meaningful.
+        # It is monotone increasing, so the fitted slope stays positive, and it
+        # resolves the mass that piles up at log q ~ 0, which a term linear in
+        # log q cannot -- there the acceptance rate climbs steeply inside a
+        # sliver of a range whose tail runs to -MAX_MARGIN.
+        feature = -tl.log(tl.maximum(-log_q, MIN_NEG_LOG_Q))
+    else:
+        # Greedy drafting takes the mode, so how decisively the drafter preferred
+        # it is the natural confidence signal.
+        feature = tl.minimum(max1 - max2, MAX_MARGIN)
+    tl.store(margins_ptr + req_state_idx * margins_stride + step, feature)
 
-    # Predict the acceptance probability from the margin and current coefficients.
+    # Predict the acceptance probability from the feature and current coefficients.
     weight = tl.load(coef_ptr + step)
     bias = tl.load(coef_ptr + coef_stride + step)
-    prob = tl.sigmoid(weight * margin + bias)
+    prob = tl.sigmoid(weight * feature + bias)
     tl.store(pred_ptr + req_state_idx * pred_stride + step, prob)
     tl.store(conf_ptr + batch_idx * conf_stride + step, prob)
 
@@ -335,8 +372,13 @@ class OnlineAcceptanceEstimator:
         max_num_reqs: int,
         num_speculative_steps: int,
         device: torch.device,
+        use_log_q: bool = False,
     ):
         self.num_speculative_steps = num_speculative_steps
+        # Which draft-confidence feature the logistic is fitted on: the drafted
+        # token's log-probability under probabilistic drafting, the top-2 logit
+        # margin under greedy. See _predict_kernel.
+        self.use_log_q = use_log_q
         self.device = device
         self._steps_since_refit = 0
         self._refits = 0
@@ -478,7 +520,12 @@ class OnlineAcceptanceEstimator:
         idx_mapping: torch.Tensor,
         draft_step: torch.Tensor,
         confidence_probs: torch.Tensor,
+        draft_tokens: torch.Tensor | None = None,
     ) -> None:
+        if self.use_log_q:
+            assert draft_tokens is not None, (
+                "log q feature needs the drafted tokens; score after sampling"
+            )
         num_tokens, vocab_size = logits.shape
         _predict_kernel[(num_tokens,)](
             self.margins,
@@ -496,12 +543,15 @@ class OnlineAcceptanceEstimator:
             # as a strided column of the (req, step) sample mapping.
             idx_mapping.stride(0),
             draft_step,
+            draft_tokens,
             num_tokens,
             vocab_size,
             per_token_step=draft_step.dim() > 0,
+            USE_LOG_Q=self.use_log_q,
             NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
             MIN_LOGIT=_MIN_LOGIT,
             MAX_MARGIN=_MAX_MARGIN,
+            MIN_NEG_LOG_Q=_MIN_NEG_LOG_Q,
             BLOCK_SIZE=8192,
             num_warps=8,
         )
