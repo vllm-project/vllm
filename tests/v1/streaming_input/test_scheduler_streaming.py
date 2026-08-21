@@ -304,6 +304,42 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
         assert "session" in scheduler.requests
 
+    def test_streaming_request_timeout_reaped_even_at_full_capacity(self):
+        """Expired sessions get reaped even when they've saturated
+        max_num_running_reqs themselves.
+
+        The capacity gate in the waiting loop (num_running >=
+        max_num_running_reqs: break) runs before that loop ever looks at
+        an individual request's deadline. If every slot is held by
+        vanished-client sessions, the old per-request check inside the
+        loop would never be reached at all -- the exact deadlock GH issue
+        #53130 describes. Timed-out reaping must happen unconditionally,
+        not gated by capacity.
+        """
+        scheduler = create_scheduler()
+        scheduler.max_num_running_reqs = 1
+
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[1, 2, 3],
+            resumable=True,
+        )
+        scheduler.add_request(session)
+        session.num_computed_tokens = len(session.prompt_token_ids)
+        scheduler._handle_stopped_request(session)
+        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+
+        # The single slot is now fully held by the stuck session: were the
+        # capacity gate checked before reaping, schedule() would break
+        # immediately and never touch it.
+        session.streaming_wait_deadline = time.time() - 1
+
+        scheduler.schedule()
+
+        assert session.status == RequestStatus.FINISHED_ABORTED
+        assert "session" not in scheduler.requests
+        assert scheduler.num_waiting_for_streaming_input == 0
+
     def test_streaming_request_session_update(self):
         """Test that a resumable request updates a waiting session directly.
 

@@ -484,6 +484,7 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        self._reap_expired_streaming_requests()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -771,32 +772,6 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
-
-                # A request parked in WAITING_FOR_STREAMING_REQ only leaves
-                # that status via an external add_request()/finish_requests()
-                # call (the next chunk, or an explicit abort) -- there is no
-                # other promotion path, unlike WAITING_FOR_REMOTE_KVS and
-                # WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR below. If the client
-                # (or a proxy in front of it) drops the connection without
-                # that signal ever reaching us, the request -- and the
-                # capacity slot num_waiting_for_streaming_input holds for it
-                # -- would otherwise be stuck forever, eventually wedging
-                # admission for the whole engine even with free KV cache
-                # (see GH issue #53130). Abort it once its deadline passes.
-                if (
-                    request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-                    and request.streaming_wait_deadline is not None
-                    and time.time() > request.streaming_wait_deadline
-                ):
-                    request_queue.pop_request()
-                    logger.warning(
-                        "%s timed out waiting for streaming input after %ds; "
-                        "aborting to free its admission slot.",
-                        request_id,
-                        envs.VLLM_STREAMING_REQUEST_TIMEOUT_SECONDS,
-                    )
-                    self.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
-                    continue
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -2218,6 +2193,41 @@ class Scheduler(SchedulerInterface):
             return self.waiting if waiting_req < skipped_req else self.skipped_waiting
 
         return self.waiting or self.skipped_waiting or None
+
+    def _reap_expired_streaming_requests(self) -> None:
+        """Abort WAITING_FOR_STREAMING_REQ requests past their deadline.
+
+        Runs unconditionally at the top of schedule(), before the
+        num_running >= max_num_running_reqs capacity gate in the waiting
+        loop below. A request parked in this status only leaves it via an
+        external add_request()/finish_requests() call; if the capacity
+        gate is what's saturated (e.g. every slot held by a vanished
+        client), the waiting loop breaks before it ever reaches a request
+        to check its deadline against, and the timeout would never fire.
+        Reaping here first guarantees it always does (see GH issue #53130).
+        """
+        if not self.skipped_waiting:
+            return
+        now = time.time()
+        expired = [
+            req
+            for req in self.skipped_waiting
+            if req.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+            and req.streaming_wait_deadline is not None
+            and now > req.streaming_wait_deadline
+        ]
+        if not expired:
+            return
+        for req in expired:
+            logger.warning(
+                "%s timed out waiting for streaming input after %ds; "
+                "aborting to free its admission slot.",
+                req.request_id,
+                envs.VLLM_STREAMING_REQUEST_TIMEOUT_SECONDS,
+            )
+        self.finish_requests(
+            [req.request_id for req in expired], RequestStatus.FINISHED_ABORTED
+        )
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
