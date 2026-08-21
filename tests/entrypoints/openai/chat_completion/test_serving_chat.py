@@ -32,7 +32,9 @@ from vllm.entrypoints.openai.chat_completion.serving import (
     _make_prompt_tokens_details,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     ErrorResponse,
     RequestResponseMetadata,
 )
@@ -839,6 +841,93 @@ async def test_streaming_reasoning_usage_counts_across_deltas():
     assert usage_chunks[-1]["usage"]["completion_tokens_details"] == {
         "reasoning_tokens": 1
     }
+
+
+_TRAVEL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "book_travel",
+        "description": "Book a travel itinerary",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "origin": {"type": "string"},
+                "destination": {"type": "string"},
+            },
+            "required": ["origin", "destination"],
+        },
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_streaming_truncation_is_not_reported_as_a_completed_tool_call():
+    """A tool call cut short by ``max_tokens`` must still report "length".
+
+    Once any tool-call delta has been streamed the terminal reason was
+    rewritten to "tool_calls" unconditionally, which threw away the engine's
+    actual reason. A generation truncated mid-arguments was then handed to the
+    caller as a finished tool call, with arguments that do not parse as JSON.
+
+    The full generator never had this problem because it only translates when
+    ``output.finish_reason == "stop"``, so the same request answered
+    differently depending on ``stream``.
+    """
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.model_config = None
+
+    parser = MagicMock()
+    parser.parse_delta.side_effect = [
+        DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_abc",
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name="book_travel", arguments='{"origin": "San Fra'
+                    ),
+                )
+            ]
+        ),
+        DeltaMessage(),
+    ]
+    parser.count_reasoning_tokens.return_value = 0
+    serving.parser_cls = MagicMock(return_value=parser)
+
+    first = _make_metrics_request_output(metrics=None, token_ids=(10, 11))
+    first.outputs[0].finish_reason = None
+    # the engine ran out of budget part way through the arguments
+    second = _make_metrics_request_output(metrics=None, token_ids=(12, 13))
+    second.outputs[0].finish_reason = "length"
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Book me a trip"}],
+        tools=[_TRAVEL_TOOL],
+        tool_choice="required",
+        max_tokens=16,
+        stream=True,
+    )
+
+    finish_reasons = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _stream_request_outputs(first, second),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Book me a trip"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if payload == "[DONE]":
+            continue
+        for choice in json.loads(payload).get("choices", []):
+            if choice.get("finish_reason"):
+                finish_reasons.append(choice["finish_reason"])
+
+    assert finish_reasons == ["length"]
 
 
 @dataclass
