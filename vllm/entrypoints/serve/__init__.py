@@ -18,6 +18,7 @@ __all__ = [
     "register_vllm_dev_api_routers",
 ]
 
+
 def register_vllm_serve_api_routers(app: "FastAPI"):
     from .instrumentator import register_instrumentator_api_routers
 

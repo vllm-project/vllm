@@ -128,11 +128,9 @@ class ToolParser:
         )
 
         from vllm.entrypoints.openai.chat_completion.protocol import (
-            ChatCompletionNamedToolChoiceParam,
             ChatCompletionRequest,
         )
         from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-        from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
         from vllm.sampling_params import StructuredOutputsParams
         from vllm.tool_parsers.utils import get_json_schema_from_tools
 
