@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from collections.abc import Collection
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
 from math import prod
 from typing import TYPE_CHECKING, TypeVar
@@ -138,6 +138,11 @@ class KVCacheSpecKind(str, Enum):
     UNKNOWN = "unknown"
 
 
+class MemoryModel(str, Enum):
+    TOKEN_PROPORTIONAL = "token_proportional"
+    REQUEST_CONSTANT = "request_constant"
+
+
 @dataclass(frozen=True)
 class KVCacheSpec:
     """
@@ -160,6 +165,14 @@ class KVCacheSpec:
     @property
     def storage_block_size(self) -> int:
         return self.block_size
+
+    @property
+    def memory_model(self) -> MemoryModel:
+        return MemoryModel.TOKEN_PROPORTIONAL
+
+    @property
+    def blocks_per_request(self) -> int:
+        return 1
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
@@ -684,6 +697,18 @@ class MambaSpec(KVCacheSpec):
             return self.page_size_padded
         return page_size
 
+    @property
+    def memory_model(self) -> MemoryModel:
+        if self.mamba_cache_mode == "all":
+            return MemoryModel.TOKEN_PROPORTIONAL
+        return MemoryModel.REQUEST_CONSTANT
+
+    @property
+    def blocks_per_request(self) -> int:
+        if self.mamba_cache_mode == "align":
+            return 2 + self.num_speculative_blocks
+        return 1 + self.num_speculative_blocks
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":
             max_model_len = vllm_config.model_config.max_model_len
@@ -807,6 +832,16 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
+
+    @property
+    def memory_model(self) -> MemoryModel:
+        memory_models = {spec.memory_model for spec in self.kv_cache_specs.values()}
+        assert len(memory_models) == 1
+        return memory_models.pop()
+
+    @property
+    def blocks_per_request(self) -> int:
+        return max(spec.blocks_per_request for spec in self.kv_cache_specs.values())
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(
@@ -953,6 +988,14 @@ class KVCacheGroupSpec:
 
 
 @dataclass
+class KVCachePoolConfig:
+    pool_id: int
+    memory_model: MemoryModel
+    group_ids: list[int]
+    num_blocks: int
+
+
+@dataclass
 class KVCacheConfig:
     """
     The KV cache configuration of a model.
@@ -972,6 +1015,39 @@ class KVCacheConfig:
     """
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
+
+    pool_configs: list[KVCachePoolConfig] = field(default_factory=list)
+    """KV cache block pools used by the scheduler and per-type managers."""
+
+    group_to_pool_id: list[int] = field(default_factory=list)
+    """Map each KV cache group index to the pool that owns its block IDs."""
+
+    def __post_init__(self) -> None:
+        if not self.pool_configs:
+            self.pool_configs = [
+                KVCachePoolConfig(
+                    pool_id=0,
+                    memory_model=MemoryModel.TOKEN_PROPORTIONAL,
+                    group_ids=list(range(len(self.kv_cache_groups))),
+                    num_blocks=self.num_blocks,
+                )
+            ]
+
+        if not self.group_to_pool_id:
+            self.group_to_pool_id = [-1] * len(self.kv_cache_groups)
+            for pool_config in self.pool_configs:
+                for group_id in pool_config.group_ids:
+                    self.group_to_pool_id[group_id] = pool_config.pool_id
+
+        assert len(self.group_to_pool_id) == len(self.kv_cache_groups)
+        assert all(pool_id >= 0 for pool_id in self.group_to_pool_id)
+        assert all(
+            pool_config.pool_id == i for i, pool_config in enumerate(self.pool_configs)
+        )
+
+    def get_pool_config_for_group(self, group_id: int) -> KVCachePoolConfig:
+        pool_id = self.group_to_pool_id[group_id]
+        return self.pool_configs[pool_id]
 
     @property
     def has_mamba_layers(self) -> bool:

@@ -24,7 +24,9 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCachePoolConfig,
     MambaSpec,
+    MemoryModel,
     SlidingWindowSpec,
 )
 
@@ -659,7 +661,7 @@ def test_partial_tail_pin_survives_released_cow_retention():
 
     # Retention released before the drain (defer_block_free=False ordering).
     _copies, retained = manager.take_kv_cache_block_copies()
-    manager.block_pool.free_blocks(retained)
+    manager.free_popped_blocks(retained)
 
     offloads = manager.take_partial_tail_offloads()
     ((_group_id, block_id, boundary_tokens),) = offloads["0"]
@@ -673,6 +675,107 @@ def test_partial_tail_pin_survives_released_cow_retention():
         manager.block_pool.get_num_free_blocks()
     )
     assert block_id not in {b.block_id for b in new_blocks}
+
+
+@pytest.mark.parametrize("deferred_free", [False, True])
+def test_partial_tail_pin_uses_owning_block_pool(deferred_free):
+    """A Mamba partial-tail pin must never touch or free the same block ID
+    from another group's pool."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+        pool_configs=[
+            KVCachePoolConfig(
+                pool_id=0,
+                memory_model=MemoryModel.TOKEN_PROPORTIONAL,
+                group_ids=[0],
+                num_blocks=24,
+            ),
+            KVCachePoolConfig(
+                pool_id=1,
+                memory_model=MemoryModel.REQUEST_CONSTANT,
+                group_ids=[1],
+                num_blocks=24,
+            ),
+        ],
+        group_to_pool_id=[0, 1],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    full_pool, mamba_pool = manager.coordinator.block_pools
+    initial_free_counts = (
+        full_pool.get_num_free_blocks(),
+        mamba_pool.get_num_free_blocks(),
+    )
+
+    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    req0.num_computed_tokens = 6
+    req0.append_output_token_ids([3])
+    assert manager.allocate_slots(req0, 1) is not None
+
+    (cow_copy,), retained = manager.take_kv_cache_block_copies()
+    cow_block = mamba_pool.blocks[cow_copy.dst_block_id]
+    same_id_other_pool_block = full_pool.blocks[cow_copy.dst_block_id]
+    manager.free_popped_blocks(retained)
+    assert cow_block.ref_cnt == 0
+    other_pool_ref_cnt = same_id_other_pool_block.ref_cnt
+    free_counts_before_pin = (
+        full_pool.get_num_free_blocks(),
+        mamba_pool.get_num_free_blocks(),
+    )
+
+    offloads = manager.take_partial_tail_offloads()
+    ((group_id, block_id, boundary_tokens),) = offloads["0"]
+    assert (group_id, block_id, boundary_tokens) == (
+        1,
+        cow_copy.dst_block_id,
+        6,
+    )
+    assert cow_block.ref_cnt == 1
+    assert same_id_other_pool_block.ref_cnt == other_pool_ref_cnt
+    assert full_pool.get_num_free_blocks() == free_counts_before_pin[0]
+    assert mamba_pool.get_num_free_blocks() == free_counts_before_pin[1] - 1
+
+    if deferred_free:
+        popped = manager.pop_blocks_for_free(req0)
+        assert any(block is cow_block for block in popped.blocks[1])
+        assert all(block is not cow_block for block in popped.blocks[0])
+        manager.free_popped_blocks(popped)
+    else:
+        manager.free(req0)
+    assert cow_block.ref_cnt == 0
+    assert (
+        full_pool.get_num_free_blocks(),
+        mamba_pool.get_num_free_blocks(),
+    ) == initial_free_counts
 
 
 def test_partial_tail_offload_dropped_when_request_freed_before_drain():
@@ -719,7 +822,7 @@ def test_partial_tail_offload_dropped_when_request_freed_before_drain():
     assert manager.allocate_slots(req0, 1) is not None
 
     # The request dies (preempt/abort) before the scheduler drains.
-    manager.block_pool.free_blocks(manager.pop_blocks_for_free(req0))
+    manager.free_popped_blocks(manager.pop_blocks_for_free(req0))
     assert manager.take_partial_tail_offloads() == {}
 
 
@@ -1100,7 +1203,7 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
         in copies
     )
     assert partial_full_block[0].ref_cnt == 1
-    manager.block_pool.free_blocks(retained)
+    manager.free_popped_blocks(retained)
     assert partial_full_block[0].ref_cnt == 0
 
 
@@ -1303,13 +1406,14 @@ def test_cow_retained_blocks_returned_for_release():
     req0.append_output_token_ids([3])
     assert manager.allocate_slots(req0, 1) is not None
     (cow_copy,), retained = manager.take_kv_cache_block_copies()
-    assert {b.block_id for b in retained} == {
+    retained_blocks = [block for group in retained.blocks for block in group]
+    assert {b.block_id for b in retained_blocks} == {
         cow_copy.src_block_id,
         cow_copy.dst_block_id,
     }
     # Not freed yet: the retention refs are still held.
-    assert all(b.ref_cnt > 0 for b in retained)
-    manager.block_pool.free_blocks(retained)
+    assert all(b.ref_cnt > 0 for b in retained_blocks)
+    manager.free_popped_blocks(retained)
 
 
 def test_free_cow_retained_blocks_defers_until_copy_step_processed():
@@ -1317,26 +1421,33 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     been processed (or deferral is off), and defers them otherwise."""
     from collections import deque
 
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+
     freed: list = []
     blocks = [SimpleNamespace(block_id=7), SimpleNamespace(block_id=9)]
+
+    def free_popped_blocks(retained: KVCacheBlocks) -> None:
+        freed.extend(reversed(retained.blocks[0]))
+
     mock = SimpleNamespace(
         kv_cache_manager=SimpleNamespace(
-            block_pool=SimpleNamespace(free_blocks=freed.extend)
+            free_popped_blocks=free_popped_blocks,
         ),
         deferred_frees=deque(),
         defer_block_free=True,
         processed_step_seq=2,
     )
     free = Scheduler._free_cow_retained_blocks
+    retained = KVCacheBlocks((blocks[::-1],))
 
     # Copy step still in flight: deferred with its fence.
-    free(mock, list(blocks), fence_seq=3)
+    free(mock, retained, fence_seq=3)
     assert not freed
-    assert mock.deferred_frees == deque([(3, blocks[::-1])])
+    assert mock.deferred_frees == deque([(3, retained)])
 
     # Copy step processed: freed immediately.
     mock.processed_step_seq = 3
-    free(mock, list(blocks), fence_seq=3)
+    free(mock, retained, fence_seq=3)
     assert freed == blocks
 
     # Deferral disabled: freed immediately regardless of the fence.
@@ -1344,7 +1455,7 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     mock.deferred_frees.clear()
     mock.defer_block_free = False
     mock.processed_step_seq = 0
-    free(mock, list(blocks), fence_seq=3)
+    free(mock, retained, fence_seq=3)
     assert freed == blocks
 
 
@@ -1597,7 +1708,7 @@ def test_hybrid_partial_hash_hit_uses_cow_under_dcp(dcp_world_size: int):
     assert (
         KVCacheBlockCopy(partial_mamba_block[0].block_id, mamba_new_block_id) in copies
     )
-    manager.block_pool.free_blocks(retained)
+    manager.free_popped_blocks(retained)
 
 
 @pytest.mark.parametrize("dcp_world_size", [2, 4])
@@ -1644,7 +1755,7 @@ def test_dcp_partial_hit_resumes_on_replicated_mamba_snapshot(
     assert all(
         copy.src_block_id != computed_blocks.blocks[1][-1].block_id for copy in copies
     )
-    manager.block_pool.free_blocks(retained)
+    manager.free_popped_blocks(retained)
 
 
 def test_dcp_joint_hit_is_bounded_by_replicated_mamba_snapshots():
