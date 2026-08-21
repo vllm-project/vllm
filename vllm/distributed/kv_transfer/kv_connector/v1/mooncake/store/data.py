@@ -300,6 +300,41 @@ class ChunkedTokenDatabase:
             yield start_idx, end_idx, h
 
 
+@dataclass(frozen=True)
+class PartialHitBoundary:
+    """Key override for the block containing a group's converged hit boundary.
+
+    Attributes:
+        group_id: KV-cache group whose boundary-block key needs an override.
+        num_tokens: Token boundary whose prefix hash identifies the matched
+            stored block. The loader uses
+            ``block_hashes[num_tokens // hash_block_size - 1]`` instead of the
+            hash implied by ``MooncakeLookupResult.hit_length``. This changes
+            only the load key, not the reusable prefix.
+    """
+
+    group_id: int
+    num_tokens: int
+
+
+@dataclass
+class MooncakeLookupResult:
+    """Lookup result used to build the subsequent load request.
+
+    Attributes:
+        hit_length: Longest prefix that every KV-cache group can reuse after
+            their individual cache hits converge.
+        partial_hit_boundaries: Per-group key overrides for blocks containing
+            the converged hit boundary. Fine-grained prefix matching can make
+            ``hit_length`` end inside a physical block whose stored key uses a
+            later hash boundary. These entries preserve the matched keys; empty
+            when every load key can be derived from ``hit_length``.
+    """
+
+    hit_length: int
+    partial_hit_boundaries: tuple[PartialHitBoundary, ...] = ()
+
+
 @dataclass
 class LoadSpec:
     """Specification for loading KV cache from external store."""
@@ -308,6 +343,7 @@ class LoadSpec:
     kvpool_cached_tokens: int
     can_load: bool
     token_len: int = 0
+    partial_hit_boundaries: tuple[PartialHitBoundary, ...] = ()
 
 
 @dataclass

@@ -55,6 +55,12 @@ class ExternalCachedBlockPool:
             return [self._present_block] * len(group_ids)
         return None
 
+    def contains(self, group_id: int, block_hash: BlockHash) -> bool:
+        """Return whether a group has a loadable key for this hash."""
+        return (
+            self._exists is not None and (group_id, bytes(block_hash)) in self._exists
+        )
+
 
 class MooncakeStoreCoordinator:
     """Mirror of ``HybridKVCacheCoordinator.find_longest_cache_hit`` over an
@@ -67,6 +73,7 @@ class MooncakeStoreCoordinator:
         hash_block_size: int,
         use_eagle: bool = False,
         retention_interval: int | None = None,
+        dcp_world_size: int = 1,
     ) -> None:
         assert all(
             g.kv_cache_spec.block_size % hash_block_size == 0 for g in kv_cache_groups
@@ -83,7 +90,7 @@ class MooncakeStoreCoordinator:
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
         self.enable_partial_hash_hits = partial_hash_hits_enabled(
-            kv_cache_groups, hash_block_size
+            kv_cache_groups, hash_block_size, dcp_world_size
         )
         self.use_eagle = use_eagle
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
@@ -376,10 +383,11 @@ class MooncakeStoreCoordinator:
         # Truncate full-attention hit_blocks to final converged length;
         # other specs already trim themselves inside their hit logic. cdiv keeps
         # the partial tail block when hit_length is not block-aligned.
-        first_group = self.attention_groups[0]
-        if isinstance(first_group.spec, FullAttentionSpec):
-            num_blocks = cdiv(hit_length, first_group.spec.block_size)
-            for group_id in first_group.group_ids:
+        for group in self.attention_groups:
+            if not isinstance(group.spec, FullAttentionSpec):
+                continue
+            num_blocks = cdiv(hit_length, group.spec.block_size)
+            for group_id in group.group_ids:
                 full_blks = hit_blocks_by_group[group_id]
                 assert full_blks is not None
                 del full_blks[num_blocks:]
@@ -398,15 +406,17 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
 
 
 def partial_hash_hits_enabled(
-    kv_cache_groups: list[KVCacheGroupSpec], hash_block_size: int
+    kv_cache_groups: list[KVCacheGroupSpec],
+    hash_block_size: int,
+    dcp_world_size: int = 1,
 ) -> bool:
-    """Mirror of core's ``HybridKVCacheCoordinator.enable_partial_hash_hits``
-    (its dcp == 1 clause holds: the connector rejects hybrid + DCP/PCP > 1).
-    Single copy on purpose — scheduler and coordinator must not disagree.
-    """
+    """Match core's DCP-aware Mamba partial-hit condition."""
     return any(
         isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)
         and spec.mamba_cache_mode == "align"
-        and spec.block_size > hash_block_size
+        and (
+            (dcp_world_size == 1 and spec.block_size > hash_block_size)
+            or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
+        )
         for g in kv_cache_groups
     )
