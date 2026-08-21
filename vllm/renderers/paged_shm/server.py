@@ -18,6 +18,7 @@ from vllm.utils import random_uuid
 from vllm.utils.network_utils import get_open_zmq_ipc_path
 
 from .constant import (
+    CLEANUP_INTERVAL,
     CLOSE_READ,
     CLOSE_WRITE,
     DEBUG_CLEAN,
@@ -123,16 +124,26 @@ class PagedShmServer:
     ) -> bool:
         """
         Remove expired entries from a priority queue and send error responses.
+        Uses get/put to peek without relying on internal `queue` attribute.
         """
         now = time.monotonic()
+        expired = []
+        # Peek at the first element without popping if not expired
         while not queue.empty():
-            item = queue.queue[0]
+            # Get the item (we'll either re-put it or discard)
+            item = queue.get()
             deadline = item[0]
             if deadline > now:
+                # Not expired: put it back and stop (since queue is ordered)
+                queue.put(item)
                 break
-            queue.get()
-            identity = item[1]
+            else:
+                # Expired: collect to send error later
+                expired.append(item)
+        # Now send errors for all expired items
+        for _, identity, *rest in expired:
             self._send_response(socket, identity, ERROR, error_msg)
+        # Return True if the queue is now empty
         return queue.empty()
 
     # ------------------------------------------------------------------
@@ -212,6 +223,19 @@ class PagedShmServer:
                 if empty:
                     self.wait_for_write_completion.pop(u, None)
                     self._wait_write_pending.discard(u)
+
+    # ------------------------------------------------------------------
+    # Periodic maintenance (cleanup + deferred request processing)
+    # ------------------------------------------------------------------
+    def _perform_maintenance(self, socket: zmq.Socket) -> None:
+        """
+        Perform periodic cleanup and attempt to satisfy deferred open_write requests.
+        Called at fixed intervals (every CLEANUP_INTERVAL seconds).
+        """
+        self.clean_expired_open_write(socket)
+        self.clean_expired_open_read(socket)
+        self.clean_expired_wait_write(socket)
+        self.defer_open_write(socket)
 
     # ------------------------------------------------------------------
     # Debug-only cleanup – forcibly cleans all pending queues and purges
@@ -403,12 +427,12 @@ class PagedShmServer:
         if self.wait_for_open_write.empty():
             return
 
-        # Check head without popping
-        deadline, identity, item_objs = self.wait_for_open_write.queue[0]
+        # Check head without popping using get/put
+        item = self.wait_for_open_write.get()
+        deadline, identity, item_objs = item
         now = time.monotonic()
         if deadline <= now:
-            # Expired – should have been cleaned, but handle defensively
-            self.wait_for_open_write.get()
+            # Expired – send error (should have been cleaned, but handle defensively)
             self._send_response(
                 socket, identity, ERROR, "TimeoutError: open_write timed out"
             )
@@ -416,16 +440,14 @@ class PagedShmServer:
 
         try:
             allocated = self.manager.open_write(item_objs)
-            # Success: pop and respond
-            self.wait_for_open_write.get()
+            # Success: respond and discard item
             response = self._build_write_response(allocated, item_objs)
             self._send_response(socket, identity, OK, response)
         except MemoryError:
-            # Not enough space – keep head and try again later
-            pass
+            # Not enough space – re-put the item and try later
+            self.wait_for_open_write.put(item)
         except Exception as e:
-            # Other errors (duplicate UUID, etc.) – pop and report
-            self.wait_for_open_write.get()
+            # Other errors – pop and report
             self._send_response(socket, identity, ERROR, f"{type(e).__name__}: {e}")
             logger.warning("open_write deferred request failed: %s", e)
 
@@ -701,18 +723,22 @@ def _zmq_server(
 
         logger.info("PagedShmServer started at %s", address)
 
+        # For periodic maintenance
+        last_cleanup_time = time.monotonic()
+
         while True:
             try:
                 socks = dict(poller.poll(POLL_INTERVAL))
             except (zmq.ZMQError, KeyboardInterrupt, EOFError):
                 break
 
+            # Perform maintenance at fixed intervals
+            now = time.monotonic()
+            if now - last_cleanup_time >= CLEANUP_INTERVAL:
+                server._perform_maintenance(socket)
+                last_cleanup_time = now
+
             if socket not in socks or socks[socket] != zmq.POLLIN:
-                # Periodic maintenance
-                server.clean_expired_open_write(socket)
-                server.clean_expired_open_read(socket)
-                server.clean_expired_wait_write(socket)
-                server.defer_open_write(socket)
                 continue
 
             # Receive request
@@ -759,7 +785,6 @@ def _zmq_server(
                         )
                 continue
 
-            # OPEN_WRITE
             if command == OPEN_WRITE:
                 try:
                     result = server.open_write(payloads[0].decode(), identity)
@@ -776,7 +801,6 @@ def _zmq_server(
                     )
                 continue
 
-            # OPEN_READ
             if command == OPEN_READ:
                 try:
                     result = server.open_read(payloads[0].decode(), identity)
@@ -793,7 +817,6 @@ def _zmq_server(
                     )
                 continue
 
-            # WAIT_WRITE
             if command == WAIT_WRITE:
                 try:
                     result = server.wait_write(payloads[0].decode(), identity)
@@ -810,29 +833,31 @@ def _zmq_server(
                     )
                 continue
 
-            # DELETE (special: clears pending waiters)
             if command == DELETE:
                 uuid = payloads[0].decode()
+                # 1. Clear pending wait queues for this UUID before deletion
+                # Open read waiters
+                q = server.wait_for_open_read.pop(uuid, None)
+                if q is not None:
+                    while not q.empty():
+                        _, ident, _ = q.get()
+                        server._send_response(
+                            socket, ident, ERROR, "Item deleted while waiting"
+                        )
+                    server._open_read_pending.discard(uuid)
+                # Wait write waiters
+                q = server.wait_for_write_completion.pop(uuid, None)
+                if q is not None:
+                    while not q.empty():
+                        _, ident = q.get()
+                        server._send_response(
+                            socket, ident, ERROR, "Item deleted while waiting"
+                        )
+                    server._wait_write_pending.discard(uuid)
+
+                # 2. Now perform deletion
                 try:
                     server.delete(uuid)
-                    # Clear pending open_read waiters for this uuid
-                    q = server.wait_for_open_read.pop(uuid, None)
-                    if q is not None:
-                        while not q.empty():
-                            _, ident, _ = q.get()
-                            server._send_response(
-                                socket, ident, ERROR, "Item deleted while waiting"
-                            )
-                        server._open_read_pending.discard(uuid)
-                    # Clear wait_write waiters
-                    q = server.wait_for_write_completion.pop(uuid, None)
-                    if q is not None:
-                        while not q.empty():
-                            _, ident = q.get()
-                            server._send_response(
-                                socket, ident, ERROR, "Item deleted while waiting"
-                            )
-                        server._wait_write_pending.discard(uuid)
                     server._send_response(socket, identity, OK, _OK_RESPONSE)
                     server.defer_open_write(socket)
                 except ValueError as e:
@@ -886,9 +911,8 @@ def _zmq_server(
                     # Fall back to global cleanup (already done at top of loop)
                     pass
 
-            # After CLOSE_READ, try to satisfy deferred writes
+            # After CLOSE_READ, try to satisfy deferred writes immediately
             if command == CLOSE_READ:
-                server.clean_expired_open_write(socket)
                 server.defer_open_write(socket)
 
     except Exception as e:

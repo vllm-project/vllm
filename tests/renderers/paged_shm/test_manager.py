@@ -58,12 +58,38 @@ class TestBasicWriteLifecycle:
         assert manager._total_available_blocks == 4
         assert "small" in manager._lru_cache
 
-    def test_close_write_does_not_cache_if_use_cache_false(self, manager, item_nocache):
+    def test_close_write_auto_deletes_non_cacheable(self, manager, item_nocache):
+        """
+        For use_cache=False and no open reads, close_write deletes the item
+        immediately, freeing its blocks.
+        """
         [alloc] = manager.open_write([item_nocache])
         manager.close_write("nocache")
+        assert "nocache" not in manager._all_items
         assert "nocache" not in manager._lru_cache
-        # Available blocks remain unchanged (still 4 - 1 = 3)
+        # Blocks are returned to the pool
+        assert manager._total_available_blocks == 4
+        assert len(manager._free_blocks) == 4
+
+    def test_close_write_keeps_non_cacheable_if_open_reads(self, manager, item_nocache):
+        """
+        If open_n_reads > 0, the non-cacheable item is kept with the given
+        reference count. After all reads are closed, it is automatically deleted.
+        """
+        [alloc] = manager.open_write([item_nocache])
+        manager.close_write("nocache", open_n_reads=1)
+        item = manager._all_items["nocache"]
+        assert item.ref_count == 1
+        assert "nocache" not in manager._lru_cache
+        # Blocks are not available (still owned)
         assert manager._total_available_blocks == 3
+
+        # Close the read – ref_count becomes 0, and because use_cache=False,
+        # the item should be deleted automatically (manager.close_read does this).
+        manager.close_read("nocache")
+        assert "nocache" not in manager._all_items
+        assert manager._total_available_blocks == 4
+        assert len(manager._free_blocks) == 4
 
     def test_close_write_with_open_read(self, manager, item_small):
         """When open_read, the item is automatically opened for reading."""
@@ -147,23 +173,30 @@ class TestReadLifecycle:
         with pytest.raises(ValueError, match="not being read"):
             manager.close_read("small")
 
-    def test_non_cacheable_read(self, manager, item_nocache):
-        """Reading a non-cacheable item should not affect LRU."""
+    def test_non_cacheable_read_and_auto_delete(self, manager, item_nocache):
+        """
+        For non-cacheable items, they must be kept alive by an open read
+        reference (via close_write with open_n_reads).  After close_read,
+        the item is auto-deleted.
+        """
         manager.open_write([item_nocache])
-        manager.close_write("nocache")
-        # Item is not cached; total_available_blocks should be 3 (not 4)
-        assert manager._total_available_blocks == 3
+        manager.close_write("nocache", open_n_reads=1)
+        # Now we have one read reference; reading again increases it.
         item = manager.open_read("nocache")
-        assert item.ref_count == 1
-        # Reading does not remove from cache (it was never there)
+        assert item.ref_count == 2
         assert "nocache" not in manager._lru_cache
-        # total_available_blocks remains 3
         assert manager._total_available_blocks == 3
+
+        # First close_read: ref_count becomes 1, still alive
         manager.close_read("nocache")
-        assert item.ref_count == 0
-        # After close, still not cached (use_cache=False)
-        assert "nocache" not in manager._lru_cache
+        assert "nocache" in manager._all_items
         assert manager._total_available_blocks == 3
+
+        # Second close_read: ref_count becomes 0, auto-delete
+        manager.close_read("nocache")
+        assert "nocache" not in manager._all_items
+        assert manager._total_available_blocks == 4
+        assert len(manager._free_blocks) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -205,21 +238,25 @@ class TestPinUnpin:
 
     def test_pin_non_cacheable(self, manager, item_nocache):
         """
-        For items with use_cache=False, pin/unpin have no effect,
-        but unpin when ref_count==0 will delete the item (as designed).
+        Pin/unpin have no effect on non-cacheable items.
+        Since non-cacheable items are deleted on close_write unless kept alive
+        by open_n_reads, we keep one read reference to test pin/unpin behavior.
+        When the last reference is closed, the item is auto-deleted.
         """
         manager.open_write([item_nocache])
-
-        # While writing (ref_count=-1), pin/unpin do nothing
+        manager.close_write("nocache", open_n_reads=1)  # keep alive
+        # Pin does nothing
         manager.pin("nocache")
+        assert "nocache" in manager._all_items
+        # Unpin when ref_count>0 does nothing
         manager.unpin("nocache")
         assert "nocache" in manager._all_items
-
-        manager.close_write("nocache")
-        # Now ref_count=0, pin does nothing, unpin triggers deletion
-        manager.pin("nocache")
-        manager.unpin("nocache")
+        # Now close the read -> ref_count=0, and because use_cache=False,
+        # it will be auto-deleted.
+        manager.close_read("nocache")
         assert "nocache" not in manager._all_items
+        # Blocks are freed
+        assert manager._total_available_blocks == 4
 
     def test_pin_during_write(self, manager, item_small):
         """Pinning an item before it is closed keeps it out of cache on close."""
@@ -253,14 +290,8 @@ class TestPinUnpin:
         # Item should not be in cache because ref_count>0
         assert "small" not in manager._lru_cache
         assert manager._total_available_blocks == 3
-        manager.close_read("small")  # ref_count=0, but unpin already called,
-        # so it should NOT be inserted automatically (unpin already did nothing)
-        # Actually, since unpin was called while ref_count>0, it didn't insert,
-        # and after close_read ref_count=0, we need to check if it gets inserted.
-        # According to manager.unpin logic, if unpin was called when ref_count>0,
-        # it sets nothing; then close_read sees ref_count==0 and use_cache=True,
-        # and will put it into cache. So after close_read, it should be in cache.
-        # This is correct behavior.
+        manager.close_read("small")  # ref_count=0, unpin already called,
+        # but close_read will put it into cache because use_cache=True
         assert "small" in manager._lru_cache
         assert manager._total_available_blocks == 4
 
@@ -300,12 +331,15 @@ class TestDelete:
         assert manager._total_available_blocks == 4
 
     def test_delete_idle_noncacheable_item(self, manager, item_nocache):
+        """
+        Non-cacheable items are auto-deleted on close_write, so we cannot
+        have an idle non-cacheable item. We test force-deleting a busy one.
+        """
         manager.open_write([item_nocache])
-        manager.close_write("nocache")
-        manager.delete("nocache")
+        manager.close_write("nocache", open_n_reads=1)  # keep alive
+        # force delete while read is active
+        manager.delete("nocache", force=True)
         assert "nocache" not in manager._all_items
-        # total_available_blocks should increase by 1 (block was previously
-        # tied up in a non‑evictable item)
         assert manager._total_available_blocks == 4
         assert len(manager._free_blocks) == 4
 
@@ -318,14 +352,28 @@ class TestDelete:
         assert len(manager._free_blocks) == 4
         assert manager._total_available_blocks == 4
 
-    def test_delete_not_in_lru_does_not_raise(self, manager, item_nocache):
-        """Regression test:
-        deleting an item not in the LRU cache must not raise KeyError."""
-        manager.open_write([item_nocache])
-        manager.close_write("nocache")
-        # 'nocache' is not in the LRU; delete should succeed silently
-        manager.delete("nocache")
-        assert "nocache" not in manager._all_items
+    def test_delete_not_in_lru_does_not_raise(self, manager):
+        """
+        Regression test: deleting an item not in the LRU cache (e.g., pinned
+        or non-cacheable) must not raise KeyError and must correctly update
+        _total_available_blocks.
+        """
+        # Pinned item: not in LRU
+        item = ShmWriteRequest(uuid="pinned", size=200, use_cache=True)
+        manager.open_write([item])
+        manager.close_write("pinned")
+        manager.pin("pinned")
+        manager.delete("pinned")
+        assert "pinned" not in manager._all_items
+        assert manager._total_available_blocks == 4
+
+        # Non-cacheable with open reads: not in LRU
+        item2 = ShmWriteRequest(uuid="noncache", size=200, use_cache=False)
+        manager.open_write([item2])
+        manager.close_write("noncache", open_n_reads=1)
+        manager.delete("noncache", force=True)
+        assert "noncache" not in manager._all_items
+        assert manager._total_available_blocks == 4
 
     def test_delete_busy_item_raises(self, manager, item_small):
         manager.open_write([item_small])
@@ -546,3 +594,19 @@ class TestInfoAndState:
         assert state["cached_items_count"] == 1  # small
         assert state["cached_blocks_count"] == 1  # small's block
         assert state["total_items_count"] == 2
+
+    def test_get_manager_state_with_noncacheable(self, manager):
+        """Non-cacheable items with open reads are counted as reading."""
+        item = ShmWriteRequest(uuid="nc", size=200, use_cache=False)
+        manager.open_write([item])
+        manager.close_write("nc", open_n_reads=1)
+        state = manager.get_manager_state()
+        assert state["total_items_count"] == 1
+        assert state["reading_items_count"] == 1
+        assert state["idle_items_count"] == 0
+        assert state["writing_items_count"] == 0
+        # Close the read -> item will be deleted
+        manager.close_read("nc")
+        state = manager.get_manager_state()
+        assert state["total_items_count"] == 0
+        assert state["free_blocks_count"] == 4

@@ -146,7 +146,6 @@ class PagedShmTensorIPC:
                 data=elem.data,
                 use_cache=a.use_cache,
                 blocks=a.blocks,
-                activate_tokens=True,
                 async_write=True,
             )
 

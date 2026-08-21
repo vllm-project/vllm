@@ -9,10 +9,13 @@ Write flow:
     allocates blocks atomically for multiple items, sets ref_count=-1.
 - close_write(uuid):
     finalizes write; if not open_read, sets ref_count=0 and caches if eligible.
+    For non-cacheable items (use_cache=False) with no read references,
+    the item is deleted immediately to free resources.
 
 Read flow:
 - open_read(uuid): increments ref_count, removes from cache if idle.
-- close_read(uuid): decrements ref_count; if becomes 0, re-caches if cacheable.
+- close_read(uuid): decrements ref_count; if becomes 0, re-caches if cacheable,
+                     else deletes immediately if non-cacheable.
 
 Additional: pin/unpin prevent eviction; delete removes idle items.
 """
@@ -111,17 +114,28 @@ class PagedShmManager:
         """
         Finalize a write operation. If open_read is False, the item becomes idle
         and may be cached.
+        For non-cacheable items (use_cache=False) with no open reads, delete
+        immediately to free resources.
         """
         item = self._get_item(uuid)
         if item.ref_count != REF_WRITING:
             raise ValueError(f"UUID {uuid} not being written")
 
         if open_n_reads <= 0:
-            item.ref_count = REF_IDLE
-            # Insert into LRU cache if caching is enabled and item is not pinned
-            if item.use_cache and uuid not in self._pinned_items:
-                self._total_available_blocks += item.n_block()
-                self._lru_cache.put(uuid, item)
+            if item.use_cache:
+                if uuid not in self._pinned_items:
+                    # Normal cacheable idle item: put into LRU
+                    item.ref_count = REF_IDLE
+                    self._total_available_blocks += item.n_block()
+                    self._lru_cache.put(uuid, item)
+                else:
+                    # Pinned: keep idle but do not cache (blocks remain occupied)
+                    item.ref_count = REF_IDLE
+            else:
+                # Non-cacheable: release immediately
+                # Set ref_count to idle to allow delete, then delete
+                item.ref_count = REF_IDLE
+                self.delete(uuid, force=False)
         else:
             item.ref_count = open_n_reads
 
@@ -149,8 +163,9 @@ class PagedShmManager:
 
     def close_read(self, uuid: str):
         """
-        Decrement the read reference count. If the count drops to zero and the
-        item is cacheable, it is put back into the LRU cache.
+        Decrement the read reference count. If the count drops to zero:
+          - For cacheable items: put back into LRU (if not pinned).
+          - For non-cacheable items: delete immediately to free blocks.
         """
         item = self._get_item(uuid)
         if item.ref_count == REF_WRITING:
@@ -161,15 +176,16 @@ class PagedShmManager:
         if item.ref_count > 0:
             item.ref_count -= 1
 
-        # If the item is now idle and cacheable, put it back into the cache
-        update_cache = (
-            item.use_cache
-            and item.ref_count == REF_IDLE
-            and uuid not in self._pinned_items
-        )
-        if update_cache:
-            self._total_available_blocks += len(item.blocks)
-            self._lru_cache.put(uuid, item)
+        # Now handle the case when ref_count becomes idle
+        if item.ref_count == REF_IDLE:
+            if not item.use_cache:
+                # Non-cacheable item is no longer needed
+                self.delete(uuid, force=False)
+                return
+            # Cacheable: re-insert if not pinned
+            if uuid not in self._pinned_items:
+                self._total_available_blocks += len(item.blocks)
+                self._lru_cache.put(uuid, item)
 
     def pin(self, uuid: str):
         """
@@ -220,13 +236,16 @@ class PagedShmManager:
         if not force and item.ref_count != REF_IDLE:
             raise ValueError(f"UUID {uuid} is busy now")
 
-        # If the item was not cached (or was pinned) its blocks were counted
-        # as unavailable; now they become truly free.
-        if not item.use_cache or uuid in self._pinned_items:
+        # Check whether the item was in the LRU cache (its blocks are already
+        # accounted for in _total_available_blocks).
+        was_cached = self._lru_cache.pop(uuid, None) is not None
+
+        # If it was not cached, its blocks are not yet counted as available,
+        # so we must add them back now.
+        if not was_cached:
             self._total_available_blocks += item.n_block()
 
         # Remove from all tracking structures.
-        self._lru_cache.pop(uuid, None)
         self._pinned_items.discard(uuid)
         self._all_items.pop(uuid)
         self._free_blocks.extend(item.blocks)

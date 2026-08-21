@@ -55,9 +55,12 @@ def _blocks_needed(size: int, block_size: int = 4096) -> int:
     return math.ceil(size / block_size)
 
 
-def _fill_memory_non_cacheable(client) -> str:
+def _fill_memory_cacheable(client) -> str:
     """
-    Allocate all available free blocks with a single non‑cacheable item.
+    Allocate all available free blocks with a single cacheable item.
+    The item is pinned to prevent automatic eviction, ensuring that
+    subsequent open_write calls truly experience an out-of-memory condition
+    rather than evicting this filler.
     Returns the UUID so the caller can free it.
     """
     state = client.get_manager_state()
@@ -68,7 +71,8 @@ def _fill_memory_non_cacheable(client) -> str:
     size = free_blocks * block_size
     uuid = _unique_uuid()
     data = bytes(size)
-    client.write(uuid, data, use_cache=False)
+    client.write(uuid, data, use_cache=True)
+    client.pin(uuid)  # pin to prevent eviction
     new_state = client.get_manager_state()
     assert new_state["free_blocks_count"] == 0, "Failed to fill memory"
     return uuid
@@ -685,7 +689,7 @@ class TestTokenProtection:
 
 class TestTimeout:
     def test_open_write_timeout_zero_raises_memory_error(self, client):
-        filler_uuid = _fill_memory_non_cacheable(client)
+        filler_uuid = _fill_memory_cacheable(client)
         try:
             with pytest.raises(RuntimeError, match="Server error"):
                 client.open_write(
@@ -696,7 +700,7 @@ class TestTimeout:
             client.delete(filler_uuid)
 
     def test_open_write_timeout_positive_succeeds_after_space_freed(self, client):
-        filler_uuid = _fill_memory_non_cacheable(client)
+        filler_uuid = _fill_memory_cacheable(client)
 
         small_uuid = _unique_uuid()
         result_holder = {}
@@ -718,7 +722,7 @@ class TestTimeout:
         time.sleep(0.2)
         assert t.is_alive(), "open_write should be waiting, not finished"
 
-        client.delete(filler_uuid)
+        client.delete(filler_uuid)  # free space
 
         t.join(timeout=10.0)
         assert not t.is_alive(), "open_write did not complete in time"
@@ -730,7 +734,7 @@ class TestTimeout:
         client.delete(small_uuid)
 
     def test_open_write_timeout_negative_infinite(self, client):
-        filler_uuid = _fill_memory_non_cacheable(client)
+        filler_uuid = _fill_memory_cacheable(client)
 
         small_uuid = _unique_uuid()
         result_holder = {}
@@ -841,7 +845,7 @@ class TestTimeout:
         client.delete(uuid)
 
     def test_open_write_timeout_expires(self, client):
-        filler_uuid = _fill_memory_non_cacheable(client)
+        filler_uuid = _fill_memory_cacheable(client)
         small_uuid = _unique_uuid()
         start = time.perf_counter()
         with pytest.raises(RuntimeError, match="Server error"):
@@ -1315,19 +1319,37 @@ class TestInfoAndCache:
         client.delete(uuid)
 
     def test_use_cache_false_does_not_cache(self, client):
+        """
+        Behavior of non-cacheable items (use_cache=False):
+        - If no read reference is retained after close_write,
+          the item is deleted immediately.
+        - If a read reference is retained via generate_read_token=True,
+          the item survives until the token is closed, then it is deleted.
+        """
         uuid = _unique_uuid()
         data = b"non-cacheable"
-        client.get_manager_state()
 
+        # Scenario 1: no read reference retained -> delete immediately after write
         client.write(uuid, data, use_cache=False)
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.read(uuid)
 
-        result = client.read(uuid)
-        assert result.tobytes() == data
+        # Scenario 2: retain via token, item is readable, auto-deleted after close_read
+        uuid2 = _unique_uuid()
+        size, token = client.write(
+            uuid2, data, use_cache=False, generate_read_token=True
+        )
+        assert token is not None
 
-        info = client.get_info(uuid)
-        assert info["uuid"] == uuid
+        # Reading via token succeeds (token holds a reference)
+        client.open_read(token)
 
-        client.delete(uuid)
+        # Close the read reference (destroy token) -> item should be deleted
+        client.close_read(token)
+
+        # Now reading via UUID should fail (item no longer exists)
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.read(uuid2)
 
     def test_use_cache_true_caches_after_close(self, client):
         uuid = _unique_uuid()
@@ -1428,3 +1450,8 @@ class TestDeleteWithWaiters:
         time.sleep(0.1)
 
         client.delete(uuid)  # force delete
+
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+        assert "err" in err_holder
+        assert "deleted" in str(err_holder["err"]).lower()

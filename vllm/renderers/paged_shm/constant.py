@@ -6,7 +6,8 @@ ERROR = b"ERROR"
 EMPTY = b""
 SHUTDOWN = b"SHUTDOWN"
 
-POLL_INTERVAL = 1000
+POLL_INTERVAL = 1000  # ms
+CLEANUP_INTERVAL = 0.1  # s
 
 OPEN_WRITE = b"open_write"
 CLOSE_WRITE = b"close_write"
