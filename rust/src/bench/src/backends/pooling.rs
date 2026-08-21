@@ -42,6 +42,16 @@ impl PoolingBackend {
         // Preserve client-side prompt_len as fallback if server doesn't report usage.
         let mut output = RequestFuncOutput {
             prompt_len: input.prompt_len,
+            num_input_sequences: match self.kind {
+                BackendKind::OpenaiEmbeddings | BackendKind::VllmPooling => {
+                    input.prompt_list.as_ref().map_or(1, |list| list.len())
+                }
+                BackendKind::OpenaiEmbeddingsChat => 1,
+                BackendKind::VllmRerank => {
+                    input.prompt_list.as_ref().map_or(1, |list| list.len().saturating_sub(1))
+                }
+                _ => unreachable!("PoolingBackend with non-pooling kind"),
+            },
             ..Default::default()
         };
 
