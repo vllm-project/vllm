@@ -56,11 +56,12 @@ class MMEncoderModelRunner(GPUModelRunner):
         done with them and leaving records this step's last write.
         """
         idx = self._input_event_idx
-        self._input_events[idx].synchronize()
+        input_event = self._input_events[idx]
+        input_event.synchronize()
         try:
             yield
         finally:
-            self._input_events[idx].record()
+            input_event.record()
             self._input_event_idx = (idx + 1) % len(self._input_events)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
