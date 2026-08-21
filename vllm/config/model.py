@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
@@ -31,6 +30,7 @@ from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
+    checkpoint_has_lm_head,
     get_config,
     get_hf_image_processor_config,
     get_hf_text_config,
@@ -186,6 +186,10 @@ class ModelConfig:
     """The Hugging Face config of the model."""
     hf_text_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
+    word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
+    """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
+    contains an `lm_head` of its own. The two may still turn out to be identical, in
+    which case they are re-tied once the weights have been loaded."""
     hf_config_path: str | None = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
@@ -241,6 +245,8 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    return_sampling_mask: bool = False
+    """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -261,6 +267,12 @@ class ModelConfig:
     equivalent exponential-race sampling. FP64 preserves lower-tail sampling
     events that fp32 uniform/exponential draws can truncate, at the cost of
     significantly lower throughput on most GPUs."""
+    enable_trace_replay: bool = False
+    """Whether to allow requests to set
+    `SamplingParams.trace_decode_token_ids`, which forces decoding to follow a
+    predetermined token sequence while still computing real logprobs. Reserved
+    for debugging and RL workflows: enabling it reserves a per-request trace
+    buffer, so it is off by default."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -347,8 +359,6 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation.
     - "terratorch" will use the TerraTorch model implementation.
     """
-    override_attention_dtype: str | None = None
-    """Override dtype for attention"""
     logits_processors: list[str | type[LogitsProcessor]] | None = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
@@ -396,6 +406,7 @@ class ModelConfig:
     video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
+    mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
@@ -421,15 +432,16 @@ class ModelConfig:
             "tokenizer_revision",
             "spec_target_max_model_len",
             "enforce_eager",
+            "return_sampling_mask",
             "logprobs_mode",
             "use_fp64_gumbel",
+            "enable_trace_replay",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
             "config_format",
             "hf_token",
             "hf_overrides",
-            "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
             "pooler_config",
@@ -527,6 +539,7 @@ class ModelConfig:
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
+        mm_device_do_normalize: bool | None,
         mm_processor_device: MMProcessorDevice | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
@@ -565,9 +578,11 @@ class ModelConfig:
 
         # If loading model/tokenizer from HF Hub, resolve the revision once
         # to prevent resolving it multiple times downstream.
-        can_resolve_model_revision = (
-            self.hf_config_path is None or self.hf_config_path == self.model
-        )
+        # If the weights come from a different repo, we cannot eagerly resolve revision
+        weights_from_model = not self.model_weights or self.model_weights == self.model
+        # If the config comes from a different repo, we cannot eagerly resolve revision
+        config_from_model = not self.hf_config_path or self.hf_config_path == self.model
+        can_resolve_model_revision = config_from_model and weights_from_model
         if can_resolve_model_revision:
             self.revision = resolve_revision(
                 self.model,
@@ -586,12 +601,6 @@ class ModelConfig:
                 self.tokenizer,
                 self.tokenizer_revision,
                 self.hf_token,
-            )
-
-        if self.override_attention_dtype is not None and not current_platform.is_rocm():
-            warnings.warn(
-                "override-attention-dtype is set but not using ROCm platform",
-                stacklevel=2,
             )
 
         if self.enable_sleep_mode:
@@ -793,6 +802,9 @@ class ModelConfig:
                 video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
+                mm_device_do_normalize=self._resolve_mm_device_do_normalize(
+                    mm_device_do_normalize
+                ),
             )
 
             mm_config_kwargs = {
@@ -842,7 +854,6 @@ class ModelConfig:
         self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
-        self._verify_bnb_config()
 
     def _supports_multimodal_for_mm_prefix(self) -> bool:
         """Whether multimodal inputs can still appear for this deployment.
@@ -880,13 +891,15 @@ class ModelConfig:
             )
         return supports_mm
 
-    def get_model_arch_config(
-        self,
-    ) -> ModelArchitectureConfig:
+    def get_model_arch_config(self) -> ModelArchitectureConfig:
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
-        convertor = convertor_cls(self.hf_config, self.hf_text_config)
+        convertor = convertor_cls(
+            self.hf_config,
+            self.hf_text_config,
+            revision=getattr(self, "revision", None),
+        )
         return convertor.convert(
             supports_multimodal=self._supports_multimodal_for_mm_prefix()
         )
@@ -925,14 +938,65 @@ class ModelConfig:
                 f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
                 "Example: max_model_len=2048"
             )
+        if self.enable_prompt_embeds and self.is_encoder_decoder:
+            # No encoder-decoder model accepts `inputs_embeds`; their decoders
+            # embed `input_ids` internally.
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with encoder-decoder models."
+            )
         return self
+
+    def _resolve_mm_device_do_normalize(
+        self, mm_device_do_normalize: bool | None
+    ) -> bool:
+        if mm_device_do_normalize is None:
+            if envs.VLLM_USE_RUST_FRONTEND:
+                logger.debug(
+                    "VLLM_USE_RUST_FRONTEND is set. "
+                    "Rust frontend does not currently support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+            else:
+                mm_device_do_normalize = (
+                    self._model_info.supports_mm_device_do_normalize
+                )
+                logger.debug(
+                    "mm_device_do_normalize is %s by default.",
+                    "enabled" if mm_device_do_normalize else "disabled",
+                )
+        else:
+            if mm_device_do_normalize and envs.VLLM_USE_RUST_FRONTEND:
+                logger.warning(
+                    "VLLM_USE_RUST_FRONTEND is set. "
+                    "Rust frontend does not currently support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+
+            if (
+                mm_device_do_normalize
+                and not self._model_info.supports_mm_device_do_normalize
+            ):
+                logger.warning(
+                    "Model does not support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+
+            logger.debug(
+                "mm_device_do_normalize is %s.",
+                "enabled" if mm_device_do_normalize else "disabled",
+            )
+
+        return mm_device_do_normalize
 
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers modeling backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
         cls = "Transformers"
-        # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
-        cls += "MultiModal" if self.hf_config != self.hf_text_config else ""
+        # If 'hf_config is not hf_text_config' it's a nested config, i.e. multimodal
+        cls += "MultiModal" if self.hf_config is not self.hf_text_config else ""
         cls += "MoE" if self.is_moe else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
@@ -1049,6 +1113,34 @@ class ModelConfig:
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
         return get_sentence_transformer_tokenizer_config(self.model, self.revision)
+
+    def maybe_untie_word_embeddings(self) -> None:
+        """Stop trusting `tie_word_embeddings` when the checkpoint disagrees.
+
+        A config may claim the word embeddings are tied while the checkpoint
+        ships an `lm_head` of its own. Tying regardless would silently discard
+        that tensor, so build the `lm_head` as if untied and let it load. The
+        two are compared once loaded, and re-tied if they turn out to match, by
+        [maybe_retie_word_embeddings][vllm.model_executor.model_loader.weight_tying.maybe_retie_word_embeddings].
+
+        Transformers makes the same decision in `PreTrainedModel.tie_weights`,
+        where it can compare the two tensors directly.
+        """
+        if not getattr(self.hf_config, "tie_word_embeddings", False):
+            return
+        if not checkpoint_has_lm_head(self.model, revision=self.revision):
+            return
+
+        logger.debug(
+            "The config for %s says the word embeddings are tied, but the checkpoint "
+            "contains an lm_head. Loading it to find out whether they really are tied.",
+            self.model,
+        )
+        # Both levels must be updated: `VllmConfig.with_hf_config` reads the top
+        # level, and the text config is what the language model itself sees.
+        self.hf_config.tie_word_embeddings = False
+        self.hf_config.get_text_config().tie_word_embeddings = False
+        self.word_embeddings_untied_by_checkpoint = True
 
     def _get_default_runner_type(
         self,
@@ -1265,34 +1357,6 @@ class ModelConfig:
             )
             self.enforce_eager = True
 
-    def _verify_bnb_config(self) -> None:
-        """
-        The current version of bitsandbytes (0.46.1) with 8-bit models does not
-        yet support CUDA graph.
-        # TODO Remove this when bitsandbytes supports.
-        """
-        is_bitsandbytes = self.quantization == "bitsandbytes"
-        has_quantization_config = self.model_arch_config.quantization_config is not None
-        is_8bit = (
-            self.model_arch_config.quantization_config.get("load_in_8bit", False)  # type: ignore[union-attr]
-            if has_quantization_config
-            else False
-        )
-        if all(
-            [
-                is_bitsandbytes,
-                has_quantization_config,
-                is_8bit,
-                not self.enforce_eager,
-            ]
-        ):
-            logger.warning(
-                "CUDA graph is not supported on BitsAndBytes 8bit yet, "
-                "fallback to the eager mode."
-            )
-
-            self.enforce_eager = True
-
     def _verify_with_expert_parallelism(self) -> None:
         if not self.is_moe:
             raise ValueError(
@@ -1450,21 +1514,40 @@ class ModelConfig:
         """Returns the total number of KV heads."""
         return self.model_arch_config.total_num_kv_heads
 
-    def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
-        """Returns the number of KV heads per GPU."""
+    def get_num_kv_heads(
+        self,
+        parallel_config: ParallelConfig,
+        arch_config: ModelArchitectureConfig | None = None,
+    ) -> int:
+        """Returns the number of KV heads per GPU.
+
+        Pass ``arch_config`` (from ``model_arch_config[layer_idx]``) to size a
+        single layer of a heterogeneous model rather than the model as a whole.
+        """
         if self.use_mla:
             # When using MLA during decode it becomes MQA
             return 1
 
-        total_num_kv_heads = self.get_total_num_kv_heads()
+        arch_config = arch_config or self.model_arch_config
+        total_num_kv_heads = arch_config.total_num_kv_heads
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
         return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)
 
-    def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
-        num_heads = self.model_arch_config.total_num_attention_heads
+    def get_num_attention_heads(
+        self,
+        parallel_config: ParallelConfig,
+        arch_config: ModelArchitectureConfig | None = None,
+    ) -> int:
+        """Returns the number of attention heads per GPU.
+
+        Pass ``arch_config`` (from ``model_arch_config[layer_idx]``) to size a
+        single layer of a heterogeneous model rather than the model as a whole.
+        """
+        arch_config = arch_config or self.model_arch_config
+        num_heads = arch_config.total_num_attention_heads
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_experts(self) -> int:
@@ -1611,6 +1694,7 @@ class ModelConfig:
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
+                code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
@@ -1618,6 +1702,7 @@ class ModelConfig:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
+                code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
@@ -1805,7 +1890,7 @@ class ModelConfig:
         # actually contain any non-attention layers.
         layer_types = getattr(self.hf_config, "layer_types", None)
         return layer_types is None or not all(
-            layer == "attention" for layer in layer_types
+            layer in ("attention", "full_attention") for layer in layer_types
         )
 
     @property
@@ -1832,6 +1917,12 @@ class ModelConfig:
             # kv_lora_rank indicates that a Transformers model implementation uses MLA
             return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         # Manually maintained list of model types for vLLM model implementations
+
+        # Bidirectional DeepSeek variants (is_causal=False, used by some
+        # embedding models) must use the non-MLA attention path, since the
+        # MLA kernels only support causal attention.
+        if not getattr(self.hf_text_config, "is_causal", True):
+            return False
         return self.is_deepseek_mla
 
     @property

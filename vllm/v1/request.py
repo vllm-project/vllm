@@ -20,7 +20,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.metrics.stats import PrefillStats
+from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -142,11 +142,19 @@ class Request:
             prompt_token_ids, prompt_embeds
         )
         self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = (
-            self.prompt_token_ids.copy()
-            if self.prompt_token_ids is not None
-            else [0] * self.num_prompt_tokens
-        )
+        if self.prompt_token_ids is None:
+            self._all_token_ids: list[int] = [0] * self.num_prompt_tokens
+        elif self.prompt_is_token_ids is None:
+            self._all_token_ids = self.prompt_token_ids.copy()
+        else:
+            # Mixed-mode prompt: positions covered by prompt_embeds hold a sentinel
+            # special token id that may lie outside the embedding. Zero them, matching
+            # the no-token-ids case above, so embedding gathers over these placeholder
+            # ids stay in bounds; the actual inputs come from prompt_embeds.
+            self._all_token_ids = [
+                t if is_tok else 0
+                for t, is_tok in zip(self.prompt_token_ids, self.prompt_is_token_ids)
+            ]
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
@@ -202,6 +210,11 @@ class Request:
         self.num_preemptions = 0
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
+
+        # Per-request speculative-decoding acceptance accumulator. Populated by
+        # the scheduler when --per-request-spec-decode-metrics is set (eagerly on
+        # add_request, then observed each verify step); stays None otherwise.
+        self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a

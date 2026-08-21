@@ -41,6 +41,7 @@ from vllm.config import (
     DeviceConfig,
     DiffusionConfig,
     ECTransferConfig,
+    EncoderCacheManagerConfig,
     EPLBConfig,
     FaultToleranceConfig,
     KernelConfig,
@@ -425,6 +426,7 @@ class EngineArgs:
 
     model: str = ModelConfig.model
     enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
+    return_sampling_mask: bool = ModelConfig.return_sampling_mask
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
@@ -479,7 +481,8 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
-    dcp_comm_backend: DCPCommBackend = ParallelConfig.dcp_comm_backend
+    dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
+    dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
@@ -520,6 +523,9 @@ class EngineArgs:
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
+    prefix_cache_retention_interval: int | None = get_field(
+        CacheConfig, "prefix_cache_retention_interval"
+    )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     offload_backend: str = OffloadConfig.offload_backend
@@ -538,6 +544,7 @@ class EngineArgs:
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     use_fp64_gumbel: bool = ModelConfig.use_fp64_gumbel
+    enable_trace_replay: bool = ModelConfig.enable_trace_replay
     disable_log_stats: bool = False
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
@@ -599,6 +606,7 @@ class EngineArgs:
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     mm_processor_device: MMProcessorDevice = "auto"
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
+    mm_device_do_normalize: bool | None = MultiModalConfig.mm_device_do_normalize
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -649,6 +657,9 @@ class EngineArgs:
     collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
     )
+    per_request_spec_decode_metrics: Literal["none", "summary", "detailed"] = (
+        ObservabilityConfig.per_request_spec_decode_metrics
+    )
     kv_cache_metrics: bool = ObservabilityConfig.kv_cache_metrics
     kv_cache_metrics_sample: float = get_field(
         ObservabilityConfig, "kv_cache_metrics_sample"
@@ -685,6 +696,9 @@ class EngineArgs:
     kv_events_config: KVEventsConfig | None = None
 
     ec_transfer_config: ECTransferConfig | None = None
+    ec_manager_config: EncoderCacheManagerConfig = get_field(
+        VllmConfig, "ec_manager_config"
+    )
     reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
 
     generation_config: str = ModelConfig.generation_config
@@ -694,7 +708,6 @@ class EngineArgs:
         ModelConfig, "override_generation_config"
     )
     model_impl: str = ModelConfig.model_impl
-    override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     kv_cache_dtype_skip_layers: list[str] = get_field(
@@ -751,7 +764,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal["auto", "triton", "flashkda"] | None = None
+    kda_prefill_backend: Literal["auto", "triton", "flashkda", "fused"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -765,6 +778,8 @@ class EngineArgs:
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
+        if isinstance(self.ec_manager_config, dict):
+            self.ec_manager_config = EncoderCacheManagerConfig(**self.ec_manager_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         if isinstance(self.weight_transfer_config, dict):
@@ -867,9 +882,16 @@ class EngineArgs:
             "--enable-return-routed-experts",
             **model_kwargs["enable_return_routed_experts"],
         )
+        model_group.add_argument(
+            "--return-sampling-mask",
+            **model_kwargs["return_sampling_mask"],
+        )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
         model_group.add_argument("--use-fp64-gumbel", **model_kwargs["use_fp64_gumbel"])
+        model_group.add_argument(
+            "--enable-trace-replay", **model_kwargs["enable_trace_replay"]
+        )
         model_group.add_argument(
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
         )
@@ -905,9 +927,6 @@ class EngineArgs:
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
         )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
-        model_group.add_argument(
-            "--override-attention-dtype", **model_kwargs["override_attention_dtype"]
-        )
         model_group.add_argument(
             "--logits-processors", **model_kwargs["logits_processors"]
         )
@@ -1053,6 +1072,10 @@ class EngineArgs:
             **parallel_kwargs["dcp_comm_backend"],
         )
         parallel_group.add_argument(
+            "--dcp-q-replicate",
+            **parallel_kwargs["dcp_q_replicate"],
+        )
+        parallel_group.add_argument(
             "--dcp-kv-cache-interleave-size",
             **parallel_kwargs["dcp_kv_cache_interleave_size"],
         )
@@ -1099,7 +1122,8 @@ class EngineArgs:
             "--data-parallel-rpc-port",
             "-dpp",
             type=int,
-            help="Port for data parallel RPC communication.",
+            help="Fixed port for data parallel RPC communication. All nodes "
+            "must use the same port.",
         )
         parallel_group.add_argument(
             "--data-parallel-backend",
@@ -1214,6 +1238,10 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
+        )
+        cache_group.add_argument(
+            "--prefix-cache-retention-interval",
+            **cache_kwargs["prefix_cache_retention_interval"],
         )
         cache_group.add_argument(
             "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
@@ -1383,6 +1411,13 @@ class EngineArgs:
             "--mm-ipc-gpu-memory-gb",
             **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
         )
+        multimodal_group.add_argument(
+            "--mm-device-do-normalize",
+            **{
+                **multimodal_kwargs["mm_device_do_normalize"],
+                "default": None,
+            },
+        )
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1448,6 +1483,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"],
+        )
+        observability_group.add_argument(
+            "--per-request-spec-decode-metrics",
+            **observability_kwargs["per_request_spec_decode_metrics"],
         )
         observability_group.add_argument(
             "--kv-cache-metrics", **observability_kwargs["kv_cache_metrics"]
@@ -1617,6 +1656,9 @@ class EngineArgs:
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
         )
         vllm_group.add_argument(
+            "--ec-manager-config", **vllm_kwargs["ec_manager_config"]
+        )
+        vllm_group.add_argument(
             "--compilation-config", "-cc", **vllm_kwargs["compilation_config"]
         )
         vllm_group.add_argument(
@@ -1678,9 +1720,10 @@ class EngineArgs:
         parser.add_argument(
             "--kda-prefill-backend",
             dest="kda_prefill_backend",
-            choices=["auto", "triton", "flashkda"],
+            choices=["auto", "triton", "flashkda", "fused"],
             default=None,
-            help="Select KDA prefill backend.",
+            help="Select KDA prefill backend. 'flashkda' is CUDA-only and "
+            "'fused' is ROCm-only; 'auto' picks a supported backend.",
         )
         return parser
 
@@ -1730,9 +1773,11 @@ class EngineArgs:
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             enable_return_routed_experts=self.enable_return_routed_experts,
+            return_sampling_mask=self.return_sampling_mask,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
+            enable_trace_replay=self.enable_trace_replay,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
@@ -1763,12 +1808,12 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             enable_cumem_allocator=self.enable_cumem_allocator,
             model_impl=self.model_impl,
-            override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
+            mm_device_do_normalize=self.mm_device_do_normalize,
             mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
@@ -1784,9 +1829,6 @@ class EngineArgs:
                 )
 
     def create_load_config(self) -> LoadConfig:
-        if self.quantization == "bitsandbytes":
-            self.load_format = "bitsandbytes"
-
         if self.load_format == "tensorizer":
             if hasattr(self.model_loader_extra_config, "to_serializable"):
                 self.model_loader_extra_config = (
@@ -1905,6 +1947,7 @@ class EngineArgs:
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
+            per_request_spec_decode_metrics=self.per_request_spec_decode_metrics,
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
             cudagraph_metrics=self.cudagraph_metrics,
@@ -1984,6 +2027,7 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
+            prefix_cache_retention_interval=self.prefix_cache_retention_interval,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
@@ -2136,7 +2180,7 @@ class EngineArgs:
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
 
-            if self.data_parallel_start_rank and not headless:
+            if self.data_parallel_start_rank is not None and not headless:
                 # Infer hybrid LB mode.
                 self.data_parallel_hybrid_lb = True
 
@@ -2155,7 +2199,9 @@ class EngineArgs:
                 self.data_parallel_hybrid_lb = False
 
             self.data_parallel_rank = (
-                self.data_parallel_start_rank or inferred_data_parallel_rank
+                self.data_parallel_start_rank
+                if self.data_parallel_start_rank is not None
+                else inferred_data_parallel_rank
             )
             if self.nnodes > 1:
                 logger.info(
@@ -2255,6 +2301,7 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_comm_backend=self.dcp_comm_backend,
+            dcp_q_replicate=self.dcp_q_replicate,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
@@ -2349,10 +2396,6 @@ class EngineArgs:
                 "Consider increasing max_num_batched_tokens or "
                 "decreasing num_speculative_tokens"
             )
-
-        # bitsandbytes pre-quantized model need a specific model loader
-        if model_config.quantization == "bitsandbytes":
-            self.quantization = self.load_format = "bitsandbytes"
 
         # Attention config overrides
         attention_config = copy.deepcopy(self.attention_config)
@@ -2481,6 +2524,17 @@ class EngineArgs:
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
+            if (
+                self.kda_prefill_backend == "flashkda"
+                and not current_platform.is_cuda()
+            ):
+                raise ValueError(
+                    "--kda-prefill-backend=flashkda is only available on CUDA."
+                )
+            if self.kda_prefill_backend == "fused" and not current_platform.is_rocm():
+                raise ValueError(
+                    "--kda-prefill-backend=fused is only available on ROCm."
+                )
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
 
         config = VllmConfig(
@@ -2503,6 +2557,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            ec_manager_config=self.ec_manager_config,
             reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
@@ -2563,8 +2618,18 @@ class EngineArgs:
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
         # So here we do an extra device name check to prevent such regression.
-        if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
-            # For GPUs like H100 and MI300x, use larger default values.
+        if device_memory >= 160 * GiB_bytes:
+            # for GPUs like B200/B300 with >= 160GB memory, use the largest defaults
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 16384,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 1024,
+                UsageContext.OPENAI_API_SERVER: 1024,
+            }
+        elif device_memory >= 70 * GiB_bytes and "a100" not in device_name:
+            # For GPUs like H100 and H200, use larger offline defaults.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
