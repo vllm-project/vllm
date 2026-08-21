@@ -36,7 +36,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
 )
-from vllm.model_executor.parameter import BasevLLMParameter
+from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
@@ -102,7 +102,11 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
     ) -> None:
         tp_rank = self.tp_rank
         param_tp_rank = getattr(param, "tp_rank", None)
-        if loaded_shard_id == self.replicated_shard_id:
+        replicate_block_scale = (
+            isinstance(param, BlockQuantScaleParameter)
+            and loaded_weight.shape[param.output_dim] < self.tp_size
+        )
+        if loaded_shard_id == self.replicated_shard_id or replicate_block_scale:
             self.tp_rank = 0
             if param_tp_rank is not None:
                 param.tp_rank = 0
@@ -121,7 +125,11 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
     ) -> None:
         tp_rank = self.tp_rank
         param_tp_rank = getattr(param, "tp_rank", None)
-        if loaded_shard_id == self.replicated_shard_id:
+        replicate_block_scale = (
+            isinstance(param, BlockQuantScaleParameter)
+            and loaded_weight.shape[param.output_dim] < self.tp_size
+        )
+        if loaded_shard_id == self.replicated_shard_id or replicate_block_scale:
             self.tp_rank = 0
             if param_tp_rank is not None:
                 param.tp_rank = 0
@@ -319,7 +327,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
-        run_gemm_rs: bool = False,
+        run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
         self.use_recoverssm = self.cache_config.use_kda_recoverssm
@@ -491,14 +499,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        self.run_gemm_rs = run_gemm_rs
-        if self.run_gemm_rs:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+        self.gemm_rs_ar = None
+        if run_gemm_rs_ar:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+                get_gemm_rs_ar,
+            )
 
-            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj)
-            if not self.run_gemm_rs:
+            gemm_rs_ar = get_gemm_rs_ar()
+            if gemm_rs_ar.can_run(self.o_proj):
+                self.gemm_rs_ar = gemm_rs_ar
+            else:
                 logger.warning_once(
-                    "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
                     prefix,
                 )
         compilation_config = vllm_config.compilation_config
@@ -541,12 +553,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        if self.run_gemm_rs:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
-
-            gemm_rs = get_gemm_rs()
-            if gemm_rs.should_run(core_attn_out):
-                return gemm_rs(core_attn_out, self.o_proj.weight)
+        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(core_attn_out):
+            return self.gemm_rs_ar(core_attn_out, self.o_proj.weight)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
