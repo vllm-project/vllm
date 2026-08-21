@@ -134,7 +134,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         aux_stream: torch.cuda.Stream | None = None,
         use_rope: bool = False,
         non_causal_multi_token_decode: bool = False,
-        run_gemm_rs: bool = False,
+        run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -271,14 +271,18 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        self.run_gemm_rs = run_gemm_rs
-        if self.run_gemm_rs:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+        self.gemm_rs_ar = None
+        if run_gemm_rs_ar:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+                get_gemm_rs_ar,
+            )
 
-            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj)
-            if not self.run_gemm_rs:
+            gemm_rs_ar = get_gemm_rs_ar()
+            if gemm_rs_ar.can_run(self.o_proj):
+                self.gemm_rs_ar = gemm_rs_ar
+            else:
                 logger.warning_once(
-                    "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
                     prefix,
                 )
 
@@ -549,12 +553,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         if gate is not None:
             attn_out = _gate_sigmoid_mul(attn_out, gate)
 
-        if self.run_gemm_rs:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
-
-            gemm_rs = get_gemm_rs()
-            if gemm_rs.should_run(attn_out):
-                return gemm_rs(attn_out, self.o_proj.weight)
+        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(attn_out):
+            return self.gemm_rs_ar(attn_out, self.o_proj.weight)
 
         return self.o_proj(attn_out)[0]
 

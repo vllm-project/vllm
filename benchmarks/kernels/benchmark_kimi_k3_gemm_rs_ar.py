@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the SM100 Kimi-K3 GEMM-RS kernel.
+"""Benchmark the SM100 Kimi-K3 GEMM-RS/AR kernel.
 
 All ranks must belong to one NVLink domain. For example, run a TP8 sweep with:
 
     torchrun --nproc-per-node=8 \
-        benchmarks/kernels/benchmark_kimi_k3_gemm_rs.py
+        benchmarks/kernels/benchmark_kimi_k3_gemm_rs_ar.py
 """
 
 import argparse
@@ -26,7 +26,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import GemmRS
+from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import GemmRsAr
 
 # Shared-expert down-proj and attention O-proj.
 _KIMI_K3_PROJECTION_K = (6144, 12288)
@@ -41,6 +41,12 @@ class Candidate:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=("rs", "ar"),
+        default="rs",
+        help="Collective mode to benchmark.",
+    )
     parser.add_argument(
         "--m",
         type=int,
@@ -138,7 +144,8 @@ def valid_rows(M: int, local_M: int, rank: int) -> int:
 
 
 def benchmark_shape(
-    gemm_rs: GemmRS,
+    gemm_rs_ar: GemmRsAr,
+    mode: str,
     M: int,
     N: int,
     K: int,
@@ -148,7 +155,8 @@ def benchmark_shape(
     device_group: dist.ProcessGroup,
     cpu_group: dist.ProcessGroup,
     device_barrier: Callable[[], None],
-) -> dict[str, float | int]:
+) -> dict[str, float | int | str]:
+    all_reduce = mode == "ar"
     world_size = dist.get_world_size(device_group)
     rank = dist.get_rank(device_group)
     device = torch.device("cuda", torch.accelerator.current_device_index())
@@ -169,17 +177,19 @@ def benchmark_shape(
     partial = torch.empty((padded_M, N), dtype=torch.bfloat16, device=device)
     symm_partial = symm_mem.empty((padded_M, N), dtype=torch.bfloat16, device=device)
     symm_partial_handle = symm_mem.rendezvous(symm_partial, device_group)
-    rs_inputs = [torch.empty_like(partial) for _ in range(num_workspaces)]
-    symm_rs_inputs = []
-    symm_rs_handles = []
+    collective_inputs = [torch.empty_like(partial) for _ in range(num_workspaces)]
+    symm_collective_inputs = []
+    symm_collective_handles = []
     for _ in range(num_workspaces):
-        rs_input = symm_mem.empty(
+        collective_input = symm_mem.empty(
             (padded_M, N),
             dtype=torch.bfloat16,
             device=device,
         )
-        symm_rs_inputs.append(rs_input)
-        symm_rs_handles.append(symm_mem.rendezvous(rs_input, device_group))
+        symm_collective_inputs.append(collective_input)
+        symm_collective_handles.append(
+            symm_mem.rendezvous(collective_input, device_group)
+        )
     torch_output = torch.empty((local_M, N), dtype=torch.bfloat16, device=device)
     symm_output = torch.empty_like(torch_output)
     gemm_output = torch.empty((M, N), dtype=torch.bfloat16, device=device)
@@ -188,21 +198,27 @@ def benchmark_shape(
         partial[M:].zero_()
         symm_partial[M:].zero_()
 
-    def make_torch_ring_ll_gemm_rs(
+    def make_torch_ring_ll_gemm_collective(
         x: torch.Tensor, weight: torch.Tensor
     ) -> Callable[[], torch.Tensor]:
         def run() -> torch.Tensor:
             torch.mm(x, weight.T, out=partial[:M])
+            if all_reduce:
+                dist.all_reduce(partial, group=device_group)
+                return partial[:M]
             dist.reduce_scatter_single(torch_output, partial, group=device_group)
             return torch_output
 
         return run
 
-    def make_torch_ldmc_gemm_rs(
+    def make_torch_ldmc_gemm_collective(
         x: torch.Tensor, weight: torch.Tensor
     ) -> Callable[[], torch.Tensor]:
         def run() -> torch.Tensor:
             torch.mm(x, weight.T, out=symm_partial[:M])
+            if all_reduce:
+                dist.all_reduce(symm_partial, group=device_group)
+                return symm_partial[:M]
             dist.reduce_scatter_single(
                 symm_output,
                 symm_partial,
@@ -212,11 +228,11 @@ def benchmark_shape(
 
         return run
 
-    def make_fused_gemm_rs(
+    def make_fused_gemm_collective(
         x: torch.Tensor, weight: torch.Tensor
     ) -> Callable[[], torch.Tensor]:
         def run() -> torch.Tensor:
-            return gemm_rs(x, weight)
+            return gemm_rs_ar(x, weight)
 
         return run
 
@@ -229,18 +245,30 @@ def benchmark_shape(
 
         return run
 
-    def make_ring_ll_rs(rs_input: torch.Tensor) -> Callable[[], torch.Tensor]:
+    def make_ring_ll_collective(
+        collective_input: torch.Tensor,
+    ) -> Callable[[], torch.Tensor]:
         def run() -> torch.Tensor:
-            dist.reduce_scatter_single(torch_output, rs_input, group=device_group)
+            if all_reduce:
+                dist.all_reduce(collective_input, group=device_group)
+                return collective_input
+            dist.reduce_scatter_single(
+                torch_output, collective_input, group=device_group
+            )
             return torch_output
 
         return run
 
-    def make_ldmc_rs(
-        rs_input: torch.Tensor,
+    def make_ldmc_collective(
+        collective_input: torch.Tensor,
     ) -> Callable[[], torch.Tensor]:
         def run() -> torch.Tensor:
-            dist.reduce_scatter_single(symm_output, rs_input, group=device_group)
+            if all_reduce:
+                dist.all_reduce(collective_input, group=device_group)
+                return collective_input
+            dist.reduce_scatter_single(
+                symm_output, collective_input, group=device_group
+            )
             return symm_output
 
         return run
@@ -248,15 +276,15 @@ def benchmark_shape(
     candidates = (
         Candidate(
             "ring_ll_us",
-            [make_torch_ring_ll_gemm_rs(x, w) for x, w in zip(inputs, weights)],
+            [make_torch_ring_ll_gemm_collective(x, w) for x, w in zip(inputs, weights)],
         ),
         Candidate(
             "ldmc_us",
-            [make_torch_ldmc_gemm_rs(x, w) for x, w in zip(inputs, weights)],
+            [make_torch_ldmc_gemm_collective(x, w) for x, w in zip(inputs, weights)],
         ),
         Candidate(
-            "gemm_rs_us",
-            [make_fused_gemm_rs(x, w) for x, w in zip(inputs, weights)],
+            "gemm_rs_ar_us",
+            [make_fused_gemm_collective(x, w) for x, w in zip(inputs, weights)],
         ),
         Candidate(
             "torch_gemm_us",
@@ -264,19 +292,19 @@ def benchmark_shape(
             check_correctness=False,
         ),
         Candidate(
-            "ring_ll_rs_us",
-            [make_ring_ll_rs(x) for x in rs_inputs],
+            "ring_ll_collective_us",
+            [make_ring_ll_collective(x) for x in collective_inputs],
             check_correctness=False,
         ),
         Candidate(
-            "ldmc_rs_us",
-            [make_ldmc_rs(x) for x in symm_rs_inputs],
+            "ldmc_collective_us",
+            [make_ldmc_collective(x) for x in symm_collective_inputs],
             check_correctness=False,
         ),
     )
 
     expected = candidates[0].runs[0]()
-    rows = valid_rows(M, local_M, rank)
+    rows = M if all_reduce else valid_rows(M, local_M, rank)
     for candidate in candidates[1:]:
         if not candidate.check_correctness:
             continue
@@ -290,7 +318,7 @@ def benchmark_shape(
         )
 
     candidate_graphs = {}
-    graph_keepalive: list[object] = [symm_partial_handle, *symm_rs_handles]
+    graph_keepalive: list[object] = [symm_partial_handle, *symm_collective_handles]
     for candidate in candidates:
         stream = torch.cuda.Stream()
         bundles = [capture_graph(run, stream, cpu_group) for run in candidate.runs]
@@ -306,70 +334,71 @@ def benchmark_shape(
         device_barrier,
     )
 
-    best_nccl_rs_us = min(times["ring_ll_rs_us"], times["ldmc_rs_us"])
+    best_nccl_us = min(times["ring_ll_collective_us"], times["ldmc_collective_us"])
     return {
+        "mode": mode.upper(),
         "M": M,
         "N": N,
         "K": K,
         **times,
-        "best_nccl_rs_us": best_nccl_rs_us,
-        "speedup_vs_ring_ll": times["ring_ll_us"] / times["gemm_rs_us"],
-        "speedup_vs_ldmc": times["ldmc_us"] / times["gemm_rs_us"],
+        "best_nccl_us": best_nccl_us,
+        "speedup_vs_ring_ll": times["ring_ll_us"] / times["gemm_rs_ar_us"],
+        "speedup_vs_ldmc": times["ldmc_us"] / times["gemm_rs_ar_us"],
     }
 
 
-def print_results(results: list[dict[str, float | int]]) -> None:
+def print_results(results: list[dict[str, float | int | str]]) -> None:
     results_df = pd.DataFrame(results)
-    end_to_end = results_df[
-        [
-            "M",
-            "N",
-            "K",
-            "ring_ll_us",
-            "ldmc_us",
-            "gemm_rs_us",
-            "speedup_vs_ring_ll",
-            "speedup_vs_ldmc",
+    collective = str(results_df["mode"].iloc[0])
+    end_to_end = (
+        results_df[
+            [
+                "M",
+                "N",
+                "K",
+                "ring_ll_us",
+                "ldmc_us",
+                "gemm_rs_ar_us",
+                "speedup_vs_ring_ll",
+                "speedup_vs_ldmc",
+            ]
         ]
-    ].rename(
-        columns={
-            "ring_ll_us": "Torch GEMM + NCCL RS (RING_LL) (us)",
-            "ldmc_us": "Torch GEMM + NCCL RS (LDMC) (us)",
-            "gemm_rs_us": "GEMM-RS (us)",
-            "speedup_vs_ring_ll": "Speedup vs RING_LL",
-            "speedup_vs_ldmc": "Speedup vs LDMC",
-        }
+        .rename(
+            columns={
+                "ring_ll_us": f"Torch GEMM + NCCL {collective} (RING_LL) (us)",
+                "ldmc_us": f"Torch GEMM + NCCL {collective} (LDMC) (us)",
+                "gemm_rs_ar_us": f"GEMM-{collective} (us)",
+                "speedup_vs_ring_ll": "Speedup vs RING_LL",
+                "speedup_vs_ldmc": "Speedup vs LDMC",
+            }
+        )
+        .round(3)
     )
-    end_to_end = end_to_end.round(
-        {
-            "Torch GEMM + NCCL RS (RING_LL) (us)": 2,
-            "Torch GEMM + NCCL RS (LDMC) (us)": 2,
-            "GEMM-RS (us)": 2,
-            "Speedup vs RING_LL": 3,
-            "Speedup vs LDMC": 3,
-        }
+    components = (
+        results_df[["M", "N", "K", "torch_gemm_us", "best_nccl_us", "gemm_rs_ar_us"]]
+        .rename(
+            columns={
+                "torch_gemm_us": "Torch GEMM (us)",
+                "best_nccl_us": f"NCCL {collective} (best) (us)",
+                "gemm_rs_ar_us": f"GEMM-{collective} (us)",
+            }
+        )
+        .round(2)
     )
-    components = results_df[
-        ["M", "N", "K", "torch_gemm_us", "best_nccl_rs_us", "gemm_rs_us"]
-    ].rename(
-        columns={
-            "torch_gemm_us": "Torch GEMM (us)",
-            "best_nccl_rs_us": "NCCL RS (best) (us)",
-            "gemm_rs_us": "GEMM-RS (us)",
-        }
-    )
-    components = components.round(2)
 
-    print("### End-to-end latency")
+    print(f"### {collective} end-to-end latency")
     print(end_to_end.to_markdown(index=False))
-    print("\n### Component latency")
+    print(f"\n### {collective} component latency")
     print(components.to_markdown(index=False))
-    print("\nNCCL RS (best) is the faster of RING_LL and LDMC for each shape.")
+    print(
+        f"\nNCCL {collective} (best) is the faster of RING_LL and LDMC "
+        "for each shape.\n"
+    )
 
 
 def main() -> None:
     args = parse_args()
-    assert args.m and min(args.m) >= 128
+    assert args.m and min(args.m) > 0
     assert args.n % 256 == 0
     assert args.num_workspaces > 0
     assert args.warmup_replays >= 0
@@ -401,12 +430,19 @@ def main() -> None:
     sync_output = torch.empty_like(sync_input)
 
     def device_barrier() -> None:
+        # Order the timed launch after a device-side rank rendezvous without
+        # including the rendezvous itself in the measured event interval.
         pynccl_comm.all_reduce(sync_input, sync_output)
 
-    gemm_rs = GemmRS(max_M=max(args.m), N=args.n)
+    gemm_rs_ar = GemmRsAr(
+        max_M=max(args.m),
+        N=args.n,
+        all_reduce=args.mode == "ar",
+    )
     results = [
         benchmark_shape(
-            gemm_rs,
+            gemm_rs_ar,
+            args.mode,
             M,
             args.n,
             K,
@@ -420,12 +456,12 @@ def main() -> None:
         for K in K_values
         for M in args.m
     ]
+    del gemm_rs_ar
 
     if tp_group.rank_in_group == 0:
         print_results(results)
 
     dist.barrier(group=tp_group.cpu_group)
-    del gemm_rs
     cleanup_dist_env_and_memory()
 
 

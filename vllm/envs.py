@@ -210,6 +210,7 @@ if TYPE_CHECKING:
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
+    VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_K3_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
@@ -1608,6 +1609,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KIMI_K3_AUX_ATTN_RES_STREAM": lambda: bool(
         int(os.getenv("VLLM_KIMI_K3_AUX_ATTN_RES_STREAM", "0"))
     ),
+    # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
+    # attention projections. All TP ranks must belong to one NVLink domain.
+    "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
     # Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 sequence-parallel
     # row-parallel projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_RS": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_RS", "0"))),
