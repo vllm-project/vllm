@@ -185,17 +185,20 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    all2all_backend: All2AllBackend = "allgather_reducescatter"
+    all2all_backend: All2AllBackend = "flashinfer_nvlink_one_sided"
     """All2All backend for MoE expert parallel communication. Available options:
 
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
+      (default). Needs the flashinfer trtllm_moe_alltoall module, which is
+      checked here, and an MNNVL fabric, which is not: a topology mismatch
+      surfaces later when the MoeAlltoAll workspace is allocated.
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
-    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
-    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -471,6 +474,17 @@ class ParallelConfig:
                 self.all2all_backend,
             )
             self.all2all_backend = "allgather_reducescatter"
+
+        if self.all2all_backend == "flashinfer_nvlink_one_sided":
+            from vllm.utils.flashinfer import has_flashinfer_nvlink_one_sided
+
+            if not has_flashinfer_nvlink_one_sided():
+                logger.warning(
+                    "The 'flashinfer_nvlink_one_sided' all2all backend needs the "
+                    "flashinfer trtllm_moe_alltoall module, which is not "
+                    "available. Falling back to 'allgather_reducescatter'."
+                )
+                self.all2all_backend = "allgather_reducescatter"
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
