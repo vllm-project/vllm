@@ -1941,6 +1941,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
         self.cudagraph_manager = None
+        if hasattr(self, "device_kv_cache_block_copier"):
+            del self.device_kv_cache_block_copier
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):
