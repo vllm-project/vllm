@@ -242,10 +242,6 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
-from vllm.model_executor.layers.attention.pcp import (
-    finalize_mla_pcp_decode,
-    maybe_gather_mla_latent_cache_inputs,
-)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -293,8 +289,12 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.dcp_utils import MLADCPManager
+from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.pcp import (
+    finalize_mla_pcp_decode,
+    maybe_gather_mla_latent_cache_inputs,
+)
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -371,8 +371,17 @@ def _get_kv_b_proj_input_dtype(
         return kv_b_proj.params_dtype
     if weight_dtype == torch.uint8:
         return None
-    if weight_dtype == current_platform.fp8_dtype() and not use_fp8_prefill:
-        return None
+    if weight_dtype == current_platform.fp8_dtype():
+        from vllm.model_executor.layers.quantization.modelopt import (
+            ModelOptFp8PbWoLinearMethod,
+        )
+
+        quant_method = getattr(kv_b_proj, "quant_method", None)
+        # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
+        if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
+            return quant_method.input_dtype
+        if not use_fp8_prefill:
+            return None
     return weight_dtype
 
 
@@ -540,6 +549,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
+        self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
+        # AMX reads kv_b_proj's weight directly and never calls it live; the
+        # reference CPU MLA backend calls it but isn't perf-critical. Skip
+        # the packed-kernel dispatch either way.
+        kv_b_proj._cpu_skip_gemm_dispatch = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
@@ -908,6 +922,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     group_size=128,
                     transpose_bm=True,
                 )
+            elif self.is_amx_bmm_enabled:
+                # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
+                # AMXMLAImpl's own (N, L, P) packed W_UK -- same as prefill.
+                N, B, P = mqa_q_nope.shape
+                L = self.kv_lora_rank
+                mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
+                ops.bmm_cpu(
+                    mqa_ql_nope,
+                    mqa_q_nope,
+                    self.impl._w_uk_packed,  # type: ignore[attr-defined]
+                    True,
+                    None,
+                )
+                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
@@ -1026,6 +1054,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Let per-backend impls do their own weight packing first (no-op
+        # unless overridden), mirroring Attention.process_weights_after_loading.
+        self.impl.process_weights_after_loading(act_dtype)
+
+        if self.is_amx_bmm_enabled:
+            # AMXMLAImpl already packed its own W_UK/W_UV above, for both
+            # prefill and decode. Release the now-unused raw weight.
+            self.kv_b_proj.weight = torch.nn.Parameter(
+                torch.empty(0), requires_grad=False
+            )
+            return
+
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
@@ -1191,6 +1231,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+            )
+        elif self.is_amx_bmm_enabled:
+            # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
+            # AMXMLAImpl's own (N, V, L) packed W_UV -- same as prefill.
+            ops.bmm_cpu(
+                out.transpose(0, 1),
+                x,
+                self.impl._w_uv_packed,  # type: ignore[attr-defined]
+                True,
+                None,
             )
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)

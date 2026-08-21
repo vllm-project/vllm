@@ -341,6 +341,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
@@ -365,7 +366,12 @@ class SpeculativeConfig:
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
-                {"n_predict": n_predict, "architectures": ["DeepSeekMTPModel"]}
+                {
+                    "n_predict": n_predict,
+                    "architectures": [
+                        "DeepseekV32MTPModel" if use_v32_mtp else "DeepSeekMTPModel"
+                    ],
+                }
             )
         if hf_config.model_type == "deepseek_v4":
             hf_config.model_type = "deepseek_mtp"
@@ -484,7 +490,10 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
-        if hf_config.architectures[0] == "NemotronH_Super_Omni_Reasoning_V3":
+        if hf_config.architectures[0] in (
+            "NemotronH_Super_Omni_Reasoning_V3",
+            "NemotronH_Omni_Reasoning_V3",
+        ):
             # Promote VLM's text_config so MTP detection below fires correctly
             hf_config = hf_config.text_config
 
@@ -759,12 +768,15 @@ class SpeculativeConfig:
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
-                if self.target_model_config.hf_text_config.model_type == "deepseek_v32":
-                    # FIXME(luccafong): cudagraph with v32 MTP is not supported,
-                    # remove this when the issue is fixed.
-                    self.enforce_eager = True
                 # use the draft model from the same model:
-                self.model = self.target_model_config.model
+                # Use model_weights if set (e.g. runai_streamer replaces
+                # model with a local cache dir but keeps the original path
+                # in model_weights), so the draft model can load weights
+                # from the same source as the target model.
+                self.model = (
+                    self.target_model_config.model_weights
+                    or self.target_model_config.model
+                )
                 # Align the quantization of draft model for cases such as
                 # --quantization fp8 with a bf16 checkpoint.
                 if not self.quantization:

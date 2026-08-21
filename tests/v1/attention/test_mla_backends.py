@@ -172,9 +172,11 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.kv_b_proj.quant_method = None
     layer.is_aiter_triton_fp4_bmm_enabled = False
     layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.is_amx_bmm_enabled = False
     layer.dcp_q_replicate = False
     layer.quant_config = None
     layer.layer_name = "test"
+    layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
 
     monkeypatch.setattr(
         mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
@@ -1660,6 +1662,12 @@ def _run_backend_correctness(
         kv_cache_per_block_size[block_size] = kv_cache
 
     # 4. Run vLLM backends and compare
+    rtol = 1e-2
+    atol = {
+        "auto": 1e-2,
+        "fp8": 1.5e-1,
+        "fp8_e4m3": 1.5e-1,
+    }[kv_cache_dtype]
     failures = []
     for backend_idx, backend_name in enumerate(backends_to_test):
         # Skip backends that don't support spec decode for spec decode tests
@@ -1723,10 +1731,6 @@ def _run_backend_correctness(
             assert torch.isfinite(backend_output).all(), (
                 f"[{backend_name}] produced non-finite values"
             )
-
-            # Check numerical similarity
-            rtol = 1e-2
-            atol = 5e-1
 
             max_diff = torch.max(torch.abs(backend_output - expected_output)).item()
             max_rel_diff = torch.max(

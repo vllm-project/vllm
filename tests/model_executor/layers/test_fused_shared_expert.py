@@ -22,8 +22,14 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
 from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
+
+pytestmark = pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="ROCm-specific aiter ops are not supported on XPU",
+)
 
 _QUARK_FSE_CONFIG: dict[str, Any] = {
     "global_quant_config": {
@@ -479,6 +485,8 @@ def test_models_fse_init(
         is_mm_prefix_lm=False,
         multimodal_config=None,
         quantization_config=None,
+        runner_type="generate",
+        is_moe=True,
     )
     vllm_config.parallel_config.enable_expert_parallel = False
     if model_type == "deepseek_v4":
@@ -535,7 +543,8 @@ def test_models_fse_init(
                 )
 
                 vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(hf_config=config)
+                    draft_model_config=SimpleNamespace(hf_config=config),
+                    method="mtp",
                 )
                 mtp = DeepSeekV4MTP(vllm_config=vllm_config)
         assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
