@@ -236,11 +236,15 @@ fn thinking_enabled(request: &ChatRequest) -> Result<bool> {
     if let Some(enable_thinking) = request.parse_template_bool("enable_thinking")? {
         return Ok(enable_thinking);
     }
+    if let Some(reasoning_effort) = request.chat_options.reasoning_effort {
+        return Ok(reasoning_effort != crate::request::ReasoningEffort::None);
+    }
     Ok(request
         .chat_options
-        .reasoning_effort
-        .map(|effort| effort != crate::request::ReasoningEffort::None)
-        .unwrap_or(true))
+        .template_kwargs
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        != Some("none"))
 }
 
 fn thinking_effort(request: &ChatRequest) -> Result<String> {
@@ -251,13 +255,22 @@ fn thinking_effort(request: &ChatRequest) -> Result<String> {
             ))
         })?
     } else if let Some(effort) = request.chat_options.reasoning_effort {
-        effort.as_str()
+        if effort == crate::request::ReasoningEffort::None {
+            DEFAULT_THINKING_EFFORT
+        } else {
+            effort.as_str()
+        }
     } else if let Some(value) = request.chat_options.template_kwargs.get("reasoning_effort") {
-        value.as_str().ok_or_else(|| {
+        let effort = value.as_str().ok_or_else(|| {
             Error::ChatTemplate(format!(
                 "template kwarg `reasoning_effort` must be a string, got {value}"
             ))
-        })?
+        })?;
+        if effort == "none" {
+            DEFAULT_THINKING_EFFORT
+        } else {
+            effort
+        }
     } else {
         DEFAULT_THINKING_EFFORT
     };
