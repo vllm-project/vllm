@@ -6,6 +6,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
+from vllm.multimodal.utils import strip_covered_mm_data
 
 if TYPE_CHECKING:
     import numpy as np
@@ -53,11 +54,16 @@ class NewRequestData:
         request: Request,
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
+        uses_mrope: bool = False,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            mm_features=request.mm_features,
+            mm_features=strip_covered_mm_data(
+                request.mm_features,
+                request.num_computed_tokens,
+                uses_mrope=uses_mrope,
+            ),
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             block_ids=block_ids,
@@ -67,6 +73,14 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
         )
+
+    @property
+    def prompt_len(self) -> int:
+        if self.prompt_token_ids is not None:
+            return len(self.prompt_token_ids)
+        if self.prompt_embeds is not None:
+            return self.prompt_embeds.shape[0]
+        return 0
 
     def __repr__(self) -> str:
         prompt_embeds_shape = (
@@ -257,6 +271,12 @@ class SchedulerOutput:
 
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
+
+    # Producer partial-tail offload hand-off for external KV connectors:
+    # {request_id: [(group_id, block_id, boundary_tokens), ...]} pointing at
+    # the durable boundary block of a producer's last-prompt-boundary partial
+    # tail (mamba "align" CoW target). None unless partial hash hits are active.
+    partial_tail_offloads: dict[str, list[tuple[int, int, int]]] | None = None
 
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.

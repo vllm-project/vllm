@@ -19,6 +19,7 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 _TORCH_TO_CUTE_DTYPE = {
     torch.bfloat16: BFloat16,
     torch.float8_e4m3fn: Float8E4M3FN,
+    torch.float32: Float32,
 }
 
 _CUTE_TO_PTX_DTYPE = {
@@ -37,6 +38,18 @@ EVICT_LAST = Int64(0x14F0000000000000)
 @dsl_user_op
 def recast_val(x, dtype, *, loc=None, ip=None):
     return dtype(llvm.bitcast(dtype.mlir_type, x.ir_value(loc=loc, ip=ip)))
+
+
+@dsl_user_op
+def to_cta0_smem(ptr: cute.Pointer, *, loc=None, ip=None):
+    return cute.make_ptr(
+        ptr.dtype,
+        ptr.toint(loc=loc, ip=ip) & 0xFEFF_FFFF,
+        cute.AddressSpace.smem,
+        assumed_align=8,
+        loc=loc,
+        ip=ip,
+    )
 
 
 def simple_tma_copy(atom, src, dst, mbar=None, cache_policy=None):

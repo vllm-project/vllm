@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
@@ -179,9 +180,13 @@ def _make_src_and_dst_indices(
     src_device: torch.device | str,
     dst_device: torch.device | str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    src_indices = torch.tensor(src_block_ids, device=src_device, dtype=torch.int64)
-    dst_indices = torch.tensor(dst_block_ids, device=dst_device, dtype=torch.int64)
-    return src_indices, dst_indices
+    def _to(block_ids: list[int], device: torch.device | str) -> torch.Tensor:
+        device = torch.device(device) if isinstance(device, str) else device
+        if device.type == "cpu":
+            return torch.tensor(block_ids, dtype=torch.int64, device=device)
+        return async_tensor_h2d(block_ids, dtype=torch.int64, device=device)
+
+    return _to(src_block_ids, src_device), _to(dst_block_ids, dst_device)
 
 
 def copy_kv_blocks(
@@ -258,8 +263,12 @@ def kv_postprocess_layout_on_receive(cache, indices):
     This method corrects layout mismatches from direct memory copies by
     permuting the tensor dimensions.
 
+    4D cache:
     - **Source Layout:** `[num_blocks, n_kv_head, block_size, head_dim]`
     - **Target Layout:** `[num_blocks, block_size, n_kv_head, head_dim]`
+    5D cache:
+    - **Source Layout:** `[num_blocks, kv_dim, n_kv_head, block_size, head_dim]`
+    - **Target Layout:** `[num_blocks, kv_dim, block_size, n_kv_head, head_dim]`
 
     Implementation:
     - x = blocks_to_update.reshape(src_shape) # view local kv with sender layout
@@ -270,7 +279,7 @@ def kv_postprocess_layout_on_receive(cache, indices):
     blocks_to_update = cache.index_select(0, indices)
     target_shape = list(blocks_to_update.shape)
     target_shape[0] = -1
-    inv_order = [0, 2, 1, 3]
+    inv_order = [0, 1, 3, 2, 4] if blocks_to_update.ndim == 5 else [0, 2, 1, 3]
     src_shape = tuple(target_shape[i] for i in inv_order)
     blocks_to_update = cache.index_select(0, indices)
     permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)

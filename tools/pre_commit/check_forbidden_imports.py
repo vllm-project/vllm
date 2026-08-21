@@ -48,6 +48,7 @@ CHECK_IMPORTS = {
             "vllm/distributed/device_communicators/shm_object_storage.py",
             "vllm/distributed/weight_transfer/ipc_engine.py",
             "vllm/distributed/weight_transfer/clients.py",
+            "tests/distributed/test_shm_broadcast.py",
             "tests/distributed/test_weight_transfer.py",
             "vllm/utils/hashing.py",
             "tests/multimodal/media/test_base.py",
@@ -90,6 +91,15 @@ CHECK_IMPORTS = {
             "from vllm.triton_utils import (triton|tl|tl, triton)"
         ),
         allowed_files={"vllm/triton_utils/importing.py"},
+    ),
+    "tilelang": ForbiddenImport(
+        pattern=r"^(from|import)\s+tilelang(\s|\.|$)",
+        tip="Use 'from vllm.tilelang_utils import tilelang, T' instead.",
+        allowed_pattern=re.compile(
+            r"from\s+vllm\.tilelang_utils\s+import\s+"
+            r"(tilelang|T|T, tilelang|tilelang, T)\b"
+        ),
+        allowed_files={"vllm/tilelang_utils/__init__.py"},
     ),
     "huggingface_hub repo API": ForbiddenImport(
         # Catch `from huggingface_hub import <fn>`, including parenthesized,
@@ -178,6 +188,29 @@ def test_regex():
         result = matches("pickle/cloudpickle", content)
         assert result == should_match, (
             f"pickle case {i} failed: {content!r} "
+            f"(expected {should_match}, got {result})"
+        )
+
+    tilelang_cases = [
+        # Should match
+        ("import tilelang", True),
+        ("import tilelang.language as T", True),
+        ("from tilelang.jit import JITImpl", True),
+        ("from tilelang.jit.kernel import JITKernel", True),
+        # Should not match: indented (local) imports are allowed, mirroring
+        # the "triton" rule, so mocked-module test imports are not flagged.
+        ("    import tilelang", False),
+        ("        from tilelang.jit import JITImpl", False),
+        ("from vllm.tilelang_utils import tilelang", False),
+        ("from vllm.tilelang_utils import T", False),
+        ("from vllm.tilelang_utils import T, tilelang", False),
+        ("from vllm.tilelang_utils import tilelang, T", False),
+        ("import tilelang_kernels", False),
+    ]
+    for i, (content, should_match) in enumerate(tilelang_cases):
+        result = matches("tilelang", content)
+        assert result == should_match, (
+            f"tilelang case {i} failed: {content!r} "
             f"(expected {should_match}, got {result})"
         )
 

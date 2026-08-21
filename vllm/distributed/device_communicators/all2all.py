@@ -734,17 +734,13 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         top_k: int,
         num_experts: int,
         hidden_size: int,
-        dispatch_dtype_bytes_per_elem: int = 0,
-        dispatch_scale_bytes_per_token: int = 0,
+        x_bytes_per_token: int,
+        x_sf_bytes_per_token: int,
     ):
         """Initialize (or grow) the MoeAlltoAll workspace."""
-        if dispatch_dtype_bytes_per_elem == 0:
-            hidden_bytes = hidden_size // 2
-        else:
-            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
         total_dispatch_payload_size_per_token = (
-            hidden_bytes
-            + dispatch_scale_bytes_per_token
+            x_bytes_per_token
+            + x_sf_bytes_per_token
             + top_k * 4  # int32 topks ids
             + top_k * 4  # float32 topk weights
         )
@@ -884,6 +880,20 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
                 self.moe_alltoall = None
                 self.mapping = None
                 self.initialized = False
+
+    def checkpoint_prepare(self) -> None:
+        if self.initialized:
+            assert self.moe_alltoall is not None
+            self.moe_alltoall.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        if self.initialized:
+            assert self.moe_alltoall is not None
+            from vllm.distributed.device_communicators.mnnvl_compat import (
+                CustomCommunicator,
+            )
+
+            self.moe_alltoall.checkpoint_restore(CustomCommunicator(self.cpu_group))
 
 
 class MoriAll2AllManager(All2AllManagerBase):
