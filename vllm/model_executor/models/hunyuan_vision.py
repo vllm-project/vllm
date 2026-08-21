@@ -28,6 +28,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
+import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -738,15 +739,21 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        # HunYuanVLProcessor requires image placeholders wrapped with start/end tokens.
+        # HunYuanVLProcessor requires image placeholders wrapped with
+        # start/end tokens. Wrap only bare occurrences so already-wrapped
+        # ones (e.g. from prior turns in multi-turn prompts) are left
+        # untouched instead of being re-wrapped into duplicates.
         if mm_data.get("images") is not None and prompt:
-            img_tok = hf_processor.image_token
-            wrapped = (
-                f"{hf_processor.image_start_token}{img_tok}"
-                f"{hf_processor.image_end_token}"
+            img_tok = re.escape(hf_processor.image_token)
+            start_tok = re.escape(hf_processor.image_start_token)
+            end_tok = re.escape(hf_processor.image_end_token)
+            bare_image_token = re.compile(f"(?<!{start_tok}){img_tok}(?!{end_tok})")
+            prompt = bare_image_token.sub(
+                f"{hf_processor.image_start_token}"
+                f"{hf_processor.image_token}"
+                f"{hf_processor.image_end_token}",
+                prompt,
             )
-            if img_tok in prompt and wrapped not in prompt:
-                prompt = prompt.replace(img_tok, wrapped)
         return self.info.ctx.call_hf_processor(
             hf_processor,
             dict(text=prompt, **mm_data),
@@ -855,11 +862,20 @@ class HunYuanVLForConditionalGeneration(
             input_tokens_tensor == image_start_token_id
         ).squeeze(1)
 
+        # Handle mismatch between token count and actual images
+        # (tokenizer may insert duplicate/placeholder image_start tokens)
+        num_images = len(image_grid_thw)
+        if len(image_start_indices) < num_images:
+            raise ValueError(
+                f"Insufficient image_start tokens ({len(image_start_indices)}) "
+                f"for {num_images} images. Expected at least {num_images}."
+            )
+
         p_index = torch.arange(len(input_tokens_tensor))
         w_index = torch.arange(len(input_tokens_tensor))
         h_index = torch.arange(len(input_tokens_tensor))
         t_index = torch.arange(len(input_tokens_tensor))
-        for image_index in range(len(image_start_indices)):
+        for image_index in range(num_images):
             # +1 : first image_token, +2: for xdrope positions
             pos = image_start_indices[image_index] + 2
             t, h, w = image_grid_thw[image_index]
