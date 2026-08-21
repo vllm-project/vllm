@@ -571,6 +571,7 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
+            num_new_tokens,
         )
 
         # P/D: delay caching blocks if we have to recv from

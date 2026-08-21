@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Sequence
 from typing import ClassVar
 
@@ -336,7 +336,11 @@ class SingleTypeKVCacheManager(ABC):
             self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_new_tokens: int | None = None,
     ) -> list[KVCacheBlock]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -349,6 +353,7 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens_main_model: The number of tokens for the main model (aka target
                 model in spec decode). w/o spec decode, it is num_tokens;
                 with spec decode, it is num_tokens - num_lookahead_tokens.
+            num_new_tokens: The number of tokens newly scheduled in this step.
         Returns:
             The new allocated blocks.
         """
@@ -1338,7 +1343,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # position the state written into `last_state_block_idx + 1`
             # describes, and it is what decides whether that block may be
             # keyed under a block-boundary hash.
-            self._state_write_tokens: dict[str, int] = {}
+            self._state_write_tokens: dict[str, deque[int]] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1594,7 +1599,11 @@ class MambaManager(SingleTypeKVCacheManager):
             return num_new_blocks + num_evictable_computed_blocks
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_new_tokens: int | None = None,
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
@@ -1612,11 +1621,12 @@ class MambaManager(SingleTypeKVCacheManager):
             # We can ignore lookahead tokens because current draft models don't have
             # mamba layers.
             num_tokens = num_tokens_main_model
-            # Where this step's forward leaves the recurrent state. It counts
-            # the unverified draft tokens the target model runs over, which is
-            # exactly what the state write covers, and is recorded before the
-            # early return below so every scheduled step is represented.
-            self._state_write_tokens[request_id] = num_tokens
+            assert num_new_tokens is not None
+            pending_writes = self._state_write_tokens.setdefault(request_id, deque())
+            step_start = num_tokens_main_model - num_new_tokens
+            while pending_writes and pending_writes[-1] > step_start:
+                pending_writes.pop()
+            pending_writes.append(num_tokens_main_model)
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
@@ -1823,17 +1833,18 @@ class MambaManager(SingleTypeKVCacheManager):
         """
         if self.mamba_cache_mode != "align":
             return None
-        num_state_tokens = self._state_write_tokens.get(request.request_id)
-        # `request.num_tokens` counts committed tokens only, so a write that
-        # ran past it covers draft tokens that are not decided yet.
-        if (
-            num_state_tokens is None
-            or num_state_tokens % self.block_size != 0
-            or num_state_tokens > request.num_tokens
-        ):
-            return [False] * max(end_block - start_block, 0)
-        boundary_block = num_state_tokens // self.block_size - 1
-        return [block == boundary_block for block in range(start_block, end_block)]
+        pending_writes = self._state_write_tokens.get(request.request_id)
+        mask = [False] * max(end_block - start_block, 0)
+        if pending_writes is None:
+            return mask
+        while pending_writes and pending_writes[0] <= request.num_tokens:
+            num_state_tokens = pending_writes.popleft()
+            if num_state_tokens % self.block_size != 0:
+                continue
+            boundary_block = num_state_tokens // self.block_size - 1
+            if start_block <= boundary_block < end_block:
+                mask[boundary_block - start_block] = True
+        return mask
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()

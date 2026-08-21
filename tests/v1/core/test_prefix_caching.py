@@ -3,6 +3,7 @@
 """Compare the with and without prefix caching."""
 
 import copy
+from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -4367,9 +4368,9 @@ def test_mamba_align_records_where_the_forward_leaves_the_state():
     prompt = [i for i in range(2) for _ in range(block_size)]
     request = make_request("record", prompt, block_size, sha256)
 
-    manager.allocate_slots(request, len(prompt), 0, None)
+    manager.allocate_slots(request, len(prompt), 0, None, delay_cache_blocks=True)
 
-    assert mamba._state_write_tokens[request.request_id] == len(prompt)
+    assert list(mamba._state_write_tokens[request.request_id]) == [len(prompt)]
 
 
 def test_mamba_align_admits_a_state_block_written_at_its_own_boundary():
@@ -4391,6 +4392,38 @@ def test_mamba_align_admits_a_state_block_written_at_its_own_boundary():
         "a write that landed exactly on a block boundary, over committed "
         "tokens only, is the case the cache is allowed to keep"
     )
+
+
+def test_mamba_align_keeps_an_async_step_boundary_write():
+    """A later scheduled step must not hide an earlier pending write."""
+    block_size = 16
+    manager, mamba = _mamba_align_manager(block_size)
+    request = make_request("async", [], block_size, sha256)
+
+    manager.allocate_slots(request, block_size, 0, None, delay_cache_blocks=True)
+    request.num_computed_tokens = block_size
+    manager.allocate_slots(request, block_size, 0, None, delay_cache_blocks=True)
+
+    request.append_output_token_ids([7] * block_size)
+    mamba.cache_blocks(request, request.num_tokens)
+
+    assert 0 in _hashed_mamba_blocks(mamba, request)
+
+
+def test_mamba_align_prunes_a_rejected_boundary_write():
+    """A rescheduled step invalidates writes beyond its new start."""
+    block_size = 16
+    manager, mamba = _mamba_align_manager(block_size)
+    request = make_request("rejected", [1] * block_size, block_size, sha256)
+    request.num_computed_tokens = block_size
+
+    manager.allocate_slots(request, block_size + 1, 0, None, delay_cache_blocks=True)
+    manager.allocate_slots(request, 1, 0, None, delay_cache_blocks=True)
+
+    request.append_output_token_ids([7] * (block_size + 1))
+    mamba.cache_blocks(request, request.num_tokens)
+
+    assert 1 not in _hashed_mamba_blocks(mamba, request)
 
 
 def test_mamba_align_intersects_a_caller_mask_with_its_own():
@@ -4431,11 +4464,13 @@ def _decode(manager, mamba, request_id, block_size, prompt_blocks, step, num_ste
     steps = []
     for _ in range(num_steps):
         request.append_output_token_ids([7] * step)
-        manager.allocate_slots(request, step, 0, None)
+        manager.allocate_slots(request, step, 0, None, delay_cache_blocks=True)
         request.num_computed_tokens += step
+        write = mamba._state_write_tokens[request.request_id][-1]
+        mamba.cache_blocks(request, request.num_tokens)
         steps.append(
             (
-                mamba._state_write_tokens[request.request_id],
+                write,
                 tuple(_hashed_mamba_blocks(mamba, request)),
             )
         )
@@ -4496,7 +4531,7 @@ def test_mamba_align_withholds_a_boundary_write_still_holding_drafts():
     assert request.num_tokens == 48
 
     # A write to the 64-token boundary while only 48 tokens are committed.
-    mamba._state_write_tokens[request.request_id] = 64
+    mamba._state_write_tokens[request.request_id] = deque([64])
 
     assert mamba._boundary_state_block_mask(request, 0, 4) == [False] * 4
 
