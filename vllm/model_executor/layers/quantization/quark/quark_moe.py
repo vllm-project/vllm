@@ -148,7 +148,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                     match.act_quant_key,
                     QuarkNvfp4MoEMethod,
                 )
-            return None, None, None
+            raise RuntimeError("Unsupported FusedMoe scheme")
 
         weight_config = quant_config._unwrap_single_quant_config(weight_config)
         input_config = quant_config._unwrap_single_quant_config(input_config)
@@ -171,7 +171,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 match.act_quant_key,
                 QuarkW8A8Int8MoEMethod,
             )
-        return None, None, None
+        raise RuntimeError("Unsupported FusedMoe scheme")
 
     @staticmethod
     def get_moe_method(
