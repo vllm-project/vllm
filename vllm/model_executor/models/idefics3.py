@@ -244,7 +244,6 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not (images := mm_data.get("images", [])):
@@ -260,7 +259,6 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
             prompt,
             mm_data,
             mm_kwargs,
-            tok_kwargs,
         )
 
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
@@ -504,6 +502,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             "up_proj",
         ],
     }
+
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

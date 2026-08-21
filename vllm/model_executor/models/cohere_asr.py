@@ -1936,9 +1936,9 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
 
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         return [0]
 
     def _call_hf_processor(
@@ -1946,7 +1946,6 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ):
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
@@ -1959,7 +1958,6 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
