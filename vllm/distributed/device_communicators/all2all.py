@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -1026,6 +1027,14 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         num_topk: int,
         use_fp8_dispatch: bool,
     ) -> dict:
+        # A data-parallel rank that holds no request still joins every MoE
+        # collective through a dummy batch. When the rank that does hold the
+        # request spends minutes JIT-compiling attention/MoE kernels on its
+        # first real forward, those waiting ranks hit DeepEP's stock 100 s GPU
+        # and 300 s CPU dispatch timeouts and abort a healthy collective.
+        # Size both timeouts for that one-off compilation instead.
+        timeout_secs = int(os.getenv("VLLM_DEEPEP_V2_TIMEOUT_SECS", "1800"))
+
         return dict(
             group=self._device_group
             if self._device_group is not None
@@ -1037,6 +1046,8 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             allow_hybrid_mode=envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE,
             prefer_overlap_with_compute=envs.VLLM_DEEPEP_V2_PREFER_OVERLAP,
             allow_multiple_reduction=(envs.VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION),
+            num_cpu_timeout_secs=timeout_secs,
+            num_gpu_timeout_secs=timeout_secs,
             explicitly_destroy=True,
         )
 
