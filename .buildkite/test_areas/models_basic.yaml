@@ -73,10 +73,10 @@ steps:
   - csrc/libtorch_stable/kimi_k3/
   - tests/models/kimi_k3/
   - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
-  - tests/kernels/test_bf16_skinny_gemm.py
+  - tests/kernels/test_k3_low_latency_gemm.py
   commands:
     # The native NVIDIA Kimi K3 kernels require the SM100 family.
-    - pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py
+    - pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_k3_low_latency_gemm.py
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
