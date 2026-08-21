@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorSchedulerContext,
     SupportsHMA,
     supports_hma,
 )
@@ -283,12 +284,12 @@ def test_multi_example_connector_consistency():
     events = get_connector_events()
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
-    # First event is bind_gpu_block_pool from initialization, then
+    # First event is bind_scheduler_context from initialization, then
     # set_xfer_handshake_metadata_pp_aware, then on_new_request when the request is
     # enqueued, then get_num_new_matched_tokens and update_state_after_alloc from
     # generate().
     assert storage1_scheduler_events[:6] == [
-        "bind_gpu_block_pool",
+        "bind_scheduler_context",
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
@@ -308,7 +309,7 @@ def test_multi_example_connector_consistency():
         "save_kv_layer",
     ]
     assert storage2_scheduler_events[:6] == [
-        "bind_gpu_block_pool",
+        "bind_scheduler_context",
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
@@ -887,6 +888,15 @@ Options:
   1. Add delegation in MultiConnector (preferred)
   2. Add to INHERITED_OK if the base implementation works correctly
 """)
+
+
+def test_multi_connector_forwards_scheduler_context(mc):
+    context = MagicMock(spec=KVConnectorSchedulerContext)
+
+    mc.bind_scheduler_context(context)
+
+    for connector in mc._connectors:
+        connector.bind_scheduler_context.assert_called_once_with(context)
 
 
 def test_multi_connector_prefer_cross_layer_blocks(mc):
