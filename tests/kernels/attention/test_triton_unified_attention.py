@@ -42,6 +42,8 @@ def _compute_clamped_mm_tile_bounds(
     mm_prefix_range_ptr,
     USE_CAUSAL: tl.constexpr,
     USE_PER_SEQ_CAUSAL: tl.constexpr,
+    CHUNK_LOOKBACK: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
 ):
     loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
         0,  # context_len
@@ -59,8 +61,8 @@ def _compute_clamped_mm_tile_bounds(
         False,  # IS_3D
         USE_CAUSAL,
         USE_PER_SEQ_CAUSAL,
-        -1,  # CHUNK_LOOKBACK
-        -1,  # CHUNK_SIZE
+        CHUNK_LOOKBACK,
+        CHUNK_SIZE,
         False,  # USE_R_SWA
         True,  # MM_PREFIX_CLAMP_SW
         2,  # MAX_MM_RANGES
@@ -84,6 +86,8 @@ def test_clamped_mm_prefix_prunes_sliding_window_tiles() -> None:
         mm_prefix_ranges,
         USE_CAUSAL=True,
         USE_PER_SEQ_CAUSAL=False,
+        CHUNK_LOOKBACK=-1,
+        CHUNK_SIZE=-1,
     )
 
     # The range is wider than the sliding window, so the upper bound must use
@@ -108,11 +112,34 @@ def test_clamped_mm_prefix_preserves_noncausal_right_window(
         mm_prefix_ranges,
         USE_CAUSAL=use_causal,
         USE_PER_SEQ_CAUSAL=use_per_seq_causal,
+        CHUNK_LOOKBACK=-1,
+        CHUNK_SIZE=-1,
     )
 
     # q_hi=1127 and window=1024 admit keys through 2150, beyond the image
     # range endpoint at 1500. Tile 67 must therefore remain in the loop.
     assert bounds.tolist() == [3, 68, 4096]
+
+
+def test_clamped_mm_prefix_preserves_keys_before_chunk_boundary() -> None:
+    """Union the chunk lower bound with the clamped image-range bound."""
+    mm_prefix_ranges = torch.tensor(
+        [[[512, 1500], [0, 0]]], dtype=torch.int32, device=DEVICE_TYPE
+    )
+    bounds = torch.empty(3, dtype=torch.int32, device=DEVICE_TYPE)
+
+    _compute_clamped_mm_tile_bounds[(1,)](
+        bounds,
+        mm_prefix_ranges,
+        USE_CAUSAL=True,
+        USE_PER_SEQ_CAUSAL=False,
+        CHUNK_LOOKBACK=0,
+        CHUNK_SIZE=256,
+    )
+
+    # The base chunk mask starts at 1024, but the MM mask can re-enable keys
+    # from its range start at 512. The loop must therefore begin at tile 16.
+    assert bounds.tolist() == [16, 47, 4096]
 
 
 def ref_paged_attn(

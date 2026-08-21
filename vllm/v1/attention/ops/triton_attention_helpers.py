@@ -175,8 +175,8 @@ def compute_tile_loop_bounds(
     2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
        only tiles that can contain an allowed key under SWA. For non-causal
        sequences, the window extends in both directions. For Gemma4's
-       window-clamped multimodal prefix mask, the upper bound is the union of
-       that right window and each image range intersecting the query block.
+       window-clamped multimodal prefix mask, the bounds include the union of
+       the base mask and each image range intersecting the query block.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
        segment's slice via ``(segm_idx * tiles_per_segment,
        (segm_idx + 1) * tiles_per_segment)``.
@@ -247,6 +247,17 @@ def compute_tile_loop_bounds(
                     (range_start < range_end)
                     & (range_start <= query_abs_hi)
                     & (range_end >= query_abs_lo)
+                )
+                mm_first_allowed_key = tl.maximum(
+                    range_start, query_abs_lo - SLIDING_WINDOW + 1
+                )
+                first_allowed_key = tl.minimum(
+                    first_allowed_key,
+                    tl.where(
+                        intersects_query_block,
+                        mm_first_allowed_key,
+                        first_allowed_key,
+                    ),
                 )
                 last_allowed_key = tl.maximum(
                     last_allowed_key,
