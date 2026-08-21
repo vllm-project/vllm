@@ -90,21 +90,101 @@ KV_CONFIG_CROSS_LAYERS=$(echo "$KV_CONFIG_CROSS_LAYERS" | tr -d '[:space:]')
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-trap 'kill $(jobs -pr) 2>/dev/null' SIGINT SIGTERM EXIT
+PROCESS_GROUPS=()
+LAST_PROCESS_PID=
+
+start_background_process() {
+  local command=$1
+  setsid bash -c "$command" &
+  LAST_PROCESS_PID=$!
+  PROCESS_GROUPS+=("$LAST_PROCESS_PID")
+}
+
+owned_process_is_running() {
+  local process_pid=$1
+  kill -0 "$process_pid" 2>/dev/null || \
+    kill -0 -- "-$process_pid" 2>/dev/null
+}
 
 wait_for_server() {
   local port=$1
-  timeout 1200 bash -c "
-    until curl -s localhost:${port}/v1/completions > /dev/null; do
-      sleep 1
-    done" && return 0 || return 1
+  local process_pid=$2
+  local process_name=$3
+  local endpoint=${4:-/health}
+  local deadline=$((SECONDS + 1200))
+
+  while ((SECONDS < deadline)); do
+    if ! kill -0 "$process_pid" 2>/dev/null; then
+      local status=0
+      wait "$process_pid" || status=$?
+      echo "$process_name exited with status $status before becoming ready"
+      return 1
+    fi
+    if curl -fs "http://localhost:${port}${endpoint}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "$process_name did not become ready on port $port"
+  return 1
+}
+
+wait_for_gpu_memory_release() {
+  if [[ "$SMI_BIN" == *"rocm"* ]]; then
+    PYTHONPATH="${GIT_ROOT}" python3 -c \
+      "from tests.utils import wait_for_memory_to_settle; wait_for_memory_to_settle()"
+  fi
 }
 
 cleanup_instances() {
-  echo "Cleaning up any running vLLM instances..."
-  pkill -f "vllm serve" || true
-  sleep 2
+  if ((${#PROCESS_GROUPS[@]} == 0)); then
+    return
+  fi
+
+  echo "Cleaning up any running vLLM and proxy instances..."
+  local process_groups=("${PROCESS_GROUPS[@]}")
+  local process_group
+  for process_group in "${process_groups[@]}"; do
+    kill -TERM "$process_group" 2>/dev/null || true
+    kill -TERM -- "-$process_group" 2>/dev/null || true
+  done
+
+  local deadline=$((SECONDS + 30))
+  local processes_running=1
+  while ((processes_running && SECONDS < deadline)); do
+    processes_running=0
+    for process_group in "${process_groups[@]}"; do
+      if owned_process_is_running "$process_group"; then
+        processes_running=1
+        break
+      fi
+    done
+    if ((processes_running)); then
+      sleep 1
+    fi
+  done
+
+  for process_group in "${process_groups[@]}"; do
+    if owned_process_is_running "$process_group"; then
+      echo "Force-stopping process group $process_group after cleanup timeout"
+      kill -KILL "$process_group" 2>/dev/null || true
+      kill -KILL -- "-$process_group" 2>/dev/null || true
+    fi
+    wait "$process_group" 2>/dev/null || true
+  done
+
+  PROCESS_GROUPS=()
 }
+
+cleanup_on_exit() {
+  local rc=$?
+  cleanup_instances || true
+  exit "$rc"
+}
+
+trap cleanup_on_exit EXIT
+trap 'exit 130' SIGINT SIGTERM
 
 get_num_gpus() {
   if [[ "$SMI_BIN" == *"nvidia"* ]]; then
@@ -159,7 +239,8 @@ run_tests_for_model() {
   if [[ -n "$ATTENTION_BACKEND" ]]; then
     BASE_CMD="${BASE_CMD} --attention-backend $ATTENTION_BACKEND"
   fi
-  eval "$BASE_CMD &"
+  start_background_process "$BASE_CMD"
+  local prefill_pid=$LAST_PROCESS_PID
 
   # ── Start decode instance ──
   echo "Starting decode instance on GPU $DECODE_GPU, port $DECODE_PORT"
@@ -185,13 +266,14 @@ run_tests_for_model() {
   if [[ -n "$ATTENTION_BACKEND" ]]; then
     BASE_CMD="${BASE_CMD} --attention-backend $ATTENTION_BACKEND"
   fi
-  eval "$BASE_CMD &"
+  start_background_process "$BASE_CMD"
+  local decode_pid=$LAST_PROCESS_PID
 
   # ── Wait for servers ──
   echo "Waiting for prefill instance on port $PREFILL_PORT to start..."
-  wait_for_server "$PREFILL_PORT"
+  wait_for_server "$PREFILL_PORT" "$prefill_pid" "Prefill server"
   echo "Waiting for decode instance on port $DECODE_PORT to start..."
-  wait_for_server "$DECODE_PORT"
+  wait_for_server "$DECODE_PORT" "$decode_pid" "Decode server"
 
   # ── Start proxy ──
   PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8192"
@@ -201,8 +283,9 @@ run_tests_for_model() {
   PROXY_CMD+=" --decoder-ports $DECODE_PORT"
 
   echo "Starting proxy server with command: $PROXY_CMD"
-  $PROXY_CMD &
-  sleep 5
+  start_background_process "$PROXY_CMD"
+  local proxy_pid=$LAST_PROCESS_PID
+  wait_for_server 8192 "$proxy_pid" "Proxy server" /healthcheck
 
   # ── Run accuracy test ──
   echo "Running accuracy tests for $model_name ($label)"
@@ -211,7 +294,7 @@ run_tests_for_model() {
 
   # ── Cleanup ──
   cleanup_instances
-  sleep 3
+  wait_for_gpu_memory_release
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────
