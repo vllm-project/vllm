@@ -1,7 +1,7 @@
 ######################### RUST BUILD IMAGE #########################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main image
 # doesn't need the rust toolchain. Runs in parallel with vllm-base.
-FROM ubuntu:22.04 AS rust-build
+FROM ubuntu:22.04 AS rust-build-cache
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
@@ -25,14 +25,19 @@ COPY build_rust.sh build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
-# Only Rust inputs are present, so suppress the artificial dirty state caused
-# by other tracked files being absent from this build stage.
-ENV SETUPTOOLS_SCM_PRETEND_METADATA={dirty=false}
+# Build with a stable version so this target snapshot is keyed only by Rust
+# inputs. The child stage below relinks the crates that embed the exact version.
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash build_rust.sh
+
+# Relink with the exact Git-derived package version.
+FROM rust-build-cache AS rust-build
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
-    bash build_rust.sh
+    SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}" bash build_rust.sh
 
 FROM ubuntu:24.04 AS vllm-base
 
