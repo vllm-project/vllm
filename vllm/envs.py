@@ -138,6 +138,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
+    VLLM_ROCM_AITER_MOE_CHUNK_TOKENS: int = 0
     VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
@@ -1276,6 +1277,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #       see PR #39177 for benchmarks)
     "VLLM_ROCM_AITER_MOE_DISPATCH_POLICY": lambda: int(
         os.getenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", "0")
+    ),
+    # Chunk size, in tokens, for the AITER fused-MoE experts call.
+    # AITER allocates its (num_tokens, topk, model_dim) intermediate
+    # internally, so it is invisible to vLLM's memory profiler and cannot be
+    # bounded by the modular-kernel chunking. Set >0 to cap that allocation.
+    #   0 = disabled (default): one call for the whole batch
+    "VLLM_ROCM_AITER_MOE_CHUNK_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_AITER_MOE_CHUNK_TOKENS", "0")
     ),
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (

@@ -543,6 +543,42 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         else:
             num_local_tokens = None
 
+        # AITER sizes its intermediate off the token count, so slicing the
+        # token dim bounds it. Routing is per-token, so results are unchanged.
+        chunk = rocm_aiter_ops.get_moe_chunk_tokens()
+        num_tokens = hidden_states.shape[0]
+        if chunk > 0 and num_local_tokens is None and num_tokens > chunk:
+            for start in range(0, num_tokens, chunk):
+                end = min(start + chunk, num_tokens)
+                chunk_a1q_scale = a1q_scale
+                if (
+                    chunk_a1q_scale is not None
+                    and chunk_a1q_scale.dim() > 0
+                    and chunk_a1q_scale.shape[0] == num_tokens
+                ):
+                    chunk_a1q_scale = chunk_a1q_scale[start:end]
+                output[start:end].copy_(
+                    rocm_aiter_fused_experts(
+                        hidden_states=hidden_states[start:end],
+                        w1=w1,
+                        w2=w2,
+                        topk_weights=topk_weights[start:end],
+                        topk_ids=topk_ids[start:end],
+                        activation=activation,
+                        apply_router_weight_on_input=apply_router_weight_on_input,
+                        expert_mask=expert_map,
+                        quant_config=self.quant_config,
+                        moe_config=self.moe_config,
+                        a1q_scale=chunk_a1q_scale,
+                        num_local_tokens=None,
+                        output_dtype=output.dtype,
+                        moe_sorting_dispatch_policy=(
+                            rocm_aiter_ops.get_moe_dispatch_policy()
+                        ),
+                    )
+                )
+            return
+
         result = rocm_aiter_fused_experts(
             hidden_states=hidden_states,
             w1=w1,
