@@ -528,3 +528,67 @@ def test_persistent_metadata_gate_without_gluon_build(
 
     assert metadata.has_persistent_metadata is expect_persistent
     assert get_mla_metadata_v1.called is expect_persistent
+
+
+def _build_non_causal(monkeypatch, *, num_heads, kv_cache_dtype, qlen, mtp_qlen):
+    """Drive _build_decode with causal=False and hand back the aiter mock."""
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        _builder(
+            mtp_decode_qlen=mtp_qlen,
+            kv_cache_dtype=kv_cache_dtype,
+            num_heads=num_heads,
+        ),
+        block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
+        seq_lens_device=torch.tensor([7, 5], dtype=torch.int32),
+        max_seq_len=7,
+        query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        num_decode_tokens=2 * qlen,
+        dcp_tot_seq_lens_device=None,
+        causal=False,
+    )
+    return metadata, get_mla_metadata_v1
+
+
+def test_non_causal_build_hands_the_mask_to_aiter(monkeypatch):
+    """The schedule carries the mask, so is_causal must follow the block."""
+    metadata, get_mla_metadata_v1 = _build_non_causal(
+        monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=8, mtp_qlen=8
+    )
+    assert metadata.has_persistent_metadata
+    # 6th positional arg of get_mla_metadata_v1 is is_causal.
+    assert get_mla_metadata_v1.call_args.args[5] is False
+
+
+def test_a_bf16_padded_rank_past_qlen4_keeps_the_schedule_when_non_causal(monkeypatch):
+    """12 heads, bf16, qlen 8 is exactly the shape the old clause turned away;
+    a non-causal block has no causal staircase for the fold to drop."""
+    metadata, _ = _build_non_causal(
+        monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=8, mtp_qlen=8
+    )
+    assert metadata.has_persistent_metadata
+
+
+def test_a_two_token_fp8_block_is_refused(monkeypatch):
+    """aiter's fp8 dispatch has no non-causal fold for qlen 2."""
+    with pytest.raises(ValueError, match="2-token"):
+        _build_non_causal(
+            monkeypatch, num_heads=12, kv_cache_dtype="fp8", qlen=2, mtp_qlen=8
+        )
+
+
+def test_a_two_token_bf16_block_is_allowed(monkeypatch):
+    """The bf16 fold has no such hole, so the guard must not fire there."""
+    metadata, _ = _build_non_causal(
+        monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=2, mtp_qlen=8
+    )
+    assert metadata.has_persistent_metadata

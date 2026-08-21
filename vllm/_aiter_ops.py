@@ -565,6 +565,7 @@ def _rocm_aiter_mla_decode_fwd_impl(
     reduce_indptr: torch.Tensor | None = None,
     reduce_final_map: torch.Tensor | None = None,
     reduce_partial_map: torch.Tensor | None = None,
+    causal: bool = True,
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
@@ -577,6 +578,11 @@ def _rocm_aiter_mla_decode_fwd_impl(
     if _check_aiter_mla_fp8_support():
         kwargs["q_scale"] = q_scale
         kwargs["kv_scale"] = kv_scale
+
+    # Leave the argument off when the block is causal, so builds without it
+    # keep working; backend selection is what refuses a non-causal block there.
+    if not causal:
+        kwargs["causal"] = False
 
     if work_meta_data is not None:
         assert work_indptr is not None, (
@@ -633,6 +639,7 @@ def _rocm_aiter_mla_decode_fwd_fake(
     reduce_indptr: torch.Tensor | None = None,
     reduce_final_map: torch.Tensor | None = None,
     reduce_partial_map: torch.Tensor | None = None,
+    causal: bool = True,
 ) -> None:
     pass
 
@@ -1897,6 +1904,21 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    @functools.cache
+    def mla_decode_supports_non_causal(cls) -> bool:
+        """Probe whether the installed aiter.mla.mla_decode_fwd accepts `causal`.
+
+        Added in aiter v0.1.20. Older builds are causal-only, so a non-causal
+        query block has no kernel there.
+        """
+        import inspect
+
+        from aiter.mla import mla_decode_fwd
+
+        return "causal" in inspect.signature(mla_decode_fwd).parameters
+
+    @classmethod
+    @if_aiter_supported
     def is_mha_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
@@ -2637,6 +2659,7 @@ class rocm_aiter_ops:
         reduce_indptr: torch.Tensor | None = None,
         reduce_final_map: torch.Tensor | None = None,
         reduce_partial_map: torch.Tensor | None = None,
+        causal: bool = True,
     ):
         torch.ops.vllm.rocm_aiter_mla_decode_fwd(
             q,
@@ -2657,6 +2680,7 @@ class rocm_aiter_ops:
             reduce_indptr=reduce_indptr,
             reduce_final_map=reduce_final_map,
             reduce_partial_map=reduce_partial_map,
+            causal=causal,
         )
 
     @staticmethod
