@@ -1734,8 +1734,6 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
-        if self.mamba_cache_mode == "align":
-            self.num_checkpoint_blocks.clear()
 
     def _cache_partial_tail_block(
         self,
