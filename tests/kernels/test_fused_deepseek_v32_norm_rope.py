@@ -26,9 +26,14 @@ rtol/atol=1e-2 (the tolerance the sibling deepseek_v4 fused-kernel test uses).
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.models.deepseek_v32.common import kernels as K
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.system_utils import update_environment_variables
 
 FP8 = torch.float8_e4m3fn
 FP8_MAX = 448.0
@@ -474,6 +479,219 @@ def test_fused_norm_rope_supports_large_token_count():
 
     rows = torch.tensor([0, num_tokens - 1], device=dev)
     assert_bf16(q_out[rows], rms_norm(q_c[rows], norm_w), "large-token q norm")
+
+
+def _all_gather_pcp_rows(local: torch.Tensor, world_size: int) -> torch.Tensor:
+    gathered = local.new_empty((world_size * local.shape[0], *local.shape[1:]))
+    dist.all_gather_into_tensor(gathered, local.contiguous())
+    return gathered
+
+
+def _fused_norm_rope_pcp_worker(
+    local_rank: int, world_size: int, master_port: int
+) -> None:
+    from vllm.v1.attention.ops.pcp import DirectPCPFusedNormRopeWorkspace
+
+    device = torch.device("cuda", local_rank)
+    torch.accelerator.set_device_index(device)
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+        }
+    )
+    dist.init_process_group("nccl")
+    try:
+        local_tokens = 3
+        num_decode_tokens = 1
+        cache_tokens = 5
+        dtype = torch.bfloat16
+        shared_generator = torch.Generator(device=device).manual_seed(1700)
+        local_generator = torch.Generator(device=device).manual_seed(1800 + local_rank)
+
+        def randn(shape: tuple[int, ...], generator: torch.Generator) -> torch.Tensor:
+            return torch.randn(shape, dtype=dtype, device=device, generator=generator)
+
+        q_c = randn((local_tokens, 1536), local_generator)
+        kv_c = randn((local_tokens, KV_LORA), local_generator)
+        k_pe = randn((local_tokens, ROPE_DIM), local_generator)
+        index_k = torch.zeros(
+            (local_tokens, INDEX_HEAD_DIM), dtype=dtype, device=device
+        )
+        index_k[:, :16] = 100
+        q_weight = randn((1536,), shared_generator)
+        kv_weight = randn((KV_LORA,), shared_generator)
+        index_weight = torch.ones(INDEX_HEAD_DIM, dtype=torch.float32, device=device)
+        index_bias = torch.zeros(INDEX_HEAD_DIM, dtype=torch.float32, device=device)
+        positions = torch.tensor(
+            [0, 1 + 2 * local_rank, 2 + 2 * local_rank],
+            dtype=torch.int64,
+            device=device,
+        )
+        cos_sin = make_cos_sin(cache_tokens, ROPE_DIM, device)
+        index_cos_sin = torch.zeros_like(cos_sin)
+        index_cos_sin[:, : ROPE_DIM // 2] = 1
+
+        for tensor in (q_c, kv_c, k_pe, index_k):
+            dist.broadcast(tensor[:num_decode_tokens], src=0)
+
+        consumed = torch.tensor([0, 1, 2, 4, 5], dtype=torch.int64, device=device)
+        slots = (torch.arange(cache_tokens, device=device) + local_rank) % cache_tokens
+        slot_mapping = torch.zeros(
+            world_size * local_tokens, dtype=torch.int64, device=device
+        )
+        slot_mapping[consumed] = slots
+
+        workspace = DirectPCPFusedNormRopeWorkspace(
+            dist.group.WORLD,
+            device,
+            local_tokens,
+            "fp8",
+            index_rope_interleave=True,
+        )
+        mla_scale = torch.tensor([0.25], dtype=torch.float32, device=device)
+
+        for has_indexer in (False, True, True):
+            mla_cache = torch.zeros(
+                (1, cache_tokens, KV_LORA + ROPE_DIM),
+                dtype=torch.uint8,
+                device=device,
+            )
+            index_cache = (
+                torch.zeros(
+                    (1, cache_tokens, INDEX_HEAD_DIM + 4),
+                    dtype=torch.uint8,
+                    device=device,
+                )
+                if has_indexer
+                else None
+            )
+            topk = torch.full((local_tokens, 17), 7, dtype=torch.int32, device=device)
+            q_out, kv_out, k_pe_out = workspace.forward(
+                positions=positions,
+                q_c=q_c,
+                q_weight=q_weight,
+                q_eps=EPS,
+                kv_c=kv_c,
+                kv_weight=kv_weight,
+                mla_k_scale=mla_scale,
+                kv_eps=EPS,
+                k_pe=k_pe,
+                k_pe_cos_sin=cos_sin,
+                index_k=index_k if has_indexer else None,
+                index_weight=index_weight if has_indexer else None,
+                index_bias=index_bias if has_indexer else None,
+                index_eps=EPS,
+                index_cos_sin=index_cos_sin if has_indexer else None,
+                topk_indices=topk,
+                mla_slot_mapping=slot_mapping,
+                index_slot_mapping=slot_mapping if has_indexer else None,
+                mla_cache=mla_cache,
+                index_cache=index_cache,
+                num_decode_tokens=num_decode_tokens,
+            )
+            torch.accelerator.synchronize()
+
+            assert_bf16(q_out, rms_norm(q_c, q_weight), "PCP Q norm")
+            assert_bf16(kv_out, rms_norm(kv_c, kv_weight), "PCP KV norm")
+            assert_bf16(
+                k_pe_out,
+                rope(k_pe, positions, cos_sin, interleave=True),
+                "PCP K-pe RoPE",
+            )
+
+            gathered_mla = torch.cat(
+                (
+                    _all_gather_pcp_rows(kv_out, world_size),
+                    _all_gather_pcp_rows(k_pe_out, world_size),
+                ),
+                dim=-1,
+            )
+            expected_mla = torch.empty(
+                (cache_tokens, KV_LORA + ROPE_DIM), dtype=FP8, device=device
+            )
+            expected_mla[slots] = (gathered_mla[consumed].float() / mla_scale).to(FP8)
+            assert_fp8(
+                mla_cache.view(FP8).view_as(expected_mla),
+                expected_mla,
+                "PCP MLA cache",
+            )
+
+            if has_indexer:
+                assert index_cache is not None
+                local_index = rope(
+                    layer_norm(index_k, index_weight, index_bias),
+                    positions,
+                    index_cos_sin,
+                    interleave=True,
+                ).to(dtype)
+                local_values, local_scales = ue8m0_quant(local_index)
+                gathered_values = _all_gather_pcp_rows(local_values, world_size)
+                gathered_scales = _all_gather_pcp_rows(
+                    local_scales[:, None], world_size
+                )[:, 0]
+                expected_values = torch.empty(
+                    (cache_tokens, INDEX_HEAD_DIM), dtype=FP8, device=device
+                )
+                expected_scales = torch.empty(
+                    cache_tokens, dtype=torch.float32, device=device
+                )
+                expected_values[slots] = gathered_values[consumed]
+                expected_scales[slots] = gathered_scales[consumed]
+                flat_index_cache = index_cache.flatten()
+                value_bytes = cache_tokens * INDEX_HEAD_DIM
+                assert_fp8(
+                    flat_index_cache[:value_bytes].view(FP8).view_as(expected_values),
+                    expected_values,
+                    "PCP indexer cache",
+                )
+                torch.testing.assert_close(
+                    flat_index_cache[value_bytes:].view(torch.float32),
+                    expected_scales,
+                    rtol=0,
+                    atol=0,
+                )
+            assert (topk == (-1 if has_indexer else 7)).all()
+
+        assert int(workspace.epoch.item()) == 3
+        assert int(workspace.phase.item()) == 0
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Fused PCP norm/RoPE requires Blackwell NVLS multicast",
+)
+def test_fused_norm_rope_pcp_reuses_indexer_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publish cache rows through the shared- and indexer-layer barriers."""
+    pytest.importorskip("torch.distributed._symmetric_memory")
+    from torch._C._autograd import DeviceType
+    from torch._C._distributed_c10d import _SymmetricMemory
+
+    world_size = 2
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip("Fused PCP norm/RoPE requires two GPUs")
+    if not _SymmetricMemory.has_multicast_support(DeviceType.CUDA, 0):
+        pytest.skip("Fused PCP norm/RoPE requires NVLS multicast")
+
+    monkeypatch.setenv("NCCL_CUMEM_ENABLE", "1")
+    monkeypatch.setenv("NCCL_NVLS_ENABLE", "1")
+    try:
+        mp.spawn(
+            _fused_norm_rope_pcp_worker,
+            args=(world_size, get_open_port()),
+            nprocs=world_size,
+        )
+    finally:
+        cleanup_dist_env_and_memory()
 
 
 # ── fused_q ──────────────────────────────────────────────────────────────────
