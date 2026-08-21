@@ -4,10 +4,12 @@
 import contextlib
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -108,6 +110,64 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
 
     assert captured["max_num_blocks_per_group"] == [1, 1]
     assert captured["slot_mapping_enabled"] == [False, True]
+
+
+def test_update_requests_applies_only_explicit_device_rewind():
+    class StagedOffsets:
+        def __init__(self):
+            self.gpu = np.asarray([19, 18, 7], dtype=np.int32)
+            self.pending: list[tuple[int, int]] = []
+            self.staged: list[tuple[int, int]] = []
+            self.apply_count = 0
+
+        def stage_write_elem(self, index: int, value: int) -> None:
+            self.pending.append((index, value))
+            self.staged.append((index, value))
+
+        def apply_write(self) -> None:
+            self.apply_count += 1
+            for index, value in self.pending:
+                self.gpu[index] = value
+            self.pending.clear()
+
+    offsets = StagedOffsets()
+    runner = SimpleNamespace(
+        req_states=SimpleNamespace(
+            req_id_to_index={"rewound": 0, "spec_rejected": 1, "forward": 2},
+            num_computed_tokens_np=np.asarray([19, 19, 3], dtype=np.int32),
+            num_computed_tokens=offsets,
+            prefill_len=SimpleNamespace(np=np.asarray([96, 96, 96], dtype=np.int32)),
+            num_computed_prefill_tokens=np.zeros(3, dtype=np.int32),
+        ),
+        block_tables=SimpleNamespace(
+            append_block_ids=lambda *_args, **_kwargs: pytest.fail(
+                "no block append expected"
+            )
+        ),
+    )
+    cached = CachedRequestData(
+        req_ids=["rewound", "spec_rejected", "forward"],
+        resumed_req_ids=set(),
+        new_token_ids=[],
+        all_token_ids={},
+        new_block_ids=[None, None, None],
+        num_computed_tokens=[0, 18, 7],
+        num_output_tokens=[0, 0, 0],
+        rewound_req_ids={"rewound"},
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=cached,
+        new_block_ids_to_zero=None,
+        kv_cache_block_copies=None,
+    )
+
+    GPUModelRunner.update_requests(runner, scheduler_output)
+
+    assert runner.req_states.num_computed_tokens_np.tolist() == [0, 18, 7]
+    assert offsets.gpu.tolist() == [0, 18, 7]
+    assert offsets.staged == [(0, 0)]
+    assert offsets.apply_count == 1
+    assert runner.req_states.num_computed_prefill_tokens.tolist() == [0, 18, 7]
 
 
 @pytest.mark.parametrize(
