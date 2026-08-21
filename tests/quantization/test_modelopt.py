@@ -214,9 +214,9 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
     )
 
     config.apply_vllm_mapper(
-        Gemma4ForConditionalGeneration.hf_to_vllm_mapper.get_unstacked_mapper()
+        Gemma4ForConditionalGeneration.hf_to_vllm_mapper.get_rename_mapper()
     )
-    config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_unstacked_mapper())
+    config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_rename_mapper())
 
     expected_prefix = "language_model.model.layers.0.moe.experts"
     assert set(config.quantized_layers) == {

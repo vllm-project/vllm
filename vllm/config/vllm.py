@@ -1147,6 +1147,19 @@ class VllmConfig:
                     "connectors (PD disaggregation, KV cache offload)."
                 )
 
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.language_model_only
+            and self.compilation_config.cudagraph_mm_encoder
+        ):
+            raise ValueError(
+                "--language-model-only is incompatible with "
+                "cudagraph_mm_encoder=True, since it disables all multimodal "
+                "inputs and the multimodal encoder is never run. Please "
+                "disable one of them."
+            )
+
         self._verify_sampling_replay_config()
         self._verify_trace_replay_config()
 
@@ -1317,6 +1330,15 @@ class VllmConfig:
                 "async speculative decoding).",
             )
             self.model_config.disable_cascade_attn = True
+
+        if (
+            self.observability_config.per_request_spec_decode_metrics != "none"
+            and self.speculative_config is None
+        ):
+            raise ValueError(
+                "--per-request-spec-decode-metrics requires speculative decoding "
+                "to be enabled (via --speculative-config)."
+            )
 
         if (
             self.model_config is not None
@@ -2429,6 +2451,7 @@ class VllmConfig:
                 "mtp",
                 "dflash",
                 "dspark",
+                "extract_hidden_states",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 

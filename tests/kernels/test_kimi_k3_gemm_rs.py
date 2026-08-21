@@ -12,7 +12,6 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import GemmRS
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
@@ -70,6 +69,11 @@ def _assert_valid_rows_close(
 
 
 def _worker(local_rank: int, world_size: int, master_port: int) -> None:
+    # This module pulls in cute_dsl, which is unavailable off CUDA, so importing
+    # it at module level would fail collection. Import it where it is used, as
+    # `kda.py` does.
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import GemmRS
+
     device = torch.device("cuda", local_rank)
     torch.accelerator.set_device_index(device)
     update_environment_variables(
