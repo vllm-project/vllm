@@ -363,11 +363,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.handle_preemptions(cm)
 
     def get_finished_count(self) -> int | None:
-        counts = {
-            count
-            for connector in self._connectors
-            if (count := connector.get_finished_count()) is not None
-        }
+        child_counts = [
+            connector.get_finished_count() for connector in self._connectors
+        ]
+        if any(count is None for count in child_counts):
+            return None
+        counts = {count for count in child_counts if count is not None}
         if len(counts) > 1:
             raise ValueError(
                 "MultiConnector children returned incompatible finished counts: "
