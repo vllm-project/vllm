@@ -11,7 +11,6 @@ import pytest
 import torch
 import zmq.asyncio
 
-from vllm import envs
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
@@ -25,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    _get_bootstrap_port,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
 )
@@ -523,18 +523,85 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         assert "Engine ID mismatch" in response.text
 
 
+@pytest.mark.asyncio
+async def test_bootstrap_external_dp_lb_no_rank_collision(
+    bootstrap_server: MooncakeBootstrapServer,
+):
+    """Regression: external DP LB engines must register with globally unique
+    dp_rank (data_parallel_index), not the node-local rank which can collide
+    across independently managed engines."""
+
+    import httpx
+
+    base_url = f"http://127.0.0.1:{bootstrap_server.port}"
+
+    # Simulate two nodes with 8 local DP engines each (dp_local_rank 0..7).
+    # Global dp indices are 0..7 on node 0 and 8..15 on node 1.
+    # With the bug, both node-0-dp0 and node-1-dp0 would register as
+    # dp_rank=0 causing an engine-ID mismatch.
+    engines = [
+        {"engine_id": "engine_dp0", "global_dp": 0},
+        {"engine_id": "engine_dp1", "global_dp": 1},
+        {"engine_id": "engine_dp8", "global_dp": 8},
+        {"engine_id": "engine_dp9", "global_dp": 9},
+    ]
+
+    async with httpx.AsyncClient() as client:
+        for eng in engines:
+            payload = {
+                "engine_id": eng["engine_id"],
+                "dp_rank": eng["global_dp"],
+                "tp_rank": 0,
+                "pp_rank": 0,
+                "addr": f"tcp://10.0.0.{eng['global_dp']}:5000",
+            }
+            response = await client.post(f"{base_url}/register", json=payload)
+            assert response.status_code == 200, (
+                f"Registration failed for {eng['engine_id']}: {response.text}"
+            )
+
+        response = await client.get(f"{base_url}/query")
+        assert response.status_code == 200
+        data = response.json()
+
+    for eng in engines:
+        key = str(eng["global_dp"])
+        assert key in data, f"dp_rank={eng['global_dp']} missing from registry"
+        assert data[key]["engine_id"] == eng["engine_id"]
+
+    # Verify that the buggy scenario (two different engine IDs on the
+    # same dp_rank) is still correctly rejected.
+    async with httpx.AsyncClient() as client:
+        collision_payload = {
+            "engine_id": "engine_dp8",
+            "dp_rank": 0,
+            "tp_rank": 0,
+            "pp_rank": 1,
+            "addr": "tcp://10.0.0.99:5000",
+        }
+        response = await client.post(f"{base_url}/register", json=collision_payload)
+        assert response.status_code == 400
+        assert "Engine ID mismatch" in response.text
+
+
 def _make_bootstrap_vllm_config(
     *,
     local_engines_only: bool = False,
+    data_parallel_external_lb: bool = False,
     data_parallel_rank_local: int = 0,
     data_parallel_index: int = 0,
+    data_parallel_size: int = 1,
+    tensor_parallel_size: int = 1,
     nnodes_within_dp: int = 1,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
             local_engines_only=local_engines_only,
+            data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_rank_local=data_parallel_rank_local,
             data_parallel_index=data_parallel_index,
+            data_parallel_size=data_parallel_size,
+            tensor_parallel_size=tensor_parallel_size,
             nnodes_within_dp=nnodes_within_dp,
             master_addr="model-parallel-master",
             data_parallel_master_ip="data-parallel-master",
@@ -597,27 +664,87 @@ def test_should_launch_bootstrap_server_selects_single_owner(
 
 
 @pytest.mark.parametrize(
-    ("local_engines_only", "nnodes_within_dp", "expected_host"),
+    ("dp_size", "tp_size", "dp_index", "data_parallel_external_lb",
+     "expected_port"),
     [
-        (True, 2, "127.0.0.1"),
-        (False, 2, "model-parallel-master"),
-        (False, 1, "data-parallel-master"),
+        (16, 1, 0, True, 8998 + 0),
+        (16, 1, 8, True, 8998 + 8),
+        (16, 1, 15, True, 8998 + 15),
+        (8, 4, 0, True, 8998 + 0),
+        (8, 4, 3, True, 8998 + 3),
+        (1, 1, 0, False, 8998),
     ],
-    ids=["local_engine", "multi_node_tp_or_pp", "single_node_internal_lb"],
+    ids=[
+        "dp16_tp1_rank0",
+        "dp16_tp1_rank8",
+        "dp16_tp1_rank15",
+        "dp8_tp4_rank0",
+        "dp8_tp4_rank3",
+        "internal_lb_single_port",
+    ],
+)
+def test_get_bootstrap_port_per_dp_rank(
+    dp_size: int,
+    tp_size: int,
+    dp_index: int,
+    data_parallel_external_lb: bool,
+    expected_port: int,
+):
+    vllm_config = _make_bootstrap_vllm_config(
+        data_parallel_external_lb=data_parallel_external_lb,
+        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
+        data_parallel_index=dp_index,
+    )
+    assert _get_bootstrap_port(vllm_config) == expected_port
+
+
+@pytest.mark.parametrize(
+    (
+        "local_engines_only",
+        "data_parallel_external_lb",
+        "nnodes_within_dp",
+        "dp_index",
+        "dp_size",
+        "tp_size",
+        "expected_host",
+        "expected_port",
+    ),
+    [
+        (True, True, 2, 3, 8, 1, "127.0.0.1", 8998 + 3),
+        (True, False, 2, 2, 4, 1, "127.0.0.1", 8998),
+        (False, False, 2, 0, 1, 1, "model-parallel-master", 8998),
+        (False, False, 1, 0, 1, 1, "data-parallel-master", 8998),
+    ],
+    ids=[
+        "external_lb",
+        "hybrid_lb_no_port_fan",
+        "multi_node_tp_or_pp",
+        "single_node_internal_lb",
+    ],
 )
 def test_get_mooncake_bootstrap_addr_selects_expected_host(
     local_engines_only: bool,
+    data_parallel_external_lb: bool,
     nnodes_within_dp: int,
+    dp_index: int,
+    dp_size: int,
+    tp_size: int,
     expected_host: str,
+    expected_port: int,
 ):
     vllm_config = _make_bootstrap_vllm_config(
         local_engines_only=local_engines_only,
+        data_parallel_external_lb=data_parallel_external_lb,
         nnodes_within_dp=nnodes_within_dp,
+        data_parallel_index=dp_index,
+        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
     )
 
     assert get_mooncake_bootstrap_addr(vllm_config) == (
         expected_host,
-        envs.VLLM_MOONCAKE_BOOTSTRAP_PORT,
+        expected_port,
     )
 
 
