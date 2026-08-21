@@ -145,7 +145,6 @@ pub struct ChatCompletionRequest {
     pub ignore_eos: bool,
 
     /// Minimum number of tokens to generate
-    #[validate(range(min = 1))]
     pub min_tokens: Option<u32>,
 
     /// Skip special tokens during detokenization

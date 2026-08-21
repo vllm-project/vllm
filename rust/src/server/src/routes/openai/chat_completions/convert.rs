@@ -433,6 +433,7 @@ mod tests {
     use expect_test::expect;
     use llm_multimodal::ImageDetail;
     use serde_json::json;
+    use validator::Validate;
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
         ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
@@ -527,6 +528,28 @@ mod tests {
 
             assert_eq!(prepared.chat_request.sampling_params.top_k, expected);
         }
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_zero_min_tokens() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "min_tokens": 0,
+        }))
+        .expect("parse zero min_tokens");
+        request.validate().expect("validate zero min_tokens");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare zero min_tokens");
+
+        assert_eq!(prepared.chat_request.sampling_params.min_tokens, Some(0));
+        assert_eq!(prepared.chat_request.decode_options.min_tokens, 0);
     }
 
     #[test]
