@@ -1504,6 +1504,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DFlash2DraftModel": _HfExamplesInfo(
         "Qwen/Qwen3.8-27B",
         speculative_model="z-lab/Qwen3.8-27B-DFlash2",
+        is_available_online=False,
         use_original_num_layers=True,
         max_model_len=8192,
         max_num_seqs=32,
