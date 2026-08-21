@@ -271,3 +271,19 @@ def test_encode_messages_preserves_small_chat_prompt(encoding_module):
         "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>"
         "Hi<｜end▁of▁sentence｜>Again<｜end▁of▁sentence｜>"
     )
+
+
+@pytest.mark.parametrize(
+    "encoding_module",
+    ENCODING_MODULES,
+    ids=["deepseek_v32", "deepseek_v4"],
+)
+def test_encode_messages_unknown_role_raises_value_error(encoding_module):
+    # An invalid role (e.g. uppercase "SYSTEM") is a client error and must be
+    # raised as ValueError so the OpenAI serving layer maps it to HTTP 400
+    # instead of NotImplementedError, which would map to HTTP 501.
+    with pytest.raises(ValueError, match="Invalid role: SYSTEM"):
+        encoding_module.encode_messages(
+            [{"role": "SYSTEM", "content": "Hello"}],
+            thinking_mode="chat",
+        )

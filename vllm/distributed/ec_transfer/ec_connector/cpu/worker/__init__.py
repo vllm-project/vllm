@@ -200,7 +200,7 @@ class ECCPUWorker:
 
         assert self._save_count + len(block_ids) <= self._save_bufs.src_ptrs.numel()
 
-        src_ptrs, dst_ptrs, sizes = self._save_bufs
+        bufs = self._save_bufs
         assert self._save_stream is not None
         src.record_stream(self._save_stream)
         src_base = src.view(-1).view(torch.uint8).data_ptr()
@@ -209,9 +209,8 @@ class ECCPUWorker:
 
         for i, block_idx in enumerate(block_ids):
             start = i * block_size
-            src_ptrs[idx] = src_base + start
-            dst_ptrs[idx] = dst_base + block_idx * block_size
-            sizes[idx] = min(block_size, total_bytes - start)
+            bufs.set_ptrs(idx, src_base + start, dst_base + block_idx * block_size)
+            bufs.sizes[idx] = min(block_size, total_bytes - start)
             idx += 1
 
         self._save_count = idx
@@ -233,7 +232,7 @@ class ECCPUWorker:
         bufs = self._save_bufs
         stream = self._save_stream
         assert bufs is not None and stream is not None
-        src_ptrs, dst_ptrs, sizes = bufs
+        src_ptrs, dst_ptrs, sizes = bufs.src_ptrs, bufs.dst_ptrs, bufs.sizes
         n = self._save_count
         num_bytes = int(sizes[:n].sum().item())
 
@@ -312,8 +311,11 @@ class ECCPUWorker:
             op_idx = 0
             for _, block_ids in load_items.values():
                 for block_idx in block_ids:
-                    src_ptrs[op_idx] = src_base + block_idx * block_size
-                    dst_ptrs[op_idx] = dst_buf_base + op_idx * block_size
+                    bufs.set_ptrs(
+                        op_idx,
+                        src_base + block_idx * block_size,
+                        dst_buf_base + op_idx * block_size,
+                    )
                     op_idx += 1
 
             start_event.record(stream)

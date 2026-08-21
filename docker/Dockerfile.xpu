@@ -28,8 +28,13 @@ COPY build_rust.sh build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
+# Only Rust inputs are present, so suppress the artificial dirty state caused
+# by other tracked files being absent from this build stage.
+ENV SETUPTOOLS_SCM_PRETEND_METADATA={dirty=false}
+
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=bind,source=.git,target=.git \
     bash build_rust.sh
 
 FROM ubuntu:24.04 AS vllm-base
@@ -87,11 +92,8 @@ RUN apt-get update -y && \
     apt-get install -y --no-install-recommends libhwloc15 libpciaccess0 libigsc1 intel-metrics-library && \
     mkdir xpu-m && \
     cd xpu-m && \
-    wget https://github.com/intel/xpumanager/releases/download/v2.0.0/libxpum2_2.0.0-238.24.04_amd64.deb && \
-    wget https://github.com/intel/xpumanager/releases/download/v2.0.0/xpu-smi_2.0.0-238.24.04_amd64.deb && \
-    dpkg-deb -x libxpum2_2.0.0-238.24.04_amd64.deb / && \
-    dpkg-deb -x xpu-smi_2.0.0-238.24.04_amd64.deb / && \
-    ldconfig && \
+    wget https://github.com/intel/xpumanager/releases/download/v2.1.0/xpu-smi_2.1.0+26.33.6468cec-1.24.04_amd64.deb && \
+    apt install -y ./xpu-smi_2.1.0+26.33.6468cec-1.24.04_amd64.deb --install-suggests && \
     cd .. && \
     rm -rf xpu-m && \
     add-apt-repository --remove -y ppa:kobuk-team/intel-graphics && \
@@ -160,8 +162,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM vllm-base AS ucx-nixl-build
 
-ARG UCX_VERSION=v1.21.0-rc2
-ARG NIXL_VERSION=v1.2.0
+# Keep UCX_VERSION aligned with the UCX that NIXL itself builds against for this
+# NIXL_VERSION (nixl contrib/Dockerfile.manylinux: ARG UCX_REF), so XPU runs the
+# same UCX commit as the released nixl-cu* wheels rather than an untested pairing.
+ARG UCX_VERSION=v1.21.x
+ARG NIXL_VERSION=v1.3.2
 
 # Build-time only: compiler, autotools, and verbs dev headers
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
@@ -196,7 +201,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM vllm-base AS vllm-openai
 
-ARG NIXL_VERSION=v1.2.0
+# Must match the ucx-nixl-build stage above: ARG does not cross stages, so a stale
+# value here installs a meta package that disagrees with the wheel built there.
+ARG NIXL_VERSION=v1.3.2
 
 # Copy compiled UCX runtime libraries and the pre-built NIXL wheel.
 # No compiler or autotools are installed in this stage.
