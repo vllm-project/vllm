@@ -197,7 +197,6 @@ async fn collect_chat_completion(
         Some(prompt_logprobs_to_maps(
             prompt_logprobs.as_ref(),
             &prompt_token_ids,
-            return_tokens_as_token_ids,
         )?)
     } else {
         None

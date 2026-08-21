@@ -10,7 +10,8 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::Prompt;
 
 use crate::routes::openai::utils::types::{
-    LogProbs, Normalizable, StreamOptions, StringOrArray, Usage, default_true, validate_stop,
+    LogProbs, Normalizable, PromptLogprobs, StreamOptions, StringOrArray, Usage, default_true,
+    validate_stop,
 };
 
 /// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM
@@ -229,7 +230,7 @@ pub(super) struct CompletionChoice {
     pub logprobs: Option<LogProbs>,
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
-    pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
+    pub prompt_logprobs: Option<PromptLogprobs>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
 }

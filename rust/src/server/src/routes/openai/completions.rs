@@ -187,7 +187,6 @@ async fn collect_completion(
         Some(prompt_logprobs_to_maps(
             collected.prompt_logprobs.as_ref(),
             collected.prompt_token_ids.as_ref(),
-            return_tokens_as_token_ids,
         )?)
     } else {
         None

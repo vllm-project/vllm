@@ -13,8 +13,8 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StringOrArray, Tool, ToolCall,
-    ToolCallDelta, ToolChoice, Usage, default_true, validate_messages, validate_stop,
+    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, StreamOptions, StringOrArray, Tool,
+    ToolCall, ToolCallDelta, ToolChoice, Usage, default_true, validate_messages, validate_stop,
     validate_top_p_value,
 };
 
@@ -340,7 +340,7 @@ pub(super) struct ChatCompletionResponse {
     pub choices: Vec<ChatCompletionChoice>,
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
-    pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
+    pub prompt_logprobs: Option<PromptLogprobs>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,

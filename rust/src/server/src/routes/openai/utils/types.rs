@@ -477,6 +477,16 @@ pub struct LogProbs {
     pub text_offset: Vec<u32>,
 }
 
+/// vLLM prompt-logprob metadata keyed by vocabulary token ID.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PromptLogprob {
+    pub logprob: f32,
+    pub rank: u32,
+    pub decoded_token: String,
+}
+
+pub type PromptLogprobs = Vec<Option<HashMap<u32, PromptLogprob>>>;
+
 /// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatLogProbs {
