@@ -1227,10 +1227,9 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
     def _apply_hf_processor_main(
         self,
-        prompt: list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    ) -> BatchFeature:
         if mm_items.get_all_counts().get("audio", 0):
             # TODO(Isotr0py): Remove this patch after upstream fix PR
             # released and Transformers version update:
@@ -1243,8 +1242,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 hf_processor_mm_kwargs.get("text_kwargs") or {}
             )
 
-        prompt, processed_data = super()._apply_hf_processor_main(
-            prompt,
+        processed_data = super()._apply_hf_processor_main(
             mm_items,
             hf_processor_mm_kwargs,
         )
@@ -1285,7 +1283,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 ]
                 processed_data["audio_feature_lengths"] = torch.tensor(audio_num_frames)
 
-        return prompt, processed_data
+        return processed_data
 
     def _maybe_apply_prompt_updates(
         self,

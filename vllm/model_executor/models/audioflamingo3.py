@@ -379,17 +379,16 @@ class AudioFlamingo3MultiModalProcessor(
 ):
     def _apply_hf_processor_main(
         self,
-        prompt: list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    ) -> BatchFeature:
         valid_mm_items = mm_items.select(
             {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
         mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return prompt, BatchFeature(dict(passthrough_data))
+            return BatchFeature(dict(passthrough_data))
 
         processor_mm_data = dict(mm_data)
         audios = processor_mm_data.pop("audios", None)
@@ -409,13 +408,13 @@ class AudioFlamingo3MultiModalProcessor(
         if audio_data is None:
             processed_data = outputs
             processed_data.update(passthrough_data)
-            return prompt, processed_data
+            return processed_data
 
         audio_list = audio_data if isinstance(audio_data, list) else [audio_data]
         if len(audio_list) == 0:
             processed_data = outputs
             processed_data.update(passthrough_data)
-            return prompt, processed_data
+            return processed_data
 
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         feature_extractor = processor.feature_extractor
@@ -438,7 +437,7 @@ class AudioFlamingo3MultiModalProcessor(
         outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
         processed_data = outputs
         processed_data.update(passthrough_data)
-        return prompt, processed_data
+        return processed_data
 
     def _get_mm_fields_config(
         self,

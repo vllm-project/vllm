@@ -1929,12 +1929,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
 
 
 class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
-    def _apply_hf_processor_main(
-        self,
-        prompt: list[int],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         processor = self.info.get_hf_processor()
         tokenizer = processor.tokenizer
         bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
@@ -1943,6 +1938,13 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             # Prepend the bos token to the prompt tokens
             prompt = [bos_token_id] + prompt
 
+        return prompt
+
+    def _apply_hf_processor_main(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
         mm_counts = mm_items.get_all_counts()
 
         valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
@@ -2108,7 +2110,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         processed_data.update(passthrough_data)
         processed_data.pop("input_ids")
 
-        return prompt, processed_data
+        return processed_data
 
     def _get_mm_fields_config(
         self,

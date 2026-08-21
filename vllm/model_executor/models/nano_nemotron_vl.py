@@ -723,7 +723,8 @@ class NanoNemotronVLMultiModalProcessor(
         # Bypass the cached path: the HF processor must receive the
         # prompt (with injected <so_embedding>) and the audio data
         # together so it can perform audio-token replacement natively.
-        prompt_ids, mm_info = self._apply_hf_processor(inputs, timing_ctx)
+        mm_info = self._apply_hf_processor(inputs, timing_ctx)
+        prompt_ids = self._postprocess_prompt(inputs.prompt)
 
         with timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(

@@ -993,19 +993,19 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> dict[str, NestedTensors]:
         # This processor supports zipping prompt and mm_data together
         if self.info.get_model_version() in {(2, 6), (4, 0), (4, 5), (4, 6)}:
-            inputs = super()._call_hf_processor(
-                prompt=prompts,  # type: ignore
-                mm_data=mm_data,
-                mm_kwargs=mm_kwargs,
+            inputs = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**mm_kwargs),
+                dict(text=prompts, **mm_data),
+                mm_kwargs,
             )
         else:
             inputs = defaultdict[str, list[torch.Tensor]](list)
 
             for i, prompt in enumerate(prompts):
-                inputs_one = super()._call_hf_processor(
-                    prompt=prompt,
-                    mm_data={k: v[i] for k, v in mm_data.items()},
-                    mm_kwargs=mm_kwargs,
+                inputs_one = self.info.ctx.call_hf_processor(
+                    self.info.get_hf_processor(**mm_kwargs),
+                    dict(text=prompt, **{k: v[i] for k, v in mm_data.items()}),
+                    mm_kwargs,
                 )
 
                 for k, v in inputs_one.items():
@@ -1016,10 +1016,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _apply_hf_processor_main(
         self,
-        prompt: list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    ) -> BatchFeature:
         valid_mm_items = mm_items.select(
             {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
@@ -1039,7 +1038,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             }
         )
         processed_data.update(passthrough_data)
-        return prompt, processed_data
+        return processed_data
 
     def _get_prompt_updates(
         self,

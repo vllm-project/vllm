@@ -135,39 +135,16 @@ class ChameleonDummyInputsBuilder(BaseDummyInputsBuilder[ChameleonProcessingInfo
 
 
 class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingInfo]):
-    def _apply_hf_processor_main(
-        self,
-        prompt: list[int],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        # ChameleonProcessor requires text corresponding to the images
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         # HF processor adds sep token for chat mode
         tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
+        sep_token_id = tokenizer.get_vocab()[tokenizer.sep_token]  # type: ignore
 
-        sep_token_id = vocab[tokenizer.sep_token]  # type: ignore
-
-        prompt = [*prompt, sep_token_id]
-
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not processor_data:
-            return prompt, BatchFeature(dict(passthrough_data))
-
-        # ChameleonProcessor requires text corresponding to the images
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **processor_data),
-            hf_processor_mm_kwargs,
-        )
-        processed_data.update(passthrough_data)
-
-        return prompt, processed_data
+        return [*prompt, sep_token_id]
 
     def _get_mm_fields_config(
         self,

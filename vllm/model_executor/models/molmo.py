@@ -1123,12 +1123,7 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
 
 
 class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
-    def _apply_hf_processor_main(
-        self,
-        prompt: list[int],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         processor = self.info.get_hf_processor()
 
         # The chat template is already applied to the prompt tokens
@@ -1141,18 +1136,23 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         )
 
         # Prepend a BOS token id to the tokens
-        prompt_ids = self.info.ctx.call_hf_processor(
+        return self.info.ctx.call_hf_processor(
             processor.process,
             dict(tokens=tokens),
         )["input_ids"].tolist()
 
+    def _apply_hf_processor_main(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
         mm_counts = mm_items.get_all_counts()
 
         valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
         processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not processor_data:
-            return prompt_ids, BatchFeature(dict(passthrough_data))
+            return BatchFeature(dict(passthrough_data))
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
@@ -1196,7 +1196,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
         processed_data.update(passthrough_data)
 
-        return prompt_ids, processed_data
+        return processed_data
 
     def _get_mm_fields_config(
         self,

@@ -810,10 +810,9 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
     def _apply_hf_processor_main(
         self,
-        prompt: list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    ) -> BatchFeature:
         """
         Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
         """
@@ -907,7 +906,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         processed_data.update(passthrough_data)
         processed_data.pop("input_ids")
 
-        return prompt, processed_data
+        return processed_data
 
 
 class Qwen2_5OmniConditionalGenerationMixin:

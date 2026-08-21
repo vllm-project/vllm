@@ -453,17 +453,16 @@ class FireRedLIDMultiModalProcessor(
 
     def _apply_hf_processor_main(
         self,
-        prompt: list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    ) -> BatchFeature:
         valid_mm_items = mm_items.select(
             {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
         mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return prompt, BatchFeature(dict(passthrough_data))
+            return BatchFeature(dict(passthrough_data))
 
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         mm_data = dict(audio=mm_data.pop("audios"))
@@ -480,7 +479,7 @@ class FireRedLIDMultiModalProcessor(
             processed_data["input_ids"] = processed_data.pop("labels")
         processed_data.update(passthrough_data)
 
-        return prompt, processed_data
+        return processed_data
 
     def _get_mm_fields_config(
         self,

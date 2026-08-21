@@ -492,6 +492,11 @@ return a schema of the tensors outputted by the HF processor that are related to
     like in the example above. If you need to modify the output of the HF processor,
     you should override
     [_postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data].
+    If the HF processor applies additional transformations to the prompt tokens
+    that are not reflected in its multi-modal outputs (e.g. prepending a BOS token),
+    you should override
+    [_postprocess_prompt][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_prompt]
+    to replicate them.
     For even more control over how the HF processor is called, you can override
     [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main]
     directly.

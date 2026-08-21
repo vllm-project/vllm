@@ -229,10 +229,9 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
 
     def _apply_hf_processor_main(
         self,
-        prompt: list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    ) -> BatchFeature:
         """Call the HuggingFace processor."""
         valid_mm_items = mm_items.select(
             {k for k, c in mm_items.get_all_counts().items() if c > 0}
@@ -240,7 +239,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return prompt, BatchFeature(dict(passthrough_data))
+            return BatchFeature(dict(passthrough_data))
 
         # Convert mm_data format: {'audios': [...]} -> {'audio': ...}
         mm_data = dict(mm_data)
@@ -267,7 +266,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
             hf_processor_mm_kwargs,
         )
         processed_data.update(passthrough_data)
-        return prompt, processed_data
+        return processed_data
 
     def _get_mm_fields_config(
         self,

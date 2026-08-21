@@ -914,10 +914,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
     def _apply_hf_processor_main(
         self,
-        prompt: list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    ) -> BatchFeature:
         """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo.
         Also remap 'audios' → 'audio' since MiMoOmniProcessor.__call__ uses
         the singular form.
@@ -928,7 +927,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return prompt, BatchFeature(dict(passthrough_data))
+            return BatchFeature(dict(passthrough_data))
 
         # Remap audios → audio (MiMoOmniProcessor uses singular param name)
         if "audios" in mm_data:
@@ -1013,7 +1012,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             hf_processor_mm_kwargs,
         )
         processed_data.update(passthrough_data)
-        return prompt, processed_data
+        return processed_data
 
     def _get_prompt_updates(
         self,

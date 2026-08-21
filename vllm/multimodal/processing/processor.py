@@ -1337,12 +1337,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _apply_hf_processor_main(
         self,
-        prompt: list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
+    ) -> BatchFeature:
         """
-        Apply the HF processor on the prompt tokens and multi-modal data.
+        Apply the HF processor on the multi-modal data.
         """
         valid_mm_items = mm_items.select(
             {k for k, c in mm_items.get_all_counts().items() if c > 0}
@@ -1361,15 +1360,27 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             )
             processed_data.update(passthrough_data)
         else:
-            processed_data = cast("BatchFeature", dict(passthrough_data))
+            from transformers.feature_extraction_utils import BatchFeature
 
-        processed_data = self._postprocess_hf_mm_data(
+            processed_data = BatchFeature(dict(passthrough_data))
+
+        return self._postprocess_hf_mm_data(
             processor_data,
             hf_processor_mm_kwargs,
             processed_data,
         )
 
-        return prompt, processed_data
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
+        """
+        Post-process the prompt token IDs before locating or applying
+        multi-modal prompt updates.
+
+        By default, the prompt is returned as-is. If the HF processor (or
+        chat template) applies additional transformations to the prompt
+        that are not reflected in its multi-modal outputs, you should
+        override this method to replicate them.
+        """
+        return prompt
 
     def _get_cache_missing_items(
         self,
@@ -1474,10 +1485,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo]:
+    ) -> MultiModalProcessingInfo:
         with timing_ctx.record("apply_hf_processor"):
-            prompt_ids, mm_processed_data = self._apply_hf_processor_main(
-                prompt=inputs.prompt,
+            mm_processed_data = self._apply_hf_processor_main(
                 mm_items=inputs.mm_data_items,
                 hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
             )
@@ -1508,13 +1518,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             prompt_updates=mm_prompt_updates,
         )
 
-        return prompt_ids, mm_info
+        return mm_info
 
     def _cached_apply_hf_processor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo]:
+    ) -> MultiModalProcessingInfo:
         """
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
@@ -1538,12 +1548,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_hashes=mm_hashes,
             )
 
-        # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
+        # NOTE: The prompt does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
         # items are combined with the cached multimodal items
         with timing_ctx.record("apply_hf_processor"):
-            prompt_ids, mm_missing_processed_data = self._apply_hf_processor_main(
-                prompt=inputs.prompt,
+            mm_missing_processed_data = self._apply_hf_processor_main(
                 mm_items=mm_missing_data_items,
                 hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
             )
@@ -1576,7 +1585,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             prompt_updates=mm_prompt_updates,
         )
 
-        return prompt_ids, mm_info
+        return mm_info
 
     def _apply_token_matches(
         self,
@@ -1789,7 +1798,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        prompt_ids, mm_info = self._cached_apply_hf_processor(inputs, timing_ctx)
+        prompt_ids = self._postprocess_prompt(inputs.prompt)
+        mm_info = self._cached_apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(

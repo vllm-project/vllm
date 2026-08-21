@@ -771,10 +771,9 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
 
     def _apply_hf_processor_main(
         self,
-        prompt: list[int],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], "BatchFeature"]:
+    ) -> "BatchFeature":
         mm_counts = mm_items.get_all_counts()
 
         valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
@@ -825,7 +824,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                 )
             hf_inputs.update(passthrough_data)
             hf_inputs.pop("input_ids", None)
-            return prompt, hf_inputs
+            return hf_inputs
 
         tokenizer = self.info.get_tokenizer()
         replacements = defaultdict[str, list[list[int]]](list)
@@ -855,7 +854,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         hf_inputs.update(passthrough_data)
         hf_inputs.pop("input_ids")
 
-        return prompt, hf_inputs
+        return hf_inputs
 
 
 # From this version on, a processor reporting no offsets is an error rather than a
