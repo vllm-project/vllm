@@ -738,7 +738,20 @@ class OpenAIServingChat(GenerateBaseServing):
                         # finish_reason is:
                         # "tool_calls" for "auto" or "required" tool calls,
                         # and "stop" for named tool calls.
-                        if tools_streamed[i] and not tool_choice_function_name:
+                        #
+                        # Only translate a clean end of generation. If the engine
+                        # stopped for any other reason -- "length", "abort",
+                        # "repetition" -- that reason has to survive, because the
+                        # tool call it was in the middle of emitting is truncated.
+                        # Overwriting it with "tool_calls" tells the caller the
+                        # call is complete while the arguments it streamed do not
+                        # even parse as JSON. The full generator already gates on
+                        # ``output.finish_reason == "stop"`` for this reason.
+                        if (
+                            tools_streamed[i]
+                            and not tool_choice_function_name
+                            and output.finish_reason == "stop"
+                        ):
                             finish_reason_ = "tool_calls"
                         else:
                             finish_reason_ = (
