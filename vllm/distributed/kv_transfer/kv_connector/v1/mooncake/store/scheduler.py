@@ -5,6 +5,8 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Scheduler-side logic for MooncakeStoreConnector."""
 
+from typing import cast
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
@@ -91,6 +93,19 @@ class MooncakeStoreScheduler:
         # store_job_id -> (referenced block ids, ranks yet to report completion)
         self._pinned_saves: dict[int, tuple[list[int], int]] = {}
 
+    def _transfer_block_ids(
+        self, block_ids: tuple[list[int], ...] | list[list[int]] | list[int]
+    ) -> tuple[list[int], ...]:
+        if not block_ids:
+            return ()
+        if isinstance(block_ids[0], int):
+            assert len(self.kv_cache_config.transfer_groups) == 1
+            return (cast(list[int], block_ids).copy(),)
+        grouped_block_ids = cast(tuple[list[int], ...] | list[list[int]], block_ids)
+        if len(grouped_block_ids) == len(self.kv_cache_config.transfer_groups):
+            return tuple(grouped_block_ids)
+        return self.kv_cache_config.select_transfer_block_ids(grouped_block_ids)
+
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
 
@@ -158,9 +173,7 @@ class MooncakeStoreScheduler:
         """Update state after block allocation."""
         local_block_ids: tuple[list[int], ...] = ()
         if num_external_tokens > 0:
-            local_block_ids = self.kv_cache_config.select_transfer_block_ids(
-                blocks.get_block_ids()
-            )
+            local_block_ids = self._transfer_block_ids(blocks.get_block_ids())
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
@@ -224,10 +237,7 @@ class MooncakeStoreScheduler:
             request_real = request_tuple[0]  # type: ignore[index]
 
             unfolded_block_ids = tuple(
-                blocks.copy()
-                for blocks in self.kv_cache_config.select_transfer_block_ids(
-                    request.block_ids
-                )
+                blocks.copy() for blocks in self._transfer_block_ids(request.block_ids)
             )
 
             prefill_tokens = _new_req_prefill_tokens(request)
@@ -263,9 +273,7 @@ class MooncakeStoreScheduler:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if new_block_ids:
-                    new_block_ids = self.kv_cache_config.select_transfer_block_ids(
-                        new_block_ids
-                    )
+                    new_block_ids = self._transfer_block_ids(new_block_ids)
 
                 req_meta = None
                 if req_id in cached_reqs.resumed_req_ids:

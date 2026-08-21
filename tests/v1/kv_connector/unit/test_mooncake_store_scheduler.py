@@ -200,6 +200,22 @@ def _add_unfinished_request(
     )
 
 
+def test_transfer_block_ids_excludes_nontransfer_groups():
+    """Store metadata must match the worker's registered cache groups."""
+    scheduler = _make_bare_scheduler()
+    spec = scheduler.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    scheduler.kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer.0"], spec),
+            KVCacheGroupSpec(["layer.1"], spec, enable_kv_transfer=False),
+        ],
+    )
+
+    assert scheduler._transfer_block_ids(([1, 2], [9])) == ([1, 2],)
+
+
 def _setup_decode_request(
     *,
     kv_role: str = "kv_consumer",
