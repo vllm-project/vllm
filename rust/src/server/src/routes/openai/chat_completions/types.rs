@@ -333,7 +333,7 @@ impl Normalizable for ChatCompletionRequest {
 /// Do not skip serializing `None` fields here: non-streaming response types
 /// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct ChatCompletionResponse {
+pub(crate) struct ChatCompletionResponse {
     pub id: String,
     pub object: String,
     pub created: u64,
@@ -349,7 +349,7 @@ pub(super) struct ChatCompletionResponse {
 
 /// Mirrors the Python vLLM `ChatCompletionResponseChoice` class.
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct ChatCompletionChoice {
+pub(crate) struct ChatCompletionChoice {
     pub index: u32,
     pub message: ChatCompletionMessage,
     pub logprobs: Option<ChatLogProbs>,
@@ -361,7 +361,7 @@ pub(super) struct ChatCompletionChoice {
 /// A literal type for the "assistant" role, since the API only allows that
 /// specific value in responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SerializeDisplay)]
-pub(super) struct AssistantRole;
+pub(crate) struct AssistantRole;
 
 impl fmt::Display for AssistantRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -371,7 +371,7 @@ impl fmt::Display for AssistantRole {
 
 /// Mirrors the Python vLLM response `ChatMessage` class.
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct ChatCompletionMessage {
+pub(crate) struct ChatCompletionMessage {
     pub role: AssistantRole,
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -382,7 +382,7 @@ pub(super) struct ChatCompletionMessage {
 /// Mirrors the Python vLLM `ChatCompletionStreamResponse` class.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct ChatCompletionStreamResponse {
+pub(crate) struct ChatCompletionStreamResponse {
     pub id: String,
     pub object: String,
     pub created: u64,
@@ -410,7 +410,7 @@ impl ChatCompletionStreamResponse {
 /// Mirrors the Python vLLM `ChatCompletionResponseStreamChoice` class.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, Serialize)]
-pub(super) struct ChatCompletionStreamChoice {
+pub(crate) struct ChatCompletionStreamChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,
     pub logprobs: Option<ChatLogProbs>,
@@ -422,7 +422,7 @@ pub(super) struct ChatCompletionStreamChoice {
 /// Mirrors the Python vLLM `DeltaMessage` class.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, Serialize)]
-pub(super) struct ChatMessageDelta {
+pub(crate) struct ChatMessageDelta {
     pub role: Option<AssistantRole>,
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,

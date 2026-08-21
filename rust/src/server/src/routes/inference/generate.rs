@@ -26,11 +26,10 @@ use vllm_llm::{
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
-use self::types::{
-    GenerateLogprob, GenerateResponse, GenerateResponseChoice, GenerateResponseStreamChoice,
-    GenerateStreamResponse,
+pub(crate) use self::types::{
+    GenerateLogprob, GenerateRequest, GenerateResponse, GenerateResponseChoice,
+    GenerateResponseStreamChoice, GenerateSamplingParams, GenerateStreamResponse,
 };
-pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};

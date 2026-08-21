@@ -56,36 +56,50 @@ impl Normalizable for GenerateRequest {}
 ///
 /// Do not skip serializing `None` fields here: non-streaming response types
 /// should serialize `None` as explicit `null`.
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GenerateResponseChoice {
+///
+/// Also deserialized by the derender endpoints. A JSON `null` `token_ids`
+/// fails deserialization (400); the derender handler additionally rejects
+/// missing/empty `token_ids` with Python's "empty or null token_ids" error.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct GenerateResponseChoice {
     pub index: u32,
     pub logprobs: Option<ChatLogProbs>,
+    // Per OpenAI spec the Python default is "stop".
+    #[serde(default = "default_finish_reason")]
     pub finish_reason: Option<String>,
+    #[serde(default)]
     pub token_ids: Vec<u32>,
+}
+
+fn default_finish_reason() -> Option<String> {
+    Some("stop".to_string())
 }
 
 /// Mirrors the Python vLLM `GenerateResponseStreamChoice` class.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GenerateResponseStreamChoice {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct GenerateResponseStreamChoice {
     pub index: u32,
     pub logprobs: Option<ChatLogProbs>,
     pub finish_reason: Option<String>,
+    #[serde(default)]
     pub token_ids: Vec<u32>,
 }
 
 /// Mirrors the Python vLLM `GenerateStreamResponse` class.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GenerateStreamResponse {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct GenerateStreamResponse {
+    #[serde(default)]
     pub request_id: String,
     pub choices: Vec<GenerateResponseStreamChoice>,
     pub usage: Option<Usage>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GenerateResponse {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct GenerateResponse {
+    #[serde(default)]
     pub request_id: String,
     pub choices: Vec<GenerateResponseChoice>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
@@ -94,8 +108,8 @@ pub(super) struct GenerateResponse {
 }
 
 /// Mirrors the Python vLLM `Logprob` class used in prompt-logprobs payloads.
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GenerateLogprob {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct GenerateLogprob {
     pub logprob: f32,
     pub rank: Option<u32>,
     pub decoded_token: Option<String>,

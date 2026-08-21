@@ -29,6 +29,10 @@ use vllm_text::{
 
 use self::convert::{ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
+use self::types::CompletionSseChunk;
+pub(crate) use self::types::{
+    CompletionChoice, CompletionResponse, CompletionStreamChoice, CompletionStreamResponse,
+};
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
     prompt_logprobs_to_maps, text_len,
@@ -37,10 +41,6 @@ use super::utils::types::Usage;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
-use crate::routes::openai::completions::types::{
-    CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
-    CompletionStreamResponse,
-};
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;

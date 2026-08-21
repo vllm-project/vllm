@@ -212,11 +212,37 @@ impl ChatRequestProcessor {
         self.prepare_text_request(request).await
     }
 
-    /// Prepare one chat request without submitting it to an engine.
-    pub async fn prepare(
+    /// Effective tool-call parser name for the model, if parsing is enabled.
+    pub fn tool_call_parser_name(&self, model_id: &str) -> Option<&str> {
+        match &self.tool_call_parser {
+            ParserSelection::Auto => ToolParserFactory::global().resolve_name_for_model(model_id),
+            ParserSelection::None => None,
+            ParserSelection::Explicit(name) => Some(name),
+        }
+    }
+
+    /// Effective reasoning parser name for the model, if parsing is enabled.
+    pub fn reasoning_parser_name(&self, model_id: &str) -> Option<&str> {
+        match &self.reasoning_parser {
+            ParserSelection::Auto => {
+                ReasoningParserFactory::global().resolve_name_for_model(model_id)
+            }
+            ParserSelection::None => None,
+            ParserSelection::Explicit(name) => Some(name),
+        }
+    }
+
+    /// Validate one chat request and construct its output processor without
+    /// rendering or tokenizing.
+    ///
+    /// Returns the request as adjusted by the processor constructor (e.g.
+    /// `decode_options.skip_special_tokens` is forced off when a parser needs
+    /// special tokens preserved), so callers that decode outside the normal
+    /// pipeline (such as the derender endpoints) observe the same options.
+    pub fn new_output_processor(
         &self,
         mut request: ChatRequest,
-    ) -> Result<(TextRequest, DynChatOutputProcessor)> {
+    ) -> Result<(ChatRequest, DynChatOutputProcessor)> {
         request.validate()?;
         let output_processor = self.backend.new_chat_output_processor(
             &mut request,
@@ -225,6 +251,15 @@ impl ChatRequestProcessor {
                 reasoning_parser: &self.reasoning_parser,
             },
         )?;
+        Ok((request, output_processor))
+    }
+
+    /// Prepare one chat request without submitting it to an engine.
+    pub async fn prepare(
+        &self,
+        request: ChatRequest,
+    ) -> Result<(TextRequest, DynChatOutputProcessor)> {
+        let (request, output_processor) = self.new_output_processor(request)?;
         let text_request = self.prepare_text_request(request).await?;
         Ok((text_request, output_processor))
     }
@@ -325,24 +360,12 @@ impl ChatLlm {
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
     pub fn tool_call_parser_name(&self) -> Option<&str> {
-        match &self.processor.tool_call_parser {
-            ParserSelection::Auto => {
-                ToolParserFactory::global().resolve_name_for_model(self.model_id())
-            }
-            ParserSelection::None => None,
-            ParserSelection::Explicit(name) => Some(name),
-        }
+        self.processor.tool_call_parser_name(self.model_id())
     }
 
     /// Effective reasoning parser name for this model, if parsing is enabled.
     pub fn reasoning_parser_name(&self) -> Option<&str> {
-        match &self.processor.reasoning_parser {
-            ParserSelection::Auto => {
-                ReasoningParserFactory::global().resolve_name_for_model(self.model_id())
-            }
-            ParserSelection::None => None,
-            ParserSelection::Explicit(name) => Some(name),
-        }
+        self.processor.reasoning_parser_name(self.model_id())
     }
 
     /// Render, tokenize, and submit one chat request.

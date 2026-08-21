@@ -7,6 +7,45 @@ use crate::{Result, Tokenizer, TokenizerError};
 
 const FIRST_CONFIGURED_TOKEN_ID: u32 = 256;
 
+/// Whether the GPT-2 `bytes_to_unicode` table maps a byte to itself.
+fn is_nice_byte(byte: u8) -> bool {
+    matches!(byte, 0x21..=0x7E | 0xA1..=0xAC) || byte >= 0xAE
+}
+
+/// Map one byte to its GPT-2 `bytes_to_unicode` piece character.
+///
+/// "Nice" bytes map to themselves; the 68 others map to U+0100 + n where n is
+/// the byte's index among the non-nice bytes.
+fn byte_to_unicode_char(byte: u8) -> char {
+    if is_nice_byte(byte) {
+        return char::from(byte);
+    }
+    let n = match byte {
+        0x00..=0x20 => u32::from(byte),
+        0x7F..=0xA0 => 33 + u32::from(byte - 0x7F),
+        // 0xAD is the only remaining non-nice byte.
+        _ => 33 + 34,
+    };
+    char::from_u32(256 + n).expect("byte_to_unicode mapping stays below U+0144")
+}
+
+/// Inverse of [`byte_to_unicode_char`]; `None` for characters outside the
+/// GPT-2 byte-piece range.
+fn unicode_char_to_byte(ch: char) -> Option<u8> {
+    let code = ch as u32;
+    if code <= 0xFF {
+        let byte = u8::try_from(code).ok()?;
+        return is_nice_byte(byte).then_some(byte);
+    }
+    let n = code.checked_sub(256)?;
+    match n {
+        0..=32 => u8::try_from(n).ok(),
+        33..=66 => u8::try_from(n - 33 + 0x7F).ok(),
+        67 => Some(0xAD),
+        _ => None,
+    }
+}
+
 /// Whether a configured test token should be treated as special.
 ///
 /// Special tokens are skipped by [`Tokenizer::decode`] when
@@ -65,6 +104,12 @@ struct TestToken {
 /// Prefer this helper over ad-hoc fake tokenizers for tests that rely on
 /// tokenizer semantics. Keep dedicated tiny fakes for error injection or for
 /// tests that deliberately need a degenerate tokenizer.
+///
+/// By default `id_to_token` represents byte ids as their lossy UTF-8 decoding,
+/// which does not round-trip through `token_to_id` for bytes >= 0x80. Tests
+/// that exercise piece-based detokenization (e.g. the derender endpoints)
+/// should opt into [`TestTokenizer::with_byte_level_piece_mapping`], which
+/// uses the reversible GPT-2 `bytes_to_unicode` mapping instead.
 #[derive(Debug, Clone)]
 pub struct TestTokenizer {
     token_to_id: BTreeMap<String, u32>,
@@ -73,6 +118,7 @@ pub struct TestTokenizer {
     unknown_decode: UnknownDecode,
     vocab_size: Option<usize>,
     bos_token_id: Option<u32>,
+    byte_level_pieces: bool,
 }
 
 impl Default for TestTokenizer {
@@ -91,7 +137,20 @@ impl TestTokenizer {
             unknown_decode: UnknownDecode::Error,
             vocab_size: None,
             bos_token_id: None,
+            byte_level_pieces: false,
         }
+    }
+
+    /// Use the reversible GPT-2 `bytes_to_unicode` mapping for byte-id token
+    /// pieces, so `id_to_token` output round-trips through `token_to_id`.
+    ///
+    /// `decode` is unaffected (bytes still decode as raw UTF-8). Production
+    /// byte-level BPE tokenizers expose the same property, and detokenization
+    /// paths that rebuild text from token pieces (e.g. the streaming derender
+    /// endpoints) rely on it.
+    pub fn with_byte_level_piece_mapping(mut self) -> Self {
+        self.byte_level_pieces = true;
+        self
     }
 
     /// Add a configured token and return the updated tokenizer.
@@ -173,8 +232,14 @@ impl TestTokenizer {
         self.added_vocab.sort_unstable_by_key(|(_, id)| *id);
     }
 
-    fn byte_to_token(id: u32) -> Option<String> {
-        u8::try_from(id).ok().map(|byte| String::from_utf8_lossy(&[byte]).into_owned())
+    fn byte_to_token(&self, id: u32) -> Option<String> {
+        u8::try_from(id).ok().map(|byte| {
+            if self.byte_level_pieces {
+                byte_to_unicode_char(byte).to_string()
+            } else {
+                String::from_utf8_lossy(&[byte]).into_owned()
+            }
+        })
     }
 
     fn flush_bytes(bytes: &mut Vec<u8>, output: &mut String) {
@@ -257,7 +322,16 @@ impl Tokenizer for TestTokenizer {
     fn token_to_id(&self, token: &str) -> Option<u32> {
         self.token_to_id.get(token).copied().or_else(|| {
             let bytes = token.as_bytes();
-            (bytes.len() == 1).then(|| u32::from(bytes[0]))
+            if bytes.len() == 1 {
+                return Some(u32::from(bytes[0]));
+            }
+            if self.byte_level_pieces {
+                let mut chars = token.chars();
+                if let (Some(ch), None) = (chars.next(), chars.next()) {
+                    return unicode_char_to_byte(ch).map(u32::from);
+                }
+            }
+            None
         })
     }
 
@@ -265,7 +339,7 @@ impl Tokenizer for TestTokenizer {
         self.id_to_token
             .get(&id)
             .map(|token| token.text.clone())
-            .or_else(|| Self::byte_to_token(id))
+            .or_else(|| self.byte_to_token(id))
     }
 
     fn added_vocab(&self) -> &[(String, u32)] {
@@ -481,5 +555,22 @@ mod tests {
 
         assert_eq!(tokenizer.vocab_size(), 20_000);
         assert_eq!(tokenizer.id_to_token(10_000).as_deref(), Some("<high>"));
+    }
+
+    #[test]
+    fn byte_level_piece_mapping_roundtrips_all_bytes() {
+        let tokenizer = TestTokenizer::new().with_byte_level_piece_mapping();
+
+        for id in 0..=255_u32 {
+            let piece = tokenizer.id_to_token(id).expect("byte id has a piece");
+            assert_eq!(tokenizer.token_to_id(&piece), Some(id), "piece {piece:?}");
+        }
+        // Decode is unaffected: pieces still decode as raw UTF-8 bytes.
+        let text = "Hello ✅ 日本語";
+        let ids = tokenizer.encode(text, false).unwrap();
+        assert_eq!(tokenizer.decode(&ids, false).unwrap(), text);
+        // GPT-2 style: the space byte maps to U+0120 ("Ġ").
+        assert_eq!(tokenizer.id_to_token(0x20).as_deref(), Some("Ġ"));
+        assert_eq!(tokenizer.token_to_id("Ġ"), Some(0x20));
     }
 }
