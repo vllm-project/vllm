@@ -206,6 +206,8 @@ class Scheduler(SchedulerInterface):
 
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
+        # Cached worker requests whose computed-token offset moved backward.
+        self.rewound_req_ids: set[str] = set()
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -1344,6 +1346,16 @@ class Scheduler(SchedulerInterface):
 
         return new_block_ids_to_zero or None
 
+    @staticmethod
+    def _mark_inflight_output_stale(request: Request, drop_stale_output: bool) -> None:
+        request.drop_stale_output = drop_stale_output or (
+            request.drop_stale_output and request.num_stale_output_tokens > 0
+        )
+        # Assign rather than accumulate: num_in_flight_tokens already includes
+        # any stale work that has not returned yet.
+        request.num_stale_output_tokens = request.num_in_flight_tokens
+        request.num_output_placeholders = 0
+
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
     ) -> None:
@@ -1367,18 +1379,10 @@ class Scheduler(SchedulerInterface):
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
-        # Async scheduling: mark all in-flight output as stale. Its tokens are
-        # still delivered on return (dropping them would perturb spec-decode
-        # acceptance) but must not mutate the reset counters; each step drains
-        # its share in update_from_output. num_in_flight_tokens already
-        # includes any undrained stale share, so assign rather than accumulate.
-        # An undrained drop-mode share stays dropped: its positions have
-        # already been resampled.
-        request.drop_stale_output = drop_stale_output or (
-            request.drop_stale_output and request.num_stale_output_tokens > 0
-        )
-        request.num_stale_output_tokens = request.num_in_flight_tokens
-        request.num_output_placeholders = 0
+        # In-flight output must not mutate the counters reset by preemption.
+        # An undrained drop-mode share stays dropped after another preemption.
+        self._mark_inflight_output_stale(request, drop_stale_output=drop_stale_output)
+        self.rewound_req_ids.discard(request.request_id)
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -1529,6 +1533,9 @@ class Scheduler(SchedulerInterface):
                 req.num_output_tokens + req.num_output_placeholders
             )
 
+        rewound_req_ids = self.rewound_req_ids.intersection(req_ids)
+        self.rewound_req_ids.difference_update(rewound_req_ids)
+
         return CachedRequestData(
             req_ids=req_ids,
             resumed_req_ids=resumed_req_ids,
@@ -1537,6 +1544,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            rewound_req_ids=rewound_req_ids,
         )
 
     def _try_schedule_encoder_inputs(
@@ -2438,6 +2446,7 @@ class Scheduler(SchedulerInterface):
 
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
+        self.rewound_req_ids.discard(request_id)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
@@ -2960,6 +2969,22 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - req_num_computed_tokens
                     )
                     request.num_computed_tokens = req_num_computed_tokens
+
+                if self.recompute_kv_load_failures:
+                    request.spec_token_ids = []
+                    self._mark_inflight_output_stale(request, drop_stale_output=True)
+                    request.is_prefill_chunk = (
+                        request.num_computed_tokens < request.num_tokens
+                    )
+                    if request.is_prefill_chunk:
+                        self._inflight_prefills.add(request)
+                    else:
+                        self._inflight_prefills.discard(request)
+                    if (
+                        self.use_v2_model_runner
+                        and request.status == RequestStatus.RUNNING
+                    ):
+                        self.rewound_req_ids.add(req_id)
 
                 affected_req_ids.add(request.request_id)
 
