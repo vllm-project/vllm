@@ -501,6 +501,9 @@ def get_and_maybe_dequant_weights(
     """Return layer's unquantized weights in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8PbWoLinearMethod,
+    )
     from vllm.model_executor.layers.quantization.online.fp8 import (
         Fp8PerTensorOnlineLinearMethod,
     )
@@ -518,6 +521,27 @@ def get_and_maybe_dequant_weights(
         layer.quant_method, UnquantizedLinearMethod
     ):
         return weight.to(out_dtype)
+
+    # ModelOpt's per-block FP8 scales remain directly dequantizable when the
+    # selected kernel keeps the checkpoint's ordinary 2D block layout. Some
+    # kernels replace that layout during post-processing; those use the generic
+    # apply-to-identity fallback below.
+    if isinstance(layer.quant_method, ModelOptFp8PbWoLinearMethod):
+        weight_scale = layer.weight_scale
+        block_size = tuple(layer.weight_block_size)
+        expected_scale_shape = (
+            weight.shape[-2] // block_size[0],
+            weight.shape[-1] // block_size[1],
+        )
+        if weight_scale.dtype == torch.float32 and tuple(weight_scale.shape) == (
+            expected_scale_shape
+        ):
+            return scaled_dequantize(
+                weight,
+                weight_scale,
+                group_shape=GroupShape(*block_size),
+                out_dtype=out_dtype,
+            )
 
     # Simple Fp8 case: rescale with tensor or block weight scales
     if (

@@ -79,6 +79,10 @@ from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_kv_concat_quant_fp8,
     fused_mla_qkv_quant_kv_cache_fp8_insert,
 )
+from vllm.models.kimi_k3.nvidia.quantization import (
+    pad_merged_output_sizes,
+    uses_modelopt_fp8_pb_wo,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -200,14 +204,31 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             # the low-rank latents are shared across TP ranks; TP splitting
             # happens at q_b_proj / kv_b_proj. Checkpoint weights ``q_a_proj``
             # and ``kv_a_proj_with_mqa`` map onto shards 0 and 1 respectively.
+            fused_qkv_a_prefix = f"{prefix}.fused_qkv_a_proj"
+            fused_qkv_a_output_sizes = [
+                self.q_lora_rank,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+            ]
+            self.fused_qkv_a_padding = 0
+            if uses_modelopt_fp8_pb_wo(quant_config, fused_qkv_a_prefix):
+                fused_qkv_a_output_sizes, self.fused_qkv_a_padding = (
+                    pad_merged_output_sizes(
+                        fused_qkv_a_output_sizes,
+                        tp_size,
+                        disable_tp=True,
+                        alignment=128,
+                    )
+                )
             self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                fused_qkv_a_output_sizes,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.fused_qkv_a_proj",
+                prefix=fused_qkv_a_prefix,
                 disable_tp=True,
             )
+            if self.fused_qkv_a_padding:
+                self.fused_qkv_a_proj.weight.data[-self.fused_qkv_a_padding :].zero_()
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
                 self.q_lora_rank,
@@ -492,6 +513,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         """
         if self.q_lora_rank is not None:
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            if self.fused_qkv_a_padding:
+                qkv_lora = qkv_lora[..., : -self.fused_qkv_a_padding]
             q_c, kv_c, k_pe = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
