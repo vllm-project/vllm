@@ -808,7 +808,7 @@ fn incremental_decode_chunks(
         for token_id in chunk_token_ids.iter().copied() {
             decoder.push_token(token_id)?;
             while let Some(chunk) = decoder.next_chunk() {
-                delta.push_str(&chunk);
+                delta.push_str(&chunk.text);
             }
         }
         chunks.push(DecodedCompletionChunk {
@@ -820,10 +820,10 @@ fn incremental_decode_chunks(
     let (last_chunk, _) = decoder.flush(None)?;
     if let Some(last_chunk) = last_chunk {
         if let Some(delta) = chunks.last_mut() {
-            delta.delta.push_str(&last_chunk);
+            delta.delta.push_str(&last_chunk.text);
         } else {
             chunks.push(DecodedCompletionChunk {
-                delta: last_chunk,
+                delta: last_chunk.text,
                 token_ids: Vec::new(),
             });
         }
