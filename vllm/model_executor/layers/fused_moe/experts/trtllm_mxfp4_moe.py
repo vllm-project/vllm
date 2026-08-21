@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.modular_kernel import W13Layout
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -144,6 +145,14 @@ class TrtLlmMxfp4ExpertsBase:
             MoEActivation.SWIGLUOAI,
             MoEActivation.SILU,
         )
+
+    @staticmethod
+    def _expected_w13_layout(
+        activation: MoEActivation,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> W13Layout:
+        return W13Layout.INTERLEAVED_W3W1
 
     @staticmethod
     def _flashinfer_activation_type(activation: MoEActivation) -> int:
