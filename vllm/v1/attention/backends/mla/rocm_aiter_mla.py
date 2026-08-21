@@ -414,11 +414,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
-        # FP8 MLA prefill (kn_mla_reduce_v1) only supports 16-aligned heads, and
-        # only runs when the KV cache is FP8 (otherwise the bf16 path is used and
-        # the PS workspace must not be reserved).
+        # The assembly prefill requires FP8 KV, bf16 output, and 16-aligned
+        # heads. It writes bf16 through a raw output pointer, so fp16 must use
+        # the standard prefill path.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
+            and vllm_config.model_config.dtype == torch.bfloat16
             and (self.num_heads % 16 == 0 or 0 < self.num_heads < 16)
         )
         if self._fp8_prefill_enabled:
