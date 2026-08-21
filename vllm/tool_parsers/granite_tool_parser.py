@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.tool_parsers.utils import (
@@ -44,8 +45,8 @@ class GraniteToolParser(ToolParser):
     are all set
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         # for granite 3.0, the token `<|tool_call|>`
         self.bot_token = "<|tool_call|>"
         # for granite 3.1, the string `<tool_call>`
@@ -153,9 +154,11 @@ class GraniteToolParser(ToolParser):
             current_tool_call: dict = tool_call_arr[self.current_tool_id]
 
             delta = None
-            # case: we are starting a new tool in the array
-            #   -> array has > 0 length AND length has moved past cursor
-            if len(tool_call_arr) > self.current_tool_id + 1:
+            # Only advance once the current tool name is streamed; granite
+            # emits arguments before name, so advancing early would drop it.
+            if len(tool_call_arr) > self.current_tool_id + 1 and (
+                self.current_tool_id < 0 or self.current_tool_name_sent
+            ):
                 # if we're moving on to a new call, first make sure we
                 # haven't missed anything in the previous one that was
                 # auto-generated due to JSON completions, but wasn't
@@ -183,7 +186,7 @@ class GraniteToolParser(ToolParser):
                         )
 
                 # re-set stuff pertaining to progress in the current tool
-                self.current_tool_id = len(tool_call_arr) - 1
+                self.current_tool_id += 1
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool.append("")
                 logger.debug("starting on new tool %d", self.current_tool_id)

@@ -206,6 +206,58 @@ def test_chat_template_validation_for_sad_paths(serve_parser):
         validate_parsed_serve_args(args)
 
 
+def test_per_request_metrics_requires_log_stats(serve_parser):
+    args = serve_parser.parse_args(
+        args=["--enable-per-request-metrics", "--disable-log-stats"]
+    )
+    with pytest.raises(ValueError):
+        validate_parsed_serve_args(args)
+
+
+def _build_launch_render_parser():
+    """Mirror `vllm launch render`.
+
+    `vllm/entrypoints/cli/main.py` parses subcommands with ``dest="subparser"``,
+    and `LaunchSubcommandBase.add_cli_args` builds the component parser with
+    `make_arg_parser`, so a launch component carries serve args under
+    ``args.subparser == "launch"``.
+    """
+    vllm_parser = FlexibleArgumentParser()
+    subparsers = vllm_parser.add_subparsers(required=False, dest="subparser")
+    launch_parser = subparsers.add_parser("launch")
+    launch_subparsers = launch_parser.add_subparsers(
+        required=True, dest="launch_component"
+    )
+    render_parser = launch_subparsers.add_parser("render")
+    make_arg_parser(render_parser)
+    return vllm_parser
+
+
+@pytest.fixture
+def launch_render_parser():
+    return _build_launch_render_parser()
+
+
+def test_launch_render_validates_serve_args(launch_render_parser):
+    """`vllm launch render` reuses the serve parser, so it gets the serve checks"""
+    args = launch_render_parser.parse_args(
+        args=["launch", "render", "--enable-auto-tool-choice"]
+    )
+    assert args.subparser == "launch"
+    with pytest.raises(TypeError):
+        validate_parsed_serve_args(args)
+
+
+def test_subcommand_without_serve_args_skips_validation():
+    """A subcommand that does not use the serve parser is still skipped"""
+    vllm_parser = FlexibleArgumentParser()
+    subparsers = vllm_parser.add_subparsers(required=False, dest="subparser")
+    subparsers.add_parser("chat")
+    args = vllm_parser.parse_args(args=["chat"])
+
+    validate_parsed_serve_args(args)
+
+
 @pytest.mark.parametrize(
     "cli_args, expected_middleware",
     [
@@ -291,3 +343,32 @@ def test_served_model_name_parsing(tmp_path, vllm_parser, args, raises):
     else:
         with pytest.raises(raises):
             vllm_parser.parse_args(args=args)
+
+
+### Tests for LoRA target modules parsing
+def test_lora_target_modules_single(serve_parser):
+    """Test parsing single lora-target-modules argument"""
+    args = serve_parser.parse_args(
+        args=["--enable-lora", "--lora-target-modules", "o_proj"]
+    )
+    assert args.lora_target_modules == ["o_proj"]
+
+
+def test_lora_target_modules_multiple(serve_parser):
+    """Test parsing multiple lora-target-modules arguments"""
+    args = serve_parser.parse_args(
+        args=[
+            "--enable-lora",
+            "--lora-target-modules",
+            "o_proj",
+            "qkv_proj",
+            "down_proj",
+        ]
+    )
+    assert args.lora_target_modules == ["o_proj", "qkv_proj", "down_proj"]
+
+
+def test_lora_target_modules_default_none(serve_parser):
+    """Test that lora-target-modules defaults to None"""
+    args = serve_parser.parse_args(args=[])
+    assert args.lora_target_modules is None

@@ -9,13 +9,16 @@ from typing import TYPE_CHECKING
 import torch
 from transformers import PreTrainedTokenizerBase
 
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
     StructuredOutputOptions,
 )
+from vllm.v1.structured_output.utils import compile_regex_with_timeout
 
 if TYPE_CHECKING:
     import lmformatenforcer
@@ -97,7 +100,10 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
         )
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
         character_level_parser: lmformatenforcer.CharacterLevelParser
         if request_type == StructuredOutputOptions.JSON:
@@ -106,7 +112,10 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             character_level_parser = lmformatenforcer.JsonSchemaParser(None)
         elif request_type == StructuredOutputOptions.REGEX:
-            character_level_parser = lmformatenforcer.RegexParser(grammar_spec)
+            character_level_parser = compile_regex_with_timeout(
+                lmformatenforcer.RegexParser,
+                grammar_spec,
+            )
         elif request_type == StructuredOutputOptions.CHOICE:
             choices = ast.literal_eval(grammar_spec)
             character_level_parser = lmformatenforcer.UnionParser(
@@ -138,7 +147,7 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
             (max_num_seqs, (self.vocab_size + 31) // 32),
             -1,
             dtype=torch.int32,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=PIN_MEMORY,
         )
 
     def destroy(self):
@@ -152,6 +161,15 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
     so_params = params.structured_outputs
 
     if so_params.regex:
+        try:
+            compile_regex_with_timeout(
+                lmformatenforcer.RegexParser,
+                so_params.regex,
+            )
+        except Exception as err:
+            raise VLLMValidationError(
+                f"Failed to compile regex for lm-format-enforcer: {err}"
+            ) from err
         return
     elif so_params.json:
         if isinstance(so_params.json, str):
@@ -159,19 +177,19 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
                 # make sure schema is valid json
                 json.loads(so_params.json)
             except json.JSONDecodeError as e:
-                raise ValueError("Invalid JSON grammar specification.") from e
+                raise VLLMValidationError("Invalid JSON grammar specification.") from e
         else:
             try:
                 json.dumps(so_params.json)
             except Exception as e:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Error serializing structured outputs jsonschema: {e}"
                 ) from e
         return
     elif so_params.choice:
         return
     elif so_params.grammar:
-        raise ValueError(
+        raise VLLMValidationError(
             "LM Format Enforcer structured outputs backend "
             "does not support grammar specifications"
         )

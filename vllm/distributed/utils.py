@@ -6,6 +6,7 @@
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import dataclasses
+import functools
 import os
 import pickle
 import socket
@@ -61,6 +62,38 @@ def divide(numerator, denominator):
     the division value."""
     ensure_divisibility(numerator, denominator)
     return numerator // denominator
+
+
+def verify_group_size_divides_partition(
+    input_size_per_partition: int,
+    group_size: int,
+    layer_name: str | None = None,
+    extra_suggestion: str = "",
+) -> None:
+    """Validate that a TP-sharded layer holds a whole number of quant groups."""
+    if input_size_per_partition % group_size == 0:
+        return
+    location = f" for layer '{layer_name}'" if layer_name else ""
+    raise ValueError(
+        f"Weight {input_size_per_partition=}{location} is not divisible by "
+        f"{group_size=}. This happens when tensor_parallel_size splits the layer input "
+        "into shards that are not a whole number of quant groups. Consider reducing "
+        f"tensor_parallel_size{extra_suggestion}."
+    )
+
+
+def is_weak_contiguous(inp: torch.Tensor) -> bool:
+    """Check that *inp* occupies a single contiguous block of memory.
+
+    Unlike ``torch.Tensor.is_contiguous()``, this also accepts tensors
+    whose strides are not strictly C-contiguous (e.g. column-major) as
+    long as the underlying storage from the tensor's offset onward is
+    exactly ``numel * element_size`` bytes.
+    """
+    return inp.is_contiguous() or (
+        inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
+        == inp.numel() * inp.element_size()
+    )
 
 
 def split_tensor_along_last_dim(
@@ -139,6 +172,29 @@ def get_pp_indices(
     return (start_layer, end_layer)
 
 
+def create_tcp_store(
+    host: str,
+    port: int,
+    listen_socket: socket.socket | None = None,
+    **kwargs: Any,
+) -> TCPStore:
+    """Create a TCPStore, optionally taking ownership of ``listen_socket``."""
+    if listen_socket is None:
+        return TCPStore(host_name=host, port=port, **kwargs)
+
+    listen_fd = listen_socket.detach()
+    try:
+        return TCPStore(
+            host_name=host,
+            port=port,
+            master_listen_fd=listen_fd,
+            **kwargs,
+        )
+    except Exception:
+        socket.close(listen_fd)
+        raise
+
+
 @dataclasses.dataclass
 class StatelessProcessGroup:
     """A dataclass to hold a metadata store, and the rank, world_size of the
@@ -149,9 +205,6 @@ class StatelessProcessGroup:
     rank: int
     world_size: int
     store: torch._C._distributed_c10d.Store
-
-    # stores a reference to the socket so that the file descriptor stays alive
-    socket: socket.socket | None
 
     data_expiration_seconds: int = 3600  # 1 hour
 
@@ -419,6 +472,7 @@ class StatelessProcessGroup:
         world_size: int,
         data_expiration_seconds: int = 3600,
         store_timeout: int = 300,
+        listen_socket: socket.socket | None = None,
     ) -> "StatelessProcessGroup":
         """A replacement for `torch.distributed.init_process_group` that does not
         pollute the global state.
@@ -436,34 +490,57 @@ class StatelessProcessGroup:
         C, and D can call `StatelessProcessGroup.create` to form another group.
         """  # noqa
         launch_server = rank == 0
-        if launch_server:
-            # listen on the specified interface (instead of 0.0.0.0)
+        if launch_server and listen_socket is None:
             listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listen_socket.bind((host, port))
             listen_socket.listen()
-            listen_fd = listen_socket.fileno()
-        else:
-            listen_socket = None
-            listen_fd = None
-
-        store = TCPStore(
-            host_name=host,
-            port=port,
+        store = create_tcp_store(
+            host,
+            port,
+            listen_socket=listen_socket,
             world_size=world_size,
             is_master=launch_server,
             timeout=timedelta(seconds=store_timeout),
             use_libuv=False,  # for now: github.com/pytorch/pytorch/pull/150215
-            master_listen_fd=listen_fd,
         )
 
         return StatelessProcessGroup(
             rank=rank,
             world_size=world_size,
             store=store,
-            socket=listen_socket,
             data_expiration_seconds=data_expiration_seconds,
         )
+
+
+@functools.lru_cache(maxsize=1)
+def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
+    """Return a cached TCPStore client.
+
+    Cached so that every call with the same ``(host, port)`` reuses the
+    same connection.  A new ``(host, port)`` evicts the old entry.
+    """
+    return TCPStore(host, port, is_master=False, wait_for_workers=False)
+
+
+def get_cpu_distributed_timeout_or_none() -> timedelta | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    timeout_seconds = vllm_config.parallel_config.cpu_distributed_timeout_seconds
+    return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
+
+
+def get_distributed_timeout_or_none() -> timedelta | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    timeout_seconds = vllm_config.parallel_config.distributed_timeout_seconds
+    return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
 
 
 def init_gloo_process_group(
@@ -504,6 +581,7 @@ def stateless_init_torch_distributed_process_group(
     backend: str,
     group_name: str | None = None,
     return_store: bool = False,
+    listen_socket: socket.socket | None = None,
 ) -> ProcessGroup | tuple[ProcessGroup, Store]:
     """
     A replacement for `torch.distributed.init_process_group` that does not
@@ -535,14 +613,38 @@ def stateless_init_torch_distributed_process_group(
     are the same as process 1 and 5, the main communication channel is
     always formed with process 1, 2, ..., 8, and the additional communication
     channel is formed with process 9 and 10.
+
+    When *listen_socket* is provided, the rendezvous step
+    is skipped and a ``TCPStore`` server is created directly using the
+    pre-bound socket.  This is useful for eliminating TOCTOU races
+    between port allocation and binding.
     """
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
+    if backend == "gloo":
+        gloo_timeout = get_cpu_distributed_timeout_or_none()
+        if gloo_timeout is not None:
+            timeout = gloo_timeout
+    else:
+        device_timeout = get_distributed_timeout_or_none()
+        if device_timeout is not None:
+            timeout = device_timeout
 
-    store, rank, world_size = next(
-        rendezvous(init_method, rank, world_size, timeout=timeout)
-    )
+    if listen_socket is not None:
+        store = create_tcp_store(
+            host,
+            port,
+            listen_socket=listen_socket,
+            world_size=world_size,
+            is_master=True,
+            timeout=timeout,
+            multi_tenant=True,
+        )
+    else:
+        store, rank, world_size = next(
+            rendezvous(init_method, rank, world_size, timeout=timeout)
+        )
     store.set_timeout(timeout)
 
     group_rank = rank

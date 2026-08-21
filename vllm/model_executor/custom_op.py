@@ -22,10 +22,11 @@ op_registry: dict[str, type["CustomOp"] | type["PluggableLayer"]] = {}
 op_registry_oot: dict[str, type["CustomOp"] | type["PluggableLayer"]] = {}
 
 
-def get_oot_class_by_name(class_name: str) -> type | None:
+def maybe_get_oot_by_class(class_type: type) -> type:
+    class_name = class_type.__name__
     if class_name in op_registry_oot:
         return op_registry_oot[class_name]
-    return None
+    return class_type
 
 
 class PluggableLayer(nn.Module):
@@ -283,7 +284,11 @@ class CustomOp(nn.Module):
 
         enabled = f"+{cls.name}" in custom_ops
         disabled = f"-{cls.name}" in custom_ops
-        assert not (enabled and disabled), f"Cannot enable and disable {cls.name}"
+        if enabled and disabled:
+            raise ValueError(
+                "custom_ops cannot both enable and disable the same operation: "
+                f"{cls.name}. Remove either the '+' or '-' directive"
+            )
 
         return (CustomOp.default_on() or enabled) and not disabled
 
@@ -298,7 +303,10 @@ class CustomOp(nn.Module):
         compilation_config = get_cached_compilation_config()
         count_none = compilation_config.custom_ops.count("none")
         count_all = compilation_config.custom_ops.count("all")
-        assert count_none + count_all == 1
+        if count_none + count_all != 1:
+            raise ValueError(
+                "custom_ops must contain exactly one base mode: 'all' or 'none'"
+            )
 
         return not count_none > 0 or count_all > 0
 

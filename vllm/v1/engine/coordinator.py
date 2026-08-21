@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import multiprocessing
+import multiprocessing.connection
 import time
 import weakref
 
@@ -55,6 +56,26 @@ class DPCoordinator:
     request wave / running state changes.
     """
 
+    def _wait_for_zmq_addrs(self, zmq_addr_pipe) -> tuple[str, str, str]:
+        try:
+            timeout = 120
+            ready = multiprocessing.connection.wait(
+                [zmq_addr_pipe, self.proc.sentinel], timeout=timeout
+            )
+            if not ready:
+                raise RuntimeError(
+                    "DP Coordinator process failed to report ZMQ addresses "
+                    f"within timeout={timeout} seconds during startup."
+                )
+            try:
+                return zmq_addr_pipe.recv()
+            except EOFError:
+                raise RuntimeError(
+                    "DP Coordinator process failed during startup."
+                ) from None
+        finally:
+            zmq_addr_pipe.close()
+
     def __init__(
         self, parallel_config: ParallelConfig, enable_wave_coordination: bool = True
     ):
@@ -66,18 +87,17 @@ class DPCoordinator:
         # Assume coordinator is colocated with front-end procs when not in
         # either external or hybrid DP LB mode.
         local_only = not parallel_config.local_engines_only
-        front_publish_address = get_engine_client_zmq_addr(
-            local_only=local_only, host=host
-        )
-
         local_only_eng = dp_size == parallel_config.data_parallel_size_local
         # NOTE(yongji): handling scaling from intra-node to inter-node
         if parallel_config.enable_elastic_ep:
             local_only_eng = False
-        back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
-        back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
+
+        front_publish_address = get_engine_client_zmq_addr(local_only, host=host)
+        back_publish_address = get_engine_client_zmq_addr(local_only_eng, host=host)
+        back_output_address = get_engine_client_zmq_addr(local_only_eng, host=host)
 
         context = get_mp_context()
+        parent_zmq_addr_pipe, child_zmq_addr_pipe = context.Pipe(duplex=False)
         self.proc: multiprocessing.Process = context.Process(
             target=DPCoordinatorProc.run_coordinator,
             name="VLLM_DP_Coordinator",
@@ -86,11 +106,18 @@ class DPCoordinator:
                 "front_publish_address": front_publish_address,
                 "back_output_address": back_output_address,
                 "back_publish_address": back_publish_address,
+                "zmq_addr_pipe": child_zmq_addr_pipe,
                 "enable_wave_coordination": enable_wave_coordination,
             },
             daemon=True,
         )
         self.proc.start()
+        child_zmq_addr_pipe.close()
+        (
+            front_publish_address,
+            back_output_address,
+            back_publish_address,
+        ) = self._wait_for_zmq_addrs(parent_zmq_addr_pipe)
 
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address
@@ -104,13 +131,16 @@ class DPCoordinator:
         """Returns tuple of ZMQ input address, output address."""
         return self.coord_in_address, self.coord_out_address
 
-    def close(self):
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown coordinator process with configurable timeout."""
+        if self._finalizer.detach() is not None:
+            shutdown([self.proc], timeout=timeout)
 
 
 class EngineState:
     def __init__(self):
-        self.request_counts = [0, 0]  # [waiting, running]
+        # [waiting, running, kv_cache_usage]
+        self.request_counts: list[int | float] = [0, 0, 0.0]
 
 
 class DPCoordinatorProc:
@@ -134,6 +164,7 @@ class DPCoordinatorProc:
         front_publish_address: str,
         back_output_address: str,
         back_publish_address: str,
+        zmq_addr_pipe=None,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
     ):
@@ -147,15 +178,20 @@ class DPCoordinatorProc:
                 front_publish_address,
                 back_output_address,
                 back_publish_address,
+                zmq_addr_pipe,
             )
         except KeyboardInterrupt:
             logger.info("DP Coordinator process exiting")
+        finally:
+            if zmq_addr_pipe is not None:
+                zmq_addr_pipe.close()
 
     def process_input_socket(
         self,
         front_publish_address: str,
         back_output_address: str,
         back_publish_address: str,
+        zmq_addr_pipe=None,
     ):
         decoder = MsgpackDecoder(EngineCoreOutputs)
 
@@ -167,7 +203,7 @@ class DPCoordinatorProc:
         stats_changed = False
         last_stats_step = -1
         last_stats_wave = -1
-        last_step_counts: list[list[int]] | None = None
+        last_step_counts: list[list[int | float]] | None = None
 
         with (
             make_zmq_socket(
@@ -189,6 +225,17 @@ class DPCoordinatorProc:
                 bind=True,
             ) as publish_back,
         ):
+            if zmq_addr_pipe is not None:
+                try:
+                    zmq_addr_pipe.send(
+                        (
+                            publish_front.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                            output_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                            publish_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                        )
+                    )
+                finally:
+                    zmq_addr_pipe.close()
             # Wait until all engines subscribe.
             for _ in self.engines:
                 if publish_back.recv() != b"\x01":
@@ -214,8 +261,12 @@ class DPCoordinatorProc:
                 wait_for = self.stats_update_interval_ms if stats_changed else 5000
 
                 # Wait at least 50ms to ensure we've received all stats for
-                # the current step.
-                min_timeout = 50 if last_step_counts is None else 0
+                # the current step. Only applicable to lockstep (MoE) DP;
+                # non-lockstep engines have no synchronized step boundaries.
+                if self.enable_wave_coordination and last_step_counts is None:
+                    min_timeout = 50
+                else:
+                    min_timeout = 0
 
                 events = poller.poll(timeout=max(min_timeout, wait_for - elapsed))
                 if not events:
@@ -246,9 +297,9 @@ class DPCoordinatorProc:
                         # Subscription message, on the other hand, is sent
                         # by each engine during initialization
                         publish_back.send(b"READY")
-                    else:
+                    elif buffer != b"\x00":
                         logger.error(
-                            "DP Coordinator receives unexpected message from engines"
+                            "DP Coordinator received unexpected message from engines"
                         )
 
                 if publish_front in events:
@@ -307,8 +358,10 @@ class DPCoordinatorProc:
                                 # is handled by all the engines.
                                 engine_to_exclude = None
 
-                            engines_running = True
-                            wave_state_changed = True
+                            # engines_running is only set from the engines'
+                            # own notifications; a paused engine discards
+                            # START_DP_WAVE, so sending it is not evidence
+                            # that the engines are running.
                             self._send_start_wave(
                                 publish_back, current_wave, engine_to_exclude
                             )
@@ -325,35 +378,44 @@ class DPCoordinatorProc:
                     eng_index = outputs.engine_index
                     scheduler_stats = outputs.scheduler_stats
                     if scheduler_stats:
+                        # Elastic EP stats may arrive while the engine list changes.
+                        if eng_index >= len(self.engines):
+                            continue
                         # 1. Updated request load stats - update our local
                         # state with these.
                         stats = self.engines[eng_index].request_counts
-                        stats_step = scheduler_stats.step_counter
-                        stats_wave = scheduler_stats.current_wave
-                        if (
-                            stats_wave > last_stats_wave
-                            or stats_wave == last_stats_wave
-                            and stats_step > last_stats_step
-                        ):
-                            if stats_changed:
-                                last_step_counts = self._get_engine_counts(do_copy=True)
-                            last_stats_step = stats_step
-                            last_stats_wave = stats_wave
-                        elif stats_wave != last_stats_wave or (
-                            stats_step != last_stats_step
-                        ):
-                            logger.warning(
-                                "Received stats for out-of-order "
-                                "step (%d, %d) from engine %d (expected "
-                                "> (%d, %d))",
-                                stats_wave,
-                                stats_step,
-                                eng_index,
-                                last_stats_wave,
-                                last_stats_step,
-                            )
+                        if self.enable_wave_coordination:
+                            # Steps are synchronized across lockstep (MoE) DP
+                            # ranks; snapshot counts at step boundaries.
+                            stats_step = scheduler_stats.step_counter
+                            stats_wave = scheduler_stats.current_wave
+                            if (
+                                stats_wave > last_stats_wave
+                                or stats_wave == last_stats_wave
+                                and stats_step > last_stats_step
+                            ):
+                                if stats_changed:
+                                    last_step_counts = self._get_engine_counts(
+                                        do_copy=True
+                                    )
+                                last_stats_step = stats_step
+                                last_stats_wave = stats_wave
+                            elif stats_wave != last_stats_wave or (
+                                stats_step != last_stats_step
+                            ):
+                                logger.warning(
+                                    "Received stats for out-of-order "
+                                    "step (%d, %d) from engine %d (expected "
+                                    "> (%d, %d))",
+                                    stats_wave,
+                                    stats_step,
+                                    eng_index,
+                                    last_stats_wave,
+                                    last_stats_step,
+                                )
                         stats[0] = scheduler_stats.num_waiting_reqs
                         stats[1] = scheduler_stats.num_running_reqs
+                        stats[2] = scheduler_stats.kv_cache_usage
                         stats_changed = True
 
                     # Wave coordination: handle wave completion and start notifications
@@ -406,7 +468,7 @@ class DPCoordinatorProc:
         wave_encoded = msgspec.msgpack.encode((wave, exclude_engine_index))
         socket.send_multipart((EngineCoreRequestType.START_DP_WAVE.value, wave_encoded))
 
-    def _get_engine_counts(self, do_copy=False) -> list[list[int]]:
+    def _get_engine_counts(self, do_copy=False) -> list[list[int | float]]:
         """Return list of [waiting, running] count lists for each engine."""
         if do_copy:
             return [copy.copy(e.request_counts) for e in self.engines]

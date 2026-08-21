@@ -33,6 +33,7 @@ from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
 )
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import MulAndSilu, SiluAndMul, get_act_fn
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
@@ -50,11 +51,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
@@ -89,7 +88,6 @@ from .utils import (
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -489,7 +487,7 @@ class Molmo2VisionTransformer(nn.Module):
         self.transformer = Molmo2VisionBlockCollection(
             config,
             quant_config,
-            prefix=f"{prefix}.transformer",
+            prefix=maybe_prefix(prefix, "transformer"),
         )
 
     def add_pos_emb(self, x: torch.Tensor, patch_num: int) -> torch.Tensor:
@@ -709,6 +707,20 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
         "merged_linear": ["gate_proj", "up_proj"],
     }
 
+    # Runs after the top-level mapper, so image_pooling_2d/image_projector
+    # source names are already renamed to q/k/v_proj and gate/up_proj.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            "wq": ("merged_qkv", "q"),
+            "wk": ("merged_qkv", "k"),
+            "wv": ("merged_qkv", "v"),
+            "k_proj": ("merged_kv", 0),
+            "v_proj": ("merged_kv", 1),
+            "gate_proj": ("merged_linear", 0),
+            "up_proj": ("merged_linear", 1),
+        },
+    )
+
     def __init__(
         self,
         vit_config: VitConfig,
@@ -839,43 +851,8 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
         ]
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("merged_qkv", "wq", "q"),
-            ("merged_qkv", "wk", "k"),
-            ("merged_qkv", "wv", "v"),
-            ("merged_kv", "k_proj", 0),
-            ("merged_kv", "v_proj", 1),
-            ("merged_linear", "gate_proj", 0),
-            ("merged_linear", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Molmo2Attention(nn.Module):
@@ -1242,20 +1219,7 @@ class Molmo2TextModel(nn.Module, SupportsQuant):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        return AutoWeightsLoader(self).load_weights(weights)
 
 
 def get_patches_grid_size(
@@ -1338,6 +1302,9 @@ def exif_transpose(
 def build_flat_image_bool_length(
     image_grids: torch.LongTensor,
     hf_config: PretrainedConfig,
+    image_use_col_tokens: bool = True,
+    use_single_crop_col_tokens: bool | None = None,
+    use_single_crop_start_token: bool = True,
 ) -> tuple[torch.LongTensor, torch.LongTensor]:
     image_patch_id = hf_config.image_patch_id
     low_res_image_start_id = hf_config.low_res_image_start_token_id
@@ -1353,7 +1320,17 @@ def build_flat_image_bool_length(
     h = image_grids[:, 2]
     w = image_grids[:, 3]
 
-    lengths = resized_h * resized_w + h * (w + 1) + 4  # [B]
+    low_res_use_col_tokens = (
+        image_use_col_tokens
+        if use_single_crop_col_tokens is None
+        else use_single_crop_col_tokens
+    )
+    low_res_extra = int(low_res_use_col_tokens)
+    high_res_extra = int(image_use_col_tokens)
+
+    lengths = (
+        resized_h * (resized_w + low_res_extra) + h * (w + high_res_extra) + 4
+    )  # [B]
     total_len = int(lengths.sum().item())
 
     flat = torch.empty(total_len, dtype=torch.long, device=device)
@@ -1363,16 +1340,24 @@ def build_flat_image_bool_length(
         resized_h_i, resized_w_i, h_i, w_i = image_grids[i].tolist()
         L_i = int(lengths[i].item())
 
-        num_low_res_patches = resized_h_i * resized_w_i
-
         idx = offset
 
-        flat[idx] = low_res_image_start_id
+        flat[idx] = (
+            low_res_image_start_id if use_single_crop_start_token else image_start_id
+        )
         idx += 1
 
-        if num_low_res_patches > 0:
-            flat[idx : idx + num_low_res_patches] = image_patch_id
-            idx += num_low_res_patches
+        low_res_block_len = resized_w_i + low_res_extra
+        if low_res_block_len > 0 and resized_h_i > 0:
+            line = torch.empty(low_res_block_len, dtype=torch.long, device=device)
+            if resized_w_i > 0:
+                line[:resized_w_i] = image_patch_id
+            if low_res_use_col_tokens:
+                line[resized_w_i] = image_col_id
+
+            block = line.repeat(resized_h_i)
+            flat[idx : idx + resized_h_i * low_res_block_len] = block
+            idx += resized_h_i * low_res_block_len
 
         flat[idx] = image_end_id
         idx += 1
@@ -1380,12 +1365,13 @@ def build_flat_image_bool_length(
         flat[idx] = image_start_id
         idx += 1
 
-        block_len = w_i + 1
+        block_len = w_i + high_res_extra
         if block_len > 0 and h_i > 0:
             line = torch.empty(block_len, dtype=torch.long, device=device)
             if w_i > 0:
                 line[:w_i] = image_patch_id
-            line[w_i] = image_col_id
+            if image_use_col_tokens:
+                line[w_i] = image_col_id
 
             block = line.repeat(h_i)
             flat[idx : idx + h_i * block_len] = block
@@ -1913,22 +1899,32 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
         height: int,
         num_frames: int,
         num_videos: int,
+        overrides: VideoDummyOptions | None = None,
     ) -> list[VideoItem]:
-        video = np.full((num_frames, height, width, 3), 255, dtype=np.uint8)
+        videos = super()._get_dummy_videos(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_videos=num_videos,
+            overrides=overrides,
+        )
+        videos = [v.copy() for v in videos]
+
         video_items = []
-        for i in range(num_videos):
+        for video in videos:
+            video_num_frames = video.shape[0]
             video_metadata = {
                 "fps": 2.0,
-                "duration": num_frames / 2.0,
-                "total_num_frames": num_frames,
-                "frames_indices": list(range(num_frames)),
+                "duration": video_num_frames / 2.0,
+                "total_num_frames": video_num_frames,
+                "frames_indices": list(range(video_num_frames)),
                 "video_backend": "decord",
                 "do_sample_frames": False,
                 "height": height,
                 "width": width,
             }
-            video_item = (video.copy(), video_metadata)
-            video_items.append(video_item)
+            video_items.append((video, video_metadata))
+
         return video_items
 
 
@@ -1952,7 +1948,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
 
@@ -2012,7 +2007,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 video_outputs = self.info.ctx.call_hf_processor(
                     patched_call,
                     dict(text=VIDEO_PROMPT, **video_mm_data),
-                    dict(**video_mm_kwargs, **tok_kwargs),
+                    video_mm_kwargs,
                 )
 
                 input_ids = video_outputs.pop("input_ids")
@@ -2062,7 +2057,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         processed_outputs = self.info.ctx.call_hf_processor(
             patched_call,
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            mm_kwargs,
         )
 
         if (images := mm_data.get("images")) is not None:
@@ -2098,7 +2093,13 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             (
                 processed_outputs["image_tokens"],
                 processed_outputs["num_image_tokens"],
-            ) = build_flat_image_bool_length(image_grids, hf_config)
+            ) = build_flat_image_bool_length(
+                image_grids,
+                hf_config,
+                image_use_col_tokens=hf_processor.image_use_col_tokens,
+                use_single_crop_col_tokens=hf_processor.use_single_crop_col_tokens,
+                use_single_crop_start_token=hf_processor.use_single_crop_start_token,
+            )
 
         return BatchFeature({**processed_outputs, **all_video_outputs})
 
@@ -2125,26 +2126,30 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             image_token_pooling=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_pooled_patches
             ),
-            image_num_crops=MultiModalFieldConfig.batched("image"),
-            image_num_pooled_patches=MultiModalFieldConfig.batched("image"),
-            image_num_patches=MultiModalFieldConfig.batched("image"),
+            image_num_crops=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            image_num_pooled_patches=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
+            image_num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_tokens=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_image_tokens
             ),
-            num_image_tokens=MultiModalFieldConfig.batched("image"),
+            num_image_tokens=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_crops
             ),
             video_token_pooling=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_pooled_patches
             ),
-            video_num_crops=MultiModalFieldConfig.batched("video"),
-            video_num_pooled_patches=MultiModalFieldConfig.batched("video"),
-            video_num_patches=MultiModalFieldConfig.batched("video"),
+            video_num_crops=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            video_num_pooled_patches=MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            ),
+            video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             video_tokens=MultiModalFieldConfig.flat_from_sizes(
                 "video", num_video_tokens
             ),
-            num_video_tokens=MultiModalFieldConfig.batched("video"),
+            num_video_tokens=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(

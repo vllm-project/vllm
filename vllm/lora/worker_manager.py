@@ -7,6 +7,7 @@ from typing import Any, Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.lora import LoRAConfig
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
@@ -18,6 +19,7 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
 
@@ -45,7 +47,10 @@ class WorkerLoRAManager:
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.lora_config = vllm_config.lora_config
+        lora_config = vllm_config.lora_config
+        if lora_config is None:
+            raise ValueError("LoRA config must be set for WorkerLoRAManager.")
+        self.lora_config: LoRAConfig = lora_config
 
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()
@@ -81,8 +86,10 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
+        if vllm_config is None:
+            raise ValueError("vllm_config must be provided to create a LoRA manager.")
         lora_manager = create_lora_manager(
             model,
             max_num_seqs=self.max_num_seqs,
@@ -121,10 +128,13 @@ class WorkerLoRAManager:
             # loading weights, throwing an exception if validation fails.
             peft_helper.validate_legal(self.lora_config)
 
-            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
-            # to ensure correct loading of lora weights.
+            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper to ensure
+            # correct loading of lora weights. We only need to know about renames for
+            # this, so we use get_rename_mapper() to ignore stacking and deletions.
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
+            if hf_to_vllm_mapper is not None:
+                hf_to_vllm_mapper = hf_to_vllm_mapper.get_rename_mapper()
 
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
@@ -140,7 +150,12 @@ class WorkerLoRAManager:
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
+                moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
             )
+            # Stamp the on-disk MoE layout onto the loaded model so the
+            # adapter manager can route 3D-format checkpoints through the
+            # 3D->2D conversion when running under the universal 2D wrapper.
+            lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
@@ -168,6 +183,9 @@ class WorkerLoRAManager:
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._adapter_manager.add_adapter(dummy_lora)
+
+    def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
+        return self._adapter_manager.get_dummy_lora_warmup_rank(default_rank)
 
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
@@ -205,9 +223,11 @@ class WorkerLoRAManager:
     def add_adapter(self, adapter_request: Any) -> bool:
         if adapter_request.adapter_id in self.list_adapters():
             return False
-        loaded_adapter = self._load_adapter(adapter_request)
-        loaded = self._adapter_manager.add_adapter(loaded_adapter)
-        self._adapter_manager.activate_adapter(loaded_adapter.id)
+        # One-time per adapter
+        with gpu_sync_allowed():
+            loaded_adapter = self._load_adapter(adapter_request)
+            loaded = self._adapter_manager.add_adapter(loaded_adapter)
+            self._adapter_manager.activate_adapter(loaded_adapter.id)
         return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
@@ -232,8 +252,10 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
+        if vllm_config is None:
+            raise ValueError("vllm_config must be provided to create a LoRA manager.")
         lora_manager = create_lora_manager(
             model,
             lora_manager_cls=self._manager_cls,
@@ -268,32 +290,34 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if (
-            lora_request.lora_int_id not in self.list_adapters()
-            or lora_request.load_inplace
-        ):
-            # Load the new adapter first to ensure it is actually valid, before
-            # evicting any existing adapters.
-            # This may cause the # of loaded lora adapters to very temporarily
-            # exceed `--max-cpu-loras`.
-            lora = self._load_adapter(lora_request)
+        with gpu_sync_allowed():
+            if (
+                lora_request.lora_int_id not in self.list_adapters()
+                or lora_request.load_inplace
+            ):
+                # Load the new adapter first to ensure it is actually valid, before
+                # evicting any existing adapters.
+                # This may cause the # of loaded lora adapters to very temporarily
+                # exceed `--max-cpu-loras`.
+                lora = self._load_adapter(lora_request)
 
-            # Remove the existing adapter if it exists
-            # Use case for LoRA inplace
-            self._adapter_manager.remove_adapter(lora.id)
+                # Remove the existing adapter if it exists
+                # Use case for LoRA inplace
+                self._adapter_manager.remove_adapter(lora.id)
 
-            # Loading succeeded, now check if we will exceed cache capacity and
-            # evict if the oldest adapter if so
-            if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
-                assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
-                self._adapter_manager.remove_oldest_adapter()
-            # Then add the new adapter to the cache
-            loaded = self._adapter_manager.add_adapter(lora)
-        else:
-            # If the lora is already loaded, just touch it to
-            # update its position in the caches
-            loaded = (
-                self._adapter_manager.get_adapter(lora_request.lora_int_id) is not None
-            )
-        self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+                # Loading succeeded, now check if we will exceed cache capacity and
+                # evict if the oldest adapter if so
+                if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
+                    assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
+                    self._adapter_manager.remove_oldest_adapter()
+                # Then add the new adapter to the cache
+                loaded = self._adapter_manager.add_adapter(lora)
+            else:
+                # If the lora is already loaded, just touch it to
+                # update its position in the caches
+                loaded = (
+                    self._adapter_manager.get_adapter(lora_request.lora_int_id)
+                    is not None
+                )
+            self._adapter_manager.activate_adapter(lora_request.lora_int_id)
         return loaded

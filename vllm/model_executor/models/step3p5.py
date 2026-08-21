@@ -23,8 +23,11 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    MoERunner,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -50,6 +53,7 @@ from .utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -267,11 +271,11 @@ class Step3p5Attention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm inline similar to Qwen3 MOE attention
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head.contiguous())
+        q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
 
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head.contiguous())
+        k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
         if self.use_rope:
             q, k = self.rotary_emb(positions, q, k)
@@ -299,7 +303,6 @@ class FusedMoEBlock(nn.Module):
         self.layer_idx = extract_layer_index(prefix)
 
         self.ep_size = get_ep_group().device_group.size()
-        self.ep_rank = get_ep_group().device_group.rank()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
@@ -311,11 +314,6 @@ class FusedMoEBlock(nn.Module):
         self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         if self.tp_size > config.moe_num_experts:
             raise ValueError(
@@ -372,14 +370,13 @@ class FusedMoEBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.share_expert",
         )
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.share_expert,
             gate=self.gate,
             num_experts=config.moe_num_experts,
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_expert_weight,
             quant_config=quant_config,
             activation=activation,
@@ -396,30 +393,9 @@ class FusedMoEBlock(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states, router_logits=hidden_states
-            )
-        else:
-            # router_logits: (num_tokens, n_experts)
-            router_logits, _ = self.gate(hidden_states)
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
-            )
-
-        shared_output, final_hidden_states = fused_moe_out
-        if self.share_expert is None:
-            assert shared_output is None
-
-        if self.share_expert is not None:
-            assert shared_output is not None
-            final_hidden_states += shared_output
-
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=hidden_states
+        )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -641,16 +617,79 @@ class Step3p5Model(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        base_layer = (
+            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
+        )
 
         # Old packed 3D format: .moe.gate_proj.weight [num_experts, out, in]
         expert_params_mapping = [
-            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2"),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.gate_proj.weight",
+                "w1",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.up_proj.weight",
+                "w3",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w2_weight",
+                ".moe.down_proj.weight",
+                "w2",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale_2",
+                ".moe.gate_proj.weight_scale_2",
+                "w1",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale_2",
+                ".moe.up_proj.weight_scale_2",
+                "w3",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w2_weight_scale_2",
+                ".moe.down_proj.weight_scale_2",
+                "w2",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale",
+                ".moe.gate_proj.weight_scale",
+                "w1",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale",
+                ".moe.up_proj.weight_scale",
+                "w3",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w2_weight_scale",
+                ".moe.down_proj.weight_scale",
+                "w2",
+            ),
+            # Required due to the Step3 HF model's packed expert format:
+            # input scales are stored as moe.{gate,up,down}_proj.input_scale
+            # rather than the standard per-expert format handled generically.
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_input_scale",
+                ".moe.gate_proj.input_scale",
+                "w1",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_input_scale",
+                ".moe.up_proj.input_scale",
+                "w3",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w2_input_scale",
+                ".moe.down_proj.input_scale",
+                "w2",
+            ),
         ]
 
         # New per-expert format: .moe.experts.E.gate_proj.weight_packed [out, in]
-        per_expert_mapping = FusedMoE.make_expert_params_mapping(
+        per_expert_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -766,7 +805,11 @@ class Step3p5Model(nn.Module):
                     # Per-tensor global scales (e.g. weight_global_scale)
                     # have shape [1] in compressed-tensors NVFP4 checkpoints.
                     # Expand to per-expert before the iteration loop.
-                    if (
+                    if loaded_weight.ndim == 0:
+                        loaded_weight = loaded_weight.unsqueeze(0).expand(
+                            moe_expert_num
+                        )
+                    elif (
                         loaded_weight.shape[0] == 1
                         and loaded_weight.shape[0] != moe_expert_num
                     ):
@@ -827,6 +870,12 @@ class Step3p5Model(nn.Module):
 
 
 class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+    # Required so quantization exclude lists match fused module prefixes.
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".share_expert.": ".moe.share_expert."}
     )
@@ -858,17 +907,17 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         )
 
         # Set MoE hyperparameters
-        self.moe_layers: list[FusedMoEBlock] = []
+        self.moe_layers: list[MoERunner] = []
+        example_layer: FusedMoEBlock | None = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
             assert isinstance(layer, Step3p5DecoderLayer)
             if hasattr(layer, "moe") and isinstance(layer.moe, FusedMoEBlock):
-                self.moe_layers.append(layer.moe)
+                example_layer = layer.moe
+                self.moe_layers.append(layer.moe.experts)
 
-        self.expert_weights = []
         assert len(self.moe_layers) > 0, "No MoE layers found in the model."
-        example_layer = self.moe_layers[0]
         self.num_moe_layers = len(self.moe_layers)
         self.num_expert_groups = 1
         self.num_shared_experts = 0
@@ -898,24 +947,6 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_tokens(input_ids)
 
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            experts = layer.experts
-            assert isinstance(experts, FusedMoE)
-            # Register the expert weights.
-            self.expert_weights.append(experts.get_expert_weights())
-            experts.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -935,18 +966,3 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-
-def get_spec_layer_idx_from_weight_name(
-    config: ModelConfig, weight_name: str
-) -> int | None:
-    if hasattr(config, "num_nextn_predict_layers") and (
-        config.num_nextn_predict_layers > 0
-    ):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(
-                f"layers.{layer_idx + i}."  # Step3p5Model
-            ) or weight_name.startswith(f"model.layers.{layer_idx + i}."):  # Step3p5MTP
-                return layer_idx + i
-    return None

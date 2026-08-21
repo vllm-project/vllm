@@ -30,9 +30,9 @@ def main(argv):
     args = parser.parse_args(argv)
 
     for file in (
-        *glob.glob("requirements/*.txt"),
-        *glob.glob("requirements/*.in"),
-        "pyproject.toml",
+        *glob.glob("requirements/**/*.txt", recursive=True),
+        *glob.glob("requirements/**/*.in", recursive=True),
+        *glob.glob("pyproject.toml"),
     ):
         with open(file) as f:
             lines = f.readlines()

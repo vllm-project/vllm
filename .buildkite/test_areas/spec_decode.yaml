@@ -1,0 +1,359 @@
+group: Spec Decode
+depends_on:
+  - image-build
+steps:
+- label: ":nvidia: (H200) V1 Spec Decode"
+  device: h200_35gb
+  key: v1-spec-decode
+  timeout_in_minutes: 40
+  source_file_dependencies:
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/inputs/
+    - vllm/model_executor/
+    - vllm/platforms/
+    - vllm/sampling_params.py
+    - vllm/transformers_utils/
+    - vllm/utils/
+    - vllm/v1/
+    - tests/v1/spec_decode
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # TODO: create another `optional` test group for slow tests
+    - pytest -v -s -m 'not slow_test' v1/spec_decode
+  mirror:
+    amd:
+      label: ":amd: (MI300) V1 Spec Decode"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 50
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200) Spec Decode Eagle 1: DeepSeek + Qwen"
+  key: spec-decode-eagle-1-deepseek-qwen
+  timeout_in_minutes: 25
+  device: h200_35gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/eagle/ -k "deepseek_eagle or qwen3_eagle3"
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode Eagle 1: DeepSeek + Qwen"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/sample/
+      - vllm/model_executor/layers/
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
+  key: spec-decode-eagle-2-llama3-qwen-vl-other
+  timeout_in_minutes: 25
+  device: h200_35gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/eagle/ -k "not deepseek_eagle and not qwen3_eagle3"
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/sample/
+      - vllm/model_executor/layers/
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (B200) Spec Decode Eagle Nightly"
+  key: spec-decode-eagle-nightly-b200
+  timeout_in_minutes: 25
+  device: b200-k8s
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/eagle/
+
+- label: ":nvidia: (H200) Spec Decode Speculators + MTP"
+  key: spec-decode-speculators-mtp
+  timeout_in_minutes: 50
+  device: h200_35gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/v1/attention/backends/
+    - vllm/transformers_utils/configs/speculators/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/speculators/
+    - pytest -v -s v1/e2e/spec_decode/mtp/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode Speculators + MTP"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 75
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/sample/
+      - vllm/model_executor/layers/
+      - vllm/transformers_utils/configs/speculators/
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (B200) Spec Decode Speculators + MTP Nightly"
+  key: spec-decode-speculators-mtp-nightly-b200
+  timeout_in_minutes: 30
+  device: b200-k8s
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/transformers_utils/configs/speculators/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/speculators/
+    - pytest -v -s v1/e2e/spec_decode/mtp/
+
+- label: ":nvidia: (H200) Spec Decode N-Gram + Suffix"
+  key: spec-decode-ngram-suffix
+  timeout_in_minutes: 20
+  device: h200_35gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+    - tests/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
+    - python3 spec_decode/test_custom_proposer.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode N-Gram + Suffix"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 35
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/sample/
+      - vllm/model_executor/layers/
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200) Spec Decode Draft Model"
+  key: spec-decode-draft-model
+  timeout_in_minutes: 45
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/draft_model/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode Draft Model"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/sample/
+      - vllm/model_executor/layers/
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (B200) Spec Decode Draft Model Nightly"
+  key: spec-decode-draft-model-nightly-b200
+  timeout_in_minutes: 40
+  device: b200-k8s
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/draft_model/
+
+- label: ":nvidia: (H100) Speculators Correctness Nightly"
+  key: speculators-correctness
+  timeout_in_minutes: 30
+  device: h100
+  optional: true
+  num_devices: 1
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/dflash/
+    - vllm/model_executor/models/qwen3_dflash.py
+    - tests/v1/spec_decode/test_speculators_correctness.py
+  commands:
+    - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+    - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
+  mirror:
+    amd:
+      label: ":amd: (MI300) Speculators Correctness Nightly"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (B200) Spec Decode DeepSeek MTP Parallel Load"
+  key: spec-decode-deepseek-mtp-parallel-load-2xb200-2xmi300
+  timeout_in_minutes: 30
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/v1/spec_decode/llm_base_proposer.py
+    - vllm/v1/spec_decode/eagle.py
+    - vllm/v1/worker/gpu/spec_decode/eagle/
+    - vllm/model_executor/models/deepseek_mtp.py
+    - vllm/model_executor/models/deepseek_v2.py
+    - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode DeepSeek MTP Parallel Load"
+      dind: false
+      device: mi300_2
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/
+      - vllm/model_executor/models/deepseek_mtp.py
+      - vllm/model_executor/models/deepseek_v2.py
+      - vllm/v1/attention/
+      - vllm/v1/engine/
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/worker/gpu_model_runner.py
+      - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200) Spec Decode AL DFlash Nightly"
+  key: spec-decode-dflash-nightly
+  timeout_in_minutes: 90
+  device: h200_35gb
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/model_executor/models/qwen3_dflash.py
+    - vllm/model_executor/models/laguna_dflash.py
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode AL DFlash Nightly"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 120
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/attention/
+      - vllm/v1/sample/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/
+      - vllm/model_executor/models/qwen2.py
+      - vllm/model_executor/models/qwen3.py
+      - vllm/model_executor/models/qwen3_dflash.py
+      - vllm/model_executor/models/laguna.py
+      - vllm/model_executor/models/laguna_dflash.py
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200) Spec Decode AL DSpark Nightly"
+  key: spec-decode-dspark-nightly
+  timeout_in_minutes: 60
+  device: h200_35gb
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/model_executor/models/qwen3_dspark.py
+    - vllm/model_executor/models/gemma4_dspark.py
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode AL DSpark Nightly"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/attention/
+      - vllm/v1/sample/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/
+      - vllm/model_executor/models/qwen2.py
+      - vllm/model_executor/models/qwen3.py
+      - vllm/model_executor/models/qwen3_dflash.py
+      - vllm/model_executor/models/qwen3_dspark.py
+      - vllm/model_executor/models/gemma4.py
+      - vllm/model_executor/models/gemma4_mm.py
+      - vllm/model_executor/models/gemma4_unified.py
+      - vllm/model_executor/models/gemma4_mtp.py
+      - vllm/model_executor/models/gemma4_dspark.py
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200) Spec Decode AL MTP + Other Acceptance Nightly"
+  key: spec-decode-mtp-other-acceptance-nightly
+  timeout_in_minutes: 60
+  device: h200_35gb
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/conftest.py
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/

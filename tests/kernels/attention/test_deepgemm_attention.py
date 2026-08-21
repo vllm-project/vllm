@@ -9,10 +9,11 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     _ceil_to_ue8m0,
     calc_diff,
-    fp8_mqa_logits,
-    fp8_paged_mqa_logits,
+    fp8_fp4_mqa_logits,
+    fp8_fp4_paged_mqa_logits,
     get_num_sms,
     get_paged_mqa_logits_metadata,
+    native_next_n_supported,
 )
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
@@ -127,8 +128,8 @@ def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
 
                 q_fp8 = q.to(torch.float8_e4m3fn)
                 kv_fp8 = per_custom_dims_cast_to_fp8(kv, (0,), False)
-                logits = fp8_mqa_logits(
-                    q_fp8, kv_fp8, weights, ks, ke, clean_logits=clean_logits
+                logits = fp8_fp4_mqa_logits(
+                    (q_fp8, None), kv_fp8, weights, ks, ke, clean_logits=clean_logits
                 )
 
                 ref_logits = _ref_fp8_mqa_logits(
@@ -150,7 +151,7 @@ def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
                 assert diff < 1e-3, f"{diff=}"
 
 
-def _ref_fp8_paged_mqa_logits(
+def _ref_fp8_fp4_paged_mqa_logits(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
     weights: torch.Tensor,
@@ -205,96 +206,110 @@ def _ref_fp8_paged_mqa_logits(
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
-@pytest.mark.parametrize("clean_logits", [True, False])
-def test_deepgemm_fp8_paged_mqa_logits(clean_logits: bool):
+# next_n = 1 + num_speculative_tokens, so next_n=4 is MTP=3 (issue #35878).
+@pytest.mark.parametrize("batch_size,next_n", [(4, 1), (2, 2), (2, 4)])
+def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
+    if not native_next_n_supported(next_n):
+        pytest.skip(f"next_n={next_n} has no native kernel on this architecture")
+
+    # NOTE: clean_logits=True is incompatible with the 2D context_lens
+    # required by csrc/apis/attention.hpp; only the False path is exercised.
+    clean_logits = False
     torch.manual_seed(0)
     random.seed(0)
 
     max_model_len = 4096
-    for batch_size, next_n in [(4, 1), (2, 2)]:
-        for heads, index_dim in [(32, 128)]:
-            for avg_kv in (2048,):
-                num_blocks, blocksize = max_model_len * 2, 64
+    for heads, index_dim in [(32, 128)]:
+        for avg_kv in (2048,):
+            num_blocks, blocksize = max_model_len * 2, 64
 
-                q = torch.randn(
-                    (batch_size, next_n, heads, index_dim),
-                    device="cuda",
-                    dtype=torch.bfloat16,
-                )
-                kv_cache = torch.randn(
-                    (num_blocks, blocksize, 1, index_dim),
-                    device="cuda",
-                    dtype=torch.bfloat16,
-                )
-                weights = torch.randn(
-                    (batch_size * next_n, heads),
-                    device="cuda",
-                    dtype=torch.float32,
-                )
+            q = torch.randn(
+                (batch_size, next_n, heads, index_dim),
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            kv_cache = torch.randn(
+                (num_blocks, blocksize, 1, index_dim),
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            weights = torch.randn(
+                (batch_size * next_n, heads),
+                device="cuda",
+                dtype=torch.float32,
+            )
 
-                context_lens = (
-                    torch.randint(int(0.8 * avg_kv), int(1.2 * avg_kv), (batch_size,))
-                    .cuda()
-                    .to(torch.int32)
-                )
-                max_block_len = (
-                    (context_lens.max().item() + blocksize - 1) // blocksize * blocksize
-                )
-                block_tables = torch.zeros(
-                    (batch_size, max_block_len),
-                    device="cuda",
-                    dtype=torch.int32,
-                )
+            context_lens = (
+                torch.randint(int(0.8 * avg_kv), int(1.2 * avg_kv), (batch_size,))
+                .cuda()
+                .to(torch.int32)
+            )
+            max_block_len = (
+                (context_lens.max().item() + blocksize - 1) // blocksize * blocksize
+            )
+            block_tables = torch.zeros(
+                (batch_size, max_block_len),
+                device="cuda",
+                dtype=torch.int32,
+            )
 
-                counter = 0
-                block_idx_pool = list(range(num_blocks))
-                random.shuffle(block_idx_pool)
-                for i in range(batch_size):
-                    ctx_len = int(context_lens[i].item())
-                    for j in range((ctx_len + blocksize - 1) // blocksize):
-                        block_tables[i][j] = block_idx_pool[counter]
-                        counter += 1
+            counter = 0
+            block_idx_pool = list(range(num_blocks))
+            random.shuffle(block_idx_pool)
+            for i in range(batch_size):
+                ctx_len = int(context_lens[i].item())
+                for j in range((ctx_len + blocksize - 1) // blocksize):
+                    block_tables[i][j] = block_idx_pool[counter]
+                    counter += 1
 
-                q_fp8 = q.to(torch.float8_e4m3fn)
-                kv_cache_fp8 = kv_cache_cast_to_fp8(kv_cache)
+            q_fp8 = q.to(torch.float8_e4m3fn)
+            kv_cache_fp8 = kv_cache_cast_to_fp8(kv_cache)
 
-                schedule_metadata = get_paged_mqa_logits_metadata(
-                    context_lens, blocksize, get_num_sms()
-                )
-                logits = fp8_paged_mqa_logits(
-                    q_fp8,
-                    kv_cache_fp8,
-                    weights,
-                    context_lens,
-                    block_tables,
-                    schedule_metadata,
-                    max_model_len,
-                    clean_logits=clean_logits,
-                )
+            # deep_gemm paged MQA logits requires 2D context_lens of
+            # shape (B, next_n) (csrc/apis/attention.hpp:332-335);
+            # see indexer.py:607-608. For each batch/next_n token, the
+            # effective context length is context_lens[b] - next_n + j + 1.
+            next_n_arange = torch.arange(next_n, device="cuda", dtype=torch.int32)
+            context_lens_2d = (
+                context_lens.unsqueeze(-1) - next_n + 1 + next_n_arange
+            ).contiguous()
+            schedule_metadata = get_paged_mqa_logits_metadata(
+                context_lens_2d,
+                blocksize,
+                get_num_sms(),
+            )
+            logits = fp8_fp4_paged_mqa_logits(
+                (q_fp8, None),
+                kv_cache_fp8,
+                weights,
+                context_lens_2d,
+                block_tables,
+                schedule_metadata,
+                max_model_len,
+                clean_logits=clean_logits,
+            )
 
-                ref_logits = _ref_fp8_paged_mqa_logits(
-                    q,
-                    kv_cache,
-                    weights,
-                    context_lens,
-                    block_tables,
-                    max_model_len,
-                )
+            ref_logits = _ref_fp8_fp4_paged_mqa_logits(
+                q,
+                kv_cache,
+                weights,
+                context_lens,
+                block_tables,
+                max_model_len,
+            )
 
-                positions = (
-                    torch.arange(max_model_len, device="cuda")
-                    .unsqueeze(0)
-                    .expand(batch_size * next_n, -1)
-                )
-                row_indices = torch.arange(batch_size * next_n, device="cuda") // next_n
-                next_n_offset = (
-                    torch.arange(batch_size * next_n, device="cuda") % next_n
-                )
-                mask = positions <= (
-                    context_lens[row_indices] - next_n + next_n_offset
-                ).unsqueeze(1)
+            positions = (
+                torch.arange(max_model_len, device="cuda")
+                .unsqueeze(0)
+                .expand(batch_size * next_n, -1)
+            )
+            row_indices = torch.arange(batch_size * next_n, device="cuda") // next_n
+            next_n_offset = torch.arange(batch_size * next_n, device="cuda") % next_n
+            mask = positions <= (
+                context_lens[row_indices] - next_n + next_n_offset
+            ).unsqueeze(1)
 
-                logits = logits.masked_fill(~mask, 0)
-                ref_logits = ref_logits.masked_fill(~mask, 0)
-                diff = calc_diff(logits, ref_logits)
-                assert diff < 1e-3, f"{diff=}"
+            logits = logits.masked_fill(~mask, 0)
+            ref_logits = ref_logits.masked_fill(~mask, 0)
+            diff = calc_diff(logits, ref_logits)
+            assert diff < 1e-3, f"{diff=}"

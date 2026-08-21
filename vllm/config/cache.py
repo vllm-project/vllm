@@ -1,26 +1,52 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from dataclasses import field
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import Field, SkipValidation, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import config, get_from_deprecated_env_if_set
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import (
+    is_quantized_kv_cache,
+    kv_cache_uses_per_token_head_scales,
+)
 
 logger = init_logger(__name__)
 
 CacheDType = Literal[
     "auto",
+    "float16",
     "bfloat16",
     "fp8",
     "fp8_e4m3",
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "turboquant_k8v4",
+    "turboquant_4bit_nc",
+    "turboquant_k3v4_nc",
+    "turboquant_3bit_nc",
+    "int4_per_token_head",
+    "int8_per_token_head",
+    "fp8_per_token_head",
+    "nvfp4",
+    "nvfp4_4over6",
 ]
-MambaDType = Literal["auto", "float32", "float16"]
+
+
+def _get_prefix_cache_retention_interval() -> int | None:
+    env_value = get_from_deprecated_env_if_set(
+        "VLLM_PREFIX_CACHE_RETENTION_INTERVAL",
+        "v0.29",
+        "prefix_cache_retention_interval",
+    )
+    return 0 if env_value is None else int(env_value)
+
+
+MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
@@ -32,15 +58,29 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    block_size: SkipValidation[int] = None  # type: ignore[assignment]
+    block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
     Accepts None (meaning "use default"). After construction, always int."""
     user_specified_block_size: bool = field(default=False, init=False)
     """Whether block_size was explicitly provided. Derived automatically."""
-    gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
+    user_specified_mamba_block_size: bool = field(default=False, init=False)
+    """Whether mamba_block_size was explicitly provided. Derived automatically."""
+    prefix_match_unit: int | None = Field(default=None, gt=0)
+    """The finest token boundary (in tokens) a prefix-cache hit can land on.
+
+    Prefix-cache keys are computed every `prefix_match_unit` tokens. It can
+    be set finer than the physical KV cache block sizes (e.g. 32 vs a
+    1024-token hybrid-model block) as long as every KV cache group's
+    `block_size` is divisible by it, enabling cache hits at boundaries
+    inside a physical block. It controls matching granularity only, not how
+    often states are stored.
+
+    This equals to the `hash_block_size` used throughout the KV cache code.
+    """
+    gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
-    utilization. If unspecified, will use the default value of 0.9. This is a
+    utilization. If unspecified, will use the default value of 0.92. This is a
     per-instance limit, and only applies to the current vLLM instance. It does
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
@@ -52,6 +92,8 @@ class CacheConfig:
     Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
     bfloat16 instead, this is an invalid option for models that do not default
     to fp8.
+    "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
+    scales per 16 values by minimizing squared reconstruction error.
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
@@ -65,31 +107,41 @@ class CacheConfig:
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
-    """Set the hash algorithm for prefix caching:\n
-    - "sha256" uses Pickle for object serialization before hashing. This is the
-    current default, as SHA256 is the most secure choice to avoid potential
-    hash collisions.\n
+    """Set the hash algorithm for prefix caching:
+
+    - "sha256" uses Pickle for object serialization before hashing. This is the current
+      default, as SHA256 is the most secure choice to avoid potential hash collisions.
     - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
-    serializes objects using canonical CBOR and hashes them with SHA-256.\n
+      serializes objects using canonical CBOR and hashes them with SHA-256.
     - "xxhash" uses Pickle serialization with xxHash (128-bit) for faster,
-    non-cryptographic hashing. Requires the optional ``xxhash`` package.
-    IMPORTANT: Use of a hashing algorithm that is not considered 
-    cryptographically secure theoretically increases the risk of hash collisions,
-    which can cause undefined behavior or even leak private information in
-    multi-tenant environments. Even if collisions are still very unlikely, it is
-    important to consider your security risk tolerance against the performance
-    benefits before turning this on.\n
+      non-cryptographic hashing. Requires the optional ``xxhash`` package.
+      IMPORTANT: Use of a hashing algorithm that is not considered  cryptographically
+      secure theoretically increases the risk of hash collisions, which can cause
+      undefined behavior or even leak private information in multi-tenant environments.
+      Even if collisions are still very unlikely, it is important to consider your
+      security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
-    reproducible hashing. Requires the optional ``xxhash`` package."""
-    calculate_kv_scales: bool = False
-    """This enables dynamic calculation of `k_scale` and `v_scale` when
-    kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
-    checkpoint if available. Otherwise, the scales will default to 1.0."""
-    cpu_kvcache_space_bytes: int | None = None
-    """(CPU backend only) CPU key-value cache space."""
+      reproducible hashing. Requires the optional ``xxhash`` package."""
+    prefix_cache_retention_interval: int | None = Field(
+        default_factory=_get_prefix_cache_retention_interval, ge=0
+    )
+    """Token interval between retained sliding-window and Mamba prefix-cache
+    checkpoints. ``0`` retains only semantic checkpoints, including the latest
+    replay boundary and shared-prefix junctions. Positive values additionally
+    retain periodic checkpoints at the specified interval, which must be a
+    multiple of the scheduler block size. ``None`` retains checkpoints densely.
+    Applies only to sliding-window and Mamba cache groups."""
+    kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
+    """Layer patterns to skip KV cache quantization. Accepts layer indices
+    (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
+    skip_page_size_padded: int | None = None
+    """Optional override for the page size of layers skipped from KV cache
+    quantization (``--kv-cache-dtype-skip-layers``); set during block-size
+    alignment so unquantized skip layers pad up to the quantized primary's
+    page."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
     Can be set only when prefix caching is enabled.
@@ -103,14 +155,26 @@ class CacheConfig:
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
     mamba_cache_mode: MambaCacheMode = "none"
-    """The cache strategy for Mamba layers.
+    """The cache strategy for Mamba layers:
+
     - "none": set when prefix caching is disabled.
-    - "all": cache the mamba state of all tokens at position i * block_size. This is 
-           the default behavior (for models that support it) when prefix caching is
-           enabled.
+    - "all": cache the mamba state of all tokens at position i * block_size.
     - "align": only cache the mamba state of the last token of each scheduler step and
-           when the token is at position i * block_size.
+      when the token is at position i * block_size. This is the default when prefix
+      caching is enabled.
     """
+    replayssm_buffer_len: int = Field(default=16, gt=0)
+    """ReplaySSM history buffer length B for standard Mamba2 decode. Kimi-K3
+    speculative decoding does not use B. Default 16."""
+    use_replayssm: bool = False
+    """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
+    the per-step full-state store, writing the checkpoint back only on flush.
+    Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
+    mamba backend; standard (non-speculative) decode only. In align mode flushes
+    are most efficient when mamba_block_size is a multiple of replayssm_buffer_len,
+    but this is not required."""
+    use_kda_recoverssm: bool = field(default=False, init=False)
+    """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
@@ -118,14 +182,20 @@ class CacheConfig:
     num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
-    kv_sharing_fast_prefill: bool = False
-    """This feature is work in progress and no prefill optimization takes place
-    with this flag enabled currently.
+    # Set after KV cache initialization.
+    kv_cache_size_tokens: int | None = field(default=None, init=False)
+    """Per-DP-engine KV cache capacity in tokens (group-aware). Uses
+    group-aware capacity since num_gpu_blocks * block_size can be wrong
+    for hybrid models where requests occupy multiple KV cache groups."""
+    kv_cache_max_concurrency: float | None = field(default=None, init=False)
+    """Per-DP-engine maximum concurrency at max_model_len tokens."""
 
-    In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
+    kv_sharing_fast_prefill: bool = False
+    """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
     some layers can skip tokens corresponding to prefill. This flag enables
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
+    NOTE: KV cache sharing is not supported for MRv2 (v2 model runner).
     """
 
     kv_cache_memory_bytes: int | None = None
@@ -163,17 +233,24 @@ class CacheConfig:
         ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
+            "kv_cache_memory_bytes",
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
-            "cpu_kvcache_space_bytes",
+            "prefix_cache_retention_interval",
+            # Prefix-caching implementation detail (doesn't affect compiled graph).
+            "prefix_match_unit",
             "mamba_page_size_padded",
+            "skip_page_size_padded",
             "user_specified_block_size",
+            "user_specified_mamba_block_size",
             "_block_size_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
+            "kv_cache_size_tokens",
+            "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
         }
@@ -191,27 +268,44 @@ class CacheConfig:
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
 
+    @field_validator("block_size", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        if value is None:
+            return value
+        return handler(value)
+
     @model_validator(mode="after")
     def _apply_block_size_default(self) -> "CacheConfig":
         # Pydantic re-runs validators when CacheConfig is nested inside
         # another pydantic model (e.g. VllmConfig). Guard against that.
         if self._block_size_resolved:
             return self
-        object.__setattr__(self, "_block_size_resolved", True)
+        self._block_size_resolved = True
         if self.block_size is None:
-            object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
+            self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
-            object.__setattr__(self, "user_specified_block_size", True)
+            self.user_specified_block_size = True
+        if self.mamba_block_size is not None:
+            self.user_specified_mamba_block_size = True
         return self
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
-        if cache_dtype.startswith("fp8"):
+        if kv_cache_uses_per_token_head_scales(cache_dtype):
             logger.info(
-                "Using fp8 data type to store kv cache. It reduces the GPU "
+                "Using %s data type to store kv cache. It reduces the GPU "
+                "memory footprint and boosts the performance. "
+                "Dynamic per-token-head scales will be computed at runtime.",
+                str(cache_dtype),
+            )
+        elif is_quantized_kv_cache(cache_dtype):
+            logger.info(
+                "Using %s data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
-                "scaling factor."
+                "scaling factor",
+                str(cache_dtype),
             )
         return cache_dtype

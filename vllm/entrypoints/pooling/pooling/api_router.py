@@ -3,25 +3,25 @@
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from typing_extensions import assert_never
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.pooling.protocol import (
-    IOProcessorResponse,
-    PoolingBytesResponse,
-    PoolingRequest,
-    PoolingResponse,
+from vllm.entrypoints.serve.utils.api_utils import (
+    load_aware_call,
+    validate_json_request,
+    with_cancellation,
 )
-from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
-from vllm.entrypoints.utils import load_aware_call, with_cancellation
+
+from .protocol import PoolingRequest
+from .serving import ServingPooling
 
 router = APIRouter()
 
 
-def pooling(request: Request) -> OpenAIServingPooling | None:
-    return request.app.state.serving_pooling
+def pooling(request: Request) -> ServingPooling:
+    handler = getattr(request.app.state, "serving_pooling", None)
+    if handler is None:
+        raise NotImplementedError("The model does not support Pooling API")
+    return handler
 
 
 @router.post(
@@ -36,22 +36,4 @@ def pooling(request: Request) -> OpenAIServingPooling | None:
 @load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Pooling API")
-
-    generator = await handler.create_pooling(request, raw_request)
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
-        return JSONResponse(content=generator.model_dump())
-    elif isinstance(generator, PoolingBytesResponse):
-        return StreamingResponse(
-            content=generator.content,
-            headers=generator.headers,
-            media_type=generator.media_type,
-        )
-
-    assert_never(generator)
+    return await handler(request, raw_request)

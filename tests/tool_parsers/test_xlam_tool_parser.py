@@ -484,7 +484,7 @@ def test_extract_tool_calls_streaming_incremental(
     expected_content,
 ):
     """Verify the XLAM Parser streaming behavior by verifying each chunk is as expected."""  # noqa: E501
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=[])
+    request = ChatCompletionRequest(model=MODEL, messages=[])
 
     chunks = []
     for delta_message in stream_delta_message_generator(
@@ -532,3 +532,26 @@ def test_extract_tool_calls_streaming_incremental(
     parsed_args = json.loads(full_args)
     expected_args = json.loads(expected_first_tool.function.arguments)
     assert parsed_args == expected_args
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_extract_tool_calls_non_ascii(xlam_tool_parser, xlam_tokenizer, streaming):
+    # Use parallel tool calls so the streaming path re-serializes arguments
+    # (the ensure_ascii fix only runs when tool_count > 1).
+    model_output = """[{"name": "get_current_weather", "arguments": {"city": "北京"}}, {"name": "get_current_weather", "arguments": {"city": "上海"}}]"""  # noqa: E501
+
+    if streaming:
+        request = ChatCompletionRequest(model=MODEL, messages=[])
+        args = "".join(
+            delta.tool_calls[0].function.arguments
+            for delta in stream_delta_message_generator(
+                xlam_tool_parser, xlam_tokenizer, model_output, request
+            )
+            if delta.tool_calls and delta.tool_calls[0].function.arguments
+        )
+    else:
+        extracted = xlam_tool_parser.extract_tool_calls(model_output, request=None)  # type: ignore[arg-type]
+        args = "".join(tc.function.arguments for tc in extracted.tool_calls)
+
+    assert "北京" in args
+    assert "\\u" not in args

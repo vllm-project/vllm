@@ -323,10 +323,7 @@ def build_audio_inputs_from_test_info(
         test_info.audio_idx_to_prompt,
         test_info.prompt_formatter,
     )
-    resampler = AudioResampler(
-        target_sr=16000,
-        method="librosa",
-    )
+    resampler = AudioResampler(target_sr=16000)
     audios = [asset.audio_and_sample_rate for asset in audio_assets]
     resampled_audios = [
         (

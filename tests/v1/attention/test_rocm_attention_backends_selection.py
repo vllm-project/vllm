@@ -28,16 +28,9 @@ def mock_vllm_config():
 
 
 @pytest.fixture
-def mock_on_gfx9():
-    """Mock gfx9 arch detection to return True."""
-    with patch("vllm.platforms.rocm.on_gfx9", return_value=True):
-        yield
-
-
-@pytest.fixture
-def mock_on_mi3xx():
-    """Mock mi3xx arch detection to return True."""
-    with patch("vllm.platforms.rocm.on_mi3xx", return_value=True):
+def mock_get_cdna_version():
+    """Mock cdna version arch detection to return True."""
+    with patch("vllm.platforms.rocm.get_cdna_version", return_value=3):
         yield
 
 
@@ -54,7 +47,7 @@ def mock_on_mi3xx():
         (
             {},
             None,
-            AttentionBackendEnum.TRITON_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
         # Test Case 2: Explicit TRITON_ATTN backend
         (
@@ -81,41 +74,24 @@ def mock_on_mi3xx():
             AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 6: VLLM_ROCM_USE_AITER=1
-        # (defaults to AITER FA when MHA not explicitly disabled)
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
-            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
-        # Test Case 7: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=1
-        (
-            {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "1"},
-            None,
-            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
-        ),
-        # Test Case 8: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
-        (
-            {
-                "VLLM_ROCM_USE_AITER": "1",
-                "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": "1",
-            },
-            None,
-            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
-        ),
-        # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
+        # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "TRITON_ATTN",
             AttentionBackendEnum.TRITON_ATTN.get_path(),
         ),
-        # Test Case 10: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
-        # (explicitly disabled)
+        # Test Case 8: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
         (
             {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
             None,
-            AttentionBackendEnum.TRITON_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
-        # Test Case 11: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
+        # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "ROCM_ATTN",
@@ -128,8 +104,7 @@ def test_standard_attention_backend_selection(
     selected_backend,
     expected_backend_path,
     mock_vllm_config,
-    mock_on_gfx9,
-    mock_on_mi3xx,
+    mock_get_cdna_version,
     monkeypatch,
 ):
     """Test standard attention backend selection with various configurations."""
@@ -322,12 +297,12 @@ def test_mla_backend_selection(
 
 
 def test_aiter_fa_requires_mi3xx(mock_vllm_config):
-    """Test that ROCM_AITER_FA requires mi3xx architecture."""
+    """Test that ROCM_AITER_FA requires CDNA3+ architecture."""
     from vllm.platforms.rocm import RocmPlatform
 
-    # Mock on_mi3xx to return False (used by supports_compute_capability)
+    # Mock cdna version to return 1 (used by supports_compute_capability)
     with (
-        patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
+        patch("vllm.platforms.rocm.get_cdna_version", return_value=1),
         pytest.raises(
             ValueError,
             match="compute capability not supported",

@@ -21,9 +21,9 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
+from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -209,11 +209,16 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         )
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
+        tokenizer = self.info.get_tokenizer()
+        prompt = tokenizer.encode(
+            prompt_text,
+            **self.info.default_tok_params.get_encode_kwargs(),
+        )
+
         return ProcessorInputs(
-            prompt=prompt_text,
+            prompt=prompt,
             mm_data_items=dummy_mm_items,
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
-            tokenization_kwargs={"truncation": False},
         )
 
     def get_dummy_mm_data(
@@ -261,7 +266,6 @@ class HCXVisionV2MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         images = mm_data.get("images")
         videos = mm_data.get("videos")
@@ -271,8 +275,7 @@ class HCXVisionV2MultiModalProcessor(
 
         # Build data dict for HF processor (images/videos only)
         # NOTE: We pass the prompt as-is without token normalization.
-        # Token expansion is handled by vLLM via _get_prompt_updates since
-        # _hf_processor_applies_updates returns False.
+        # Token expansion is handled by vLLM via _get_prompt_updates.
         data: dict[str, object] = dict(
             text=prompt,
             images=images,
@@ -282,27 +285,10 @@ class HCXVisionV2MultiModalProcessor(
         processed_outputs = self.info.ctx.call_hf_processor(
             hf_processor=hf_processor,
             data=data,
-            kwargs=dict(**mm_kwargs, **tok_kwargs),
+            kwargs=mm_kwargs,
         )
 
         return processed_outputs
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        # Match BaseMultiModalProcessor behavior:
-        # - raw multimodal inputs: HF processor applies updates
-        # - embedding inputs: vLLM applies updates
-        return super()._hf_processor_applies_updates(
-            prompt_text,
-            mm_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
-        )
 
     def _get_prompt_updates(
         self,
@@ -470,15 +456,6 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.vision_config = vision_config
         self.text_config = text_config
         self.vllm_config = vllm_config
-        self.dtype = vllm_config.model_config.dtype
-
-        # Initialize Qwen2.5 Vision Transformer
-        self.visual = Qwen2_5_VisionTransformer(
-            vision_config=vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "visual"),
-        )
 
         # Linear projector (vision_hidden_size -> text_hidden_size)
         # For V2 model: mm_projector_type is "linear"
@@ -492,18 +469,21 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         else:
             out_hidden = vision_hidden_size
 
-        # Always create Linear projector since HF checkpoint has mm_projector weights
-        self.mm_projector = nn.Linear(out_hidden, text_hidden_size)
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.visual = Qwen2_5_VisionTransformer(
+                vision_config=vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+            self.mm_projector = nn.Linear(out_hidden, text_hidden_size)
 
-        # Language model
-        self.lm_head_vocab_size = getattr(
-            text_config, "padded_vocab_size", text_config.vocab_size
-        )
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -632,9 +612,6 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 modalities["video"] = self._parse_and_validate_video_input(**kwargs)
 
         return modalities
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(
         self,

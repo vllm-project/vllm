@@ -2,21 +2,59 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that compute logits from hidden_stats."""
 
-import torch
+from collections.abc import Callable
+from functools import cache
 
+import torch
+import torch.nn.functional as F
+
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
-from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.logger import init_logger
+from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
+)
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+
+logger = init_logger(__name__)
+
+
+@cache
+def _flashinfer_topk() -> Callable[..., tuple[torch.Tensor, torch.Tensor]] | None:
+    """FlashInfer's radix top-k, or None for torch.topk.
+
+    The top-k spans the vocabulary, where the radix kernel is about twice
+    torch.topk.
+    """
+    if not current_platform.is_cuda():
+        return None
+    if not has_flashinfer():
+        logger.info_once(
+            "flashinfer is unavailable; vocab-parallel top-k uses torch.topk, "
+            "at roughly half the speed."
+        )
+        return None
+    from flashinfer import top_k
+
+    return top_k
+
+
+def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    impl = _flashinfer_topk()
+    if impl is None or not scores.is_cuda:
+        return torch.topk(scores, k, dim=-1)
+    return impl(scores, k, sorted=True, deterministic=True)
 
 
 # --8<-- [start:logits_processor]
-@CustomOp.register("logits_processor")
-class LogitsProcessor(CustomOp):
+@PluggableLayer.register("logits_processor")
+class LogitsProcessor(PluggableLayer):
     """Process logits and apply logits processors from sampling metadata.
 
     This layer does the following:
@@ -50,6 +88,11 @@ class LogitsProcessor(CustomOp):
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
         self.use_all_gather = current_platform.use_all_gather()
+        # Dtype of the lm_head projection. Defaults to the model dtype; an
+        # fp32 head (via `--hf-overrides '{"head_dtype": "float32"}'`) is
+        # required for RL training-inference consistency.
+        model_config = get_current_vllm_config().model_config
+        self.head_dtype = model_config.head_dtype if model_config is not None else None
 
     def forward(
         self,
@@ -86,6 +129,45 @@ class LogitsProcessor(CustomOp):
             logits = tensor_model_parallel_gather(logits)
         return logits
 
+    def _apply_head(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_states: torch.Tensor,
+        embedding_bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Project hidden states through the lm_head, honoring head_dtype."""
+        if self.head_dtype is None or self.head_dtype == hidden_states.dtype:
+            return lm_head.quant_method.apply(
+                lm_head, hidden_states, bias=embedding_bias
+            )
+
+        if not isinstance(lm_head.quant_method, UnquantizedEmbeddingMethod):
+            raise ValueError(
+                "A head_dtype different from the model dtype is only "
+                "supported for an unquantized lm_head."
+            )
+        if (
+            self.head_dtype == torch.float32
+            and (current_platform.is_cuda() or current_platform.is_rocm())
+            and hidden_states.is_cuda
+        ):
+            # Accumulate the projection directly into fp32. This avoids
+            # materializing an fp32 copy of the lm_head weight on every step,
+            # unlike casting both operands. `torch.mm(out_dtype=...)` only
+            # supports fp32 output for fp16/bf16 inputs, and is only
+            # implemented for CUDA and ROCm (the latter via the non-Lt GEMM
+            # path); other platforms fall back to the cast path below.
+            flat = hidden_states.reshape(-1, hidden_states.shape[-1])
+            logits = torch.mm(flat, lm_head.weight.t(), out_dtype=self.head_dtype)
+            if embedding_bias is not None:
+                logits = logits + embedding_bias.to(self.head_dtype)
+            return logits.reshape(*hidden_states.shape[:-1], -1)
+        return F.linear(
+            hidden_states.to(self.head_dtype),
+            lm_head.weight.to(self.head_dtype),
+            embedding_bias.to(self.head_dtype) if embedding_bias is not None else None,
+        )
+
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
@@ -93,10 +175,11 @@ class LogitsProcessor(CustomOp):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+        logits = self._apply_head(lm_head, hidden_states, embedding_bias)
 
         # Gather logits for TP
-        logits = self._gather_logits(logits)
+        if lm_head.tp_size > 1:
+            logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any).
         if logits is not None:
@@ -120,9 +203,9 @@ class LogitsProcessor(CustomOp):
                 "The local argmax reduction optimization is not supported for "
                 "non-positive logit scaling factors."
             )
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = lm_head.tp_size
 
-        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+        logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         if self.soft_cap is not None:
             logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
         if self.scale != 1.0:
@@ -154,6 +237,53 @@ class LogitsProcessor(CustomOp):
         max_rank_idx = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
         top_tokens = gathered[:, :, 1].gather(dim=-1, index=max_rank_idx)
         return top_tokens.squeeze(-1).to(torch.int64)
+
+    def get_top_k_tokens(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_states: torch.Tensor,
+        k: int,
+        embedding_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Vocab-parallel top-k without all-gathering full logits.
+
+        The `get_top_tokens` reduction widened from one token to k, returning
+        the values as well as the global ids. Communication is
+        O(batch * 2k * tp_size) rather than O(batch * vocab_size).
+
+        Scale and soft cap are applied to the k selected values rather than
+        the whole vocabulary; both are monotonic, so the selection is the same
+        and only k entries are touched.
+        """
+        if self.scale <= 0.0 and self.scale != 1.0:
+            raise ValueError(
+                "The local top-k reduction optimization is not supported for "
+                "non-positive logit scaling factors."
+            )
+
+        logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+
+        # Mask out padding entries beyond org_vocab_size on this shard.
+        num_pad = lm_head.shard_indices.num_org_vocab_padding
+        if num_pad > 0:
+            logits[..., -num_pad:] = -float("inf")
+
+        values, ids = _topk(logits, k)
+        # Convert shard-local indices to global vocab indices.
+        ids = ids.to(torch.int64) + lm_head.shard_indices.org_vocab_start_index
+
+        if lm_head.tp_size > 1:
+            values = tensor_model_parallel_all_gather(values, dim=-1)
+            ids = tensor_model_parallel_all_gather(ids, dim=-1)
+            values, selected = _topk(values, k)
+            ids = ids.gather(-1, selected)
+
+        values = values.float()
+        if self.scale != 1.0:
+            values = values * self.scale
+        if self.soft_cap is not None:
+            values = torch.tanh(values / self.soft_cap) * self.soft_cap
+        return ids, values
 
     def extra_repr(self) -> str:
         s = f"vocab_size={self.vocab_size}"

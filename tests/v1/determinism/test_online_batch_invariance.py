@@ -17,7 +17,7 @@ from typing import Any
 
 import openai
 import pytest
-from utils import BACKENDS, _random_prompt, resolve_model_name, skip_unsupported
+from utils import BACKENDS, TEST_MODEL, _random_prompt, skip_if_not_cuda
 
 from tests.utils import RemoteOpenAIServer
 
@@ -133,13 +133,12 @@ def _compare_bs1_vs_bsn_single_process(
                 )
 
 
-@skip_unsupported
+@skip_if_not_cuda
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     backend: str,
 ) -> None:
     random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
-    model_name = resolve_model_name(backend)
     prompts_all = [_random_prompt(10, 50) for _ in range(32)]
 
     sp_kwargs: dict[str, Any] = {
@@ -159,11 +158,11 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     if tp_size:
         server_args += ["-tp", tp_size]
 
-    with RemoteOpenAIServer(model_name, server_args) as server:
+    with RemoteOpenAIServer(TEST_MODEL, server_args) as server:
         client = server.get_client()
         _compare_bs1_vs_bsn_single_process(
             prompts=prompts_all,
             sp_kwargs=sp_kwargs,
             client=client,
-            model_name=model_name,
+            model_name=TEST_MODEL,
         )

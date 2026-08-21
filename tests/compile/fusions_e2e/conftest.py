@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+from collections import defaultdict
 
 import pytest
 import regex as re
@@ -11,7 +12,9 @@ from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 from .common import FUSION_LOG_PATTERNS, AttentionBackendCase, Matches
 
 
-def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
+def run_model(
+    compile_config: CompilationMode | CompilationConfig, model: str, **model_kwargs
+):
     """Run a model with the given compilation config for E2E fusion tests."""
     compilation_config = (
         compile_config
@@ -52,6 +55,16 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
         llm.llm_engine.vllm_config.compilation_config.compile_ranges_endpoints
     )
 
+    # Fetch match table from each worker via RPC and sum across workers.
+    worker_tables: list[dict[str, int]] = llm.llm_engine.engine_core.collective_rpc(
+        "get_compilation_match_table"
+    )
+    combined: defaultdict[str, int] = defaultdict(int)
+    for table in worker_tables:
+        for k, v in table.items():
+            combined[k] += v
+    return dict(combined)
+
 
 @pytest.fixture
 def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
@@ -68,19 +81,32 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
     ):
         monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1" if use_deepgemm else "0")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "1" if use_aiter else "0")
         from vllm._aiter_ops import rocm_aiter_ops
 
         rocm_aiter_ops.refresh_env_variables()
 
         # Filter here to reduce code duplication
+        backend_name = attn_backend.backend.name.lower()
         requires_mla = "deepseek" in model_name.lower()
-        is_mla = "mla" in attn_backend.backend.name.lower()
+        is_mla = "mla" in backend_name
 
         if requires_mla != is_mla:
             pytest.skip(
                 f"Incompatible model '{model_name}' and "
                 f"attention backend '{attn_backend.backend.name}'"
             )
+
+        if backend_name == "rocm_attn" and model_name == "openai/gpt-oss-20b":
+            pytest.skip(
+                "ROCM_ATTN does not support attention sinks (required by gpt-oss-20b)"
+            )
+
+        if attn_backend.backend.name == "FLASHINFER":
+            from vllm.utils.flashinfer import supports_trtllm_attention
+
+            if not supports_trtllm_attention():
+                matches = matches._replace(attn_quant_fusion=0)
 
         # Disable, compile cache to make sure custom passes run.
         # Otherwise, we can't verify fusion happened through the logs.
@@ -94,6 +120,11 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         model_kwargs["attention_config"] = {"backend": attn_backend.backend.name}
         model_kwargs["tensor_parallel_size"] = tp_size
 
+        # Cap warmup memory: tests use small max_model_len (1024) but the
+        # engine default max_num_batched_tokens is 16384. Warming up large
+        # models (e.g. Llama-4-Scout-FP8) at 16384 tokens may trigger OOM.
+        model_kwargs.setdefault("max_num_batched_tokens", 8192)
+
         # Always compile the full graph instead of piecewise
         if not compilation_config["use_inductor_graph_partition"]:
             compilation_config["splitting_ops"] = []
@@ -106,7 +137,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         )
 
         with caplog_mp_spawn(logging.DEBUG) as log_holder:
-            run_model(full_compilation_config, model_name, **model_kwargs)
+            match_table = run_model(full_compilation_config, model_name, **model_kwargs)
 
         num_compile_ranges = len(full_compilation_config.get_compile_ranges())
         assert num_compile_ranges in [1, 2, 3]
@@ -148,11 +179,14 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             else:
                 num_ranges_activated = num_compile_ranges
 
+            # TODO: Remove log counting in unit tests
+            # once all matchers implement VllmFusionPatternMatcherPass
             n_expected = tp_size * num_ranges_activated
-            assert len(log_matches) == n_expected, (
-                f"Could not find {n_expected} {match_name} "
-                f"(found {len(log_matches)}) in:\n {log_holder.text}"
-            )
+            if match_name not in ("attn_quant_fusion", "act_quant_fusion"):
+                assert len(log_matches) == n_expected, (
+                    f"Could not find {n_expected} {match_name} "
+                    f"(found {len(log_matches)}) in:\n {log_holder.text}"
+                )
 
             expected_matches = getattr(matches, match_name)
 
@@ -207,6 +241,21 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"Expecting 0 ar_rms on "
                     f"{tp_size * (num_ranges_activated - 1)} large-range "
                     f"entries (SP took precedence), found: {log_matches}"
+                )
+
+            elif match_name == "act_quant_fusion":
+                actual_match = match_table.get("activation_quant_fusion_pass", 0)
+                assert actual_match == expected_matches * n_expected, (
+                    f"Could not find {expected_matches * n_expected} "
+                    f"{match_name} (found {actual_match})."
+                )
+            elif match_name == "attn_quant_fusion":
+                actual_match = match_table.get(
+                    "attn_quant_fusion", 0
+                ) + match_table.get("mla_attn_quant_fusion", 0)
+                assert actual_match == expected_matches * n_expected, (
+                    f"Could not find {expected_matches * n_expected} "
+                    f"{match_name} (found {actual_match})."
                 )
             else:
                 expected_matches_list = [expected_matches] * n_expected

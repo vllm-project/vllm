@@ -12,6 +12,7 @@ from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.ovis import VisualEmbedding
@@ -24,7 +25,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -337,7 +337,6 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             # Avoid warning from HF logger for text-only input
@@ -349,7 +348,6 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
         hf_processor = self.info.get_hf_processor()
 
@@ -402,12 +400,11 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
+        hf_processor = self.info.get_hf_processor()
 
         placeholder = {
-            "image": vocab[IMAGE_TOKEN],
-            "video": vocab[VIDEO_TOKEN],
+            "image": hf_processor.get_token_value("image_token"),
+            "video": hf_processor.get_token_value("video_token"),
         }
 
         def get_replacement_ovis(item_idx, modality: str):
@@ -465,7 +462,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
                 config=config.vit_config,
                 visual_vocab_size=config.visual_vocab_size,
                 quant_config=quant_config,
-                prefix=f"{prefix}.visual_tokenizer",
+                prefix=maybe_prefix(prefix, "visual_tokenizer"),
             )
             self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)
 

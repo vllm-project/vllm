@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+import os
 import traceback
 from itertools import chain
 from typing import TYPE_CHECKING
@@ -8,7 +9,6 @@ from typing import TYPE_CHECKING
 from vllm import envs
 from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import supports_xccl
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
@@ -134,7 +134,7 @@ def xpu_platform_plugin() -> str | None:
     try:
         import torch
 
-        if supports_xccl():
+        if torch.distributed.is_xccl_available():
             dist_backend = "xccl"
             from vllm.platforms.xpu import XPUPlatform
 
@@ -150,28 +150,61 @@ def xpu_platform_plugin() -> str | None:
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
 
 
-def cpu_platform_plugin() -> str | None:
-    is_cpu = False
-    logger.debug("Checking if CPU platform is available.")
-    try:
-        is_cpu = vllm_version_matches_substr("cpu")
-        if is_cpu:
-            logger.debug(
-                "Confirmed CPU platform is available because vLLM is built with CPU."
-            )
-        if not is_cpu:
-            import sys
+def _is_amd_zen_cpu() -> bool:
+    """Detect AMD CPU with AVX-512 via /proc/cpuinfo."""
+    if not os.path.exists("/proc/cpuinfo"):
+        return False
+    with open("/proc/cpuinfo") as f:
+        cpuinfo = f.read()
+    return "AuthenticAMD" in cpuinfo and "avx512" in cpuinfo
 
-            is_cpu = sys.platform.startswith("darwin")
+
+def cpu_platform_plugin() -> str | None:
+    logger.debug("Checking if CPU platform is available.")
+    is_cpu = envs.VLLM_TARGET_DEVICE == "cpu"
+    if is_cpu:
+        logger.debug(
+            "Confirmed CPU platform is available because "
+            "VLLM_TARGET_DEVICE is set to CPU."
+        )
+    else:
+        try:
+            is_cpu = vllm_version_matches_substr("cpu")
             if is_cpu:
                 logger.debug(
-                    "Confirmed CPU platform is available because the machine is MacOS."
+                    "Confirmed CPU platform is available because vLLM is built "
+                    "with CPU."
                 )
+            if not is_cpu:
+                import sys
 
-    except Exception as e:
-        logger.debug("CPU platform is not available because: %s", str(e))
+                is_cpu = sys.platform.startswith("darwin")
+                if is_cpu:
+                    logger.debug(
+                        "Confirmed CPU platform is available because the machine "
+                        "is MacOS."
+                    )
+        except Exception as e:
+            logger.debug("CPU platform is not available because: %s", str(e))
 
-    return "vllm.platforms.cpu.CpuPlatform" if is_cpu else None
+    if not is_cpu:
+        return None
+
+    if _is_amd_zen_cpu():
+        try:
+            import zentorch  # noqa: F401
+
+            logger.info(
+                "AMD Zen CPU detected with zentorch installed, using ZenCpuPlatform."
+            )
+            return "vllm.platforms.zen_cpu.ZenCpuPlatform"
+        except ImportError:
+            logger.debug(
+                "AMD Zen CPU detected but zentorch not installed, "
+                "falling back to CpuPlatform."
+            )
+
+    return "vllm.platforms.cpu.CpuPlatform"
 
 
 builtin_platform_plugins = {
@@ -184,6 +217,15 @@ builtin_platform_plugins = {
 
 
 def resolve_current_platform_cls_qualname() -> str:
+    # An explicit CPU target is authoritative. Native CPU-only CI jobs reuse
+    # an accelerator wheel and can run on accelerator hosts, so probing every
+    # plugin would otherwise activate both CPU and the host accelerator.
+    if envs.VLLM_TARGET_DEVICE == "cpu":
+        cpu_platform_cls_qualname = cpu_platform_plugin()
+        assert cpu_platform_cls_qualname is not None
+        logger.debug("Explicitly selected CPU platform.")
+        return cpu_platform_cls_qualname
+
     platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
 
     activated_plugins = []
@@ -269,4 +311,11 @@ def __setattr__(name: str, value):
         raise AttributeError(f"No attribute named '{name}' exists in {__name__}.")
 
 
-__all__ = ["Platform", "PlatformEnum", "current_platform", "CpuArchEnum", "_init_trace"]
+__all__ = [
+    "Platform",
+    "PlatformEnum",
+    "current_platform",
+    "CpuArchEnum",
+    "_init_trace",
+    "_is_amd_zen_cpu",
+]

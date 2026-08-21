@@ -17,20 +17,30 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize,
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import (
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
+    BatchedPrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    ref_nvfp4_quant,
+)
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
+
+DEVICE = current_platform.device_type
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
@@ -45,10 +55,13 @@ def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
 
 def make_dummy_moe_config(
     num_experts: int = 1,
+    num_local_experts: int | None = None,
     experts_per_token: int = 1,
     hidden_dim: int = 1,
-    intermediate_size_per_partition: int = 1,
+    intermediate_size: int = 1,
     in_dtype: torch.dtype = torch.bfloat16,
+    max_num_tokens: int = 512,
+    activation: MoEActivation = MoEActivation.SILU,
 ) -> FusedMoEConfig:
     """
     This is a dummy config for the mk constructor interface
@@ -61,14 +74,17 @@ def make_dummy_moe_config(
         num_experts=num_experts,
         experts_per_token=experts_per_token,
         hidden_dim=hidden_dim,
-        intermediate_size_per_partition=intermediate_size_per_partition,
-        num_local_experts=num_experts,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_local_experts
+        if num_local_experts is not None
+        else num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        activation=MoEActivation.SILU,
+        activation=activation,
         in_dtype=in_dtype,
-        device="cuda",
+        device=DEVICE,
         routing_method=RoutingMethodType.TopK,
+        max_num_tokens=max_num_tokens,
     )
 
 
@@ -137,7 +153,6 @@ def batched_moe(
             quant_config=quant_config,
             moe_config=moe_config,
         ),
-        inplace=False,
     )
 
     return fused_experts.apply(
@@ -190,7 +205,6 @@ def naive_batched_moe(
             quant_config=quant_config,
             moe_config=moe_config,
         ),
-        inplace=False,
     )
 
     return fused_experts.apply(
@@ -226,7 +240,7 @@ def make_quantized_test_activations(
     block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    a = torch.randn((E, m, k), device="cuda", dtype=in_dtype) / 10
+    a = torch.randn((E, m, k), device=DEVICE, dtype=in_dtype) / 10
     a_q = a
     a_scale = None
 
@@ -248,7 +262,7 @@ def make_quantized_test_activations(
     return a, a_q, a_scale
 
 
-def moe_quantize_weights(
+def moe_quantize_weights_2d(
     w: torch.Tensor,
     w_s: torch.Tensor | None,
     quant_dtype: torch.dtype | str | None,
@@ -286,9 +300,64 @@ def moe_quantize_weights(
             assert not per_token_quant
             w_amax = torch.abs(w).max().to(torch.float32)
             w_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w_amax
-            w, w_s = ops.scaled_fp4_quant(w, w_gs)
+            if current_platform.is_rocm():
+                w, w_s = _scaled_fp4_quant_emulated(w, w_gs)
+            else:
+                w, w_s = ops.scaled_fp4_quant(w, w_gs)
         else:
             raise RuntimeError(f"Unsupported quant type {quant_dtype}")
+
+    return w, w_s, w_gs
+
+
+def _pack_e2m1_fp4(fp4_values: torch.Tensor) -> torch.Tensor:
+    assert fp4_values.shape[-1] % 2 == 0
+
+    abs_values = fp4_values.abs()
+    codes = torch.empty_like(abs_values, dtype=torch.uint8)
+    for code, value in enumerate((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)):
+        codes[abs_values == value] = code
+    codes = codes | ((fp4_values < 0).to(torch.uint8) << 3)
+    return codes[..., 0::2] | (codes[..., 1::2] << 4)
+
+
+def _scaled_fp4_quant_emulated(
+    w: torch.Tensor, w_gs: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    fp4_values, w_s = ref_nvfp4_quant(w, w_gs, block_size=16)
+    return _pack_e2m1_fp4(fp4_values), w_s.to(torch.float8_e4m3fn)
+
+
+def moe_quantize_weights(
+    w: torch.Tensor,
+    w_s: torch.Tensor | None,
+    quant_dtype: torch.dtype | str | None,
+    per_token_quant: bool,
+    block_shape: list[int] | None,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    assert w.dim() == 3
+    e, rows, cols = w.shape
+    w_l = [None] * e
+    w_s_l = [None] * e
+    w_gs_l = [None] * e
+    for idx in range(e):
+        w_l[idx], w_s_l[idx], w_gs_l[idx] = moe_quantize_weights_2d(
+            w[idx], None, quant_dtype, per_token_quant, block_shape
+        )
+
+    w = torch.stack(w_l)
+    w_s = torch.stack(w_s_l)
+    w_gs = torch.stack(w_gs_l) if e > 0 and w_gs_l[0] is not None else None
+
+    if w_s.ndim == 2:
+        assert w_s.shape[-1] == 1
+        w_s = w_s.view(-1, 1, 1)
+
+    if block_shape is not None:
+        block_n, block_k = block_shape
+        n_tiles = (rows + block_n - 1) // block_n
+        k_tiles = (cols + block_k - 1) // block_k
+        assert w_s.shape == (e, n_tiles, k_tiles)
 
     return w, w_s, w_gs
 
@@ -302,31 +371,12 @@ def make_test_weight(
     block_shape: list[int] | None = None,
     per_out_ch_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    w_16 = torch.randn((e, rows, cols), device="cuda", dtype=in_dtype) / 15
-    w_gs = None
+    w_16 = torch.randn((e, rows, cols), device=DEVICE, dtype=in_dtype) / 15
 
     if quant_dtype is not None:
-        w_l = [None] * e
-        w_s_l = [None] * e
-        w_gs_l = [None] * e
-        for idx in range(e):
-            w_l[idx], w_s_l[idx], w_gs_l[idx] = moe_quantize_weights(
-                w_16[idx], None, quant_dtype, per_out_ch_quant, block_shape
-            )
-
-        w = torch.stack(w_l)
-        w_s = torch.stack(w_s_l)
-        if e > 0 and w_gs_l[0] is not None:
-            w_gs = torch.stack(w_gs_l)
-        if w_s.ndim == 2:
-            assert w_s.shape[-1] == 1
-            w_s = w_s.view(-1, 1, 1)
-
-        if block_shape is not None:
-            block_n, block_k = block_shape
-            n_tiles = (rows + block_n - 1) // block_n
-            k_tiles = (cols + block_k - 1) // block_k
-            assert w_s.shape == (e, n_tiles, k_tiles)
+        w, w_s, w_gs = moe_quantize_weights(
+            w_16, None, quant_dtype, per_out_ch_quant, block_shape
+        )
     else:
         w = w_16
         w_s = None
@@ -384,6 +434,7 @@ def make_test_quant_config(
     per_act_token_quant: bool = False,
     block_shape: list[int] | None = None,
     make_gate: bool = True,
+    is_scale_swizzled: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, FusedMoEQuantConfig]:
     (_, w1, w1_s, w1_gs), (_, w2, w2_s, w2_gs) = make_test_weights(
         e,
@@ -400,8 +451,8 @@ def make_test_quant_config(
     a1_gscale: torch.Tensor | None = None
     a2_gscale: torch.Tensor | None = None
     if quant_dtype == "nvfp4":
-        a1_gscale = torch.ones((e,), device="cuda", dtype=torch.float32)
-        a2_gscale = torch.ones((e,), device="cuda", dtype=torch.float32)
+        a1_gscale = torch.ones((e,), device=DEVICE, dtype=torch.float32)
+        a2_gscale = torch.ones((e,), device=DEVICE, dtype=torch.float32)
         a1_scale = a1_gscale
         a2_scale = a2_gscale
     else:
@@ -424,6 +475,7 @@ def make_test_quant_config(
             # TODO: make sure this is handled properly
             g1_alphas=(1 / w1_gs) if w1_gs is not None else None,
             g2_alphas=(1 / w2_gs) if w2_gs is not None else None,
+            is_scale_swizzled=is_scale_swizzled,
         ),
     )
 
@@ -454,7 +506,6 @@ def fused_moe(
     )
 
 
-# CustomOp?
 class BaselineMM(torch.nn.Module):
     def __init__(
         self,
@@ -462,11 +513,20 @@ class BaselineMM(torch.nn.Module):
         out_dtype: torch.dtype,
     ):
         super().__init__()
-        self.b = b.to(dtype=torch.float32)
+        self.b = torch.nn.Parameter(b.to(dtype=torch.float32))
         self.out_dtype = out_dtype
 
     def forward(self, a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
         return torch.mm(a.to(dtype=torch.float32), self.b).to(self.out_dtype), None
+
+
+class BaselineSiluAndMul(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        return torch.nn.functional.silu(x[..., :d]) * x[..., d:]
 
 
 class TestMLP(torch.nn.Module):
@@ -479,7 +539,7 @@ class TestMLP(torch.nn.Module):
         super().__init__()
         self.gate_up_proj = BaselineMM(w1, out_dtype)
         self.down_proj = BaselineMM(w2, out_dtype)
-        self.act_fn = SiluAndMul()
+        self.act_fn = BaselineSiluAndMul()
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
@@ -493,8 +553,8 @@ def make_naive_shared_experts(
     K: int,
     in_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.nn.Module:
-    w1 = torch.randn((K, N * 2), device="cuda", dtype=in_dtype) / 15
-    w2 = torch.randn((N, K), device="cuda", dtype=in_dtype) / 15
+    w1 = torch.randn((K, N * 2), device=DEVICE, dtype=in_dtype) / 15
+    w2 = torch.randn((N, K), device=DEVICE, dtype=in_dtype) / 15
     return TestMLP(w1, w2, out_dtype=in_dtype)
 
 
@@ -564,35 +624,24 @@ class RealMLP(torch.nn.Module):
         return x
 
 
-def make_shared_experts(
+def make_shared_experts_with_weights(
     N: int,
     K: int,
-    in_dtype: torch.dtype = torch.bfloat16,
+    in_dtype: torch.dtype,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_s: torch.Tensor | None = None,
+    w2_s: torch.Tensor | None = None,
     quant_dtype: torch.dtype | str | None = None,
 ) -> torch.nn.Module:
-    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-
-    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
-        1,
-        N,
-        K,
-        in_dtype=in_dtype,
-        quant_dtype=quant_dtype,
-    )
     old_dtype = torch.get_default_dtype()
     try:
         torch.set_default_dtype(in_dtype)
         if quant_dtype == torch.float8_e4m3fn:
-            w1 = w1[0].transpose(0, 1)
-            w2 = w2[0].transpose(0, 1)
-            w1_s = w1_s[0].transpose(0, 1) if w1_s is not None else None
-            w2_s = w2_s[0].transpose(0, 1) if w2_s is not None else None
+            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
             quant_config = Fp8Config(True)
         else:
-            w1 = w1[0]
-            w2 = w2[0]
-            w1_s = None
-            w2_s = None
             quant_config = None
 
         return RealMLP(K, N, w1, w2, "silu", quant_config, w1_s=w1_s, w2_s=w2_s)
@@ -603,7 +652,6 @@ def make_shared_experts(
 def modular_triton_fused_moe(
     moe_config: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
-    shared_experts: torch.nn.Module | None = None,
 ) -> FusedMoEKernel:
     return FusedMoEKernel(
         maybe_make_prepare_finalize(
@@ -613,6 +661,46 @@ def modular_triton_fused_moe(
             use_monolithic=False,
         ),
         TritonExperts(moe_config, quant_config),
-        shared_experts,
-        inplace=False,
     )
+
+
+def make_shared_experts(
+    N: int,
+    K: int,
+    in_dtype: torch.dtype = torch.bfloat16,
+    quant_dtype: torch.dtype | str | None = None,
+) -> torch.nn.Module:
+    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
+        1,
+        N,
+        K,
+        in_dtype=in_dtype,
+        quant_dtype=quant_dtype,
+    )
+
+    return make_shared_experts_with_weights(
+        N, K, in_dtype, w1, w2, w1_s=w1_s, w2_s=w2_s, quant_dtype=quant_dtype
+    )
+
+
+def check_accuracy(a, b, atol, rtol, percent):
+    """Allow a mismatch percentage of 1 - percent."""
+    if torch.any(torch.isnan(a)):
+        raise Exception("NaN in reference output")
+    if torch.any(torch.isnan(b)):
+        raise Exception("NaN in actual output")
+    if torch.any(torch.isinf(a)):
+        raise Exception("Inf in reference output")
+    if torch.any(torch.isinf(b)):
+        raise Exception("Inf in actual output")
+    assert a.shape == b.shape, f"Shape mismatch: {a.shape} vs {b.shape}"
+
+    left = torch.abs(a - b)
+    right = atol + rtol * torch.abs(b)
+    count = torch.sum(left > right)
+    mismatch_percent = count / a.numel()
+    if mismatch_percent > 1 - percent:
+        raise Exception(
+            f"Mismatch percentage is {mismatch_percent:.4f} for rtol {rtol} "
+            f"(threshold: {1 - percent:.4f})"
+        )

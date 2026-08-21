@@ -30,6 +30,7 @@ from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.aimv2 import AIMv2Model
@@ -42,7 +43,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -96,7 +96,7 @@ class VisualTokenizer(torch.nn.Module):
         self.backbone = self._init_backbone(
             config=config,
             quant_config=quant_config,
-            prefix=f"{prefix}.backbone",
+            prefix=maybe_prefix(prefix, "backbone"),
         )
         # reserved tokens for IMAGE_INDICATORS
         head_dim = config.vocab_size - len(IMAGE_INDICATOR_IDS)
@@ -346,7 +346,6 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             # Avoid warning from HF logger for text-only input
@@ -358,7 +357,6 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         hf_processor = self.info.get_hf_processor()
@@ -386,7 +384,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            grids=MultiModalFieldConfig.batched("image"),
+            grids=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             indicator_tokens=MultiModalFieldConfig.batched("image"),
         )
 
@@ -442,7 +440,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
             self.visual_tokenizer = VisualTokenizer(
                 config=config.visual_tokenizer_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.visual_tokenizer",
+                prefix=maybe_prefix(prefix, "visual_tokenizer"),
             )
             self.vte = VisualEmbedding(
                 self.config.visual_tokenizer_config.vocab_size, self.config.hidden_size

@@ -80,6 +80,9 @@ class Step3p5Config(PretrainedConfig):
 
         self.att_impl_type = att_impl_type
         self.use_head_wise_attn_gate = use_head_wise_attn_gate
+        # For some reason the checkpoint has longer layer_types than num_hidden_layers
+        if layer_types is not None:
+            layer_types = layer_types[: self.num_hidden_layers]
         self.layer_types = layer_types
         self.use_rope_layers = use_rope_layers
         self.yarn_only_types = yarn_only_types

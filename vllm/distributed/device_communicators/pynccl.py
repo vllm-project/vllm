@@ -3,6 +3,8 @@
 
 
 # ===================== import region =====================
+import threading
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
@@ -108,9 +110,7 @@ class PyNcclCommunicator:
         if self.rank == 0:
             # get the unique id from NCCL
             self.unique_id = self.nccl.ncclGetUniqueId()
-            logger.info_once(
-                "vLLM is using nccl==%s", self.nccl.ncclGetVersion(), scope="local"
-            )
+            logger.info_once("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
         else:
             # construct an empty unique id
             self.unique_id = ncclUniqueId()
@@ -144,6 +144,24 @@ class PyNcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
+
+    def destroy(self):
+        if self.available and not self.disabled:
+            # ncclCommAbort can block until all CUDA graphs that
+            # captured NCCL ops on this comm are destroyed — and
+            # those graphs are released later in this same main-
+            # thread teardown, so a direct call here self-deadlocks.
+            # Run it in a daemon thread with a timeout: the main
+            # thread proceeds, the graphs drop, and the abort returns.
+            def _abort():
+                with torch.accelerator.device_index(self.device.index):
+                    self.nccl.ncclCommAbort(self.comm)
+
+            abort_thread = threading.Thread(target=_abort, daemon=True)
+            abort_thread.start()
+            abort_thread.join(timeout=5.0)
+            self.available = False
+            self.disabled = True
 
     def all_reduce(
         self,

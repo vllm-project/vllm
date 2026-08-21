@@ -4,9 +4,9 @@ import contextlib
 import importlib.metadata
 import os
 import random
+import sys
 import threading
 from collections.abc import Callable, Collection
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -18,6 +18,7 @@ from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -39,8 +40,17 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
+    "int4_per_token_head": torch.uint8,
+    "int8_per_token_head": torch.int8,
+    "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
+    "turboquant_k8v4": torch.uint8,
+    "turboquant_4bit_nc": torch.uint8,
+    "turboquant_k3v4_nc": torch.uint8,
+    "turboquant_3bit_nc": torch.uint8,
+    "nvfp4": torch.uint8,
+    "nvfp4_4over6": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -54,13 +64,27 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 
 
 MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
-    # TODO: Add more modelopt kv cache dtype
-    # mappings here when it supported by some attention backend
-    # (for example supports nvfp4).
     "fp8": "fp8_e4m3",
+    "nvfp4": "nvfp4",
 }
 
 T = TypeVar("T")
+
+
+PIN_MEMORY = is_pin_memory_available()
+
+
+def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    return (
+        kv_cache_dtype.startswith("fp8")
+        or kv_cache_dtype.endswith("per_token_head")
+        or kv_cache_dtype.startswith("nvfp4")
+    )
+
+
+def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
+    """Return True if *kv_cache_dtype* needs per-token-head scales."""
+    return kv_cache_dtype.endswith("per_token_head")
 
 
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
@@ -93,6 +117,32 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
     return True
 
 
+def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
+    """Fix degenerate strides on size=1 dimensions for CUDA TMA compatibility.
+
+    PyTorch allows any stride on a size=1 dim (is_contiguous() is always True
+    there), so a size=1 dim may have stride=1 (2 bytes for bf16) instead of
+    the canonical product(shape[i+1:]).  CUDA TMA on H100+ requires all
+    non-outermost strides to be ≥16-byte aligned; stride=1 triggers
+    cudaErrorIllegalInstruction.  Zero-copy: patches stride metadata only via
+    as_strided; returns t unchanged if all size=1 strides are already canonical.
+    """
+    if 1 not in t.shape:
+        return t
+    strides = list(t.stride())
+    shape = t.shape
+    prev_stride = 1
+    changed = False
+    for i in range(len(shape) - 1, -1, -1):
+        if shape[i] == 1 and strides[i] != prev_stride:
+            strides[i] = prev_stride
+            changed = True
+        prev_stride = strides[i] * shape[i]
+    if not changed:
+        return t
+    return t.as_strided(t.shape, strides)
+
+
 @contextlib.contextmanager
 def set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""
@@ -100,6 +150,121 @@ def set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(dtype)
     yield
     torch.set_default_dtype(old_dtype)
+
+
+def _cgroup_cpu_limit() -> float | None:
+    """Effective CPU quota of this process's cgroup, None if unlimited.
+
+    Resolves the process's own cgroup from /proc/self/cgroup and takes the
+    tightest cpu.max (v2) or cfs quota (v1) along the hierarchy.
+    """
+    limit: float | None = None
+    try:
+        with open("/proc/self/cgroup") as f:
+            entries = [line.strip().split(":", 2) for line in f]
+
+        def visit(base: str, rel_path: str, read_quota) -> None:
+            nonlocal limit
+            path = rel_path
+            while path:
+                quota = read_quota(os.path.join(base, path.lstrip("/")))
+                if quota is not None:
+                    limit = quota if limit is None else min(limit, quota)
+                path = path.rsplit("/", 1)[0]
+
+        def read_v2(cg_dir: str) -> float | None:
+            try:
+                with open(os.path.join(cg_dir, "cpu.max")) as f:
+                    quota, period = f.read().split()
+                return None if quota == "max" else float(quota) / float(period)
+            except (OSError, ValueError):
+                return None
+
+        def read_v1(cg_dir: str) -> float | None:
+            try:
+                with open(os.path.join(cg_dir, "cpu.cfs_quota_us")) as f:
+                    quota = int(f.read())
+                if quota <= 0:
+                    return None
+                with open(os.path.join(cg_dir, "cpu.cfs_period_us")) as f:
+                    return quota / int(f.read())
+            except (OSError, ValueError):
+                return None
+
+        for entry in entries:
+            if len(entry) != 3:
+                continue
+            _, controllers, rel_path = entry
+            if controllers == "":  # cgroup v2
+                visit("/sys/fs/cgroup", rel_path, read_v2)
+            elif "cpu" in controllers.split(","):  # cgroup v1
+                visit("/sys/fs/cgroup/cpu", rel_path, read_v1)
+    except OSError:
+        pass
+    return limit
+
+
+def available_cpu_count() -> int:
+    """CPUs actually usable by this process: scheduling affinity capped by
+    the cgroup CPU quota (unlike `os.cpu_count()`, which is quota-blind)."""
+    if sys.platform != "linux":
+        return os.cpu_count() or 1
+    count = len(os.sched_getaffinity(0))
+    limit = _cgroup_cpu_limit()
+    if limit is not None:
+        count = min(count, int(limit))
+    return max(1, count)
+
+
+# Marks OMP_NUM_THREADS as chosen by vLLM for its worker processes rather than
+# set by the user, so a worker knows it may drop the value once startup is done.
+OMP_NUM_THREADS_SET_BY_VLLM = "VLLM_OMP_NUM_THREADS_SET_BY_VLLM"
+
+
+def startup_omp_num_threads(num_local_procs: int) -> int:
+    """Thread count for a worker process's startup work (weight loading).
+
+    Weight loading does CPU-parallel work, so workers benefit from more than
+    one thread, but only a bounded share of the CPUs this node's workers may
+    actually use: torch's default is the host core count, which ignores both
+    scheduling affinity and any cgroup CPU quota, and doesn't account for the
+    other workers sharing the node.
+    """
+    return max(1, available_cpu_count() // max(1, num_local_procs))
+
+
+def set_torch_threads_for_runtime() -> None:
+    """Set torch intra-op threads to 1 for steady-state serving.
+
+    Any multi-threaded torch CPU op in the engine hot loop leaves the OMP
+    workers spin-waiting after each parallel region, stealing cycles from the
+    step's serial code (and burning cgroup CPU quota in containers). No
+    steady-state CPU op benefits from intra-op parallelism.
+    Respects an externally-set OMP_NUM_THREADS.
+    """
+    if (
+        omp_num_threads := os.environ.get("OMP_NUM_THREADS")
+    ) is not None and os.environ.get(OMP_NUM_THREADS_SET_BY_VLLM) != "1":
+        try:
+            if int(omp_num_threads) > 1:
+                logger.warning_once(
+                    "OMP_NUM_THREADS=%s is set; leaving Torch threads at %d "
+                    "for serving. Multi-threaded torch CPU ops during serving "
+                    "can degrade performance through spin-wait contention and "
+                    "cgroup CPU-quota throttling.",
+                    omp_num_threads,
+                    torch.get_num_threads(),
+                )
+        except ValueError:
+            pass
+        return
+    if torch.get_num_threads() != 1:
+        logger.info_once(
+            "Reducing Torch threads from %d to 1 for serving. Set "
+            "OMP_NUM_THREADS in the external environment to override.",
+            torch.get_num_threads(),
+        )
+        torch.set_num_threads(1)
 
 
 @contextlib.contextmanager
@@ -285,6 +450,8 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
                 and kv_algo.get("type") == "float"
             ):
                 kv_algo = "fp8"
+            elif kv_algo.get("num_bits") == 4 and kv_algo.get("type") == "float":
+                kv_algo = "nvfp4"
             else:
                 # Unknown/unsupported format - return "auto" as safe fallback
                 logger.warning(
@@ -356,8 +523,64 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        from vllm.platforms import current_platform
+
+        current_platform.manual_seed_all(seed)
+
+
+def nvfp4_kv_cache_full_dim(head_size: int) -> int:
+    """Packed last dim for NVFP4 KV cache: fp4 data + fp8 block scales."""
+    return head_size // 2 + head_size // 16
+
+
+def nvfp4_split_data_scale(
+    kv_side: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split one side (K or V) of an NVFP4 KV cache into data and scale.
+
+    The input is a 4D uint8 tensor whose last dimension is
+    ``full_dim = data_dim + scale_dim``.  The physical layout within each
+    side is ``[data | scale]``, both packed contiguously.
+
+    The caller is responsible for slicing K and V from the combined cache
+    first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
+
+    Args:
+        kv_side: 4D uint8 tensor ``(B, H, N, full_dim)``.
+
+    Returns:
+        ``(data, scale)`` where *data* is uint8 and *scale* is
+        float8_e4m3fn, both views of the same storage.
+    """
+    num_pages = kv_side.shape[0]
+    dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
+    full_dim = kv_side.shape[3]
+    data_dim = full_dim * 8 // 9
+    scale_dim = full_dim - data_dim
+
+    data_per_kv = dim_1 * dim_2 * data_dim
+    page_bytes = kv_side.stride(0)
+
+    # Derive inner strides from the kv_side strides, scaling by the
+    # ratio of the target dim to full_dim.  This preserves the physical
+    # layout (NHD vs HND) encoded in the input tensor's strides.
+    s1 = kv_side.stride(1) * data_dim // full_dim
+    s2 = kv_side.stride(2) * data_dim // full_dim
+    data_shape = (num_pages, dim_1, dim_2, data_dim)
+    data_strides = (page_bytes, s1, s2, 1)
+
+    s1_s = kv_side.stride(1) * scale_dim // full_dim
+    s2_s = kv_side.stride(2) * scale_dim // full_dim
+    scale_shape = (num_pages, dim_1, dim_2, scale_dim)
+    scale_strides = (page_bytes, s1_s, s2_s, 1)
+
+    base = kv_side.storage_offset()
+    data = torch.as_strided(kv_side, data_shape, data_strides, storage_offset=base)
+    scale = torch.as_strided(
+        kv_side, scale_shape, scale_strides, storage_offset=base + data_per_kv
+    ).view(torch.float8_e4m3fn)
+
+    return data, scale
 
 
 def create_kv_caches_with_random_flash(
@@ -386,15 +609,31 @@ def create_kv_caches_with_random_flash(
     value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
-        key_value_cache = torch.empty(
-            size=kv_cache_allocation_shape, dtype=dtype, device=device
-        ).permute(*stride_order)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
-            key_value_cache.uniform_(-scale, scale)
-        elif cache_dtype == "fp8":
-            _generate_random_fp8(key_value_cache, -scale, scale)
+        if isinstance(cache_dtype, str) and cache_dtype.startswith("nvfp4"):
+            # Full page dim: fp4 data + fp8 block scales per head.
+            # Per page layout: [K_data | K_scale | V_data | V_scale]
+            # Returns [:, 0] and [:, 1] like all other dtypes.
+            full_dim = nvfp4_kv_cache_full_dim(head_size)
+            nvfp4_shape = (num_blocks, 2, block_size, num_heads, full_dim)
+            nvfp4_phys = tuple(nvfp4_shape[i] for i in stride_order)
+            inv = [stride_order.index(i) for i in range(len(stride_order))]
+            key_value_cache = torch.randint(
+                0,
+                256,
+                nvfp4_phys,
+                dtype=dtype,
+                device=device,
+            ).permute(*inv)
         else:
-            raise ValueError(f"Does not support key cache of type {cache_dtype}")
+            key_value_cache = torch.empty(
+                size=kv_cache_allocation_shape, dtype=dtype, device=device
+            ).permute(*stride_order)
+            if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+                key_value_cache.uniform_(-scale, scale)
+            elif cache_dtype == "fp8":
+                _generate_random_fp8(key_value_cache, -scale, scale)
+            else:
+                raise ValueError(f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
@@ -449,14 +688,24 @@ def create_kv_caches_with_random(
 
 
 def async_tensor_h2d(
-    data: list,
-    dtype: torch.dtype,
-    target_device: str | torch.device,
-    pin_memory: bool,
+    data: list | np.ndarray | torch.Tensor,
+    device: str | torch.device,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """Asynchronously create a tensor and copy it from host to device."""
-    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
-    return t.to(device=target_device, non_blocking=True)
+    """Copy list/numpy array/tensor async from host to device."""
+    if isinstance(data, np.ndarray):
+        data = torch.from_numpy(data)
+    if isinstance(data, torch.Tensor):
+        t = data.pin_memory() if PIN_MEMORY else data
+    else:
+        t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
+    assert t.is_cpu
+    return t.to(device=device, dtype=dtype, non_blocking=True)
+
+
+def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
+    t = torch.from_numpy(array)
+    return t.pin_memory() if PIN_MEMORY else t
 
 
 def make_ndarray_with_pad(
@@ -590,49 +839,6 @@ def aux_stream() -> torch.cuda.Stream | None:
     return _aux_stream
 
 
-@lru_cache(maxsize=8)
-def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
-    # Note: cuda_visible_devices is not used, but we keep it as an argument for
-    # LRU Cache purposes.
-
-    # Code below is based on
-    # https://github.com/pytorch/pytorch/blob/
-    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
-    # torch/cuda/__init__.py#L831C1-L831C17
-    import torch.cuda
-    import torch.version
-
-    from vllm.platforms import current_platform
-
-    if not torch.cuda._is_compiled():
-        return 0
-    if current_platform.is_rocm():
-        # ROCm uses amdsmi instead of nvml for stateless device count
-        # This requires a sufficiently modern version of Torch 2.4.0
-        raw_count = (
-            torch.cuda._device_count_amdsmi()
-            if (hasattr(torch.cuda, "_device_count_amdsmi"))
-            else -1
-        )
-    else:
-        raw_count = torch.cuda._device_count_nvml()
-    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
-    return r
-
-
-def cuda_device_count_stateless() -> int:
-    """Get number of CUDA devices, caching based on the value of
-    CUDA_VISIBLE_DEVICES at the time of call.
-
-    This should be used instead of torch.accelerator.device_count()
-    unless CUDA_VISIBLE_DEVICES has already been set to the desired
-    value."""
-
-    # This can be removed and simply replaced with torch.cuda.get_device_count
-    # after https://github.com/pytorch/pytorch/pull/122815 is released.
-    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
-
-
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
@@ -681,9 +887,17 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
-        assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+        # Remove once the vllm-xpu-kernels fix for empty and non-pinned inputs
+        # (vllm-project/vllm-xpu-kernels#513) is in a released package.
+        if cpu_tensor.numel() == 0:
+            return torch.empty(cpu_tensor.shape, dtype=cpu_tensor.dtype, device="xpu")
+        if not cpu_tensor.is_pinned():
+            contiguous_cpu = cpu_tensor.contiguous()
+            pinned = torch.empty_like(contiguous_cpu, pin_memory=True)
+            pinned.copy_(contiguous_cpu)
+            cpu_tensor = pinned
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
-    elif current_platform.is_cuda() or current_platform.is_rocm():
+    elif current_platform.is_cuda_alike():
         return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
     else:
         raise ValueError(
@@ -742,42 +956,62 @@ def is_torch_equal(target: str) -> bool:
 
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
 
+# Allow toggling LayerName usage via environment variable.
+# Defaults to True on torch >= 2.11, False otherwise.
+# Set VLLM_USE_LAYERNAME=0 to disable even on torch >= 2.11.
+_USE_LAYERNAME = HAS_OPAQUE_TYPE and envs.VLLM_USE_LAYERNAME
+
 if HAS_OPAQUE_TYPE:
     from torch._opaque_base import OpaqueBase
 else:
     OpaqueBase = object  # type: ignore[misc, assignment]
 
 
-class ModuleName(OpaqueBase):  # type: ignore[misc]
+class LayerName(OpaqueBase):  # type: ignore[misc]
     """Wraps a module name string for use as a torch opaque type.
 
     When torch >= 2.11, this is registered as a hoisted value-type opaque
     object so that torch.compile lifts it as a graph input instead of baking
-    it as a constant.  This avoids per-layer recompilation for MOE ops.
+    it as a constant.  This avoids per-layer recompilation for custom ops
+    that accept layer name strings (attention, MOE, KV cache, etc.).
     """
 
     def __init__(self, value: str):
         self.value = value
 
     def __eq__(self, other):
-        return isinstance(other, ModuleName) and self.value == other.value
+        return isinstance(other, LayerName) and self.value == other.value
 
     def __hash__(self):
         return hash(self.value)
 
     def __fx_repr__(self):
-        return (f"ModuleName({self.value!r})", {ModuleName})
+        return (f"LayerName({self.value!r})", {"LayerName": LayerName})
 
 
 if HAS_OPAQUE_TYPE:
     from torch._library.opaque_object import register_opaque_type
 
-    register_opaque_type(ModuleName, typ="value", hoist=True)
+    register_opaque_type(LayerName, typ="value", hoist=True)
+
+# On torch >= 2.11 (with VLLM_USE_LAYERNAME enabled), custom op
+# layer_name parameters use LayerName; otherwise they remain plain str.
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    LayerNameType: TypeAlias = str | LayerName
+else:
+    LayerNameType = LayerName if _USE_LAYERNAME else str
 
 
-# Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
-def supports_xccl() -> bool:
-    return torch.distributed.is_xccl_available()
+def _resolve_layer_name(layer_name: str | LayerName) -> str:
+    """Unwrap a LayerName to str, or return str unchanged."""
+    return layer_name.value if isinstance(layer_name, LayerName) else layer_name
+
+
+def _encode_layer_name(layer_name: str) -> str | LayerName:
+    """Wrap a str layer name as LayerName when enabled."""
+    return LayerName(layer_name) if _USE_LAYERNAME else layer_name
 
 
 # Supports XPU Graph with PyTorch versions >= 2.11.0.dev for XPU platform

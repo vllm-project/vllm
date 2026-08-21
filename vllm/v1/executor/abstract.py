@@ -7,7 +7,9 @@ from concurrent.futures import Future
 from functools import cached_property
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
@@ -21,7 +23,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
@@ -57,9 +59,14 @@ class Executor(ABC):
                 )
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
-            from vllm.v1.executor.ray_executor import RayDistributedExecutor
+            if envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
+                from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
 
-            executor_class = RayDistributedExecutor
+                executor_class = RayExecutorV2
+            else:
+                from vllm.v1.executor.ray_executor import RayDistributedExecutor
+
+                executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
@@ -104,25 +111,31 @@ class Executor(ABC):
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
+        self.ec_output_aggregator: ECOutputAggregator | None = None
 
     @abstractmethod
     def _init_executor(self) -> None:
         raise NotImplementedError
 
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-        """
-        Initialize the KV caches and begin the model execution loop of the
-        underlying workers.
-        """
+        """Initialize the KV caches on the underlying workers."""
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
-        compilation_times: list[float] = self.collective_rpc("compile_or_warm_up_model")
+
+    def compile_or_warm_up_model(self) -> None:
+        """Compile/warm up the model and capture cudagraphs on workers."""
+        compilation_times: list[CompilationTimes] = self.collective_rpc(
+            "compile_or_warm_up_model"
+        )
         # Propagate compilation time from workers back to the main process.
         # With TP>1, compilation happens in worker processes, so the main
         # process config is never updated. Use max across workers since they
         # compile in parallel.
         if compilation_times:
             self.vllm_config.compilation_config.compilation_time = max(
-                compilation_times
+                t.language_model for t in compilation_times
+            )
+            self.vllm_config.compilation_config.encoder_compilation_time = max(
+                t.encoder for t in compilation_times
             )
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
@@ -192,7 +205,7 @@ class Executor(ABC):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> list[dict[int, KVConnectorHandshakeMetadata]]:
+    ) -> list[dict[tuple[int, int], KVConnectorHandshakeMetadata]]:
         return self.collective_rpc("get_kv_connector_handshake_metadata")
 
     @overload
@@ -242,10 +255,6 @@ class Executor(ABC):
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
-    @property
-    def max_concurrent_batches(self) -> int:
-        return 1
-
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.collective_rpc("profile", args=(is_start, profile_prefix))
 
@@ -276,11 +285,20 @@ class Executor(ABC):
             connector, self.parallel_config.world_size
         )
 
+    def init_ec_output_aggregator(self) -> None:
+        self.ec_output_aggregator = ECOutputAggregator()
+
     @cached_property  # Avoid unnecessary RPC calls
     def supported_tasks(self) -> tuple[SupportedTask, ...]:
         output: list[tuple[SupportedTask, ...]]
         output = self.collective_rpc("get_supported_tasks")
         return output[0]
+
+    def supports_draft_weight_updates(self) -> bool:
+        worker_support: list[bool] = self.collective_rpc(
+            "supports_draft_weight_updates"
+        )
+        return all(worker_support)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
@@ -352,6 +370,13 @@ class Executor(ABC):
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
         raise NotImplementedError
+
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        """
+        Whether the executor supports async scheduling.
+        """
+        return False
 
 
 from vllm.v1.executor.uniproc_executor import (  # noqa: E402

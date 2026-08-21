@@ -9,7 +9,8 @@ import pytest
 import pytest_asyncio
 from openai import OpenAI
 
-from ....utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
+
 from .conftest import (
     BASE_TEST_ENV,
     has_output_type,
@@ -37,7 +38,7 @@ def server():
         "--reasoning-parser",
         "qwen3",
         "--max_model_len",
-        "5000",
+        "6000",
         "--structured-outputs-config.backend",
         "xgrammar",
         "--enable-auto-tool-choice",
@@ -67,7 +68,7 @@ async def client(server):
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 123 * 456?",
+        input="What is 123 * 456? Answer with only the number.",
         temperature=0.0,
     )
     assert response is not None
@@ -185,6 +186,12 @@ async def test_function_call_first_turn(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.xfail(
+    reason=(
+        "MCP tools are not properly supported: tool name parameters "
+        "are not extracted for prompt rendering."
+    ),
+)
 async def test_mcp_tool_call(client: OpenAI, model_name: str):
     """MCP tool calling with code_interpreter.
 

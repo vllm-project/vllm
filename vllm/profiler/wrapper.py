@@ -1,19 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import inspect
+import json
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
 from typing import Literal
+from uuid import uuid4
 
 import torch
+from packaging.version import InvalidVersion, Version
 from typing_extensions import override
 
+import vllm.version
 from vllm.config import ProfilerConfig
 from vllm.config.profiler import _is_uri_path
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+_TRITON_PROTON_3_7_VERSION = Version("3.7.0")
 
 
 class WorkerProfiler(ABC):
@@ -41,6 +50,11 @@ class WorkerProfiler(ABC):
         self._profiling_for_iters = 0
         self._running = False
 
+    @property
+    def is_running(self) -> bool:
+        """Whether the underlying profiler is currently collecting data."""
+        return self._running
+
     @abstractmethod
     def _start(self) -> None:
         """Start the profiler."""
@@ -63,7 +77,7 @@ class WorkerProfiler(ABC):
         """Call _stop with error handling but no safeguards."""
         try:
             self._stop()
-            logger.info_once("Profiler stopped successfully.", scope="local")
+            logger.info_once("Profiler stopped successfully.")
         except Exception as e:
             logger.warning("Failed to stop profiler: %s", e)
         self._running = False  # Always mark as not running, assume stop worked
@@ -93,7 +107,7 @@ class WorkerProfiler(ABC):
             and self._delay_iters > 0
             and self._active_iteration_count == self._delay_iters
         ):
-            logger.info_once("Starting profiler after delay...", scope="local")
+            logger.info_once("Starting profiler after delay...")
             self._call_start()
 
         # Call profiler step for schedule-based profiling
@@ -109,9 +123,7 @@ class WorkerProfiler(ABC):
             # Automatically stop the profiler after max iters
             # will be marked as not running, but leave as active so that stop
             # can clean up properly
-            logger.info_once(
-                "Max profiling iterations reached. Stopping profiler...", scope="local"
-            )
+            logger.info_once("Max profiling iterations reached. Stopping profiler...")
             self._call_stop()
             return
 
@@ -141,7 +153,7 @@ class WorkerProfiler(ABC):
 
     def shutdown(self) -> None:
         """Ensure profiler is stopped when shutting down."""
-        logger.info_once("Shutting down profiler", scope="local")
+        logger.info_once("Shutting down profiler")
         if self._running:
             self.stop()
 
@@ -150,10 +162,11 @@ class WorkerProfiler(ABC):
         return nullcontext()
 
 
-TorchProfilerActivity = Literal["CPU", "CUDA", "XPU"]
+TorchProfilerActivity = Literal["CPU", "CUDA", "PrivateUse1", "XPU"]
 TorchProfilerActivityMap = {
     "CPU": torch.profiler.ProfilerActivity.CPU,
     "CUDA": torch.profiler.ProfilerActivity.CUDA,
+    "PrivateUse1": torch.profiler.ProfilerActivity.PrivateUse1,
     "XPU": torch.profiler.ProfilerActivity.XPU,
 }
 
@@ -176,7 +189,6 @@ class TorchProfilerWrapper(WorkerProfiler):
             logger.info_once(
                 "Torch profiling enabled. Traces will be saved to: %s",
                 torch_profiler_trace_dir,
-                scope="local",
             )
             logger.debug(
                 "Profiler config: record_shapes=%s,"
@@ -216,7 +228,6 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.wait_iterations,
                     profiler_config.warmup_iterations,
                     profiler_config.active_iterations,
-                    scope="local",
                 )
 
         self.profiler = torch.profiler.profile(
@@ -239,10 +250,60 @@ class TorchProfilerWrapper(WorkerProfiler):
             profiler_config.wait_iterations + profiler_config.warmup_iterations - 1,
             0,
         )
+        self._version_metadata_added = False
+
+    def _build_profiler_table(
+        self,
+        sort_key: str,
+        row_limit: int | None = None,
+    ) -> str:
+        if row_limit is None:  # use profiler default row limit of 100
+            return self.profiler.key_averages().table(sort_by=sort_key)
+        return self.profiler.key_averages().table(
+            sort_by=sort_key,
+            row_limit=row_limit,
+        )
+
+    def _write_profiler_table(self, rank: int, table: str) -> None:
+        profiler_dir = self.profiler_config.torch_profiler_dir
+
+        # Skip file write for URI paths (gs://, s3://, etc.)
+        # as standard file I/O doesn't work with URI schemes
+        if not _is_uri_path(profiler_dir):
+            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+            with open(profiler_out_file, "w") as f:
+                print(table, file=f)
+
+    def _maybe_add_version_metadata(self) -> None:
+        """Stamp the vLLM version (which embeds the git commit) into the trace.
+
+        add_metadata_json is a no-op until Kineto is initialized, which with a
+        schedule only happens after the WAIT phase, so stamp once it's live.
+        """
+        if self._version_metadata_added:
+            return
+        # None while the schedule is still in the WAIT phase.
+        if self.profiler.profiler is None:
+            return
+        try:
+            self.profiler.add_metadata_json(
+                "vllm_version", json.dumps(vllm.version.__version__)
+            )
+            self.profiler.add_metadata_json(
+                "vllm_version_tuple",
+                json.dumps([str(p) for p in vllm.version.__version_tuple__]),
+            )
+        except Exception as e:
+            logger.warning("Failed to add vLLM version to profiler metadata: %s", e)
+        # Mark done even on failure, to avoid retrying every step.
+        self._version_metadata_added = True
 
     @override
     def _start(self) -> None:
         self.profiler.start()
+        # No-schedule case: Kineto is live immediately. With a schedule this
+        # no-ops and _profiler_step stamps it once WAIT ends.
+        self._maybe_add_version_metadata()
 
     @override
     def _stop(self) -> None:
@@ -251,26 +312,22 @@ class TorchProfilerWrapper(WorkerProfiler):
         profiler_config = self.profiler_config
         rank = self.local_rank
         if profiler_config.torch_profiler_dump_cuda_time_total:
-            profiler_dir = profiler_config.torch_profiler_dir
-            sort_key = "self_cuda_time_total"
-            table = self.profiler.key_averages().table(sort_by=sort_key)
-
-            # Skip file write for URI paths (gs://, s3://, etc.)
-            # as standard file I/O doesn't work with URI schemes
-            if not _is_uri_path(profiler_dir):
-                profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
-                with open(profiler_out_file, "w") as f:
-                    print(table, file=f)
+            table = self._build_profiler_table(sort_key="self_cuda_time_total")
+            self._write_profiler_table(rank, table)
 
             # only print profiler results on rank 0
             if rank == 0:
                 print(table)
-        if self.dump_cpu_time_total and rank == 0:
-            logger.info(
-                self.profiler.key_averages().table(
-                    sort_by="self_cpu_time_total", row_limit=50
-                )
+
+        if self.dump_cpu_time_total:
+            table = self._build_profiler_table(
+                sort_key="self_cpu_time_total", row_limit=50
             )
+            self._write_profiler_table(rank, table)
+
+            # only print profiler results on rank 0
+            if rank == 0:
+                print(table)
 
     @override
     def _profiler_step(self) -> bool:
@@ -282,6 +339,8 @@ class TorchProfilerWrapper(WorkerProfiler):
         """
         if self._uses_schedule:
             self.profiler.step()
+            # Stamp once the schedule leaves WAIT and Kineto is live.
+            self._maybe_add_version_metadata()
             # Track warmup steps - only count active steps toward max_iterations
             if self._warmup_steps_remaining > 0:
                 self._warmup_steps_remaining -= 1
@@ -291,6 +350,123 @@ class TorchProfilerWrapper(WorkerProfiler):
     @override
     def annotate_context_manager(self, name: str):
         return torch.profiler.record_function(name)
+
+
+class ProtonProfilerWrapper(WorkerProfiler):
+    """Worker profiler backed by :mod:`triton.profiler` (Proton)."""
+
+    def __init__(
+        self,
+        profiler_config: ProfilerConfig,
+        worker_name: str,
+    ) -> None:
+        super().__init__(profiler_config)
+
+        try:
+            self._proton = importlib.import_module("triton.profiler")
+            triton = importlib.import_module("triton")
+        except ImportError as exc:
+            raise RuntimeError(
+                "The Proton profiler requires a Triton installation with "
+                "triton.profiler support."
+            ) from exc
+
+        self._output_dir = profiler_config.proton_profiler_dir
+        self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
+        self._context = profiler_config.proton_context
+        self._data = profiler_config.proton_data
+        self._backend = profiler_config.proton_backend
+        self._mode = profiler_config.proton_mode
+        self._hook = profiler_config.proton_hook
+        self._output_format = profiler_config.proton_output_format
+        self._triton_version_string = getattr(triton, "__version__", "unknown")
+        try:
+            self._triton_version = Version(self._triton_version_string)
+        except InvalidVersion:
+            self._triton_version = None
+        self._validate_capabilities()
+        self._session_id: int | None = None
+        # Qualify output names by process and wrapper instance so a new
+        # worker cannot overwrite profiles left by an earlier server process.
+        self._instance_id = f"pid{os.getpid()}_{uuid4().hex}"
+        self._run_id = 0
+
+        logger.info_once(
+            "Proton profiling enabled. Output will be saved under: %s",
+            self._output_dir,
+        )
+
+    def _require_triton_version(self, feature: str, minimum: Version) -> None:
+        if self._triton_version is None or self._triton_version < minimum:
+            raise RuntimeError(
+                f"Proton {feature} requires Triton >= {minimum}; found "
+                f"{self._triton_version_string}."
+            )
+
+    def _validate_capabilities(self) -> None:
+        if self._output_format is not None:
+            parameters = inspect.signature(self._proton.finalize).parameters
+            supports_output_format = "output_format" in parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            if not supports_output_format:
+                raise RuntimeError(
+                    "The installed Triton Proton does not support selecting "
+                    "an output format during finalize."
+                )
+
+        if self._output_format == "hatchet_msgpack":
+            self._require_triton_version(
+                "hatchet_msgpack output", _TRITON_PROTON_3_7_VERSION
+            )
+        if self._mode and self._mode.split(":", 1)[0] == "periodic_flushing":
+            self._require_triton_version(
+                "periodic flushing", _TRITON_PROTON_3_7_VERSION
+            )
+
+    def _create_session(self, output_path: str) -> int:
+        os.makedirs(self._output_dir, exist_ok=True)
+        session_id = self._proton.start(
+            name=output_path,
+            context=self._context,
+            data=self._data,
+            backend=self._backend,
+            mode=self._mode,
+            hook=self._hook,
+        )
+        if session_id is None:
+            raise RuntimeError("Proton did not create a profiling session")
+        return session_id
+
+    @override
+    def _start(self) -> None:
+        output_path = f"{self._output_path}_{self._instance_id}_run{self._run_id}"
+        self._session_id = self._create_session(output_path)
+        self._run_id += 1
+
+    @override
+    def _stop(self) -> None:
+        assert self._session_id is not None
+        session_id = self._session_id
+        try:
+            self._proton.deactivate(session=session_id)
+        finally:
+            try:
+                if self._output_format is None:
+                    self._proton.finalize(session=session_id)
+                else:
+                    self._proton.finalize(
+                        session=session_id, output_format=self._output_format
+                    )
+            finally:
+                self._session_id = None
+
+    @override
+    def annotate_context_manager(self, name: str):
+        if not self._running:
+            return nullcontext()
+        return self._proton.scope(name)
 
 
 class CudaProfilerWrapper(WorkerProfiler):

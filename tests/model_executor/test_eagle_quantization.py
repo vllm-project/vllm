@@ -10,9 +10,10 @@ from vllm.config import LoadConfig, ModelConfig, SpeculativeConfig, VllmConfig
 from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.platforms import current_platform
 
+DEVICE_TYPE = current_platform.device_type
 DEVICES = (
-    [f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)]
-    if current_platform.is_cuda_alike()
+    [f"{DEVICE_TYPE}:{i}" for i in range(min(torch.accelerator.device_count(), 2))]
+    if not current_platform.is_cpu()
     else ["cpu"]
 )
 
@@ -99,32 +100,6 @@ def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> 
     assert output.shape == (2, output_size)
 
 
-def test_kv_cache_scale_name_handling():
-    # Mock a quant config that supports cache scales
-    mock_quant_config = Mock()
-    mock_quant_config.get_cache_scale = Mock(return_value="layers.0.self_attn.kv_scale")
-
-    # Condition check in load_weights
-    name = "layers.0.self_attn.k_proj.weight"
-    scale_name = mock_quant_config.get_cache_scale(name)
-
-    # Check if get_cache_scale is called and returns expected value
-    mock_quant_config.get_cache_scale.assert_called_once_with(name)
-    assert scale_name == "layers.0.self_attn.kv_scale"
-
-
-def test_kv_cache_scale_name_no_scale():
-    # Mock a quant config that returns None for get_cache_scale
-    mock_quant_config = Mock()
-    mock_quant_config.get_cache_scale = Mock(return_value=None)
-
-    name = "layers.0.mlp.gate_proj.weight"
-    scale_name = mock_quant_config.get_cache_scale(name)
-
-    # Should return None for weights that don't have cache scales
-    assert scale_name is None
-
-
 def test_maybe_remap_kv_scale_name():
     from vllm.model_executor.model_loader.weight_utils import maybe_remap_kv_scale_name
 
@@ -139,31 +114,46 @@ def test_maybe_remap_kv_scale_name():
     assert remapped in params_dict or remapped == name or remapped is None
 
 
-def test_load_weights_kv_scale_handling():
-    kv_scale_param = Mock()
-    kv_scale_param.weight_loader = Mock()
+def test_eagle3_lm_head_receives_quant_config():
+    """Eagle3LlamaForCausalLM must pass quant_config to ParallelLMHead.
 
-    params_dict = {
-        "layers.0.self_attn.kv_scale": kv_scale_param,
-    }
+    Without quant_config, quantized lm_head weights (e.g. INT8 per-channel)
+    in Eagle3 drafter checkpoints fail to load because ParallelLMHead doesn't
+    expect weight_packed tensors.
+    """
+    from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 
     mock_quant_config = Mock()
-    mock_quant_config.get_cache_scale = Mock(return_value="layers.0.self_attn.kv_scale")
 
-    # Load_weights logic for KV cache scales
-    name = "layers.0.self_attn.k_proj.weight"
-    loaded_weight_tensor = torch.tensor([1.0, 2.0])
+    mock_hf_config = Mock()
+    mock_hf_config.draft_vocab_size = 1000
+    mock_hf_config.hidden_size = 256
+    mock_hf_config.vocab_size = 32000
+    mock_hf_config.logit_scale = 1.0
 
-    if mock_quant_config is not None:
-        scale_name = mock_quant_config.get_cache_scale(name)
-        if scale_name:
-            param = params_dict[scale_name]
-            assert param is kv_scale_param
-            weight_to_load = (
-                loaded_weight_tensor
-                if loaded_weight_tensor.dim() == 0
-                else loaded_weight_tensor[0]
-            )
+    mock_vllm_config = Mock()
+    mock_vllm_config.speculative_config.draft_model_config.hf_config = mock_hf_config
+    mock_vllm_config.model_config.get_num_layers.return_value = 32
+    mock_vllm_config.speculative_config.parallel_drafting = False
 
-            assert scale_name == "layers.0.self_attn.kv_scale"
-            assert weight_to_load == loaded_weight_tensor[0]
+    with (
+        patch("vllm.model_executor.models.llama_eagle3.LlamaModel") as MockModel,
+        patch("vllm.model_executor.models.llama_eagle3.ParallelLMHead") as MockLMHead,
+        patch("vllm.model_executor.models.llama_eagle3.LogitsProcessor"),
+        patch(
+            "vllm.model_executor.models.llama_eagle3.get_draft_quant_config",
+            return_value=mock_quant_config,
+        ),
+    ):
+        MockModel.return_value.use_aux_hidden_state = True
+
+        Eagle3LlamaForCausalLM(vllm_config=mock_vllm_config)
+
+        MockLMHead.assert_called_once()
+        call_kwargs = MockLMHead.call_args.kwargs
+        assert "quant_config" in call_kwargs, (
+            "ParallelLMHead must receive quant_config for quantized lm_head weights"
+        )
+        assert call_kwargs["quant_config"] is mock_quant_config, (
+            "ParallelLMHead must receive the draft model's quant_config"
+        )

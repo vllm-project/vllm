@@ -4,14 +4,19 @@
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 import pybase64
 import torch
 from PIL import Image
 
+import vllm.envs as envs
 from vllm.utils.serial_utils import tensor2base64
+from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
-from ..image import convert_image_mode, rgba_to_rgb
+from ..image import convert_image_mode, normalize_image, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
+
+MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
 
 
 class ImageMediaIO(MediaIO[Image.Image]):
@@ -20,9 +25,11 @@ class ImageMediaIO(MediaIO[Image.Image]):
     error handling.
     """
 
-    def __init__(self, image_mode: str = "RGB", **kwargs) -> None:
+    def __init__(self, image_mode: str | None = "RGB", **kwargs) -> None:
         super().__init__()
 
+        # Target mode for loaded images; `None` keeps the original mode
+        # (i.e. no conversion, alpha channel is preserved as-is).
         self.image_mode = image_mode
         # `kwargs` contains custom arguments from
         # --media-io-kwargs for this modality, merged with
@@ -57,25 +64,45 @@ class ImageMediaIO(MediaIO[Image.Image]):
         """Convert image mode with custom background color."""
         if isinstance(image, MediaWithBytes):
             image = image.media
-        if image.mode == self.image_mode:
+        if self.image_mode is None or image.mode == self.image_mode:
             return image
         elif image.mode == "RGBA" and self.image_mode == "RGB":
             return rgba_to_rgb(image, self.rgba_background_color)
         else:
-            return convert_image_mode(image, self.image_mode)
+            return convert_image_mode(
+                image, self.image_mode, self.rgba_background_color
+            )
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
-        image = Image.open(BytesIO(data))
-        return MediaWithBytes(self._convert_image_mode(image), data)
+        try:
+            image = Image.open(BytesIO(data))
+            w, h = image.size
+            max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
+            if max_pixels > 0 and w * h > max_pixels:
+                raise ValueError(
+                    f"Image dimensions {w}x{h} ({w * h} pixels) exceed "
+                    f"the maximum of {max_pixels} pixels. Set "
+                    f"VLLM_MAX_IMAGE_PIXELS to increase this limit."
+                )
+            image = normalize_image(image)
+            image.load()
+            converted = self._convert_image_mode(image)
+        except (OSError, Image.UnidentifiedImageError) as e:
+            raise ValueError(f"Failed to load image: {e}") from e
+
+        io_config = None
+        if converted is not image:
+            io_config = {
+                "image_mode": self.image_mode,
+                "rgba_background_color": self.rgba_background_color,
+            }
+        return MediaWithBytes(converted, data, io_config)
 
     def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image]:
-        with open(filepath, "rb") as f:
-            data = f.read()
-        image = Image.open(BytesIO(data))
-        return MediaWithBytes(self._convert_image_mode(image), data)
+        return self.load_bytes(filepath.read_bytes())
 
     def encode_base64(
         self,
@@ -104,21 +131,30 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
     def __init__(self) -> None:
         super().__init__()
 
-    def load_bytes(self, data: bytes) -> torch.Tensor:
+    def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
         buffer = BytesIO(data)
-        # Enable sparse tensor integrity checks to prevent out-of-bounds
-        # writes from maliciously crafted tensors
-        with torch.sparse.check_sparse_tensor_invariants():
+        with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(buffer, weights_only=True)
             return tensor.to_dense()
+
+    def _load_numpy(self, data: bytes) -> torch.Tensor:
+        with BytesIO(data) as buffer:
+            return torch.from_numpy(np.load(buffer))
+
+    def load_bytes(self, data: bytes) -> torch.Tensor:
+        if data[:6] == MAGIC_NUMPY_PREFIX:
+            return self._load_numpy(data)
+
+        return self._load_pickled_torch(data)
 
     def load_base64(self, media_type: str, data: str) -> torch.Tensor:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> torch.Tensor:
-        # Enable sparse tensor integrity checks to prevent out-of-bounds
-        # writes from maliciously crafted tensors
-        with torch.sparse.check_sparse_tensor_invariants():
+        if filepath.suffix == ".npy":
+            return torch.from_numpy(np.load(filepath))
+
+        with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(filepath, weights_only=True)
             return tensor.to_dense()
 

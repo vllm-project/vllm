@@ -15,6 +15,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -32,8 +36,8 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from .utils import AutoWeightsLoader
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 NORM2FN = {
@@ -280,6 +284,11 @@ class InternMLP(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(
+    dynamic_arg_dims={"hidden_states": 0},
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class InternVisionEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -364,8 +373,8 @@ class InternVisionEncoder(nn.Module):
         self.layers = nn.ModuleList(
             [
                 self.layer_cls(
-                    config,
-                    quant_config,
+                    config=config,
+                    quant_config=quant_config,
                     num_dummy_heads=num_dummy_heads,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
@@ -436,11 +445,5 @@ class InternVisionModel(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

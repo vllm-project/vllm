@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 import os
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
 import cv2
+import pybase64 as base64
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -16,7 +16,7 @@ from vllm.benchmarks.datasets import RandomMultiModalDataset, SampleRequest
 @pytest.fixture(scope="session")
 def hf_tokenizer() -> PreTrainedTokenizerBase:
     """Use a small, commonly available tokenizer."""
-    return AutoTokenizer.from_pretrained("gpt2")
+    return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 
 @pytest.fixture

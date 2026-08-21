@@ -19,6 +19,7 @@ from vllm.transformers_utils.runai_utils import (
 def test_is_runai_obj_uri():
     assert is_runai_obj_uri("gs://some-gcs-bucket/path")
     assert is_runai_obj_uri("s3://some-s3-bucket/path")
+    assert is_runai_obj_uri("az://some-azure-container/path")
     assert not is_runai_obj_uri("nfs://some-nfs-path")
 
 

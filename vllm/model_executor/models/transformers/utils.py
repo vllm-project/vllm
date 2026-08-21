@@ -16,22 +16,26 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import lru_cache
+from itertools import chain
+from operator import attrgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import nn
 
-from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import is_rope_parameters_nested
 
 if TYPE_CHECKING:
@@ -94,7 +98,13 @@ def init_on_device_without_buffers(device: torch.device):
             setattr(torch, torch_function_name, old_torch_function)
 
 
-Style = Literal["colwise", "colwise_rep", "rowwise", "rowwise_rep", "replicate"]
+Style = Literal[
+    "colwise",
+    "rowwise",
+    "replicate",
+    "colwise_gather_output",
+    "rowwise_split_input",
+]
 
 
 def replace_linear_class(
@@ -120,10 +130,10 @@ def replace_linear_class(
 
     vllm_linear_cls, vllm_linear_kwargs = {
         "colwise": (ColumnParallelLinear, {}),
-        "colwise_rep": (ColumnParallelLinear, {"gather_output": True}),
         "rowwise": (RowParallelLinear, {}),
-        "rowwise_rep": (RowParallelLinear, {"input_is_parallel": False}),
         "replicate": (ReplicatedLinear, {}),
+        "colwise_gather_output": (ColumnParallelLinear, {"gather_output": True}),
+        "rowwise_split_input": (RowParallelLinear, {"input_is_parallel": False}),
     }.get(style, (ReplicatedLinear, {}))
 
     return vllm_linear_cls(
@@ -176,43 +186,129 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
     )
 
 
-def replace_rms_norm_class(rms_norm: nn.Module, hidden_size: int) -> RMSNorm:
-    """Replace a Transformers RMSNorm with vLLM's RMSNorm.
+def attrsetter(attr: str) -> Callable[[object, object], None]:
+    """Set a possibly nested attribute, like the inverse of attrgetter."""
+    parent, _, name = attr.rpartition(".")
 
-    This method assumes:
-    - Weight is stored as `weight`.
-    - Epsilon is stored as `eps` or `variance_epsilon`.
-    - `with_scale` indicates whether the layer has a weight (Gemma3n only).
-    - `var_hidden_size` is only ever used for Intern vision encoder in vLLM
-    and Transformers doesn't appear to have the same concept.
+    def setter(obj: object, value: object):
+        attr_parent = attrgetter(parent)(obj) if parent else obj
+        setattr(attr_parent, name, value)
+
+    return setter
+
+
+class _UninitializedEmbedding(nn.Embedding):
+    """Make `__init__` inert, so that `VocabParallelEmbedding.__init__`'
+    call to `super().__init__` does not invoke `nn.Embedding.__init__`."""
+
+    def __init__(self):
+        pass
+
+
+class _VocabParallelEmbeddingBase(VocabParallelEmbedding, _UninitializedEmbedding):
+    """Orders `VocabParallelEmbedding` ahead of `nn.Embedding` in the MRO, so that
+    `super().forward(...)` in an `nn.Embedding` subclass reaches vLLM's embedding."""
+
+
+@lru_cache
+def _rebase_on_vocab_parallel(cls: type[nn.Embedding]) -> type[VocabParallelEmbedding]:
+    """Subclass `cls` so that `VocabParallelEmbedding` supersedes its `nn.Embedding`.
+
+    Args:
+        cls: The `nn.Embedding` subclass to rebase. Cached, so a given `cls` always
+            maps to the same class.
+    Returns:
+        The new class, to assign to `__class__` of an instance of `cls`.
     """
-    eps = getattr_iter(rms_norm, ("eps", "variance_epsilon"), 1e-6)
-    kwargs = {"hidden_size": hidden_size, "eps": eps}
-    # Update hidden size if weight is available
-    weight_meta = getattr(rms_norm, "weight", None)
-    if weight_meta is not None:
-        kwargs["hidden_size"] = weight_meta.size(0)
-    # Check if weight is all zeros, which indicates GemmaRMSNorm
-    # We must create a new instance because rms_norm is on meta
-    try:
-        with torch.device("cpu"):
-            weight_test = getattr(rms_norm.__class__(1), "weight", None)
-    except Exception:
-        logger.warning(
-            "Failed to determine if RMSNorm weight is centered on zero or one. "
-            "Defaulting to one."
+    return type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})
+
+
+def replace_embedding_class(
+    embedding: nn.Module,
+    quant_config: "QuantizationConfig | None" = None,
+    *,
+    prefix: str = "",
+) -> nn.Module:
+    """Replace the `nn.Embedding` in `embedding` with `VocabParallelEmbedding`.
+
+    Args:
+        embedding: The module returned by `model.get_input_embeddings()`.
+        quant_config: Quantization config for the new embedding.
+        prefix: Qualname of `embedding`, used to look up its quantization method.
+    Returns:
+        The module to install with `model.set_input_embeddings()`. Composing and
+        inheriting modules are mutated in place and returned as-is.
+    Raises:
+        ValueError: If `embedding` composes anything other than one `nn.Embedding`,
+            which would leave the input embedding weights ambiguous.
+    """
+    # If `embedding` composes its `nn.Embedding`, recurse into it
+    if not isinstance(embedding, nn.Embedding):
+        composed = [
+            (name, module)
+            for name, module in embedding.named_modules()
+            if isinstance(module, nn.Embedding)
+        ]
+        if len(composed) != 1:
+            raise ValueError(
+                f"Expected {type(embedding).__name__} to be an `nn.Embedding` or to "
+                f"compose exactly one, but found {len(composed)}."
+            )
+        name, module = composed[0]
+        new_embedding = replace_embedding_class(
+            module, quant_config, prefix=maybe_prefix(prefix, name)
         )
-        weight_test = None
-    if weight_test is not None and torch.all(weight_test == 0):
-        return GemmaRMSNorm(**kwargs)
-    # Otherwise assume it's a regular RMSNorm
-    kwargs["has_weight"] = getattr(rms_norm, "with_scale", True)
-    if weight_meta is not None:
-        kwargs["dtype"] = weight_meta.dtype
-    else:
-        # No weight, fall back to weightless RMSNorm
-        kwargs["has_weight"] = False
-    return RMSNorm(**kwargs)
+        attrsetter(name)(embedding, new_embedding)
+        return embedding
+
+    kwargs = dict(
+        num_embeddings=embedding.num_embeddings,
+        embedding_dim=embedding.embedding_dim,
+        params_dtype=embedding.weight.dtype,
+        quant_config=quant_config,
+        prefix=prefix,
+    )
+    # If `embedding` is a bare `nn.Embedding`, simple replace
+    if type(embedding) is nn.Embedding:
+        return VocabParallelEmbedding(**kwargs)
+
+    # Otherwise `embedding` inherits `nn.Embedding`, rebase it in place
+    embedding.__class__ = _rebase_on_vocab_parallel(type(embedding))
+    VocabParallelEmbedding.__init__(embedding, **kwargs)
+    return embedding
+
+
+def recursive_replace_linear(
+    model: nn.Module,
+    quant_config: "QuantizationConfig | None",
+    prefix: str = "",
+):
+    """Recursively replace linear modules in the model as needed."""
+
+    def _recursive_replace(module: nn.Module, prefix: str):
+        for child_name, child_module in module.named_children():
+            new_module = child_module
+            qual_name = maybe_prefix(prefix, child_name)
+            # Replace modules as needed
+            if isinstance(child_module, nn.Linear):
+                style = "replicate"
+                new_module = replace_linear_class(
+                    child_module,
+                    style,
+                    quant_config,
+                    prefix=qual_name,
+                )
+            else:
+                _recursive_replace(child_module, prefix=qual_name)
+            if new_module is not child_module:
+                setattr(module, child_name, new_module)
+
+    _recursive_replace(model, prefix=prefix)
+
+
+def named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+    """`module`'s own state (i.e. named parameters and buffers)."""
+    return chain(module.named_parameters(), module.named_buffers())
 
 
 def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
