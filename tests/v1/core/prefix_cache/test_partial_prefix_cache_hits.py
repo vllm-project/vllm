@@ -548,42 +548,25 @@ def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     assert moved[0].block_id == cow_copy.dst_block_id
 
 
-def test_take_partial_tail_offloads_returns_cow_target():
+@pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
+def test_take_partial_tail_offloads_returns_cow_target(dcp_world_size: int):
     """The connector offload hand-off exposes the mamba CoW *target* block Y
     (the durable boundary state), not the overwritten source X, and only at
     the CoW step."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
-    kv_cache_config = KVCacheConfig(
-        num_blocks=24,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["full"],
-                FullAttentionSpec(
-                    block_size=hash_block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["mamba"],
-                MambaSpec(
-                    block_size=block_size,
-                    shapes=(1, 1),
-                    dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
-                ),
-            ),
-        ],
-    )
-    manager = make_kv_cache_manager(
-        kv_cache_config=kv_cache_config,
-        max_model_len=8192,
-        enable_caching=True,
+    manager = make_full_mamba_manager(
+        dcp_world_size=dcp_world_size,
         hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=block_size,
+        num_blocks=24,
     )
+    full_manager, mamba_manager = manager.coordinator.single_type_managers
+    assert full_manager.dcp_world_size == dcp_world_size
+    assert full_manager.block_size == hash_block_size * dcp_world_size
+    assert mamba_manager.dcp_world_size == 1
+    assert mamba_manager.block_size == block_size
 
     req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
