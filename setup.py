@@ -258,6 +258,16 @@ class cmake_build_ext(build_ext):
             "-DVLLM_TARGET_DEVICE={}".format(VLLM_TARGET_DEVICE),
         ]
 
+        # CI's trace-selection pilot reads the configured build through the
+        # CMake File API. The query must exist before configure; keeping this
+        # behind an explicit build-stage environment flag leaves local builds
+        # and release wheels unchanged.
+        if os.getenv("VLLM_CI_CAPTURE_BUILD_GRAPH") == "1":
+            query = Path(self.build_temp) / ".cmake/api/v1/query/codemodel-v2"
+            query.parent.mkdir(parents=True, exist_ok=True)
+            query.touch()
+            cmake_args += ["-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]
+
         verbose = envs.VERBOSE
         if verbose:
             cmake_args += ["-DCMAKE_VERBOSE_MAKEFILE=ON"]

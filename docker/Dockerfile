@@ -341,6 +341,7 @@ WORKDIR /workspace
 
 COPY pyproject.toml setup.py CMakeLists.txt ./
 COPY tools/build_rust.py tools/build_rust.py
+COPY tools/ci_test_selection tools/ci_test_selection/
 COPY cmake cmake/
 COPY csrc csrc/
 COPY vllm/envs.py vllm/envs.py
@@ -363,6 +364,11 @@ ARG VLLM_MAIN_CUDA_VERSION=""
 
 # Use dummy version for csrc-build wheel (only .so files are extracted, version doesn't matter)
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+csrc.build"
+
+# Request a CMake File API reply from source builds. Precompiled-wheel builds
+# do not configure CMake; the capture step below records that absence without
+# breaking the regular image build, and the optional trace job then soft-fails.
+ENV VLLM_CI_CAPTURE_BUILD_GRAPH=1
 
 # Use existing torch for nightly builds
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -410,6 +416,22 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
         export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+    fi
+
+# Persist checkout-agnostic native provenance in the image. Image-build
+# publishes these exact bytes once with a separate SHA/repository manifest;
+# traced test jobs reference those hashes rather than copying the maps. A
+# precompiled build intentionally has no File API reply and therefore no
+# build-graph.jsonl: the shadow trace step detects and reports that incomplete
+# evidence instead of publishing a misleading graph.
+RUN set -eu; \
+    mkdir -p /opt/vllm-ci/build-graph; \
+    if ! bash tools/ci_test_selection/export_image_build_provenance.sh \
+        /workspace /opt/vllm-ci/build-graph; then \
+        rm -f /opt/vllm-ci/build-graph/build-graph.jsonl \
+            /opt/vllm-ci/build-graph/kernel-map.jsonl; \
+        echo "Static test-selection provenance export failed; evidence unavailable" \
+            > /opt/vllm-ci/build-graph/MISSING; \
     fi
 
 #################### CSRC BUILD IMAGE ####################
@@ -926,6 +948,8 @@ ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 
 # We can specify the standard or nightly build of PyTorch
 ARG PYTORCH_NIGHTLY
+
+COPY --from=csrc-build /opt/vllm-ci/build-graph /opt/vllm-ci/build-graph
 
 # Install vLLM and EP kernel wheels after the stable test dependencies so
 # source-only changes do not invalidate the dependency layers above.
