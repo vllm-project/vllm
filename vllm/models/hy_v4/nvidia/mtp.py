@@ -39,11 +39,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from .model import (
-    HYV4_PACKED_MODULES_MAPPING,
-    HYV4DecoderLayer,
-    _normalize_hyv4_config,
-)
+from .model import HYV4DecoderLayer, _normalize_hyv4_config
 
 logger = init_logger(__name__)
 
@@ -385,7 +381,7 @@ class HYV4MultiTokenPredictor(nn.Module):
             self.num_mtp_layers,
         )
         if self.quant_config is not None:
-            self.quant_config.packed_modules_mapping = HYV4_PACKED_MODULES_MAPPING
+            self.quant_config.packed_modules_mapping = HYV4MTP.packed_modules_mapping
 
         # Sparse DSA draft blocks must share the target model's top-k buffer.
         # The proposer injects it through HYV4MTP.set_topk_indices_buffer()
@@ -470,7 +466,13 @@ class HYV4MTP(nn.Module):
     matching `DeepseekV32MTP` / `KimiK3MTP` / `HYV3MTP`.
     """
 
-    packed_modules_mapping = HYV4_PACKED_MODULES_MAPPING
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        # MLA runs both latent down-projections as one GEMM.
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        # The indexer fuses wk and weights_proj into one GEMM.
+        "wk_weights_proj": ["wk", "weights_proj"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -700,9 +702,12 @@ class HYV4MTP(nn.Module):
                 if param_name.endswith(tag) and ".experts." in param_name:
                     base = param_name.split(".experts.")[0]
                     fused_expert_param_names[base, tag] = param_name
-        dense_mlp_stacked_mapping = [
+        stacked_mapping = [
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            # MLA runs both latent down-projections as one GEMM.
+            (".fused_qkv_a_proj", ".q_a_proj", 0),
+            (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
         ]
         # Sparse DSA draft blocks build an Indexer whose wk / weights_proj are
         # fused into a single MergedColumnParallelLinear (wk_weights_proj).
@@ -751,7 +756,7 @@ class HYV4MTP(nn.Module):
                 name = name.replace("gate.e_score_correction_bias", "expert_bias")
 
             is_loaded = False
-            for param_name, weight_name, shard_id in dense_mlp_stacked_mapping:
+            for param_name, weight_name, shard_id in stacked_mapping:
                 if weight_name not in name or ".experts." in name:
                     continue
                 name_mapped = name.replace(weight_name, param_name)

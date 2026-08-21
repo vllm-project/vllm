@@ -73,10 +73,6 @@ from .moe import HYV4FeedForward, HYV4MoEFused
 
 logger = init_logger(__name__)
 
-HYV4_PACKED_MODULES_MAPPING = {
-    "gate_up_proj": ["gate_proj", "up_proj"],
-}
-
 
 def _normalize_hyv4_config(config: PretrainedConfig) -> PretrainedConfig:
     """Populate the aliases consumed by the shared MoE implementation."""
@@ -420,14 +416,17 @@ class HYV4Model(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
+            # HYV4 is MLA-only: no q/k/v projections, but the two latent
+            # down-projections are fused into one GEMM.
+            (".fused_qkv_a_proj", ".q_a_proj", 0),
+            (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
-            # The indexer fuses wk and weights_proj into one GEMM.
-            ("wk_weights_proj", "wk", 0),
-            ("wk_weights_proj", "weights_proj", 1),
+            # The indexer fuses wk and weights_proj into one GEMM. Anchor on
+            # the leading dot: a bare "wk" would also rewrite any future
+            # weight whose name merely contains it.
+            (".wk_weights_proj", ".wk", 0),
+            (".wk_weights_proj", ".weights_proj", 1),
         ]
         # FP8 indexer wk dequant buffer (weight and scale arrive separately).
         pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
@@ -655,7 +654,13 @@ class HYV4Model(nn.Module):
 
 
 class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
-    packed_modules_mapping = HYV4_PACKED_MODULES_MAPPING
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        # MLA runs both latent down-projections as one GEMM.
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        # The indexer fuses wk and weights_proj into one GEMM.
+        "wk_weights_proj": ["wk", "weights_proj"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

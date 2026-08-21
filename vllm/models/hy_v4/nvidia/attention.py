@@ -351,23 +351,19 @@ class HYV4MLAAttention(nn.Module):
 
         self.scaling = self.qk_head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
-        self.q_a_proj = None
+        self.fused_qkv_a_proj = None
         self.kv_a_proj_with_mqa = None
         if self.q_lora_rank is not None:
-            self.q_a_proj = MergedColumnParallelLinear(
+            # ``q_a_proj`` and ``kv_a_proj_with_mqa`` read the same
+            # ``hidden_states`` and are both TP-replicated, so they run as one
+            # GEMM. The checkpoint keeps them separate; `load_weights` merges
+            # them through ``stacked_params_mapping``.
+            self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
-                [self.q_lora_rank],
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.q_a_proj",
-                disable_tp=True,
-            )
-            self.kv_a_proj_with_mqa = MergedColumnParallelLinear(
-                self.hidden_size,
-                [self.kv_lora_rank + self.qk_rope_head_dim],
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.kv_a_proj_with_mqa",
+                prefix=f"{prefix}.fused_qkv_a_proj",
                 disable_tp=True,
             )
         else:
@@ -643,18 +639,22 @@ class HYV4MLAAttention(nn.Module):
     ) -> torch.Tensor:
         q_c = None
         if self.q_lora_rank is not None:
-            assert self.q_a_proj is not None
+            assert self.fused_qkv_a_proj is not None
             assert self.q_a_layernorm is not None
             assert self.q_b_proj is not None
-            q_c = self.q_a_proj(hidden_states)[0]
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
             q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
             assert self.q_proj is not None
+            assert self.kv_a_proj_with_mqa is not None
             q = self.q_proj(hidden_states)[0]
+            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
 
-        assert self.kv_a_proj_with_mqa is not None
-        kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c)
 
