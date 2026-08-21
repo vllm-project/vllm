@@ -9,6 +9,7 @@ RFC: https://github.com/vllm-project/vllm/issues/45585
 PR:  https://github.com/vllm-project/vllm/pull/45586
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -21,8 +22,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import requests
-
-from tests.utils import RemoteOpenAIServer
 
 # ---------------------------------------------------------------------------
 # Model / server defaults
@@ -72,7 +71,7 @@ _DUMMY_ARGS = [
 @contextmanager
 def server(
     extra_args=None,
-    port: int | None = None,
+    port: int = 8770,
     timeout: float = 180.0,
     dummy_weights: bool = False,
 ):
@@ -80,27 +79,52 @@ def server(
 
     Args:
         extra_args:      Additional CLI flags appended after the base args.
-        port:            Optional fixed HTTP port. An open port is chosen by default.
+        port:            HTTP port to bind (caller is responsible for uniqueness).
         timeout:         Seconds to wait for /health before giving up.
         dummy_weights:   If True, use --load-format dummy (fast, no real weights).
     """
+    env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
-    args = [
+    cmd = [
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        MODEL_NAME,
+        "--port",
+        str(port),
         "--served-model-name",
         "m",
         *(base + (extra_args or [])),
     ]
-    if port is not None:
-        args.extend(["--port", str(port)])
-
-    with RemoteOpenAIServer(
-        MODEL_NAME,
-        args,
-        env_dict={"VLLM_SERVER_DEV_MODE": "1"},
-        auto_port=port is None,
-        max_wait_seconds=timeout,
-    ) as remote_server:
-        yield remote_server.url_root
+    proc = subprocess.Popen(
+        cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+    )
+    url = f"http://localhost:{port}"
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                err = (
+                    proc.stderr.read(4000).decode(errors="replace")
+                    if proc.stderr
+                    else ""
+                )
+                raise RuntimeError(f"vllm server exited during startup:\n{err}")
+            with contextlib.suppress(Exception):
+                if requests.get(f"{url}/health", timeout=3).status_code == 200:
+                    break
+            time.sleep(1)
+        else:
+            proc.terminate()
+            raise RuntimeError("vllm server did not start in time")
+        yield url
+    finally:
+        proc.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+        if proc.poll() is None:
+            proc.kill()
 
 
 # ---------------------------------------------------------------------------

@@ -25,7 +25,7 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
 def server_url():
     with (
         patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"}),
-        server(dummy_weights=True) as url,
+        server(port=8800, dummy_weights=True) as url,
     ):
         try:
             yield url
