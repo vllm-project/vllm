@@ -280,9 +280,9 @@ class QuarkConfig(QuantizationConfig):
             supported = capability >= min_capability
             if error and not supported:
                 raise RuntimeError(
-                    "Quantization scheme is not supported for ",
-                    f"the current GPU. Min capability: {min_capability}. ",
-                    f"Current capability: {capability}.",
+                    "Quantization scheme is not supported for the current GPU. "
+                    f"Min capability: {min_capability}. "
+                    f"Current capability: {capability}."
                 )
             return supported
         else:
