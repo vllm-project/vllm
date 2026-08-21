@@ -2,14 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from collections.abc import Mapping
 from contextlib import nullcontext
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.context import InputProcessingContext
 from vllm.multimodal.processing.processor import (
     PlaceholderFeaturesInfo,
@@ -28,6 +33,38 @@ from vllm.multimodal.processing.processor import (
 from .utils import random_image
 
 pytestmark = pytest.mark.cpu_test
+
+
+class _DummyInputsBuilder(BaseDummyInputsBuilder):
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return "dummy prompt"
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+    ) -> MultiModalDataDict:
+        return {}
+
+
+def test_dummy_processor_inputs_disable_truncation() -> None:
+    info = Mock()
+    info.parse_mm_data.return_value = {}
+    info.default_tok_params.get_encode_kwargs.return_value = {
+        "add_special_tokens": False,
+        "truncation": True,
+    }
+    info.ctx.tokenizer.encode.return_value = [1, 2, 3]
+
+    inputs = _DummyInputsBuilder(info).get_dummy_processor_inputs(16, {}, {})
+
+    assert inputs.prompt == [1, 2, 3]
+    info.ctx.tokenizer.encode.assert_called_once_with(
+        "dummy prompt",
+        add_special_tokens=False,
+        truncation=False,
+    )
 
 
 @pytest.mark.parametrize(
