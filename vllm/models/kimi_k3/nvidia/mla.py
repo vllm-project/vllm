@@ -65,9 +65,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.modelopt import (
-    is_modelopt_fp8_pb_wo_layer,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
 )
@@ -203,27 +200,14 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             # the low-rank latents are shared across TP ranks; TP splitting
             # happens at q_b_proj / kv_b_proj. Checkpoint weights ``q_a_proj``
             # and ``kv_a_proj_with_mqa`` map onto shards 0 and 1 respectively.
-            qkv_a_output_sizes = [
-                self.q_lora_rank,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-            ]
-            qkv_a_prefix = f"{prefix}.fused_qkv_a_proj"
-            self.qkv_a_padding = 0
-            if is_modelopt_fp8_pb_wo_layer(quant_config, qkv_a_prefix):
-                remainder = sum(qkv_a_output_sizes) % 128
-                self.qkv_a_padding = 0 if remainder == 0 else 128 - remainder
-                if self.qkv_a_padding:
-                    qkv_a_output_sizes.append(self.qkv_a_padding)
             self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
-                qkv_a_output_sizes,
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 bias=False,
                 quant_config=quant_config,
-                prefix=qkv_a_prefix,
+                prefix=f"{prefix}.fused_qkv_a_proj",
                 disable_tp=True,
             )
-            if self.qkv_a_padding:
-                self.fused_qkv_a_proj.weight.data[-self.qkv_a_padding :].zero_()
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
                 self.q_lora_rank,
@@ -504,8 +488,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         """
         if self.q_lora_rank is not None:
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            if self.qkv_a_padding:
-                qkv_lora = qkv_lora[..., : -self.qkv_a_padding]
             q_c, kv_c, k_pe = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )

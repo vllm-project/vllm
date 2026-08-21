@@ -32,9 +32,6 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
-from vllm.model_executor.layers.quantization.modelopt import (
-    is_modelopt_fp8_pb_wo_layer,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
@@ -363,14 +360,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         local_output_size = (
             4 * self.local_projection_size + self.head_dim + self.local_num_heads
         )
-        in_proj_prefix = f"{prefix}.in_proj_qkvgfab"
-        alignment = (
-            128
-            if is_modelopt_fp8_pb_wo_layer(self.quant_config, in_proj_prefix)
-            else 16
-        )
-        remainder = local_output_size % alignment
-        self.in_proj_padding = 0 if remainder == 0 else alignment - remainder
+        self.in_proj_padding = -local_output_size % 16
         if self.in_proj_padding:
             in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
         self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
@@ -380,7 +370,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             tp_size=self.tp_size,
             bias=False,
             quant_config=self.quant_config,
-            prefix=in_proj_prefix,
+            prefix=f"{prefix}.in_proj_qkvgfab",
         )
         if self.in_proj_padding:
             self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()

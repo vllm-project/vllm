@@ -377,7 +377,7 @@ def _get_kv_b_proj_input_dtype(
         )
 
         quant_method = getattr(kv_b_proj, "quant_method", None)
-        # FP8_PB_WO requires BF16/FP16 activations
+        # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
         if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
             return quant_method.input_dtype
         if not use_fp8_prefill:
