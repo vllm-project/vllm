@@ -217,3 +217,16 @@ def test_get_rename_mapper_keeps_only_renames():
     for name in ("drop_regex.w", "drop_substr.w", "drop_prefix.w", "w.drop_suffix"):
         assert mapper._map_name(name) is None
         assert renames._map_name(name) == name
+
+
+@pytest.mark.cpu_test
+def test_get_unstacked_mapper_compatibility():
+    mapper = WeightsMapper(
+        orig_to_new_substr={"drop_substr": None, "keep_substr": "kept"},
+        orig_to_new_stacked={".q_proj": (".qkv_proj", "q")},
+    )
+
+    unstacked = mapper.get_unstacked_mapper()
+
+    assert unstacked.orig_to_new_substr == mapper.orig_to_new_substr
+    assert unstacked.orig_to_new_stacked == {}
