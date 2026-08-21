@@ -5,6 +5,7 @@ import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import pydantic
@@ -19,6 +20,7 @@ from vllm.config import (
     CompilationConfig,
     KernelConfig,
     ModelConfig,
+    ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
     SchedulerConfig,
@@ -82,6 +84,19 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def test_per_request_spec_decode_metrics_requires_spec_decode():
+    # The flag only makes sense with speculative decoding configured; enabling
+    # it without --speculative-config should fail fast rather than silently
+    # produce no metrics.
+    for level in ("summary", "detailed"):
+        with pytest.raises(ValueError, match="speculative"):
+            VllmConfig(
+                observability_config=ObservabilityConfig(
+                    per_request_spec_decode_metrics=level
+                )
+            )
 
 
 def test_compile_config_repr_succeeds():
@@ -261,6 +276,20 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
     SpeculativeConfig.hf_config_override(hf_config)
 
     assert hf_config.architectures == [expected_architecture]
+
+
+def test_v2_model_runner_supports_extract_hidden_states():
+    config = VllmConfig()
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="extract_hidden_states",
+            parallel_drafting=False,
+            enable_adaptive_verification=False,
+        ),
+    )
+
+    assert config._get_v2_model_runner_unsupported_features() == []
 
 
 @pytest.mark.parametrize(
