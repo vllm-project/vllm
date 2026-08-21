@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
+from functools import cached_property
 from math import prod
 from typing import TYPE_CHECKING, TypeVar
 
@@ -950,6 +951,8 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
+    # Whether this group is part of the externally transferable KV state.
+    enable_kv_transfer: bool = True
 
 
 @dataclass
@@ -972,6 +975,22 @@ class KVCacheConfig:
     """
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
+
+    @cached_property
+    def transfer_group_ids(self) -> tuple[int, ...]:
+        """IDs of cache groups that participate in external KV transfer."""
+        return tuple(
+            group_id
+            for group_id, group in enumerate(self.kv_cache_groups)
+            if group.enable_kv_transfer
+        )
+
+    @cached_property
+    def transfer_groups(self) -> tuple[KVCacheGroupSpec, ...]:
+        """Cache groups that participate in external KV transfer."""
+        return tuple(
+            self.kv_cache_groups[group_id] for group_id in self.transfer_group_ids
+        )
 
     @property
     def has_mamba_layers(self) -> bool:
