@@ -46,14 +46,14 @@ def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
     ],
 )
 @pytest.mark.core_model
-def test_supports_multimodal_encoder(limit_mm_per_prompt, enable_mm_embeds, expected):
+def test_uses_multimodal_encoder(limit_mm_per_prompt, enable_mm_embeds, expected):
     """Only modalities with positive limits should run the encoder tower."""
     ctx = build_model_context(
         "Qwen/Qwen2.5-VL-3B-Instruct",
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
     ctx.model_config.multimodal_config.enable_mm_embeds = enable_mm_embeds
-    assert MULTIMODAL_REGISTRY.supports_multimodal_encoder(ctx.model_config) is expected
+    assert MULTIMODAL_REGISTRY.uses_multimodal_encoder(ctx.model_config) is expected
 
 
 def test_create_processor_error_uses_served_model_name():

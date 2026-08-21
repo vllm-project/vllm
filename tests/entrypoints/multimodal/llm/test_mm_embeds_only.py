@@ -20,10 +20,14 @@ def llm(vllm_runner):
     with vllm_runner(
         MODEL,
         max_model_len=2048,
-        enforce_eager=True,
+        enforce_eager=False,
         gpu_memory_utilization=0.8,
         enable_mm_embeds=True,
         limit_mm_per_prompt={"image": 0},
+        compilation_config={
+            "cudagraph_mode": "NONE",
+            "cudagraph_mm_encoder": True,
+        },
     ) as runner:
         # pytest caches yielded fixtures until after teardown, so use a proxy to
         # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.

@@ -34,6 +34,7 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -118,15 +119,24 @@ class _ModelStateForTest(ModelState):
         return {}
 
 
-def _make_model_state_vllm_config():
-    model_config = SimpleNamespace(
-        dtype=torch.float32,
-        enforce_eager=False,
-        max_model_len=128,
-        get_inputs_embeds_size=lambda: 4,
+def _make_embedding_only_model_config():
+    mm_config = SimpleNamespace(
+        enable_mm_embeds=True,
+        get_limit_per_prompt=lambda modality: 0,
     )
     return SimpleNamespace(
-        model_config=model_config,
+        dtype=torch.float32,
+        enforce_eager=False,
+        get_inputs_embeds_size=lambda: 4,
+        get_multimodal_config=lambda: mm_config,
+        is_multimodal_model=True,
+        max_model_len=128,
+    )
+
+
+def _make_model_state_vllm_config():
+    return SimpleNamespace(
+        model_config=_make_embedding_only_model_config(),
         scheduler_config=SimpleNamespace(
             max_num_seqs=1,
             max_num_batched_tokens=8,
@@ -138,15 +148,15 @@ def _make_model_state_vllm_config():
 
 @pytest.mark.cpu_test
 def test_embedding_only_mode_skips_encoder_cudagraph_manager():
-    """Embedding-only inputs must not capture a missing vision tower."""
+    """Embedding-only inputs must not create an encoder CUDA graph manager."""
     vllm_config = _make_model_state_vllm_config()
     model = nn.Module()
 
     with (
         patch.object(
             MULTIMODAL_REGISTRY,
-            "supports_multimodal_encoder",
-            return_value=False,
+            "_create_processing_info",
+            return_value=SimpleNamespace(supported_mm_limits={"image"}),
         ),
         patch(
             "vllm.v1.worker.gpu.model_states.interface.supports_encoder_cudagraph",
@@ -165,6 +175,25 @@ def test_embedding_only_mode_skips_encoder_cudagraph_manager():
 
     manager.assert_not_called()
     assert not state.encoder_runner.has_cudagraph()
+
+
+@pytest.mark.cpu_test
+def test_legacy_runner_skips_encoder_cudagraph_manager_for_embedding_only_mode():
+    """The legacy runner must apply the same embedding-only guard."""
+    runner = object.__new__(GPUModelRunner)
+    runner.compilation_config = SimpleNamespace(cudagraph_mm_encoder=True)
+    runner.mm_registry = MULTIMODAL_REGISTRY
+    runner.model_config = _make_embedding_only_model_config()
+    runner.supports_mm_inputs = True
+
+    with patch.object(
+        MULTIMODAL_REGISTRY,
+        "_create_processing_info",
+        return_value=SimpleNamespace(supported_mm_limits={"image"}),
+    ):
+        manager = runner._create_encoder_cudagraph_manager()
+
+    assert manager is None
 
 
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:

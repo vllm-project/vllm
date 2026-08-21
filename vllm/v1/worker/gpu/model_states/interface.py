@@ -71,7 +71,7 @@ class ModelState(ABC):
             enable_encoder_cuda_graph = (
                 not self.model_config.enforce_eager
                 and vllm_config.compilation_config.cudagraph_mm_encoder
-                and MULTIMODAL_REGISTRY.supports_multimodal_encoder(self.model_config)
+                and MULTIMODAL_REGISTRY.uses_multimodal_encoder(self.model_config)
                 and supports_encoder_cudagraph(model)
             )
             cudagraph_manager = (

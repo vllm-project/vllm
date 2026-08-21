@@ -6740,7 +6740,7 @@ class GPUModelRunner(
         if not (
             self.compilation_config.cudagraph_mm_encoder
             and self.supports_mm_inputs
-            and self.mm_registry.supports_multimodal_encoder(self.model_config)
+            and self.mm_registry.uses_multimodal_encoder(self.model_config)
         ):
             return None
 
