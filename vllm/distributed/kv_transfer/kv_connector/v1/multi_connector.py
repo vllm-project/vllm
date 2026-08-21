@@ -409,6 +409,23 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 to_return = (toks, load_async)
         return to_return
 
+    def get_hybrid_backfill_tokens(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> tuple[int, int]:
+        # Only consulted when no connector had matched tokens, so no
+        # connector has been assigned to this request yet.
+        for i, c in enumerate(self._connectors):
+            num_local, num_external = c.get_hybrid_backfill_tokens(
+                request, num_computed_tokens
+            )
+            if num_external > 0:
+                # The connector serving the backfill is assigned the request.
+                self._requests_to_connector[request.request_id] = i
+                return (num_local, num_external)
+        return (0, 0)
+
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):

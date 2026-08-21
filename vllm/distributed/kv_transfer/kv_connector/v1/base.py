@@ -182,6 +182,37 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    def get_hybrid_backfill_tokens(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> tuple[int, int]:
+        """Resolve a divergent local hybrid hit by backfilling external state.
+
+        Only consulted for connectors with
+        `supports_divergent_local_hybrid_hits` when the local per-group hits
+        diverged and `get_num_new_matched_tokens()` reported no external
+        tokens beyond the divergent hit. A connector holding the full
+        per-group state set at a boundary at or below `num_computed_tokens`
+        can keep most of the deeper local prefix and restore the lagging
+        recurrent state by loading just that boundary, instead of the
+        scheduler discarding the divergent hit and recomputing.
+
+        Args:
+            request: the request object.
+            num_computed_tokens: the number of locally computed tokens
+                backing the divergent hit (block-aligned).
+
+        Returns:
+            A `(num_local_tokens, num_external_tokens)` tuple: keep the local
+            prefix up to `num_local_tokens` and load `num_external_tokens`
+            beyond it asynchronously, making
+            `num_local_tokens + num_external_tokens` a resume boundary with
+            valid state in every group. `(0, 0)` if no boundary can be
+            backed.
+        """
+        return (0, 0)
+
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         """
