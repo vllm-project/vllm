@@ -335,6 +335,19 @@ class SpeculativeConfig:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
 
+        # Parallel-drafting methods (e.g. DFlash, DSpark, P-EAGLE, PARD) build the
+        # whole speculative block in a single forward pass, so num_speculative_tokens
+        # determines tensor shapes inside the draft model's compiled graph -- DFlash2,
+        # for instance, derives block_size = 1 + num_speculative_tokens. Omitting it
+        # here lets a cached compilation artifact built for one k be silently reused
+        # for another, which fails at cudagraph capture with e.g.
+        #   AssertionError: expected size 9==7, stride 5120==5120 at dim=1
+        # Sequential methods (MTP, EAGLE, n-gram) re-run a fixed q=1 draft graph k
+        # times, so their graph does not depend on k and is deliberately left alone
+        # to avoid needless recompilation.
+        if self.parallel_drafting:
+            factors.append(self.num_speculative_tokens)
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
