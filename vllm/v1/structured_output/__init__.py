@@ -326,7 +326,12 @@ class StructuredOutputManager:
                             advance_grammar = False
                             post_reasoning_end_in_window = True
                     if advance_grammar and not grammar.is_terminated():
-                        accepted = grammar.accept_tokens(req_id, [token])
+                        if post_reasoning_end_in_window:
+                            accepted = bool(grammar.validate_tokens([token]))
+                            if accepted:
+                                accepted = grammar.accept_tokens(req_id, [token])
+                        else:
+                            accepted = grammar.accept_tokens(req_id, [token])
                         if accepted:
                             state_advancements += 1
                         elif not post_reasoning_end_in_window:
