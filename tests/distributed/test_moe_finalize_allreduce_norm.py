@@ -90,6 +90,7 @@ def _worker(local_rank: int, world_size: int, q: mp.Queue):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
         torch.manual_seed(1234 + local_rank)
 
+        m.setenv("VLLM_ENABLE_MOE_TAIL_FUSION", "1")
         if fmfn.moe_tail_fusion_max_tokens(HIDDEN_SIZE, dtype) < NUM_TOKENS:
             q.put("MoE tail fusion is unsupported on this setup.")
             return
@@ -233,6 +234,8 @@ def test_rms_norm_weight_bias(default_vllm_config):
 def test_moe_finalize_allreduce_rms_norm(world_size, monkeypatch):
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"needs {world_size} GPUs")
+    # The fusion is opt-in; without this the workers see a 0 ceiling and skip.
+    monkeypatch.setenv("VLLM_ENABLE_MOE_TAIL_FUSION", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_ALLREDUCE_BACKEND", "trtllm")
 
     q: mp.Queue = mp.get_context("spawn").Queue()

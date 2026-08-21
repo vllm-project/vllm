@@ -25,6 +25,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import (
     MoEOutput,
     UnfinalizedMoEOutput,
@@ -47,6 +48,8 @@ except (ImportError, AttributeError):
 
 _FI_SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 
+logger = init_logger(__name__)
+
 
 @lru_cache
 def moe_tail_fusion_max_tokens(hidden_size: int, dtype: torch.dtype) -> int:
@@ -59,25 +62,48 @@ def moe_tail_fusion_max_tokens(hidden_size: int, dtype: torch.dtype) -> int:
     """
     from vllm.config.compilation import PassConfig
 
-    if flashinfer_comm is None or envs.VLLM_DISABLE_MOE_TAIL_FUSION:
+    if not envs.VLLM_ENABLE_MOE_TAIL_FUSION:
+        return 0
+    if flashinfer_comm is None:
+        logger.debug_once("MoE tail fusion off: flashinfer.comm is unavailable")
         return 0
     if dtype not in _FI_SUPPORTED_DTYPES:
+        logger.debug_once("MoE tail fusion off: unsupported dtype %s", dtype)
         return 0
     tp_size = get_tensor_model_parallel_world_size()
     # Without TP there is no all-reduce to fuse into; the pattern has no mnnvl
     # implementation and trtllm all-reduce is single-node only.
     if tp_size <= 1 or get_node_count() > 1:
+        logger.debug_once(
+            "MoE tail fusion off: needs single-node TP>1, got tp_size=%d nodes=%d",
+            tp_size,
+            get_node_count(),
+        )
         return 0
 
     max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size)
     if not max_size_mb:
+        logger.debug_once(
+            "MoE tail fusion off: no workspace size for tp_size=%d", tp_size
+        )
         return 0
     element_size = torch.tensor([], dtype=dtype).element_size()
     row_bytes = hidden_size * element_size
-    return min(
+    max_tokens = min(
         int(max_size_mb * 1024 * 1024) // row_bytes,
         _MAX_COMM_SIZE // (row_bytes * tp_size),
     )
+    # Worth a line: which batches fuse is a deployment-shaped property, and a
+    # ceiling under the running batch size means the fusion silently never runs.
+    logger.debug_once(
+        "MoE tail fusion on: batches up to %d tokens fuse (hidden=%d %s tp=%d); "
+        "larger batches finalize in the MoE kernel",
+        max_tokens,
+        hidden_size,
+        dtype,
+        tp_size,
+    )
+    return max_tokens
 
 
 def _finalize_workspace(num_tokens: int, hidden_size: int, dtype: torch.dtype):

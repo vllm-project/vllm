@@ -260,7 +260,7 @@ if TYPE_CHECKING:
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
-    VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
+    VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -288,7 +288,8 @@ if TYPE_CHECKING:
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
-    VLLM_DISABLE_MOE_TAIL_FUSION: bool = False
+    VLLM_ENABLE_MOE_TAIL_FUSION: bool = False
+    VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
@@ -1858,7 +1859,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
-        int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0"))
+        int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "1"))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
@@ -1994,10 +1995,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
     ),
-    # Keeps the MoE kernel finalizing its own output instead of deferring the
-    # top-k reduction into the fused all-reduce + RMSNorm that follows it.
-    "VLLM_DISABLE_MOE_TAIL_FUSION": lambda: bool(
-        int(os.getenv("VLLM_DISABLE_MOE_TAIL_FUSION", "0"))
+    # Defers the MoE top-k reduction into the fused all-reduce + RMSNorm that
+    # follows it, instead of letting the MoE kernel finalize its own output.
+    # Off by default: measured on MiniMax-M3 NVFP4 / TP=4 / GB200 it wins 1.6%
+    # TPOT at concurrency 1, breaks even at 8 and loses 3.4% at 32, and the
+    # fused pattern is trtllm-only, so enabling it also gives up mnnvl
+    # all-reduce (another 3.6% at concurrency 1 on an NVL node).
+    "VLLM_ENABLE_MOE_TAIL_FUSION": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_MOE_TAIL_FUSION", "0"))
+    ),
+    # Emergency rollback for the DeepSeek-V4 NVIDIA MegaMoE path. By default,
+    # DeepGEMM computes replicated FP8 shared experts in the same persistent
+    # SM100 kernel as the routed FP4 experts.
+    "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
     ),
     # Limits when we run shared_experts in a separate stream.
     # We found out that for large batch sizes, the separate stream
@@ -2249,6 +2260,9 @@ def compile_factors() -> dict[str, object]:
         "S3_ACCESS_KEY_ID",
         "S3_SECRET_ACCESS_KEY",
         "S3_ENDPOINT_URL",
+        # Credential; never affects compiled artifacts and must not be
+        # persisted in cache_key_factors.json.
+        "VLLM_API_KEY",
         "VLLM_USAGE_STATS_SERVER",
         "VLLM_NO_USAGE_STATS",
         "VLLM_DO_NOT_TRACK",
