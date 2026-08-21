@@ -890,15 +890,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "(dict object has no attribute '__name__').",
         },
     ),
-    "FireRedLIDForConditionalGeneration": _HfExamplesInfo(
-        "PatchyTisa/FireRedLID-vllm",
-        trust_remote_code=True,
-        max_transformers_version="5.1",
-        transformers_version_reason={
-            "vllm": "Incompatible with transformers v5.2+ "
-            "(dict object has no attribute '__name__').",
-        },
-    ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
         "allendou/Fun-ASR-Nano-2512-vllm",
         trust_remote_code=True,
