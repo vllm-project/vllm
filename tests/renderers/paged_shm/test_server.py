@@ -164,8 +164,6 @@ class TestWriteRead:
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_write_read_torch_gpu(self, server):
-        # This test uses its own client to allow pinning,
-        # but still uses the same server.
         client = PagedShmClient(address=server.address, pin=True)
         try:
             uuid = _unique_uuid()
@@ -323,9 +321,8 @@ class TestContextManagers:
                 raise TestException("trigger rollback")
 
         state_after_rollback = client.get_manager_state()
-        # Known server issue: rollback does not fully free blocks (leaks one block).
-        # Accept that at most one block is leaked.
-        assert state_after_rollback["free_blocks_count"] == initial_free - 1
+        # With force delete, blocks are fully freed
+        assert state_after_rollback["free_blocks_count"] == initial_free
         with pytest.raises(RuntimeError, match="Server error"):
             client.read(uuid)
 
@@ -411,6 +408,22 @@ class TestErrors:
             state_after_delete["cached_items_count"]
             == state_before_delete["cached_items_count"] - 1
         )
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.read(uuid)
+
+    def test_delete_force_writing_item(self, client):
+        """Delete can force-remove an item that is still being written."""
+        uuid = _unique_uuid()
+        # Allocate blocks but don't close write
+        item = ShmWriteRequest(uuid=uuid, size=100, use_cache=True)
+        client.open_write([item], timeout=0.0)
+
+        # Delete should succeed despite ref_count == -1
+        state_before = client.get_manager_state()
+        client.delete(uuid)
+        state_after = client.get_manager_state()
+        # Blocks should be freed
+        assert state_after["free_blocks_count"] == state_before["free_blocks_count"] + 1
         with pytest.raises(RuntimeError, match="Server error"):
             client.read(uuid)
 
@@ -548,23 +561,30 @@ class TestConcurrency:
 
 
 # ---------------------------------------------------------------------------
-# OpenRead
+# Token protection tests (auto reference)
 # ---------------------------------------------------------------------------
 
 
-class TestOpenRead:
-    def test_write_open_read_holds_read_lock(self, client):
+class TestTokenProtection:
+    def test_auto_protection_holds_read_lock(self, client):
+        """
+        Writing with generate_read_token=True automatically reserves one read
+        reference per token. Token can be open_read multiple times without being
+        consumed until close_read is called.
+        """
         uuid = _unique_uuid()
-        data = b"open_read data"
+        data = b"auto protection test"
         state_before = client.get_manager_state()
 
-        client.write(uuid, data, open_read=True)
+        size, token = client.write(uuid, data, generate_read_token=True)
 
         state_after_write = client.get_manager_state()
+        # Should have one extra reading item (the automatically reserved reference)
         assert (
             state_after_write["reading_items_count"]
             == state_before["reading_items_count"] + 1
         )
+        # The item should NOT be cached yet (because it's held by the token)
         assert (
             state_after_write["cached_items_count"]
             == state_before["cached_items_count"]
@@ -575,36 +595,86 @@ class TestOpenRead:
             == state_before["free_blocks_count"] - needed
         )
 
-        result = client.read(uuid)
-        assert result.tobytes() == data
-
-        state_after_read = client.get_manager_state()
+        # Token can be open_read multiple times without consuming it
+        alloc1 = client.open_read(token, timeout=0.0)
+        assert alloc1.size == len(data)
+        state_after_read1 = client.get_manager_state()
         assert (
-            state_after_read["reading_items_count"]
+            state_after_read1["reading_items_count"]
             == state_after_write["reading_items_count"]
         )
 
-        client.close_read(uuid)
+        alloc2 = client.open_read(token, timeout=0.0)
+        assert alloc2.size == len(data)
+        state_after_read2 = client.get_manager_state()
+        assert (
+            state_after_read2["reading_items_count"]
+            == state_after_write["reading_items_count"]
+        )
+
+        # Close the token to release the read reference and destroy it
+        client.close_read(token)
         state_after_close = client.get_manager_state()
         assert (
             state_after_close["reading_items_count"]
             == state_before["reading_items_count"]
         )
+        # Now item becomes idle and cacheable
         assert (
             state_after_close["cached_items_count"]
             == state_before["cached_items_count"] + 1
         )
 
+        # Token is destroyed; further opens should fail
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.open_read(token, timeout=0.0)
+
         client.delete(uuid)
 
-    def test_write_open_read_locks_until_manual_close(self, client):
+    def test_token_allows_multiple_open_reads(self, client):
+        """A token can be used for multiple open_read calls without consuming it."""
         uuid = _unique_uuid()
-        data = b"locked data"
-        client.write(uuid, data, open_read=True)
-        state = client.get_manager_state()
-        assert state["reading_items_count"] > 0
+        data = b"multiple reads"
+        size, token = client.write(uuid, data, generate_read_token=True)
 
-        client.close_read(uuid)
+        for _ in range(3):
+            alloc = client.open_read(token, timeout=0.0)
+            assert alloc.size == len(data)
+
+        client.close_read(token)
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.open_read(token, timeout=0.0)
+
+        client.delete(uuid)
+
+    def test_auto_protection_with_async(self, client):
+        """Async write with token automatically gets protection."""
+        uuid = _unique_uuid()
+        data = b"async auto protection"
+        state_before = client.get_manager_state()
+
+        size, future, token = client.write(
+            uuid, data, generate_read_token=True, async_write=True
+        )
+        future.result()
+
+        state_after_write = client.get_manager_state()
+        assert (
+            state_after_write["reading_items_count"]
+            == state_before["reading_items_count"] + 1
+        )
+        assert (
+            state_after_write["cached_items_count"]
+            == state_before["cached_items_count"]
+        )
+
+        client.close_read(token)
+        state_after_close = client.get_manager_state()
+        assert (
+            state_after_close["cached_items_count"]
+            == state_before["cached_items_count"] + 1
+        )
+
         client.delete(uuid)
 
 
@@ -826,12 +896,15 @@ class TestAsyncWrite:
         assert result.tobytes() == data
         client.delete(uuid)
 
-    def test_async_write_with_open_read(self, client):
+    def test_async_write_with_token_auto_protection(self, client):
+        """Async write with token automatically holds a reference."""
         uuid = _unique_uuid()
-        data = b"async with open_read"
+        data = b"async token protection"
         state_before = client.get_manager_state()
 
-        size, future, _ = client.write(uuid, data, open_read=True, async_write=True)
+        size, future, token = client.write(
+            uuid, data, generate_read_token=True, async_write=True
+        )
         assert size == len(data)
         future.result()
 
@@ -845,7 +918,13 @@ class TestAsyncWrite:
             == state_before["cached_items_count"]
         )
 
-        client.close_read(uuid)
+        # Can open_read multiple times via token without consuming it
+        alloc1 = client.open_read(token, timeout=0.0)
+        assert alloc1.size == len(data)
+        alloc2 = client.open_read(token, timeout=0.0)
+        assert alloc2.size == len(data)
+
+        client.close_read(token)
         state_after_close = client.get_manager_state()
         assert (
             state_after_close["cached_items_count"]
@@ -1070,14 +1149,19 @@ class TestReadToken:
         assert token is not None
         assert size == len(data)
 
-        result = client.read(token)
-        assert result.tobytes() == data
+        # Token can be open_read multiple times without consuming it
+        alloc1 = client.open_read(token, timeout=0.0)
+        assert alloc1.size == len(data)
+        alloc2 = client.open_read(token, timeout=0.0)
+        assert alloc2.size == len(data)
 
+        client.close_read(token)
         with pytest.raises(RuntimeError, match="Server error"):
-            client.read(token)
+            client.open_read(token, timeout=0.0)
 
-        result2 = client.read(uuid)
-        assert result2.tobytes() == data
+        # The original UUID still works (no read lock held)
+        result = client.read(uuid)
+        assert result.tobytes() == data
         client.delete(uuid)
 
     def test_generate_and_use_token_async(self, client):
@@ -1089,11 +1173,14 @@ class TestReadToken:
         )
         future.result()
 
-        result = client.read(token)
-        assert result.tobytes() == data
+        alloc1 = client.open_read(token, timeout=0.0)
+        assert alloc1.size == len(data)
+        alloc2 = client.open_read(token, timeout=0.0)
+        assert alloc2.size == len(data)
 
+        client.close_read(token)
         with pytest.raises(RuntimeError, match="Server error"):
-            client.read(token)
+            client.open_read(token, timeout=0.0)
 
         client.delete(uuid)
 
@@ -1116,11 +1203,14 @@ class TestReadToken:
 
         client.wait_write(token, timeout=5.0)
 
-        result = client.read(token)
-        assert result.tobytes() == data
+        alloc1 = client.open_read(token, timeout=0.0)
+        assert alloc1.size == len(data)
+        alloc2 = client.open_read(token, timeout=0.0)
+        assert alloc2.size == len(data)
 
+        client.close_read(token)
         with pytest.raises(RuntimeError, match="Server error"):
-            client.read(token)
+            client.open_read(token, timeout=0.0)
 
         t.join()
         client.delete(uuid)
@@ -1130,11 +1220,12 @@ class TestReadToken:
         data = b"reuse test"
         size, token = client.write(uuid, data, generate_read_token=True)
 
-        result = client.read(token)
-        assert result.tobytes() == data
+        alloc = client.open_read(token, timeout=0.0)
+        assert alloc.size == len(data)
 
+        client.close_read(token)
         with pytest.raises(RuntimeError, match="Server error"):
-            client.read(token)
+            client.open_read(token, timeout=0.0)
 
         client.delete(uuid)
 
@@ -1147,8 +1238,9 @@ class TestReadToken:
             result = client._storage.read_to_numpy(ctx.size, ctx.blocks)
             assert result.tobytes() == data
 
+        # After context exit, token is destroyed
         with pytest.raises(RuntimeError, match="Server error"):
-            client.read(token)
+            client.open_read(token, timeout=0.0)
 
         client.delete(uuid)
 
@@ -1174,11 +1266,12 @@ class TestReadToken:
         client.wait_write(token, timeout=5.0)
         t.join()
 
-        result = client.read(token)
-        assert result.tobytes() == data
+        alloc = client.open_read(token, timeout=0.0)
+        assert alloc.size == len(data)
 
+        client.close_read(token)
         with pytest.raises(RuntimeError, match="Server error"):
-            client.read(token)
+            client.open_read(token, timeout=0.0)
 
         client.delete(uuid)
 
@@ -1187,21 +1280,16 @@ class TestReadToken:
         data = b"delete token"
         size, token = client.write(uuid, data, generate_read_token=True)
 
+        # Delete forces removal, ignoring the token reference
         client.delete(uuid)
 
+        # Token is gone
         with pytest.raises(RuntimeError, match="Server error"):
-            client.read(token)
+            client.open_read(uuid, timeout=0.0)
 
-        with pytest.raises(RuntimeError, match="Server error"):
-            client.read(uuid)
-
-    def test_multiple_tokens_same_item(self, client):
-        uuid = _unique_uuid()
-        data = b"single token"
-        size, token = client.write(uuid, data, generate_read_token=True)
-        result = client.read(token)
-        assert result.tobytes() == data
-        client.delete(uuid)
+        # close_read on token should fail because token no longer exists
+        with pytest.raises(RuntimeError, match="not found"):
+            client.close_read(token)
 
 
 # ---------------------------------------------------------------------------
@@ -1282,40 +1370,61 @@ class TestMultiClient:
             client1.close()
             client2.close()
 
-    def test_concurrent_locks_two_clients(self, server):
-        client1 = PagedShmClient(address=server.address, pin=False)
-        client2 = PagedShmClient(address=server.address, pin=False)
-        try:
-            uuid = _unique_uuid()
-            item = ShmWriteRequest(uuid=uuid, size=100, use_cache=True)
-            client1.open_write([item], timeout=0.0)
 
-            with pytest.raises(RuntimeError, match="Server error"):
-                client2.open_read(uuid, timeout=0.0)
+# ---------------------------------------------------------------------------
+# Delete with pending waiters
+# ---------------------------------------------------------------------------
 
-            result_holder = {}
-            err_holder = {}
 
-            def _reader():
-                try:
-                    result_holder["item"] = client2.open_read(uuid, timeout=5.0)
-                except Exception as e:
-                    err_holder["err"] = e
+class TestDeleteWithWaiters:
+    def test_delete_clears_pending_open_reads(self, client):
+        uuid = _unique_uuid()
+        # Start a write but don't close it
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
 
-            t = threading.Thread(target=_reader)
-            t.start()
+        # Start a thread waiting for open_read
+        result_holder = {}
+        err_holder = {}
 
-            time.sleep(0.2)
-            assert t.is_alive()
+        def waiter():
+            try:
+                client.open_read(uuid, timeout=5.0)
+                result_holder["done"] = True
+            except Exception as e:
+                err_holder["err"] = e
 
-            client1.close_write(uuid)
-            t.join(timeout=5.0)
-            assert "err" not in err_holder
-            assert "item" in result_holder
+        t = threading.Thread(target=waiter)
+        t.start()
+        time.sleep(0.1)  # ensure waiter is queued
 
-            client2.close_read(uuid)
-            client1.delete(uuid)
+        # Delete should force removal and wake waiters with error
+        client.delete(uuid)  # succeeds, forces cleanup
 
-        finally:
-            client1.close()
-            client2.close()
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+        assert "err" in err_holder
+        assert "deleted" in str(err_holder["err"]).lower()
+
+    def test_delete_clears_pending_wait_write(self, client):
+        uuid = _unique_uuid()
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
+
+        result_holder = {}
+        err_holder = {}
+
+        def waiter():
+            try:
+                client.wait_write(uuid, timeout=5.0)
+                result_holder["done"] = True
+            except Exception as e:
+                err_holder["err"] = e
+
+        t = threading.Thread(target=waiter)
+        t.start()
+        time.sleep(0.1)
+
+        client.delete(uuid)  # force delete

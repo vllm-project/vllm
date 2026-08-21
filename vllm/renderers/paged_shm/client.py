@@ -102,7 +102,6 @@ class _WriteContext:
         uuid: str,
         size: int,
         use_cache: bool,
-        activate_tokens: bool = False,
         blocks: list[int] | None = None,
         timeout: float = 0.0,
         generate_read_token: bool = False,
@@ -111,7 +110,6 @@ class _WriteContext:
         self._uuid = uuid
         self._size = size
         self._use_cache = use_cache
-        self.activate_tokens = activate_tokens
         self._timeout = timeout
         self._generate_read_token = generate_read_token
         self.blocks = blocks or []
@@ -134,7 +132,7 @@ class _WriteContext:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type is None:
-            self._client.close_write(self._uuid, activate_tokens=self.activate_tokens)
+            self._client.close_write(self._uuid)
         else:
             # Rollback: delete the item immediately; do not close_write first.
             try:
@@ -285,7 +283,6 @@ class PagedShmClient(_BaseClient):
         size: int,
         use_cache: bool = True,
         blocks: list[int] | None = None,
-        activate_tokens: bool = False,
         timeout: float = 0.0,
         generate_read_token: bool = False,
     ) -> _WriteContext:
@@ -295,7 +292,6 @@ class PagedShmClient(_BaseClient):
             uuid,
             size,
             use_cache=use_cache,
-            activate_tokens=activate_tokens,
             blocks=blocks,
             timeout=timeout,
             generate_read_token=generate_read_token,
@@ -327,7 +323,6 @@ class PagedShmClient(_BaseClient):
         data: bytes | np.ndarray | torch.Tensor,
         use_cache: bool = True,
         blocks: list[int] | None = None,
-        activate_tokens: bool = False,
         async_write: bool = False,
         timeout: float = 0.0,
         generate_read_token: bool = False,
@@ -337,11 +332,10 @@ class PagedShmClient(_BaseClient):
 
         If `generate_read_token` is True, the server will generate a read token
         that can be used to read the item without knowing the UUID.  The token
-        is returned as part of the result.
-
-        If `activate_tokens` is True, the server will pre-increment read
-        references for each generated token, allowing them to be released
-        later via close_read.
+        is returned as part of the result.  The server automatically reserves
+        a read reference for each generated token, ensuring the item remains
+        cached as long as any token exists.  Token holders must call
+        `close_read(token)` to release their reference.
 
         Returns:
             - If `async_write` is False and `generate_read_token` is False:
@@ -375,9 +369,7 @@ class PagedShmClient(_BaseClient):
                 if generate_read_token:
                     token = alloc[0].read_token
 
-            future = self._executor.submit(
-                self._async_write_task, uuid, data, blocks, activate_tokens
-            )
+            future = self._executor.submit(self._async_write_task, uuid, data, blocks)
             return size, future, token
 
         # Synchronous path
@@ -386,7 +378,6 @@ class PagedShmClient(_BaseClient):
             size,
             use_cache,
             blocks,
-            activate_tokens=activate_tokens,
             timeout=timeout,
             generate_read_token=generate_read_token,
         ) as ctx:
@@ -395,13 +386,11 @@ class PagedShmClient(_BaseClient):
                 return size, ctx.read_token
             return size
 
-    def _async_write_task(
-        self, uuid: str, data, blocks: list[int], activate_tokens: bool
-    ):
+    def _async_write_task(self, uuid: str, data, blocks: list[int]):
         """Background task for asynchronous writes."""
         try:
             self._storage.write(data, blocks)
-            self.close_write(uuid, activate_tokens=activate_tokens)
+            self.close_write(uuid)
         except Exception:
             # Rollback: delete the item to free blocks
             try:
@@ -471,14 +460,13 @@ class PagedShmClient(_BaseClient):
         resp_dict = json.loads(resp)
         return [ShmAllocation(**a) for a in resp_dict["data"]]
 
-    def close_write(self, uuid: str, activate_tokens: bool = False) -> None:
+    def close_write(self, uuid: str) -> None:
         """
         Finalise a write operation for the given UUID.
-        If activate_tokens is True, the server will pre-increment read references
-        for any tokens associated with this item. This allows close_read to
-        release the reference later.
+        The server will automatically reserve one read reference for each
+        generated read token associated with this UUID.
         """
-        payload = json.dumps({"uuid": uuid, "activate_tokens": activate_tokens})
+        payload = json.dumps({"uuid": uuid})
         self._request(CLOSE_WRITE, payload)
 
     def open_read(self, uuid_or_token: str, timeout: float = 0.0) -> ShmAllocation:
@@ -498,7 +486,8 @@ class PagedShmClient(_BaseClient):
 
         If a read token is provided, the token will be destroyed on the server
         (i.e., removed from the token mapping).  The token must have been used
-        in a prior open_read call (or pre-incremented via activate_tokens).
+        in a prior open_read call (or pre-incremented via the automatic
+        reservation on close_write).
         """
         self._request(CLOSE_READ, uuid_or_token)
 

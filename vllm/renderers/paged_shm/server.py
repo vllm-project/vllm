@@ -94,10 +94,23 @@ class PagedShmServer:
 
         # Read token storage: token -> real_uuid
         self._read_tokens: dict[str, str] = {}
-        # Tracks tokens that have been used in open_read (but not yet closed)
-        self._used_tokens: set[str] = set()
         # Reverse mapping: real_uuid -> set of tokens
         self._item_to_read_tokens: dict[str, set[str]] = {}
+
+    # ------------------------------------------------------------------
+    # Internal helper to get blocks without changing ref_count
+    # ------------------------------------------------------------------
+    def _get_item_blocks_no_ref(self, uuid: str) -> tuple[int, list[int]]:
+        """
+        Retrieve size and block list for an item without modifying its
+        reference count. This is used for token-based open_read.
+        """
+        item = self.manager._all_items.get(uuid)
+        if item is None:
+            raise ValueError(f"UUID {uuid} not found")
+        if item.ref_count == -1:  # REF_WRITING
+            raise RuntimeError(f"Item {uuid} is still being written")
+        return item.size, item.blocks.copy()
 
     # ------------------------------------------------------------------
     # Generic queue cleanup helper
@@ -201,12 +214,11 @@ class PagedShmServer:
                     self._wait_write_pending.discard(u)
 
     # ------------------------------------------------------------------
-    # Debug-only cleanup – forcibly cleans all pending queues and attempts
-    # to release any leaked resources (e.g., tokens, stale waiters).
-    # Only available when self.debug is True.
+    # Debug-only cleanup – forcibly cleans all pending queues and purges
+    # tokens. Only available when self.debug is True.
     # ------------------------------------------------------------------
     def debug_cleanup(self, socket: zmq.Socket) -> None:
-        """Force‑clean all wait queues and purge unused tokens (debug only)."""
+        """Force‑clean all wait queues and purge tokens (debug only)."""
         if not self.debug:
             raise RuntimeError("debug_cleanup called but debug mode is disabled")
 
@@ -224,7 +236,7 @@ class PagedShmServer:
                     self._send_response(
                         socket, identity, ERROR, "Cleaned by debug_cleanup"
                     )
-            self._open_read_pending.discard(u)
+        self._open_read_pending.clear()
 
         # 3. Clean all pending wait_write waiters
         for u in list(self._wait_write_pending):
@@ -235,17 +247,9 @@ class PagedShmServer:
                     self._send_response(
                         socket, identity, ERROR, "Cleaned by debug_cleanup"
                     )
-            self._wait_write_pending.discard(u)
+        self._wait_write_pending.clear()
 
-        # 4. Purge unused tokens (any token in _used_tokens that is not currently
-        #    held by a read lock is suspect, but we cannot easily determine that.
-        #    As a safe measure, we simply clear all tokens and warn.
-        #    This is debug-only, so aggressive cleanup is acceptable.
-        if self._used_tokens:
-            logger.warning(
-                "debug_cleanup: clearing %d used tokens", len(self._used_tokens)
-            )
-            self._used_tokens.clear()
+        # 4. Purge all tokens (forcefully)
         if self._read_tokens:
             logger.warning(
                 "debug_cleanup: clearing %d read tokens", len(self._read_tokens)
@@ -300,38 +304,64 @@ class PagedShmServer:
     def open_read(self, data: bytes, identity: bytes) -> str | None:
         """
         Acquire a read reference to an item, returning its block list and size.
+        Supports both real UUIDs and read tokens.
+        - For UUIDs: increases ref_count via manager.open_read.
+        - For tokens: does NOT increase ref_count; returns blocks directly.
         """
         read_request = json.loads(data)
-        uuid = read_request["uuid"]
+        uuid_or_token = read_request["uuid"]
         timeout = float(read_request.get("timeout", 0.0))
 
-        real_uuid, is_token = self._resolve_read_token(uuid)
-
-        if is_token and uuid in self._used_tokens:
-            raise ValueError(f"Read token {uuid} has already been used")
-
-        try:
-            info = self.manager.get_info(real_uuid)
-        except ValueError:
-            if is_token:
-                self._invalidate_token(uuid)
-            raise
-
-        if info["ref_count"] < 0:  # being written
-            if timeout == 0.0:
-                raise RuntimeError(f"Item {uuid} is still being written")
-            if timeout < 0:
-                timeout = self.max_timeout
-            deadline = time.monotonic() + timeout
-            q = self.wait_for_open_read.setdefault(real_uuid, PriorityQueue())
-            self._open_read_pending.add(real_uuid)
-            # Store the original identifier if it was a token
-            q.put((deadline, identity, uuid))
-            return None
+        real_uuid, is_token = self._resolve_read_token(uuid_or_token)
 
         if is_token:
-            self._used_tokens.add(uuid)
-        return self._open_read(real_uuid)
+            # Token must exist and not have been consumed by close_read
+            if uuid_or_token not in self._read_tokens:
+                raise ValueError(
+                    f"Read token '{uuid_or_token}' not found or already consumed"
+                )
+            # Get the item info without modifying ref_count
+            try:
+                size, blocks = self._get_item_blocks_no_ref(real_uuid)
+            except ValueError as e:
+                # If item not found or still being written, delegate to waiting logic
+                if "still being written" in str(e):
+                    # Wait if timeout allows
+                    if timeout == 0.0:
+                        raise RuntimeError(
+                            f"Item {real_uuid} is still being written"
+                        ) from None
+                    if timeout < 0:
+                        timeout = self.max_timeout
+                    deadline = time.monotonic() + timeout
+                    q = self.wait_for_open_read.setdefault(real_uuid, PriorityQueue())
+                    self._open_read_pending.add(real_uuid)
+                    q.put((deadline, identity, uuid_or_token))
+                    return None
+                else:
+                    raise
+            # Build response directly
+            resp = ShmAllocation(
+                uuid=real_uuid, size=size, blocks=blocks, use_cache=True
+            )
+            return json.dumps({"status": "ok", "data": asdict(resp)})
+        else:
+            # Normal UUID path – use manager.open_read (increases ref_count)
+            try:
+                info = self.manager.get_info(real_uuid)
+            except ValueError:
+                raise
+            if info["ref_count"] < 0:  # being written
+                if timeout == 0.0:
+                    raise RuntimeError(f"Item {real_uuid} is still being written")
+                if timeout < 0:
+                    timeout = self.max_timeout
+                deadline = time.monotonic() + timeout
+                q = self.wait_for_open_read.setdefault(real_uuid, PriorityQueue())
+                self._open_read_pending.add(real_uuid)
+                q.put((deadline, identity, uuid_or_token))
+                return None
+            return self._open_read(real_uuid)
 
     def wait_write(self, data: bytes, identity: bytes) -> str | None:
         """
@@ -426,17 +456,23 @@ class PagedShmServer:
             while not q.empty():
                 _, identity, original_id = q.get()
                 real_uuid, is_token = self._resolve_read_token(original_id)
-                if is_token and original_id in self._used_tokens:
-                    self._send_response(socket, identity, ERROR, "Token already used")
-                    continue
                 try:
                     if is_token:
-                        self._used_tokens.add(original_id)
-                    result = self._open_read(real_uuid)
-                    self._send_response(socket, identity, OK, result)
+                        # Token path: do not increase ref_count
+                        size, blocks = self._get_item_blocks_no_ref(real_uuid)
+                        resp = ShmAllocation(
+                            uuid=real_uuid, size=size, blocks=blocks, use_cache=True
+                        )
+                        self._send_response(
+                            socket,
+                            identity,
+                            OK,
+                            json.dumps({"status": "ok", "data": asdict(resp)}),
+                        )
+                    else:
+                        result = self._open_read(real_uuid)
+                        self._send_response(socket, identity, OK, result)
                 except Exception as e:
-                    if is_token:
-                        self._used_tokens.discard(original_id)
                     self._send_response(
                         socket, identity, ERROR, f"{type(e).__name__}: {e}"
                     )
@@ -480,25 +516,27 @@ class PagedShmServer:
             return self._read_tokens[uuid], True
         return uuid, False
 
-    def _consume_token(self, token: str) -> None:
-        """Remove a token completely."""
+    def _destroy_token(self, token: str) -> None:
+        """
+        Permanently destroy a read token by removing it from both mappings.
+        After this, any further use of the token will be invalid.
+        """
         real_uuid = self._read_tokens.pop(token, None)
         if real_uuid is not None:
-            self._item_to_read_tokens.get(real_uuid, set()).discard(token)
-        self._used_tokens.discard(token)
-
-    def _invalidate_token(self, token: str) -> None:
-        """Force-invalidate a token (e.g., on item deletion)."""
-        real_uuid = self._read_tokens.pop(token, None)
-        if real_uuid is not None:
-            self._item_to_read_tokens.get(real_uuid, set()).discard(token)
-        self._used_tokens.discard(token)
+            token_set = self._item_to_read_tokens.get(real_uuid)
+            if token_set is not None:
+                token_set.discard(token)
+                if not token_set:
+                    self._item_to_read_tokens.pop(real_uuid, None)
 
     def _open_read(self, uuid: str) -> str:
         """Internal helper to open a read reference and build response."""
         item = self.manager.open_read(uuid)
         resp = ShmAllocation(
-            uuid=item.uuid, size=item.size, blocks=item.blocks, use_cache=item.use_cache
+            uuid=item.uuid,
+            size=item.size,
+            blocks=item.blocks,
+            use_cache=item.use_cache,
         )
         return json.dumps({"status": "ok", "data": asdict(resp)})
 
@@ -530,21 +568,40 @@ class PagedShmServer:
     # Other command handlers
     # ------------------------------------------------------------------
     def close_write(self, items_data: bytes) -> str:
-        """Finish writing an item, making it readable and cacheable."""
+        """
+        Finish writing an item, making it readable and cacheable.
+
+        Automatically gives one read reference for each generated read token
+        associated with the UUID, ensuring the item remains cached as long as
+        any token is alive.  The token can be used for multiple open_read calls
+        until it is closed via close_read.
+        """
         items = json.loads(items_data)
         uuid = items["uuid"]
-        open_read = items["open_read"]
-        self.manager.close_write(uuid, open_read)
+        tokens = self._item_to_read_tokens.get(uuid, set())
+        open_n_reads = len(tokens)
+        self.manager.close_write(uuid, open_n_reads)
         return _OK_RESPONSE
 
     def close_read(self, uuid: str) -> str:
-        """Release a read reference. Accepts UUID or read token (token is consumed)."""
+        """
+        Release a read reference. Accepts UUID or read token.
+        If a token is given, it is destroyed (removed) after releasing the reference.
+        If the token has no pre‑incremented reference (ref_count==0), we only destroy
+        the token without calling manager.close_read to avoid ValueError.
+        """
         real_uuid, is_token = self._resolve_read_token(uuid)
         if is_token:
-            if uuid not in self._used_tokens:
-                raise ValueError(f"Read token {uuid} not used for open_read")
-            self.manager.close_read(real_uuid)
-            self._consume_token(uuid)
+            # Check if the item exists and has a positive ref_count
+            try:
+                info = self.manager.get_info(real_uuid)
+                if info["ref_count"] > 0:
+                    self.manager.close_read(real_uuid)
+                # else ref_count == 0, do not call close_read
+            except ValueError:
+                # Item may have been deleted; just destroy token
+                pass
+            self._destroy_token(uuid)
         else:
             self.manager.close_read(real_uuid)
         return _OK_RESPONSE
@@ -560,13 +617,12 @@ class PagedShmServer:
         return _OK_RESPONSE
 
     def delete(self, uuid: str) -> str:
-        """Delete an item and free its blocks."""
-        # Invalidate all read tokens associated with this item
+        """Delete an item and free its blocks (forcefully)."""
+        # Destroy all read tokens associated with this item
         if uuid in self._item_to_read_tokens:
-            for token in self._item_to_read_tokens.pop(uuid):
-                self._read_tokens.pop(token, None)
-                self._used_tokens.discard(token)
-        self.manager.delete(uuid)
+            for token in list(self._item_to_read_tokens[uuid]):
+                self._destroy_token(token)
+        self.manager.delete(uuid, force=True)
         return _OK_RESPONSE
 
     def get_manager_state(self) -> str:
@@ -587,6 +643,8 @@ class PagedShmServer:
         """Return object info as a JSON string."""
         real_uuid, _ = self._resolve_read_token(uuid)
         info = self.manager.get_info(real_uuid)
+        info.pop("use_cache", None)
+        info.pop("blocks", None)
         return json.dumps(info)
 
     def close(self):

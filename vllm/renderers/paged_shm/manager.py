@@ -211,13 +211,13 @@ class PagedShmManager:
             self._total_available_blocks += len(item.blocks)
             self._lru_cache.put(uuid, item)
 
-    def delete(self, uuid: str):
+    def delete(self, uuid: str, force: bool = False):
         """
         Permanently delete an item. Its blocks are returned to the free pool.
-        The item must be idle (ref_count == REF_IDLE).
+        If force=True, the item is deleted regardless of ref_count.
         """
         item = self._get_item(uuid)
-        if item.ref_count != REF_IDLE:
+        if not force and item.ref_count != REF_IDLE:
             raise ValueError(f"UUID {uuid} is busy now")
 
         # If the item was not cached (or was pinned) its blocks were counted
