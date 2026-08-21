@@ -422,7 +422,7 @@ class Worker(WorkerBase):
 
         # Construct the model runner
         if self.use_v2_model_runner:
-            if self.vllm_config.is_encoder_only:
+            if self.vllm_config.is_mm_encoder_only:
                 from vllm.v1.worker.mm_encoder_model_runner import (
                     MMEncoderModelRunner as GPUModelRunnerV2,
                 )
@@ -810,7 +810,7 @@ class Worker(WorkerBase):
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
-        if self.use_v2_model_runner and not self.vllm_config.is_encoder_only:
+        if self.use_v2_model_runner and not self.vllm_config.is_mm_encoder_only:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
             # An encoder-only instance runs no language model to warm up.
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
