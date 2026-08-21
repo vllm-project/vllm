@@ -1157,17 +1157,23 @@ class SpeculativeConfig:
             raise ValueError("Adaptive verification only supported with DSpark")
 
         if self.max_model_len is not None:
-            # V0 used this to skip speculation for long sequences. V1 has no
-            # runtime consumer: for ngram and custom_class `draft_model_config`
-            # aliases the target config so the override never runs, and for
-            # draft-model methods the value is assigned but nothing reads it.
-            # Warn rather than reject, so existing configs keep starting.
-            logger.warning(
-                "speculative_config.max_model_len is set to %d but has no "
-                "effect: nothing in V1 reads it, so sequences are not skipped "
-                "for speculation. Remove it to silence this warning.",
-                self.max_model_len,
+            # Methods that reuse the target model's config never reach the
+            # _maybe_override_draft_max_model_len call above, so the requested
+            # draft window is silently dropped.
+            effective_max_model_len = (
+                self.draft_model_config.max_model_len
+                if self.draft_model_config is not None
+                else self.target_model_config.max_model_len
             )
+            if effective_max_model_len != self.max_model_len:
+                logger.warning(
+                    "speculative_config.max_model_len=%d has no effect with "
+                    "method=%r, which does not build a separate draft model "
+                    "config; the draft window stays at %d.",
+                    self.max_model_len,
+                    self.method,
+                    effective_max_model_len,
+                )
 
         return self
 
