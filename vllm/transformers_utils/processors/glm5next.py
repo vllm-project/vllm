@@ -60,10 +60,12 @@ from transformers.video_utils import (
 
 logger = logging.get_logger(__name__)
 
-# Serving cap on max pixels. The checkpoint's ``max_image_tokens`` (8000 image /
-# 240000 video) implies pixel budgets of 12.5M / 376M px that would make vLLM's
-# startup encoder-profiling reserve huge activation memory and starve the KV
-# cache (300B weights already fill the GPU). ~1.25M px is a sane serving cap.
+# Serving cap on max VIDEO pixels. The checkpoint's video ``max_image_tokens``
+# (240000) implies a 376M px budget that would make vLLM's startup
+# encoder-profiling reserve huge activation memory and starve the KV cache
+# (300B weights already fill the GPU). ~1.25M px is a sane serving cap.
+# Images intentionally follow the checkpoint budget (8000 tokens) so that
+# preprocessing matches the HF reference pixel-for-pixel.
 _MM_MAX_PIXELS = 1_254_400
 
 # Frame-sampler fallbacks (mirror the checkpoint's fps_interval=2 /
@@ -818,17 +820,21 @@ class Glm5NextProcessor(ProcessorMixin):
         ``processor_config.json`` (nested ``image_processor`` / ``video_processor``,
         token-budget style, no standalone ``preprocessor_config.json``) and
         declares a custom ``processor_class`` that ``AutoProcessor`` cannot
-        resolve. We read the configs here, cap the token budgets to a serving
-        pixel limit, and instantiate the vLLM-native sub-processors.
+        resolve. We read the configs here, cap only the video token budget to a
+        serving pixel limit (images follow the checkpoint budget so preprocessing
+        matches the HF reference), and instantiate the vLLM-native sub-processors.
         """
         from transformers import AutoTokenizer
 
         model_path = pretrained_model_name_or_path
         tokenizer = AutoTokenizer.from_pretrained(model_path, **kwargs)
 
-        def _cap_cfg(cfg: dict) -> dict:
-            # Cap the pixel budget to the serving limit via max_image_tokens.
-            if cfg.get("max_image_tokens") is not None:
+        def _cap_cfg(cfg: dict, *, is_video: bool) -> dict:
+            # Video keeps a serving pixel cap (the checkpoint's 240k-token
+            # budget would starve the KV cache at startup profiling); images
+            # follow the checkpoint budget verbatim so preprocessing matches
+            # the HF reference exactly.
+            if is_video and cfg.get("max_image_tokens") is not None:
                 ps = cfg.get("patch_size", 14)
                 ms = cfg.get("merge_size", 2)
                 tps = cfg.get("temporal_patch_size", 2)
@@ -838,13 +844,13 @@ class Glm5NextProcessor(ProcessorMixin):
                 )
             return cfg
 
-        ip_cfg = _cap_cfg(dict(get_image_processor_config(model_path)))
+        ip_cfg = _cap_cfg(dict(get_image_processor_config(model_path)), is_video=False)
         image_processor = Glm5NextImageProcessor(
             **{k: v for k, v in ip_cfg.items() if k != "image_processor_type"}
         )
 
         with open(os.path.join(model_path, "processor_config.json")) as f:
-            vp_cfg = _cap_cfg(dict(json.load(f)["video_processor"]))
+            vp_cfg = _cap_cfg(dict(json.load(f)["video_processor"]), is_video=True)
         video_processor = Glm5NextVideoProcessor(
             **{k: v for k, v in vp_cfg.items() if k != "video_processor_type"}
         )
