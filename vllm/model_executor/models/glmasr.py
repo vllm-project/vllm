@@ -750,45 +750,40 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             chunk_counts.append(min(n_chunks, max_windows))
         return chunk_counts
 
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        mm_data = dict(mm_data)
         if "audios" in mm_data:
             mm_data["audio"] = mm_data.pop("audios")
 
-        audio = mm_data.get("audio", [])
-        audio_list = [audio] if audio and not isinstance(audio, list) else audio
-
-        # Handle sampling_rate
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         hf_processor_mm_kwargs = dict(
             **hf_processor_mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
         )
 
-        outputs = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            mm_data,
-            hf_processor_mm_kwargs,
-        )
+        return mm_data, hf_processor_mm_kwargs
 
-        # Postprocess: rename mask and add chunk counts
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         # Handle different key names from different transformers versions
-        if "input_features_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
-        elif "input_features_mask" not in outputs and "input_features" in outputs:
+        if "input_features_mask" in processed_data:
+            processed_data["feature_attention_mask"] = processed_data.pop(
+                "input_features_mask"
+            )
+        elif "input_features" in processed_data:
             # If no mask is provided, create one from input_features
-            input_features = outputs["input_features"]
+            input_features = processed_data["input_features"]
             if isinstance(input_features, torch.Tensor):
                 # Create a mask of all ones matching the sequence length
                 mask = torch.ones(
@@ -796,19 +791,21 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                     input_features.shape[-1],
                     dtype=torch.long,
                 )
-                outputs["feature_attention_mask"] = mask
+                processed_data["feature_attention_mask"] = mask
 
-        # Get processor for chunk counts calculation
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        audio = mm_data.get("audio", [])
+        audio_list = [audio] if audio and not isinstance(audio, list) else audio
+        if audio_list:
+            processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        # Override chunk counts calculation with GLM-ASR specific logic
-        chunk_counts = self._calculate_chunk_counts(
-            audio_list, processor.feature_extractor, processor
-        )
-        outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
+            # Override chunk counts calculation with GLM-ASR specific logic
+            chunk_counts = self._calculate_chunk_counts(
+                audio_list, processor.feature_extractor, processor
+            )
+            processed_data["chunk_counts"] = torch.tensor(
+                chunk_counts, dtype=torch.long
+            )
 
-        processed_data = outputs
-        processed_data.update(passthrough_data)
         return processed_data
 
     def _get_mm_fields_config(

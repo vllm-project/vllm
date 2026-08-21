@@ -235,38 +235,27 @@ class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingIn
 
 
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessingInfo]):
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
 
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
+        mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
         if audios:
             mm_data["audio"] = audios
 
-        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         hf_processor_mm_kwargs = dict(
             **hf_processor_mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
         )
 
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
-        )
-        processed_data.update(passthrough_data)
-        return processed_data
+        return mm_data, hf_processor_mm_kwargs
 
     def _get_mm_fields_config(
         self,

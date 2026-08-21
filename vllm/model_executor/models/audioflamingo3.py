@@ -377,43 +377,38 @@ class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
 class AudioFlamingo3MultiModalProcessor(
     BaseMultiModalProcessor[AudioFlamingo3ProcessingInfo]
 ):
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        processor_mm_data = dict(mm_data)
-        audios = processor_mm_data.pop("audios", None)
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", None)
         if audios is not None:
-            processor_mm_data["audio"] = audios
+            mm_data["audio"] = audios
 
-        outputs = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            processor_mm_data,
-            hf_processor_mm_kwargs,
-        )
+        return mm_data, hf_processor_mm_kwargs
 
-        if "input_features_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if "input_features_mask" in processed_data:
+            processed_data["feature_attention_mask"] = processed_data.pop(
+                "input_features_mask"
+            )
 
-        audio_data = processor_mm_data.get("audio")
+        audio_data = mm_data.get("audio")
         if audio_data is None:
-            processed_data = outputs
-            processed_data.update(passthrough_data)
             return processed_data
 
         audio_list = audio_data if isinstance(audio_data, list) else [audio_data]
         if len(audio_list) == 0:
-            processed_data = outputs
-            processed_data.update(passthrough_data)
             return processed_data
 
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
@@ -434,9 +429,8 @@ class AudioFlamingo3MultiModalProcessor(
                 n_win = max_windows
             chunk_counts.append(n_win)
 
-        outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
-        processed_data = outputs
-        processed_data.update(passthrough_data)
+        processed_data["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
+
         return processed_data
 
     def _get_mm_fields_config(

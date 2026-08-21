@@ -190,21 +190,15 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
 
 
 class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo]):
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        audios = mm_data.get("audios", [])
         assert isinstance(audios, list)
 
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
@@ -214,15 +208,17 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
             include_audio_num_chunks=True,
         )
 
-        output = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(**mm_data, audios=audios),
-            hf_processor_mm_kwargs,
-        )
-        output["audio_features"] = output.pop("audio_values")
+        return mm_data, hf_processor_mm_kwargs
 
-        processed_data = output
-        processed_data.update(passthrough_data)
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if "audio_values" in processed_data:
+            processed_data["audio_features"] = processed_data.pop("audio_values")
+
         return processed_data
 
     def _get_mm_fields_config(

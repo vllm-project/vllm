@@ -10,6 +10,8 @@ Since Transformers 5.10, `ProcessorMixin` now allows multi-modal inputs to be pa
 
 To work around this, each model defines how to generate dummy text based on the number of multi-modal inputs, via [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text], which its override of [_get_hf_processor_text][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_processor_text] returns so that [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main] passes it to the HF processor together with the multi-modal inputs to obtain the processed multi-modal data.
 
+Similarly, since the multi-modal data extracted by vLLM may not match what a specific HF processor expects, [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main] allows each model to adapt the inputs via [_preprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._preprocess_hf_mm_data] (e.g. renaming keys like `audios` to `audio` or injecting extra keyword arguments such as `sampling_rate`) and the outputs via [_postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data], without having to reimplement the entire method.
+
 ## Prompt Update Detection
 
 One of the main responsibilities of HF processor is to update the prompt with placeholder tokens. For example:

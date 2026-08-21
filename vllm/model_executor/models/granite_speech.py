@@ -180,21 +180,14 @@ class GraniteSpeechMultiModalProcessor(
             )
         ]
 
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
 
@@ -202,12 +195,14 @@ class GraniteSpeechMultiModalProcessor(
             # GraniteSpeechFeatureExtractor accepts "audio"
             mm_data["audio"] = audios
 
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
-        )
+        return mm_data, hf_processor_mm_kwargs
 
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         if "audio" in mm_data:
             # Calculate the number of audio tokens per entry in the batch;
             # This is used to split the batch back out after padding.
@@ -215,8 +210,6 @@ class GraniteSpeechMultiModalProcessor(
             processed_data["audio_embed_sizes"] = (
                 processed_data["input_ids"] == audio_token_index
             ).sum(-1)
-
-        processed_data.update(passthrough_data)
 
         return processed_data
 

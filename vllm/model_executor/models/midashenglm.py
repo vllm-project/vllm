@@ -583,24 +583,17 @@ class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessing
 class MiDashengLMMultiModalProcessor(
     BaseMultiModalProcessor[MiDashengLMProcessingInfo]
 ):
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
 
-        # + Padding
         min_audio_len = self.info.get_min_audio_len()
         processed_audios = [
             np.pad(
@@ -617,17 +610,7 @@ class MiDashengLMMultiModalProcessor(
         if processed_audios:
             mm_data["audio"] = processed_audios
 
-        hf_processor_mm_kwargs = dict(
-            **hf_processor_mm_kwargs,
-        )
-
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
-        )
-        processed_data.update(passthrough_data)
-        return processed_data
+        return mm_data, hf_processor_mm_kwargs
 
     def _get_mm_fields_config(
         self,

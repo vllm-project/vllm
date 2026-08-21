@@ -1320,6 +1320,23 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         return None
 
+    def _preprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        """
+        Pre-process the multi-modal data and HF processor keyword arguments
+        before they are passed to the HF processor.
+
+        By default, both are returned as-is. If the HF processor expects the
+        multi-modal data under different keys than those provided by the
+        multi-modal items (e.g. `audio` instead of `audios`), or requires
+        additional keyword arguments (e.g. `sampling_rate`), you should
+        override this method.
+        """
+        return mm_data, hf_processor_mm_kwargs
+
     def _postprocess_hf_mm_data(
         self,
         mm_data: Mapping[str, object],
@@ -1349,6 +1366,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if processor_data:
+            processor_data, hf_processor_mm_kwargs = self._preprocess_hf_mm_data(
+                processor_data, hf_processor_mm_kwargs
+            )
+
             prompt_text = self._get_hf_processor_text(mm_items.get_all_counts())
             if prompt_text is not None:
                 processor_data = dict(text=prompt_text, **processor_data)

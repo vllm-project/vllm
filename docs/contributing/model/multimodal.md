@@ -489,7 +489,12 @@ return a schema of the tensors outputted by the HF processor that are related to
     [_get_hf_processor_text][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_processor_text]
     to return the dummy text from
     [BaseDummyInputsBuilder.get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text]
-    like in the example above. If you need to modify the output of the HF processor,
+    like in the example above. If the HF processor expects the multi-modal data
+    under different keys than those provided by the multi-modal items
+    (e.g. `audio` instead of `audios`), or requires additional keyword arguments
+    (e.g. `sampling_rate`), you should override
+    [_preprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._preprocess_hf_mm_data].
+    If you need to modify the output of the HF processor,
     you should override
     [_postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data].
     If the HF processor applies additional transformations to the prompt tokens

@@ -461,30 +461,28 @@ class MossTranscribeDiarizeDummyInputsBuilder(
 class MossTranscribeDiarizeMultiModalProcessor(
     BaseMultiModalProcessor[MossTranscribeDiarizeProcessingInfo]
 ):
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         audios = _get_audios_from_mm_data(mm_data)
 
-        processed = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, audio=audios),
-            hf_processor_mm_kwargs,
-        )
-        processed_data = _add_vllm_audio_metadata(processed, len(audios))
-        processed_data.update(passthrough_data)
+        return dict(audio=audios), hf_processor_mm_kwargs
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        audios = _get_audios_from_mm_data(mm_data)
+        if audios:
+            processed_data = _add_vllm_audio_metadata(processed_data, len(audios))
+
         return processed_data
 
     def _get_mm_fields_config(
