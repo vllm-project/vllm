@@ -23,7 +23,9 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -261,7 +263,7 @@ class InklingReplicatedEmbedding(nn.Module):
         return embed_rmsnorm(input_ids, self.weight, None, 0.0)
 
 
-class InklingModel(nn.Module):
+class InklingModel(nn.Module, EagleModelMixin):
     def __init__(
         self,
         *,
@@ -339,8 +341,13 @@ class InklingModel(nn.Module):
                 self.config.log_scaling_alpha,
             )
 
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], 0, hidden_states, None
+        )
         pending: tuple[InklingDelta, InklingShortConv] | None = None
-        for layer in self.layers[self.start_layer : self.end_layer]:
+        for idx, layer in enumerate(
+            self.layers[self.start_layer : self.end_layer]
+        ):
             hidden_states, pending = layer(
                 positions,
                 hidden_states,
@@ -350,6 +357,9 @@ class InklingModel(nn.Module):
                 log_scaling=log_scaling,
             )
             attn_in0 = None
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, None
+            )
 
         if not get_pp_group().is_last_rank:
             if pending is not None:
@@ -363,11 +373,16 @@ class InklingModel(nn.Module):
                 pending[0], hidden_states, pending[1], self.norm, positions
             )[0]
             assert norm_out is not None
-            return norm_out
-        return self.norm(hidden_states)
+            hidden_states = norm_out
+        else:
+            hidden_states = self.norm(hidden_states)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+        return hidden_states
 
 
-class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
+class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):
     """Shared text-backbone causal-LM scaffolding for both entry classes."""
 
     hf_to_vllm_mapper = WeightsMapper(
