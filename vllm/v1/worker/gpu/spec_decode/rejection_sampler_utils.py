@@ -3,7 +3,13 @@
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
+from vllm.v1.worker.gpu.sample.gumbel import (
+    RNG_DOMAIN_ACCEPTANCE,
+    RNG_DOMAIN_RESIDUAL,
+    gumbel_block_argmax,
+    tl_rand32,
+    tl_rng_seed,
+)
 
 
 @triton.jit
@@ -537,6 +543,7 @@ def _rejection_kernel(
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    ACCEPTANCE_RNG_DOMAIN: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -566,7 +573,8 @@ def _rejection_kernel(
 
         if verifying:
             pos = tl.load(pos_ptr + logit_idx)
-            u = tl_rand32(seed, pos, includes_zero=False)
+            coin_seed = tl_rng_seed(seed, ACCEPTANCE_RNG_DOMAIN)
+            u = tl_rand32(coin_seed, pos, includes_zero=False)
             if is_greedy:
                 # Greedy sampling. Accept IFF draft matches target argmax.
                 # NOTE: Target argmax is stored directly so that resampling
@@ -732,6 +740,7 @@ def _resample_kernel(
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    RESIDUAL_RNG_DOMAIN: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -837,6 +846,8 @@ def _resample_kernel(
         0,  # logits_cache_stride_1
         None,  # logits_cache_col_ptr
         vocab_size,
+        RESIDUAL_RNG_DOMAIN,
+        use_target_stream=is_bonus,
         APPLY_TEMPERATURE=False,
         USE_FP64=USE_FP64,
     )
@@ -946,6 +957,7 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
     use_block_verification: bool = False,
+    use_batch_invariant_rng: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -1129,6 +1141,7 @@ def rejection_sample(
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        ACCEPTANCE_RNG_DOMAIN=(RNG_DOMAIN_ACCEPTANCE if use_batch_invariant_rng else 0),
         num_warps=1,
     )
 
@@ -1169,6 +1182,7 @@ def rejection_sample(
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_FP64=use_fp64,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        RESIDUAL_RNG_DOMAIN=(RNG_DOMAIN_RESIDUAL if use_batch_invariant_rng else 0),
     )
 
     # Insert the resampled tokens into the output sampled.

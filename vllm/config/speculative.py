@@ -1494,6 +1494,15 @@ class SpeculativeConfig:
     def use_dspark(self) -> bool:
         return self.method == "dspark"
 
+    def supports_batch_invariance(self) -> bool:
+        return (
+            self.method in ("eagle3", "dflash", "dspark")
+            and self.draft_sample_method == "probabilistic"
+            and self.rejection_sample_method == "standard"
+            and self.num_speculative_tokens_per_batch_size is None
+            and not self.enable_adaptive_verification
+        )
+
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
 

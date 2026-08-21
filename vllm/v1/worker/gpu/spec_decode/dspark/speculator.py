@@ -30,7 +30,10 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import (
+    RNG_DOMAIN_DRAFT_PROPOSAL,
+    gumbel_sample,
+)
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
@@ -147,6 +150,9 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_cache=self.draft_logits,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
+            rng_domain=(
+                RNG_DOMAIN_DRAFT_PROPOSAL if self.use_batch_invariant_rng else 0
+            ),
         )
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
