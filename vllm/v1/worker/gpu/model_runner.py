@@ -525,9 +525,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
+            # Let each cache type account for CP. Attention KV is DCP-sharded,
+            # while Mamba/GDN recurrent state is replicated across DCP ranks.
             max_num_blocks = spec.max_num_blocks_per_req(
                 self.vllm_config, block_table_max_model_len
             )
+            # Preserve each cache type's alignment requirements after applying
+            # its topology-aware block-table width.
             max_num_blocks = get_block_table_width(
                 max_num_blocks,
                 spec.block_size,

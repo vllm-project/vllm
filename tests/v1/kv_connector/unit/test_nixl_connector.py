@@ -43,7 +43,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-    HostReadStager,
+    HostWriteStager,
     _ReqState,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -1815,11 +1815,12 @@ def test_host_stager_read_failure_reaches_terminal_state():
     """A terminal NIXL error must fail even when another chunk was queued."""
     pool = SimpleNamespace(free_slots=[])
     slot = SimpleNamespace(pool=pool)
+    queued = [(np.array([2]),) * 4 + (7, 16)]
     state = _ReqState(
-        queued=[(np.array([2]), np.array([0]), 7, 16)],
-        reading=[(1, slot, np.array([0]))],
+        queued=queued,
+        reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))],
     )
-    stager = object.__new__(HostReadStager)
+    stager = object.__new__(HostWriteStager)
     stager._reqs = {"request": state}
     stager.nixl_wrapper = MagicMock()
     stager.nixl_wrapper.check_xfer_state.return_value = "ERR"
@@ -1834,8 +1835,8 @@ def test_host_stager_abort_drains_read_before_reusing_slot():
     """Aborting a posted read must not return its slot while NIXL says PROC."""
     pool = SimpleNamespace(free_slots=[])
     slot = SimpleNamespace(pool=pool)
-    state = _ReqState(reading=[(1, slot, np.array([0]))])
-    stager = object.__new__(HostReadStager)
+    state = _ReqState(reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))])
+    stager = object.__new__(HostWriteStager)
     stager._reqs = {"request": state}
     stager.nixl_wrapper = MagicMock()
     stager.nixl_wrapper.check_xfer_state.side_effect = ["PROC", "DONE"]
@@ -1855,8 +1856,8 @@ def test_host_stager_copy_failure_waits_for_recorded_event():
     event = MagicMock()
     event.query.side_effect = [False, True]
     slot = SimpleNamespace(pool=pool, event=event)
-    state = _ReqState(reading=[(1, slot, np.array([0]))])
-    stager = object.__new__(HostReadStager)
+    state = _ReqState(reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))])
+    stager = object.__new__(HostWriteStager)
     stager._reqs = {"request": state}
     stager.nixl_wrapper = MagicMock()
     stager.nixl_wrapper.check_xfer_state.return_value = "DONE"
@@ -1874,7 +1875,7 @@ def test_host_stager_is_only_initialized_for_same_host_reads(monkeypatch):
     worker = object.__new__(NixlConnectorWorker)
     worker._host_stager = None
     worker._host_stager_init_attempted = False
-    worker.use_host_buffer = True
+    worker.region_mem_types = ["DRAM"]
     worker.src_blocks_data = np.array([[1_000, 16, 0]], dtype=np.uint64)
     worker.device_id = 0
     worker.nixl_wrapper = MagicMock()
@@ -1888,7 +1889,7 @@ def test_host_stager_is_only_initialized_for_same_host_reads(monkeypatch):
         "local-host",
     )
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.HostReadStager",
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.HostWriteStager",
         return_value=stager,
     ) as stager_factory:
         assert worker._maybe_init_host_stager("remote-host") is None

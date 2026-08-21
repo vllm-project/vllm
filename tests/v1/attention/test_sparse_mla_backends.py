@@ -450,6 +450,7 @@ def test_sparse_backend_decode_correctness(
         device,
         arange_block_indices=True,
     )
+
     kv_cache = create_and_prepopulate_kv_cache(
         kv_c_contexts=kv_c_contexts,
         k_pe_contexts=k_pe_contexts,

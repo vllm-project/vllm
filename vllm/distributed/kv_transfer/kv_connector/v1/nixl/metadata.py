@@ -43,8 +43,7 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #      clock-sync timestamp
 #   6: Validate EAGLE/MTP speculative configuration compatibility
 #   7: Include NIXL transfer mode (push vs pull) in the compatibility hash
-#   8: Add packed KV cache region metadata, including strides, block counts,
-#      group IDs, block sizes, and names
+#   8: Add per-region transfer geometry to NixlAgentMetadata
 #
 NIXL_CONNECTOR_VERSION: int = 8
 

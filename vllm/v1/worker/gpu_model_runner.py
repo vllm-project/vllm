@@ -1272,8 +1272,8 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
 
-        # Zero freshly allocated cache blocks to prevent stale NaN/data from
-        # corrupting attention or SSM computation.
+        # Zero GPU memory for freshly allocated cache blocks to prevent
+        # stale NaN/data from corrupting attention or SSM computation.
         if scheduler_output.new_block_ids_to_zero:
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
         if scheduler_output.kv_cache_block_copies:

@@ -43,7 +43,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.hisparse import (
     make_hisparse_nixl_adapter,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-    HostReadStager,
+    HostWriteStager,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
@@ -570,7 +570,7 @@ class NixlBaseConnectorWorker:
         self._invalidated_recv_reqs: queue.Queue[ReqId] = queue.Queue()
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
         # Set when the local KV destination is host memory; see host_staging.
-        self._host_stager: HostReadStager | None = None
+        self._host_stager: HostWriteStager | None = None
         self._host_stager_init_attempted = False
         # A posted READ cannot be aborted, so failure remains pending until
         # every sibling transfer is terminal and its blocks are safe to reuse.
@@ -633,10 +633,12 @@ class NixlBaseConnectorWorker:
             get_representative_spec_type(g.kv_cache_spec)
             for g in self.kv_cache_config.transfer_groups
         )
+
         # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
+
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
@@ -1147,6 +1149,7 @@ class NixlBaseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+
         if self._nixl_adapter is not None:
             self._nixl_adapter.reset_regions()
 
@@ -1456,7 +1459,6 @@ class NixlBaseConnectorWorker:
         self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
             self.register_local_xfer_handler(self.block_size)
         )
-
         # After KV Caches registered, listen for new connections.
         agent_metadata = NixlAgentMetadata(
             engine_id=self.engine_id,
@@ -2625,7 +2627,7 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
-    def _maybe_init_host_stager(self, remote_host: str) -> HostReadStager | None:
+    def _maybe_init_host_stager(self, remote_host: str) -> HostWriteStager | None:
         """Enable device staging for same-host, all-host KV reads.
 
         UCX falls back to TCP loopback for a remote-device to local-host read,
@@ -2655,7 +2657,7 @@ class NixlBaseConnectorWorker:
             [int(entry[0]) for entry in self.src_blocks_data], dtype=np.uint64
         )
         try:
-            self._host_stager = HostReadStager(
+            self._host_stager = HostWriteStager(
                 desc_lens=desc_lens,
                 host_addrs=host_addrs,
                 device=torch.device(f"cuda:{self.device_id}"),
@@ -2667,13 +2669,13 @@ class NixlBaseConnectorWorker:
             )
         except Exception:
             logger.exception(
-                "NIXL host read staging setup failed; falling back to direct "
+                "NIXL host write staging setup failed; falling back to direct "
                 "host reads (set VLLM_NIXL_HOST_STAGE_BYTES=0 to silence)"
             )
             self._host_stager = None
         return self._host_stager
 
-    def _host_stagers(self) -> Iterator[HostReadStager]:
+    def _host_stagers(self) -> Iterator[HostWriteStager]:
         if self._host_stager is not None:
             yield self._host_stager
         if (
