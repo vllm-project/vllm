@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
