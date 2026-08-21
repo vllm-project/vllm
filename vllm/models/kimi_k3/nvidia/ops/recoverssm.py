@@ -334,10 +334,26 @@ def _prepare_commit_plan_kernel(
     )
 
 
+def _compact_conv_block_d(args: dict[str, Any]) -> int:
+    batch = args["BATCH"]
+    if not args["ALIGN_MODE"]:
+        return 64 if batch <= 2 else 128
+    if batch == 1:
+        return 128
+    return 256 if batch == 4 else 64
+
+
+def _compact_conv_num_warps(args: dict[str, Any]) -> int:
+    batch = args["BATCH"]
+    if args["ALIGN_MODE"]:
+        return 4 if batch in (2, 4) else 1
+    return 2 if batch == 1 else 1
+
+
 @triton.heuristics(
     {
-        "BLOCK_D": lambda args: 64 if args["ALIGN_MODE"] else 128,
-        "num_warps": lambda args: 1,
+        "BLOCK_D": _compact_conv_block_d,
+        "num_warps": _compact_conv_num_warps,
     }
 )
 @triton.jit
@@ -359,6 +375,7 @@ def _compact_conv_state_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_HISTORY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    BATCH: tl.constexpr,
 ):
     pid_d = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -418,10 +435,25 @@ def _compact_conv_state_kernel(
     )
 
 
+def _commit_kda_value_block(args: dict[str, Any]) -> int:
+    batch = args["BATCH"]
+    if not args["ALIGN_MODE"]:
+        return 4 if batch <= 2 else 16
+    if batch == 2:
+        return 16
+    return 32 if batch == 4 else 8
+
+
+def _commit_kda_num_warps(args: dict[str, Any]) -> int:
+    if not args["ALIGN_MODE"]:
+        return 1
+    return 4 if args["BATCH"] == 1 else 2 if args["BATCH"] == 2 else 1
+
+
 @triton.heuristics(
     {
-        "BV": lambda args: 8 if args["ALIGN_MODE"] else 16,
-        "num_warps": lambda args: 1,
+        "BV": _commit_kda_value_block,
+        "num_warps": _commit_kda_num_warps,
     }
 )
 @triton.jit
@@ -466,6 +498,7 @@ def _commit_kda_state_kernel(
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    BATCH: tl.constexpr,
     LAUNCH_DEPENDENT_KERNELS: tl.constexpr,
 ):
     if LAUNCH_DEPENDENT_KERNELS:
@@ -1058,6 +1091,7 @@ class KDARecoverSSMCommitContext:
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
             ALIGN_MODE=block_table is not None,
+            BATCH=batch,
             LAUNCH_DEPENDENT_KERNELS=use_pdl,
             num_stages=2,
         )
@@ -1087,6 +1121,7 @@ class KDARecoverSSMCommitContext:
             state_indices.stride(0),
             BLOCK_HISTORY=block_history,
             ALIGN_MODE=block_table is not None,
+            BATCH=batch,
             launch_pdl=use_pdl,
         )
 
