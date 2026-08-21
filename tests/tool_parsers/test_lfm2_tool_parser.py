@@ -792,6 +792,39 @@ def test_streaming_bad_bracket_after_a_streamed_prefix_reported_once(
     assert logged_warning.call_count == 1
 
 
+@pytest.mark.parametrize(
+    "bad_value",
+    ["f'{q}'", "[i for i in y]"],
+    ids=["fstring_placeholder", "comprehension"],
+)
+def test_streaming_unconvertible_value_never_streams_partial_args(
+    bad_value: str, lfm2_tokenizer: TokenizerLike
+):
+    """A value whose early prefix completes to a fabricated literal (f' to
+    f'', [ to []) converted, so the call's argument prefix was streamed; once
+    the real value arrived it stopped converting and the call was dropped,
+    leaving the client a tool call whose arguments are half a JSON object.
+    The fabricated shapes now wait, so an unconvertible call streams nothing
+    and only the parseable sibling comes through."""
+    import json
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}, f(x={bad_value})]{TOOL_CALL_END}"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=True,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert [call.function for call in tool_calls] == [SIMPLE_FUNCTION_CALL]
+    for call in tool_calls:
+        json.loads(call.function.arguments)
+
+
 def test_streaming_implicit_string_concatenation(lfm2_tokenizer: TokenizerLike):
     """Adjacent string literals ('ab' 'cd') are valid Python that concatenates
     to one value. The broken-string guard misread the second opening quote as

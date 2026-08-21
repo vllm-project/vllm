@@ -1083,6 +1083,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
             are detected.
     """
     bracket_stack: list[str] = []
+    last_quote_open = -1
     for index, char in enumerate(text):
         # Inside a string literal only an unescaped matching quote is
         # significant; brackets are literal text. Without this guard a bracket
@@ -1105,6 +1106,19 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
                 raise UnexpectedAstError("Mismatched curly braces")
         elif char in {"'", '"'}:
             bracket_stack.append(char)
+            last_quote_open = index
+
+    if bracket_stack and bracket_stack[-1] in {"'", '"'}:
+        # Closing an f-string ourselves fabricates a placeholder-free literal
+        # out of text that may still grow a placeholder — a value that
+        # converts now and stops converting once the '{' arrives, after its
+        # prefix has already been streamed and cannot be retracted.
+        j = last_quote_open
+        while j > 0 and text[j - 1].isalpha() and last_quote_open - j < 2:
+            j -= 1
+        at_boundary = j == 0 or not (text[j - 1].isalnum() or text[j - 1] == "_")
+        if at_boundary and "f" in text[j:last_quote_open].lower():
+            return None
 
     text = text.rstrip()
     if text.endswith("=") or text.endswith(":"):
@@ -1123,12 +1137,11 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
             return None
     if text.endswith(","):
         text = text[:-1]
-    if (
-        bracket_stack
-        and bracket_stack[-1] == "["
-        and not text.endswith("[")
-        and not text.endswith(")")
-    ):
+    # A list only completes right after a closed call: anywhere else the
+    # closing "]" fabricates a value (a just-opened "[" becomes an empty
+    # list) that converts now and stops converting once real elements
+    # arrive, after its prefix has already been streamed.
+    if bracket_stack and bracket_stack[-1] == "[" and not text.endswith(")"):
         return None
 
     _CLOSING = {"[": "]", "(": ")", "{": "}", "'": "'", '"': '"'}

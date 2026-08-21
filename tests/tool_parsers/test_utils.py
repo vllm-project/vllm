@@ -351,6 +351,34 @@ class TestMakeValidPythonStringLiterals:
         with pytest.raises(UnexpectedAstError):
             make_valid_python("[exec(command=data])")
 
+    def test_open_fstring_waits(self):
+        # Closing an f-string ourselves fabricates a placeholder-free
+        # literal: `f(x=f'` completed to `f(x=f'')` converts, then stops
+        # converting once `{` arrives — after its prefix was streamed.
+        assert make_valid_python("[f(x=f'ab") is None
+        assert make_valid_python('[f(x=F"ab') is None
+        assert make_valid_python("[f(x=rf'ab") is None
+
+    def test_closed_fstring_completes(self):
+        # Only an f-string still open at the end must wait; a closed one is
+        # ordinary text and a later open plain string still completes.
+        result = make_valid_python("[f(x=f'ab', y='c")
+        assert result is not None
+        assert result[0] == "[f(x=f'ab', y='c')]"
+
+    def test_open_raw_string_still_completes(self):
+        # The wait is specific to f-strings: a raw string's value is its
+        # prefix, streaming it early is safe.
+        result = make_valid_python("[f(x=r'a\\b")
+        assert result is not None
+        assert result[0] == "[f(x=r'a\\b')]"
+
+    def test_just_opened_list_value_waits(self):
+        # `f(x=[` completed to `f(x=[])` fabricates an empty list: it
+        # converts, then stops converting once a non-literal element
+        # arrives — after `{"x": [` was streamed.
+        assert make_valid_python("[f(x=[") is None
+
     def test_multiline_string_argument_recovers_after_escape(self):
         # A raw newline inside a string argument is invalid Python, so
         # make_valid_python alone returns None; callers pre-escape control
