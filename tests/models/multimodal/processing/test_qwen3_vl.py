@@ -6,6 +6,7 @@ Covers the fix for num_frames-based timestamp calculation
 (issue vllm-project/vllm#35909).
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -184,3 +185,39 @@ def test_processor_multi_video_list_kwargs(
     assert len(video_phs) == 2, (
         f"Expected exactly 2 video placeholders, got {len(video_phs)}"
     )
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_profiling_dummy_image_is_not_truncated(model_id, monkeypatch):
+    """The profiling-time dummy prompt expands the image placeholder to more
+    tokens than the HF tokenizer's ``model_max_length``. HF-side truncation of
+    that expansion makes ``Qwen3VLProcessor`` fail its image-token consistency
+    check, aborting engine startup during memory profiling. Multi-modal
+    processor calls must therefore explicitly disable HF truncation."""
+    ctx = build_model_context(
+        model_id,
+        model_config_kwargs={"max_model_len": 4096},
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    original_call = processor.info.ctx.call_hf_processor
+    hf_calls: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
+
+    def spying_call(self, hf_processor, data, kwargs=None, **kw):
+        kwargs = kwargs or {}
+        hf_calls.append((data, dict(kwargs)))
+        return original_call(hf_processor, data, kwargs, **kw)
+
+    monkeypatch.setattr(type(processor.info.ctx), "call_hf_processor", spying_call)
+
+    mm_inputs = MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
+        ctx.model_config, {"image": 1}, processor=processor
+    )
+
+    mm_call_kwargs = [
+        kwargs for data, kwargs in hf_calls if data.get("images") is not None
+    ]
+    assert mm_call_kwargs, "expected at least one HF processor call with images"
+    assert all(kwargs.get("truncation") is False for kwargs in mm_call_kwargs)
+    assert len(mm_inputs["prompt_token_ids"]) > 4096

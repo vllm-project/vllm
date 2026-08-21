@@ -1288,6 +1288,30 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     ) -> BatchFeature:
         mm_data = dict(mm_data)
 
+        def call_hf_processor(
+            prompt: str,
+            mm_data: Mapping[str, object],
+            mm_kwargs: Mapping[str, object],
+        ) -> BatchFeature:
+            # vLLM enforces max_model_len itself, and HF-side truncation of a
+            # prompt whose placeholders were expanded to per-item feature
+            # tokens (e.g. the profiling-time dummy prompt for a max-size
+            # image) breaks Qwen3VLProcessor's token-count consistency check.
+            # Keep truncation semantics for text-only calls; disable it only
+            # when the call carries multi-modal data, matching
+            # ColPaliMultiModalProcessor.
+            if not mm_data:
+                return self.info.ctx.call_hf_processor(
+                    self.info.get_hf_processor(**mm_kwargs),
+                    dict(text=prompt),
+                    mm_kwargs,
+                )
+            return self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**mm_kwargs),
+                dict(text=prompt, **mm_data),
+                dict(mm_kwargs, truncation=False),
+            )
+
         # Separate video processing from image processing. Because the videos
         # are processed into several image patches
         video_input_ids_lst: list[list[int]] = []
@@ -1365,7 +1389,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 if "num_frames" in video_mm_kwargs and "fps" not in video_mm_kwargs:
                     video_mm_kwargs["fps"] = None
 
-                video_outputs = super()._call_hf_processor(
+                video_outputs = call_hf_processor(
                     prompt="<|vision_start|><|video_pad|><|vision_end|>",
                     mm_data=video_mm_data,
                     mm_kwargs=video_mm_kwargs,
@@ -1426,7 +1450,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         non_video_mm_kwargs = {
             k: v for k, v in mm_kwargs.items() if k not in ("fps", "num_frames")
         }
-        processed_outputs = super()._call_hf_processor(
+        processed_outputs = call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=non_video_mm_kwargs,
