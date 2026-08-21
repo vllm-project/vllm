@@ -285,6 +285,32 @@ mod tests {
     }
 
     #[test]
+    fn prepare_completion_request_normalizes_top_k_sentinels() {
+        for (top_k, expected) in [
+            (serde_json::Value::Null, None),
+            (json!(-1), Some(0)),
+            (json!(0), Some(0)),
+            (json!(20), Some(20)),
+        ] {
+            let mut value = base_request_json();
+            value
+                .as_object_mut()
+                .expect("request object")
+                .insert("top_k".to_string(), top_k);
+            let request: CompletionRequest = serde_json::from_value(value).expect("parse top_k");
+            let prepared = prepare_completion_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                &test_tokenizer(),
+            )
+            .expect("prepare top_k");
+
+            assert_eq!(prepared.text_request.sampling_params.top_k, expected);
+        }
+    }
+
+    #[test]
     fn normalize_coerces_null_max_tokens_to_default() {
         // An absent `max_tokens` already gets the serde default.
         let absent: CompletionRequest =

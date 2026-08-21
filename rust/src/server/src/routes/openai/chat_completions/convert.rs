@@ -504,6 +504,32 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_normalizes_top_k_sentinels() {
+        for (top_k, expected) in [
+            (serde_json::Value::Null, None),
+            (json!(-1), Some(0)),
+            (json!(0), Some(0)),
+            (json!(20), Some(20)),
+        ] {
+            let request: ChatCompletionRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true,
+                "top_k": top_k,
+            }))
+            .expect("parse top_k");
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("prepare top_k");
+
+            assert_eq!(prepared.chat_request.sampling_params.top_k, expected);
+        }
+    }
+
+    #[test]
     fn prepare_chat_request_maps_parallel_tool_calls() {
         let mut request = base_request();
         request.parallel_tool_calls = Some(false);

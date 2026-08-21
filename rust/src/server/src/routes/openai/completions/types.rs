@@ -11,7 +11,7 @@ use vllm_text::Prompt;
 
 use crate::routes::openai::utils::types::{
     LogProbs, Normalizable, PromptLogprobs, StreamOptions, StringOrArray, Usage, default_true,
-    validate_stop,
+    deserialize_request_top_k, validate_stop,
 };
 
 /// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM
@@ -97,6 +97,7 @@ pub struct CompletionRequest {
     pub use_beam_search: bool,
 
     /// Top-k sampling parameter
+    #[serde(default, deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
 
     /// Min-p nucleus sampling parameter

@@ -14,8 +14,8 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, StreamOptions, StringOrArray, Tool,
-    ToolCall, ToolCallDelta, ToolChoice, Usage, default_true, validate_messages, validate_stop,
-    validate_top_p_value,
+    ToolCall, ToolCallDelta, ToolChoice, Usage, default_true, deserialize_request_top_k,
+    validate_messages, validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -119,6 +119,7 @@ pub struct ChatCompletionRequest {
     pub use_beam_search: bool,
 
     /// Top-k sampling parameter
+    #[serde(default, deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
 
     /// Min-p nucleus sampling parameter
