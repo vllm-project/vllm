@@ -6,6 +6,7 @@ import warnings
 import pytest
 import torch.cuda
 
+import vllm.model_executor.models.registry as model_registry
 from vllm.model_executor.models import (
     is_pooling_model,
     is_text_generation_model,
@@ -63,6 +64,17 @@ def test_registry_imports(model_arch):
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None
 
+    registered_model = ModelRegistry.models[model_arch]
+    if isinstance(registered_model, _LazyRegisteredModel) and (
+        model_registry._get_builtin_model_info(
+            registered_model.module_name, registered_model.class_name
+        )
+        is not None
+    ):
+        assert registered_model.inspect_model_cls() == (
+            model_registry._ModelInfo.from_model_cls(model_cls)
+        )
+
     if model_arch in _SPECULATIVE_DECODING_MODELS:
         return  # Ignore these models which do not have a unified format
 
@@ -75,6 +87,16 @@ def test_registry_imports(model_arch):
 
     if model_arch in _MULTIMODAL_MODELS:
         assert supports_multimodal(model_cls)
+
+
+def test_builtin_model_info_skips_dynamic_inspection(monkeypatch):
+    monkeypatch.setattr(
+        _LazyRegisteredModel, "_load_modelinfo_from_cache", lambda *_: pytest.fail()
+    )
+    monkeypatch.setattr(model_registry, "_run_in_subprocess", lambda _: pytest.fail())
+    model_info = ModelRegistry._try_inspect_model_cls("Qwen2ForCausalLM")
+    assert model_info is not None
+    assert model_info.architecture == "Qwen2ForCausalLM"
 
 
 @create_new_process_for_each_test()
@@ -192,8 +214,8 @@ def test_lazy_modelinfo_package_attempts_cache_load(monkeypatch):
     )
 
     registered_model = _LazyRegisteredModel(
-        module_name="vllm.model_executor.models.transformers",
-        class_name="TransformersForCausalLM",
+        module_name="vllm.models.deepseek_v32",
+        class_name="DeepseekV32ForCausalLM",
     )
 
     result = registered_model.inspect_model_cls()
