@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
+    record_modelwise_reload_metadata,
     set_torchao_reload_attrs,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant
@@ -58,6 +59,7 @@ def initialize_model(
         with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
             model = model_class(vllm_config=vllm_config, prefix=prefix)
             record_metadata_for_reloading(model)
+            record_modelwise_reload_metadata(model)
             return model
 
     msg = (
@@ -90,41 +92,42 @@ def initialize_model(
     with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
         model = model_class(**kwargs)
         record_metadata_for_reloading(model)
+        record_modelwise_reload_metadata(model)
 
     return model
 
 
 def process_weights_after_loading(
-    model: nn.Module, model_config: ModelConfig, target_device: torch.device
+    model: nn.Module,
+    model_config: ModelConfig,
+    target_device: torch.device,
+    *,
+    force: bool = False,
+    skip_modules: frozenset[str] = frozenset(),
 ) -> None:
-    for _, module in model.named_modules():
-        quant_method = getattr(module, "quant_method", None)
-        if isinstance(quant_method, QuantizeMethodBase):
-            # When quant methods need to process weights after loading
-            # (for repacking, quantizing, etc), they expect parameters
-            # to be on the global target device. This scope is for the
-            # case where cpu offloading is used, where we will move the
-            # parameters onto device for processing and back off after.
-            with (
-                device_loading_context(module, target_device),
-                arena_scope(get_reload_arena(module)),
-            ):
-                quant_method.process_weights_after_loading(module)
-            # process_weights_after_loading may swap in freshly-created
-            # Parameters (e.g. FP8 requantization), which are stamped with the
-            # global rank in BasevLLMParameter.__init__. Re-reconcile their TP
-            # state to the layer so a later weight reload / RL weight-refit
-            # narrows replicated (disable_tp) weights at the correct offset.
-            if hasattr(module, "update_param_tp_status"):
-                module.update_param_tp_status()
-            # Repacking transients above can leave large amounts of memory in
-            # the caching allocator, which starves the OS on UMA devices.
-            release_device_memory_under_pressure(target_device)
+    """Run post-load processing on every module that needs it.
+
+    Args:
+        model: Model whose modules are processed.
+        model_config: Config used by attention post-load processing.
+        target_device: Device the weights must be on while processing.
+        force: Re-run processing on modules that already ran it.
+        skip_modules: Names of modules that committed their own serving
+            values (for example a streaming per-expert reload) and must not
+            be processed again.
+    """
+    for module_name, module in model.named_modules():
+        if module_name in skip_modules:
+            continue
+        if isinstance(getattr(module, "quant_method", None), QuantizeMethodBase):
+            process_quant_method_after_loading(module, target_device, force=force)
 
     # Initialize post-load attention weights for any attention layer and MM
     # encoder. NOTE: Happens after other modules so we can easily decompress
     # weights.
-    for _, module in model.named_modules():
+    for module_name, module in model.named_modules():
+        if module_name in skip_modules:
+            continue
         if is_deferred_attention_layer(module):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
@@ -139,7 +142,9 @@ def process_weights_after_loading(
     # load_weights(). When using DummyModelLoader (e.g. profiling or
     # sleep/wake_up reload), the model's load_weights() is not called, so we
     # must handle HPC modules here generically.
-    for _, module in model.named_modules():
+    for module_name, module in model.named_modules():
+        if module_name in skip_modules:
+            continue
         if isinstance(module, HpcModule):
             module.process_weights_after_loading(model)
 
@@ -151,6 +156,34 @@ def process_weights_after_loading(
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
     if model_config.quantization == "torchao":
         set_torchao_reload_attrs(model, model_config)
+
+
+def process_quant_method_after_loading(
+    module: nn.Module,
+    target_device: torch.device,
+    *,
+    force: bool = False,
+) -> None:
+    """Run post-load processing for one quantized module.
+
+    This is the module-scoped portion of ``process_weights_after_loading``.
+    Lazy reload calls it as soon as manifest coverage proves that all inputs to
+    the quant method are available. It preserves device-loading, reload-arena,
+    TP reconciliation, and allocator-pressure behavior of the model-wide path.
+    """
+    quant_method = getattr(module, "quant_method", None)
+    if not isinstance(quant_method, QuantizeMethodBase):
+        return
+    if force and hasattr(module, "_already_called_process_weights_after_loading"):
+        delattr(module, "_already_called_process_weights_after_loading")
+    with (
+        device_loading_context(module, target_device),
+        arena_scope(get_reload_arena(module)),
+    ):
+        quant_method.process_weights_after_loading(module)
+    if hasattr(module, "update_param_tp_status"):
+        module.update_param_tp_status()
+    release_device_memory_under_pressure(target_device)
 
 
 @contextmanager

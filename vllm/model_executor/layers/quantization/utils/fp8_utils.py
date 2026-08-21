@@ -1406,6 +1406,40 @@ def process_fp8_weight_block_strategy(
     return weight, weight_scale
 
 
+def requantize_fp8_w13_expert(
+    weight: torch.Tensor,
+    weight_scales: torch.Tensor,
+    shard_size: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Requantize one expert's w1/w3 halves onto their shared max scale.
+
+    Args:
+        weight: ``[2 * shard_size, hidden]`` FP8 weights for a single expert,
+            each half still quantized with its own checkpoint scale.
+        weight_scales: The two per-half scales for that expert.
+        shard_size: Rows per half.
+        out: Destination for the requantized weights. Defaults to ``weight``,
+            which is then requantized in place.
+
+    Returns:
+        The shared (max) scale the halves were requantized onto.
+    """
+    max_scale = weight_scales.max()
+    destination = weight if out is None else out
+    start = 0
+    for shard_id in range(2):
+        dq_weight = per_tensor_dequantize(
+            weight[start : start + shard_size, :],
+            weight_scales[shard_id],
+        )
+        destination[start : start + shard_size, :], _ = ops.scaled_fp8_quant(
+            dq_weight, max_scale
+        )
+        start += shard_size
+    return max_scale
+
+
 def process_fp8_weight_tensor_strategy_moe(
     weight: torch.Tensor,
     weight_scales: torch.Tensor,
@@ -1426,16 +1460,9 @@ def process_fp8_weight_tensor_strategy_moe(
     # For w13 case (common): require single scale for w13 per expert, but
     # on disk there is a scale for w1 and w3. Use the max to requantize.
     for expert_id in range(num_experts):
-        start = 0
-        for shard_id in range(2):
-            dq_weight = per_tensor_dequantize(
-                weight[expert_id][start : start + shard_size, :],
-                weight_scales[expert_id][shard_id],
-            )
-            weight[expert_id][start : start + shard_size, :], _ = ops.scaled_fp8_quant(
-                dq_weight, max_scales[expert_id]
-            )
-            start += shard_size
+        requantize_fp8_w13_expert(
+            weight[expert_id], weight_scales[expert_id], shard_size
+        )
     return weight, max_scales
 
 

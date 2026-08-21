@@ -58,13 +58,14 @@ class HTTPVLLMWeightSyncClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def _post(self, path: str, json: dict[str, Any] | None = None) -> None:
+    def _post(self, path: str, json: dict[str, Any] | None = None) -> Any:
         import requests
 
         response = requests.post(
             f"{self.base_url}/{path}", json=json, timeout=self.timeout
         )
         response.raise_for_status()
+        return response.json()
 
     def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None:
         self._post("init_weight_transfer_engine", {"init_info": init_info})
@@ -82,6 +83,10 @@ class HTTPVLLMWeightSyncClient:
             {"weight_version": weight_version} if weight_version is not None else None
         )
         self._post("finish_weight_update", json)
+
+    def get_rank_sharding_manifests(self) -> list[dict[str, Any]]:
+        response = self._post("get_rank_sharding_manifests")
+        return response["manifests"]
 
 
 class RayVLLMWeightSyncClient:
@@ -119,3 +124,11 @@ class RayVLLMWeightSyncClient:
             ray.get(
                 [h.update_weight_version.remote(weight_version) for h in self.handles]
             )
+
+    def get_rank_sharding_manifests(self) -> list[Any]:
+        import ray
+
+        nested = ray.get(
+            [h.get_rank_sharding_manifests.remote() for h in self.handles]
+        )
+        return [manifest for group in nested for manifest in group]

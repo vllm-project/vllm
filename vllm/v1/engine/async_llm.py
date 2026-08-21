@@ -1156,6 +1156,7 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc("finish_weight_update")
         if weight_version is not None:
             await self.update_weight_version(weight_version)
+        await self.engine_core.reset_prefix_cache_async()
 
     async def update_weight_version(self, new_version: str) -> None:
         """Set the weight version without updating weights."""
@@ -1164,3 +1165,7 @@ class AsyncLLM(EngineClient):
     async def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         return await self.engine_core.get_weight_version_async()
+
+    async def get_rank_sharding_manifests(self) -> list[Any]:
+        """Return one rank-local checkpoint sharding manifest per worker."""
+        return await self.collective_rpc("get_rank_sharding_manifest")

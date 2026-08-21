@@ -73,8 +73,8 @@ from vllm.model_executor.layers.rotary_embedding import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
+    ModelwiseReloader,
+    RuntimeReloadSession,
 )
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
@@ -5694,23 +5694,21 @@ class GPUModelRunner(
 
         # begin loading weights
         logger.info_once("Reloading weights inplace...")
-        if is_checkpoint_format:
-            # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
-
-        else:
-            # load weights from kernel format
-            logger.warning_once(
-                "Reloading with `is_checkpoint_format=True` requires that "
-                "weights be in kernel format and already sharded",
-            )
-            loaded_weights = set()
-            for name, loaded_weight in weights_iterator:
-                param = _get_parameter_for_reload(model, name)  # TODO: buffers?
-                param.copy_(loaded_weight)
-                loaded_weights.add(name)
+        with reload_storage_guard(model):
+            if is_checkpoint_format:
+                with set_current_vllm_config(self.vllm_config):
+                    loaded_weights = ModelwiseReloader(
+                        model, self.model_config, self.device
+                    ).reload(weights_iterator)
+            else:
+                session = RuntimeReloadSession(model)
+                session.start()
+                try:
+                    session.load_weights(weights_iterator)
+                    loaded_weights = session.finish()
+                except BaseException:
+                    session.abort()
+                    raise
 
         arena_problems = verify_model_arenas(model, arena_snaps)
 
@@ -7109,8 +7107,8 @@ class GPUModelRunner(
         # arena covers them; the manifest is what lets a reload notice if a
         # global cache rebinds an address a graph baked in.
         if os.environ.get("VLLM_RELOAD_GLOBAL_MANIFEST", "warn") != "off":
-            from vllm.model_executor.reload_manifest import (
-                record_global_storage)
+            from vllm.model_executor.reload_manifest import record_global_storage
+
             record_global_storage()
 
         return cuda_graph_size

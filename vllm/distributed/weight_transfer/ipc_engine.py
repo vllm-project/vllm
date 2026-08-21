@@ -12,6 +12,7 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from typing_extensions import Self
 
 from vllm import envs
+from vllm.config import set_current_vllm_config
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
@@ -25,6 +26,8 @@ from vllm.distributed.weight_transfer.base import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.model_executor.model_loader.reload import ModelwiseReloadSession
+    from vllm.model_executor.model_loader.reload.runtime import RuntimeReloadSession
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     PackedBufferImporter,
@@ -124,9 +127,9 @@ class IPCWeightTransferEngine(
     """
     Weight transfer engine using CUDA IPC for communication between trainer and workers.
 
-    This implementation uses CUDA IPC to transfer weights from the trainer (rank 0)
-    to all inference workers in a process group. IPC handles are used to share
-    memory between processes on the same node.
+    This implementation uses CUDA IPC to transfer checkpoint- or runtime-format
+    weights to inference workers. IPC handles are used to share memory between
+    processes on the same node.
     """
 
     # Define backend-specific dataclass types
@@ -147,6 +150,7 @@ class IPCWeightTransferEngine(
         # Shared across all chunks of every packed transfer this engine
         # receives; see PackedBufferImporter for the refcount contract.
         self._packed_importer = PackedBufferImporter()
+        self.reload_session: ModelwiseReloadSession | RuntimeReloadSession | None = None
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """
@@ -160,26 +164,49 @@ class IPCWeightTransferEngine(
         self.packed = init_info.packed
 
     def start_weight_update(self) -> None:
-        """Initialize layerwise reloading for the incoming checkpoint weights."""
+        """Open a transaction matching the configured weight format."""
         from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
+            ModelwiseReloadSession,
+            RuntimeReloadSession,
         )
 
-        initialize_layerwise_reload(self.model)
+        if self.config.weight_format == "runtime":
+            session = RuntimeReloadSession(self.model)
+        else:
+            session = ModelwiseReloadSession(
+                self.model,
+                self.model_config,
+                self.device,
+            )
+        session.start()
+        self.reload_session = session
 
     def finish_weight_update(self) -> None:
-        """Finalize layerwise reloading after all weights have been received."""
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
+        """Commit the active checkpoint- or runtime-format transaction."""
+        session = self.reload_session
+        if session is None:
+            raise RuntimeError("IPC weight update session is not active")
+        self.reload_session = None
+        from vllm.model_executor.model_loader.reload import RuntimeReloadSession
 
-        finalize_layerwise_reload(self.model, self.model_config)
+        if isinstance(session, RuntimeReloadSession):
+            session.finish()
+            return
+        with set_current_vllm_config(self.vllm_config):
+            session.finish()
+
         # Every reduce_tensor call is a fresh export with its own refcount
         # slot, so releasing once per update always balances this update's
         # export and lets the trainer reclaim its staging buffer. Callers
         # that skip finish are still covered by the replace-on-next-export
         # path inside the importer.
         self._packed_importer.close()
+
+    def abort_weight_update(self) -> None:
+        session = self.reload_session
+        self.reload_session = None
+        if session is not None:
+            session.abort()
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """
@@ -200,19 +227,29 @@ class IPCWeightTransferEngine(
         # is not guaranteed to match self.device. The IPC tensors must be
         # rebuilt on the device the model lives on.
         device_index = self.device.index
+        from vllm.model_executor.model_loader.reload import RuntimeReloadSession
+
+        if isinstance(self.reload_session, RuntimeReloadSession) and self.packed:
+            raise ValueError(
+                "Packed IPC uses staging buffers and is incompatible with "
+                "weight_format='runtime'"
+            )
+        allowed = self.rank_local_checkpoint_names()
 
         if self.packed:
             if update_info.tensor_sizes is None:
                 raise ValueError("`tensor_sizes` is required when packed=True")
             assert isinstance(update_info.ipc_handles, dict)
-            weights = packed_ipc_consumer(
-                ipc_handle=update_info.ipc_handles,
-                names=update_info.names,
-                shapes=update_info.shapes,
-                dtype_names=update_info.dtype_names,
-                tensor_sizes=update_info.tensor_sizes,
-                device_index=device_index,
-                importer=self._packed_importer,
+            weights = self.filter_rank_local_weights(
+                packed_ipc_consumer(
+                    ipc_handle=update_info.ipc_handles,
+                    names=update_info.names,
+                    shapes=update_info.shapes,
+                    dtype_names=update_info.dtype_names,
+                    tensor_sizes=update_info.tensor_sizes,
+                    device_index=device_index,
+                    importer=self._packed_importer,
+                )
             )
         else:
             assert isinstance(update_info.ipc_handles, list)
@@ -221,6 +258,8 @@ class IPCWeightTransferEngine(
                 update_info.names,
                 update_info.ipc_handles,
             ):
+                if allowed is not None and name not in allowed:
+                    continue
                 props = torch.cuda.get_device_properties(device_index)
                 physical_gpu_id = str(props.uuid)
 
@@ -243,10 +282,14 @@ class IPCWeightTransferEngine(
             disable_mtp_completeness_check,
         )
 
+        session = self.reload_session
+        if session is None:
+            raise RuntimeError("IPC weight update session is not active")
         with disable_mtp_completeness_check():
-            self.model.load_weights(weights)
+            session.load_weights(weights)
 
     def shutdown(self) -> None:
+        self.abort_weight_update()
         self._packed_importer.close()
 
 
@@ -306,7 +349,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
 
     def send_weights(self) -> None:
         assert self.source is not None
-        source = self.source
+        source = self.rank_local_source()
         if self.is_sender:
             self.client.start_weight_update()
         # Unpacked returns strong refs to its IPC-shared copies; they must stay

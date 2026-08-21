@@ -115,6 +115,70 @@ class ModuleSource(WeightSource):
         for name, param in self._module.named_parameters():
             yield name, materialize_full_tensor(param)
 
+    def iter_names(self, names: frozenset[str]) -> Iterator[tuple[str, torch.Tensor]]:
+        """Materialize only the named parameters required by one worker."""
+        parameters = dict(self._module.named_parameters())
+        missing = names - parameters.keys()
+        if missing:
+            raise ValueError(
+                "Rank-local sharding manifest references weights absent from "
+                f"the trainer source iteration: {sorted(missing)[:20]}"
+            )
+        for name, param in parameters.items():
+            if name in names:
+                yield name, materialize_full_tensor(param)
+
+
+class RankLocalWeightSource(WeightSource):
+    """Restrict a source to checkpoint names consumed by one inference rank."""
+
+    def __init__(self, source: WeightSource, source_names: set[str]) -> None:
+        self._source = source
+        self._source_names = frozenset(source_names)
+
+    @classmethod
+    def from_manifest(
+        cls, source: WeightSource, manifest: Any
+    ) -> "RankLocalWeightSource":
+        if getattr(manifest, "state", "unavailable") != "exact":
+            raise ValueError(
+                "Cannot construct a rank-local source from an inexact sharding "
+                f"manifest: {getattr(manifest, 'reason', None)}"
+            )
+        return cls(source, set(manifest.source_names))
+
+    def metadata(self) -> list[ParamMeta]:
+        metadata = [
+            item for item in self._source.metadata() if item.name in self._source_names
+        ]
+        found = {item.name for item in metadata}
+        missing = self._source_names - found
+        if missing:
+            raise ValueError(
+                "Rank-local sharding manifest references weights absent from "
+                f"the trainer source: {sorted(missing)[:20]}"
+            )
+        return metadata
+
+    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
+        if isinstance(self._source, ModuleSource):
+            yield from self._source.iter_names(self._source_names)
+            return
+
+        # Custom sources may require every trainer rank to drive all producer
+        # collectives in lockstep. Consume their full iterator but only expose
+        # this inference rank's source names to the transport.
+        expected = set(self._source_names)
+        for name, tensor in self._source:
+            if name in expected:
+                expected.remove(name)
+                yield name, tensor
+        if expected:
+            raise ValueError(
+                "Rank-local sharding manifest references weights absent from "
+                f"the trainer source iteration: {sorted(expected)[:20]}"
+            )
+
 
 # Base protocols for backend-specific dataclasses
 @dataclass
@@ -191,10 +255,10 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     plugged in.
 
     Each engine owns its full weight-update lifecycle: `start_weight_update`,
-    `update_weights`, and `finish_weight_update`. Layerwise reloading (used by
-    checkpoint-format engines) is opted into per engine by running it inside
-    `start_weight_update`/`finish_weight_update`. Engines that apply weights in
-    place (e.g. sparse patches) leave those methods as no-ops.
+    `update_weights`, and `finish_weight_update`. Checkpoint-format engines use
+    this explicit boundary to defer model-wide post-load processing until the
+    trainer declares the update complete. Runtime-format engines copy already
+    processed tensors directly and use the boundary only for protocol state.
 
     Subclasses should define:
         init_info_cls: Type of backend-specific initialization info
@@ -302,9 +366,8 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         Prepare the engine for a new weight update.
 
-        Engines that receive weights in checkpoint format initialize layerwise reloading
-        here, else this is typically a no-op.
-        See: https://docs.vllm.ai/en/latest/training/layerwise/ for more details.
+        Checkpoint-format engines open a modelwise reload transaction. Runtime-
+        format engines open a direct in-place update session.
         """
         raise NotImplementedError
 
@@ -313,10 +376,14 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         Finalize the current weight update.
 
-        Checkpoint-format engines finalize layerwise reloading here; engines
-        that apply weights in place leave this as a no-op.
+        Checkpoint-format engines run modelwise finalization here. Runtime-
+        format engines only close their protocol session; values were already
+        copied in place.
         """
         raise NotImplementedError
+
+    def abort_weight_update(self) -> None:
+        """Abort an active update and restore the serving model if needed."""
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """
@@ -330,6 +397,34 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
         # next step uses the new weights.
         torch.accelerator.synchronize()
+
+    def rank_local_checkpoint_names(self) -> frozenset[str] | None:
+        """Return checkpoint sources consumed by this worker's rank."""
+        if self.config.weight_format != "checkpoint":
+            return None
+        from vllm.model_executor.model_loader.reload import (
+            get_rank_sharding_manifest,
+        )
+
+        manifest = get_rank_sharding_manifest(self.model)
+        if manifest.state == "legacy":
+            return None
+        if manifest.state != "exact":
+            raise ValueError(
+                f"Worker has no exact rank-local sharding manifest: {manifest.reason}"
+            )
+        return frozenset(manifest.source_names)
+
+    def filter_rank_local_weights(
+        self, weights: Iterator[tuple[str, torch.Tensor]]
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        allowed = self.rank_local_checkpoint_names()
+        if allowed is None:
+            yield from weights
+            return
+        for name, tensor in weights:
+            if name in allowed:
+                yield name, tensor
 
     @abstractmethod
     def receive_weights(self, update_info: TUpdateInfo) -> None:
@@ -421,6 +516,52 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
         # `is_sender`, so non-sender ranks never touch the wire.
         self.client = client
         self.source = source
+        self._rank_local_source: WeightSource | None = None
+
+    def rank_local_source(self) -> WeightSource:
+        """Filter the trainer source by the union of worker load manifests."""
+        if self.source is None:
+            raise RuntimeError("Weight transfer has no trainer source")
+        if self._rank_local_source is not None:
+            return self._rank_local_source
+
+        names: set[str] | None = None
+        getter = getattr(self.client, "get_rank_sharding_manifests", None)
+        if self.is_sender and callable(getter):
+            manifests = getter()
+            names = set()
+            for manifest in manifests:
+                state = (
+                    manifest.get("state")
+                    if isinstance(manifest, dict)
+                    else getattr(manifest, "state", None)
+                )
+                if state != "exact":
+                    reason = (
+                        manifest.get("reason")
+                        if isinstance(manifest, dict)
+                        else getattr(manifest, "reason", None)
+                    )
+                    raise ValueError(
+                        "Inference worker has no exact rank-local sharding "
+                        f"manifest: {reason}"
+                    )
+                source_names = (
+                    manifest.get("source_names", ())
+                    if isinstance(manifest, dict)
+                    else manifest.source_names
+                )
+                names.update(source_names)
+
+        if torch.distributed.is_initialized():
+            payload = [names]
+            torch.distributed.broadcast_object_list(payload, src=0)
+            names = payload[0]
+
+        self._rank_local_source = (
+            self.source if names is None else RankLocalWeightSource(self.source, names)
+        )
+        return self._rank_local_source
 
     @classmethod
     @abstractmethod

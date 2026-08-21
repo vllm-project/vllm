@@ -1339,6 +1339,12 @@ class Worker(WorkerBase):
             try:
                 self.weight_transfer_engine.update_weights(update_info)
             except BaseException:
+                try:
+                    self.weight_transfer_engine.abort_weight_update()
+                except BaseException:
+                    logger.exception(
+                        "Failed to abort weight update after receive failure"
+                    )
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
                 raise
@@ -1353,14 +1359,24 @@ class Worker(WorkerBase):
                 "finish_weight_update called without a matching start_weight_update."
             )
 
-        with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.finish_weight_update()
-            self.weight_transfer_engine.reset_weight_update_target()
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                self.weight_transfer_engine.finish_weight_update()
+                self.weight_transfer_engine.reset_weight_update_target()
+        finally:
             self._weight_update_active = False
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
             self.model_runner.reset_lora_state()
+
+    def get_rank_sharding_manifest(self) -> Any:
+        """Return the initial-load source-to-fragment manifest for this rank."""
+        from vllm.model_executor.model_loader.reload import (
+            get_rank_sharding_manifest,
+        )
+
+        return get_rank_sharding_manifest(self.model_runner.model)
 
     def shutdown(self) -> None:
         gc.unfreeze()

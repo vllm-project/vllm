@@ -10,6 +10,11 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload.sharding import (
+    capture_rank_sharding,
+    install_sharding_recorders,
+    uninstall_sharding_recorders,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -61,7 +66,12 @@ class BaseModelLoader(ABC):
             log_model_inspection(model)
 
             logger.debug("Loading weights on %s ...", load_device)
-            self.load_weights(model, model_config)
+            install_sharding_recorders(model)
+            try:
+                with capture_rank_sharding(model, reset=True):
+                    self.load_weights(model, model_config)
+            finally:
+                uninstall_sharding_recorders(model)
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
