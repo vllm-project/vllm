@@ -8,6 +8,7 @@ from unittest.mock import Mock, call, patch
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
@@ -1976,3 +1977,254 @@ class TestReloadDraftWeights:
         get_loader.assert_not_called()
         runner.get_draft_model.assert_not_called()
         target_model.load_weights.assert_called_once_with(weights)
+
+    def test_disk_reload_skips_dim_mismatched_aliased_embeddings(self):
+        """Skip shared embed load; still fill the tied draft-dim lm_head."""
+
+        class _TiedHead(nn.Module):
+            def __init__(self, weight: nn.Parameter):
+                super().__init__()
+                self.weight = weight
+
+        class _TinyLM(nn.Module):
+            def __init__(self, embed_dim: int):
+                super().__init__()
+                self.embed_tokens = nn.Embedding(8, embed_dim)
+                self.lm_head = _TiedHead(self.embed_tokens.weight)
+                self.proj = nn.Linear(4, 4, bias=False)
+
+            def load_weights(self, weights):
+                from vllm.model_executor.models.utils import AutoWeightsLoader
+
+                return AutoWeightsLoader(self).load_weights(weights)
+
+        target_model = _TinyLM(embed_dim=8)
+        draft_model = _TinyLM(embed_dim=2)
+        original_embed = target_model.embed_tokens.weight.detach().clone()
+        original_lm_head = draft_model.lm_head.weight
+        draft_model.embed_tokens = target_model.embed_tokens
+
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        draft_placeholder = torch.full((8, 2), 7.0)
+        draft_proj = torch.eye(4)
+        target_weights = iter([("proj.weight", torch.eye(4))])
+        seen_during_draft_init: list[nn.Module] = []
+
+        def get_loader(_load_config):
+            loader = Mock()
+
+            def get_all_weights(_config, model):
+                if model is draft_model:
+                    return iter(
+                        [
+                            ("embed_tokens.weight", draft_placeholder),
+                            ("proj.weight", draft_proj),
+                        ]
+                    )
+                return target_weights
+
+            loader.get_all_weights.side_effect = get_all_weights
+            return loader
+
+        def capture_init(model):
+            if model is not draft_model:
+                return
+            seen_during_draft_init.extend(
+                module
+                for _name, module in model.named_modules(remove_duplicate=False)
+                if _name
+            )
+
+        with (
+            patch.object(
+                gpu_model_runner_module, "get_model_loader", side_effect=get_loader
+            ),
+            patch.object(
+                gpu_model_runner_module,
+                "initialize_layerwise_reload",
+                side_effect=capture_init,
+            ),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights()
+
+        assert draft_model.embed_tokens is target_model.embed_tokens
+        assert torch.equal(target_model.embed_tokens.weight, original_embed)
+        assert draft_model.lm_head.weight is original_lm_head
+        assert torch.equal(draft_model.lm_head.weight, draft_placeholder)
+        assert torch.equal(draft_model.proj.weight, draft_proj)
+        assert target_model.embed_tokens not in seen_during_draft_init
+
+    def test_disk_reload_keeps_untied_head_off_shared_embed(self):
+        """Same-width shared embed is discarded.
+        A distinct lm_head loads from its own checkpoint tensor, not embed_tokens.
+        """
+
+        class _Head(nn.Module):
+            def __init__(self, weight: nn.Parameter):
+                super().__init__()
+                self.weight = weight
+
+        class _TinyLM(nn.Module):
+            def __init__(self, embed_dim: int):
+                super().__init__()
+                self.embed_tokens = nn.Embedding(8, embed_dim)
+                self.lm_head = _Head(nn.Parameter(torch.zeros(8, embed_dim)))
+                self.proj = nn.Linear(4, 4, bias=False)
+
+            def load_weights(self, weights):
+                from vllm.model_executor.models.utils import AutoWeightsLoader
+
+                return AutoWeightsLoader(self).load_weights(weights)
+
+        target_model = _TinyLM(embed_dim=8)
+        draft_model = _TinyLM(embed_dim=8)
+        original_embed = target_model.embed_tokens.weight.detach().clone()
+        original_head = draft_model.lm_head.weight.detach().clone()
+        draft_model.embed_tokens = target_model.embed_tokens
+
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        embed_placeholder = torch.full((8, 8), 7.0)
+        head_from_ckpt = torch.full((8, 8), 3.0)
+        draft_proj = torch.eye(4)
+        target_weights = iter([("proj.weight", torch.eye(4))])
+
+        def get_loader(_load_config):
+            loader = Mock()
+
+            def get_all_weights(_config, model):
+                if model is draft_model:
+                    return iter(
+                        [
+                            ("embed_tokens.weight", embed_placeholder),
+                            ("lm_head.weight", head_from_ckpt),
+                            ("proj.weight", draft_proj),
+                        ]
+                    )
+                return target_weights
+
+            loader.get_all_weights.side_effect = get_all_weights
+            return loader
+
+        with (
+            patch.object(
+                gpu_model_runner_module, "get_model_loader", side_effect=get_loader
+            ),
+            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights()
+
+        assert draft_model.embed_tokens is target_model.embed_tokens
+        assert torch.equal(target_model.embed_tokens.weight, original_embed)
+        assert not torch.equal(draft_model.lm_head.weight, original_head)
+        assert torch.equal(draft_model.lm_head.weight, head_from_ckpt)
+        assert torch.equal(draft_model.proj.weight, draft_proj)
+
+    def test_disk_reload_detaches_repeated_lm_head_aliases(self):
+        """MTP shares one target lm_head at draft.lm_head and each shared_head."""
+
+        class _SharedHead(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.head = nn.Linear(2, 8, bias=False)
+
+        class _Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.shared_head = _SharedHead()
+
+        class _Inner(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([_Layer(), _Layer()])
+
+        class _Draft(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lm_head = nn.Linear(2, 8, bias=False)
+                self.model = _Inner()
+                self.proj = nn.Linear(4, 4, bias=False)
+
+            def load_weights(self, weights):
+                from vllm.model_executor.models.utils import AutoWeightsLoader
+
+                return AutoWeightsLoader(self).load_weights(weights)
+
+        class _Target(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lm_head = nn.Linear(8, 8, bias=False)
+                self.proj = nn.Linear(4, 4, bias=False)
+
+            def load_weights(self, weights):
+                from vllm.model_executor.models.utils import AutoWeightsLoader
+
+                return AutoWeightsLoader(self).load_weights(weights)
+
+        target_model = _Target()
+        draft_model = _Draft()
+        original_head = target_model.lm_head.weight.detach().clone()
+        draft_model.lm_head = target_model.lm_head
+        for layer in draft_model.model.layers:
+            layer.shared_head.head = target_model.lm_head
+
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        placeholder = torch.full((8, 2), 7.0)
+        draft_proj = torch.eye(4)
+        target_weights = iter([("proj.weight", torch.eye(4))])
+        seen_target_head: list[bool] = []
+
+        def get_loader(_load_config):
+            loader = Mock()
+
+            def get_all_weights(_config, model):
+                if model is draft_model:
+                    return iter(
+                        [
+                            ("lm_head.weight", placeholder),
+                            ("model.layers.0.shared_head.head.weight", placeholder),
+                            ("model.layers.1.shared_head.head.weight", placeholder),
+                            ("proj.weight", draft_proj),
+                        ]
+                    )
+                return target_weights
+
+            loader.get_all_weights.side_effect = get_all_weights
+            return loader
+
+        def capture_init(model):
+            if model is not draft_model:
+                return
+            seen_target_head.append(
+                any(
+                    module is target_model.lm_head
+                    for _name, module in model.named_modules(remove_duplicate=False)
+                )
+            )
+
+        with (
+            patch.object(
+                gpu_model_runner_module, "get_model_loader", side_effect=get_loader
+            ),
+            patch.object(
+                gpu_model_runner_module,
+                "initialize_layerwise_reload",
+                side_effect=capture_init,
+            ),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights()
+
+        assert seen_target_head == [False]
+        assert draft_model.lm_head is target_model.lm_head
+        assert draft_model.model.layers[0].shared_head.head is target_model.lm_head
+        assert draft_model.model.layers[1].shared_head.head is target_model.lm_head
+        assert torch.equal(target_model.lm_head.weight, original_head)
+        assert torch.equal(draft_model.proj.weight, draft_proj)

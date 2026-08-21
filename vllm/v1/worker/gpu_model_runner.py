@@ -498,6 +498,97 @@ class ExecuteModelState(NamedTuple):
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
 
 
+class _DiscardSharedDraftWeights(nn.Module):
+    """Drop tensors for draft submodules that are the live target object."""
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        for _name, _weight in weights:
+            pass
+        return set()
+
+
+class _TiedDraftWeightSink(nn.Module):
+    """Fill draft lm_head from tied embed tensors; do not write the target embed.
+    Uses load_weights so AutoWeightsLoader can dispatch without dual-registering.
+    """
+
+    def __init__(self, src: nn.Module):
+        super().__init__()
+        self._dst = src
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loaded: set[str] = set()
+        dst = self._dst
+        for name, tensor in weights:
+            leaf = name.split(".")[-1]
+            param = getattr(dst, leaf, None)
+            if not isinstance(param, nn.Parameter):
+                continue
+            loader = getattr(param, "weight_loader", None)
+            if callable(loader):
+                loader(param, tensor)
+            else:
+                param.data.copy_(tensor)
+            loaded.add(name)
+        return loaded
+
+
+def _replacement_for_detached_draft_module(
+    attr: str, module: nn.Module, draft_model: nn.Module
+) -> nn.Module:
+    if attr == "embed_tokens":
+        lm_head = getattr(draft_model, "lm_head", None)
+        detached_weight = getattr(module, "weight", None)
+        head_weight = getattr(lm_head, "weight", None) if lm_head is not None else None
+        if (
+            isinstance(detached_weight, nn.Parameter)
+            and isinstance(head_weight, nn.Parameter)
+            and head_weight is not detached_weight
+            and head_weight.shape != detached_weight.shape
+        ):
+            return _TiedDraftWeightSink(lm_head)
+    return _DiscardSharedDraftWeights()
+
+
+@contextmanager
+def _temporarily_detach_target_owned_draft_modules(
+    draft_model: object, target_model: object
+) -> Iterator[None]:
+    """Unbind target-owned draft aliases for the duration of draft load_weights.
+    Dim-mismatched shared embeds (Gemma4 MTP after embed replace) mismatch otherwise.
+    """
+    if not isinstance(draft_model, nn.Module) or not isinstance(
+        target_model, nn.Module
+    ):
+        yield
+        return
+
+    target_module_ids = {id(module) for module in target_model.modules()}
+    attachments: list[tuple[nn.Module, str, nn.Module]] = []
+    # remove_duplicate=False: MTP aliases the same target lm_head at
+    # draft.lm_head and every layer.shared_head.head.
+    for name, module in draft_model.named_modules(remove_duplicate=False):
+        if not name or id(module) not in target_module_ids:
+            continue
+        parent_name, sep, attr = name.rpartition(".")
+        parent = draft_model if not sep else draft_model.get_submodule(parent_name)
+        if id(parent) in target_module_ids:
+            continue
+        attachments.append((parent, attr, module))
+
+    for parent, attr, module in attachments:
+        setattr(
+            parent,
+            attr,
+            _replacement_for_detached_draft_module(attr, module, draft_model),
+        )
+    try:
+        yield
+    finally:
+        for parent, attr, module in attachments:
+            setattr(parent, attr, module)
+
+
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
 ):
@@ -5663,11 +5754,13 @@ class GPUModelRunner(
                 f"Draft model reloading with `{load_config.load_format}` format"
             )
 
-        initialize_layerwise_reload(draft_model)
-        draft_model.load_weights(
-            model_loader.get_all_weights(draft_model_config, draft_model)
-        )
-        finalize_layerwise_reload(draft_model, draft_model_config)
+        target_model = self.get_model()
+        with _temporarily_detach_target_owned_draft_modules(draft_model, target_model):
+            initialize_layerwise_reload(draft_model)
+            draft_model.load_weights(
+                model_loader.get_all_weights(draft_model_config, draft_model)
+            )
+            finalize_layerwise_reload(draft_model, draft_model_config)
 
     def reload_weights(
         self,
@@ -5703,8 +5796,8 @@ class GPUModelRunner(
 
         # load weights from disk if none are provided
         if weights_iterator is None:
-            # Reload draft weights (dropped by L2 sleep) before the target so it
-            # stays authoritative for shared storage. Unbound: MRV2 passes a V2 self.
+            # Draft first (L2 dropped its params). Target-owned aliases are
+            # detached during that load. Unbound: MRV2 passes a V2 self.
             GPUModelRunner._reload_draft_weights_from_disk(self)
 
             model_loader = get_model_loader(self.load_config)
