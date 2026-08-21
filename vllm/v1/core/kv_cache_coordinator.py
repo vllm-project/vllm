@@ -635,7 +635,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             )
             for g in kv_cache_config.kv_cache_groups
         )
-        self.enable_partial_hash_hits = has_partial_mamba_group
+        has_dcp_partial_full_attention_group = dcp_world_size > 1 and any(
+            isinstance(g.kv_cache_spec, FullAttentionSpec)
+            and manager.block_size > hash_block_size
+            for g, manager in zip(
+                kv_cache_config.kv_cache_groups, self.single_type_managers
+            )
+        )
+        self.enable_partial_hash_hits = (
+            has_partial_mamba_group or has_dcp_partial_full_attention_group
+        )
         if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
                 type(manager).__name__
