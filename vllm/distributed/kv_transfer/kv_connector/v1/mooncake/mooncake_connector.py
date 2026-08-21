@@ -163,8 +163,6 @@ def _validate_dcp_size_for_kv_head_groups(
         )
 
 
-
-
 def _get_kv_head_group_rank_and_count(
     tp_rank: int,
     tp_size: int,
@@ -186,10 +184,8 @@ def _get_prefill_ranks_for_decode(
     total_num_kv_heads: int,
     is_mla: bool,
 ) -> list[int]:
-    d_kv_head_group_rank, d_kv_head_group_count = (
-        _get_kv_head_group_rank_and_count(
-            d_tp_rank, d_tp_size, total_num_kv_heads, is_mla
-        )
+    d_kv_head_group_rank, d_kv_head_group_count = _get_kv_head_group_rank_and_count(
+        d_tp_rank, d_tp_size, total_num_kv_heads, is_mla
     )
     _, p_kv_head_group_count = _get_kv_head_group_rank_and_count(
         0, p_tp_size, total_num_kv_heads, is_mla
@@ -245,34 +241,6 @@ def _get_decode_ranks_for_prefill(
         if p_tp_rank in p_tp_ranks:
             d_tp_ranks.append(d_tp_rank)
     return d_tp_ranks
-
-
-def _filter_dcp_block_ids(
-    p_block_ids: list[int],
-    d_block_ids: list[int],
-    p_dcp_rank: int,
-    p_dcp_size: int,
-    d_dcp_rank: int,
-    d_dcp_size: int,
-) -> tuple[list[int], list[int]]:
-    p_sequence_span = len(p_block_ids) * p_dcp_size
-    d_sequence_span = len(d_block_ids) * d_dcp_size
-    d_start_sequence_block = p_sequence_span - d_sequence_span
-    d_sequence_block_to_cache_block = {
-        d_start_sequence_block + i * d_dcp_size + d_dcp_rank: block_id
-        for i, block_id in enumerate(d_block_ids)
-    }
-
-    filtered_p_block_ids: list[int] = []
-    filtered_d_block_ids: list[int] = []
-    for i, p_block_id in enumerate(p_block_ids):
-        p_sequence_block = i * p_dcp_size + p_dcp_rank
-        d_block_id = d_sequence_block_to_cache_block.get(p_sequence_block)
-        if d_block_id is not None:
-            filtered_p_block_ids.append(p_block_id)
-            filtered_d_block_ids.append(d_block_id)
-
-    return filtered_p_block_ids, filtered_d_block_ids
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
@@ -744,7 +712,7 @@ class MooncakeXferMetadata(
     remote_port: int
     remote_tp_size: int
     remote_tp_rank: int
-    req_blocks: dict[ReqId, tuple[TransferId, list[list[int]]]]
+    req_blocks: dict[ReqId, tuple[TransferId, list[list[int]], int]]
     kv_caches_base_addr: list[int]
     block_lens: list[int]
     kv_block_lens: list[int]
@@ -797,6 +765,7 @@ class PullReqMeta:
     local_block_ids: list[list[int]]
     remote_engine_id: EngineId
     remote_bootstrap_addr: str
+    num_computed_tokens: int = 0
     # Set expire time to avoid infinitely sending requests.
     expire_time: float = float("inf")
     # Designed for one D pairing to multiple P
@@ -842,6 +811,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
                 remote_engine_id=remote_engine_id,
                 remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
                 transfer_id=transfer_id,
+                num_computed_tokens=kv_transfer_params.get("num_computed_tokens", 0),
             )
         else:
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
@@ -1192,6 +1162,7 @@ class MooncakeConnectorScheduler:
             # Remote prefill: get all prompt blocks from remote.
             assert not self.is_kv_producer
             token_ids = request.prompt_token_ids or []
+            params["num_computed_tokens"] = num_computed_tokens
             count = self._get_remote_prefill_token_count(len(token_ids)) - (
                 num_computed_tokens
             )
@@ -1492,8 +1463,8 @@ class MooncakeConnectorWorker:
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
         self.use_mla = self.model_config.use_mla
-        self._total_num_kv_heads = 1 if self.use_mla else (
-            self.model_config.get_total_num_kv_heads()
+        self._total_num_kv_heads = (
+            1 if self.use_mla else (self.model_config.get_total_num_kv_heads())
         )
         if self.dcp_size > 1 and len(kv_cache_config.kv_cache_groups) != 1:
             msg = (
@@ -1841,7 +1812,8 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        for d_req_id, (transfer_id, _) in meta.req_blocks.items():
+        for d_req_id, req_block_entry in meta.req_blocks.items():
+            transfer_id = req_block_entry[0]
             if transfer_id not in self.reqs_need_send:
                 # This req is not enqueued in P side yet, create it here.
                 self.reqs_need_send[transfer_id] = SendBlockMeta(
@@ -2023,6 +1995,36 @@ class MooncakeConnectorWorker:
             for i, group in enumerate(block_ids)
         ]
 
+    def _filter_dcp_block_ids(
+        self,
+        p_block_ids: list[int],
+        d_block_ids: list[int],
+        p_dcp_rank: int,
+        p_dcp_size: int,
+        d_dcp_rank: int,
+        d_dcp_size: int,
+        num_computed_tokens: int,
+    ) -> tuple[list[int], list[int]]:
+        d_start_sequence_block = num_computed_tokens // self.block_size
+        d_first_sequence_block = d_start_sequence_block + (
+            (d_dcp_rank - d_start_sequence_block) % d_dcp_size
+        )
+        d_sequence_block_to_cache_block = {
+            d_first_sequence_block + i * d_dcp_size: block_id
+            for i, block_id in enumerate(d_block_ids)
+        }
+
+        filtered_p_block_ids: list[int] = []
+        filtered_d_block_ids: list[int] = []
+        for i, p_block_id in enumerate(p_block_ids):
+            p_sequence_block = i * p_dcp_size + p_dcp_rank
+            d_block_id = d_sequence_block_to_cache_block.get(p_sequence_block)
+            if d_block_id is not None:
+                filtered_p_block_ids.append(p_block_id)
+                filtered_d_block_ids.append(d_block_id)
+
+        return filtered_p_block_ids, filtered_d_block_ids
+
     async def _build_transfer_params(
         self,
         ready_reqs: list[tuple[ReqId, SendBlockMeta]],
@@ -2038,7 +2040,11 @@ class MooncakeConnectorWorker:
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
 
         for d_req_id, send_meta in ready_reqs:
-            _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
+            req_block_entry = agent_meta.req_blocks[d_req_id]
+            remote_block_ids_per_group = req_block_entry[1]
+            remote_num_computed_tokens = (
+                req_block_entry[2] if len(req_block_entry) > 2 else 0
+            )
 
             if not remote_block_ids_per_group or all(
                 len(g) == 0 for g in remote_block_ids_per_group
@@ -2099,13 +2105,14 @@ class MooncakeConnectorWorker:
                         )
                         has_block_error = True
                         break
-                    local_group, remote_group = _filter_dcp_block_ids(
+                    local_group, remote_group = self._filter_dcp_block_ids(
                         p_block_ids=local_group,
                         d_block_ids=remote_group,
                         p_dcp_rank=p_dcp_rank,
                         p_dcp_size=self.dcp_size,
                         d_dcp_rank=d_dcp_rank,
                         d_dcp_size=agent_meta.remote_dcp_size,
+                        num_computed_tokens=remote_num_computed_tokens,
                     )
                 else:
                     n_local = len(local_group)
@@ -3132,7 +3139,11 @@ class MooncakeConnectorWorker:
         include_layout: bool,
     ) -> MooncakeXferMetadata:
         req_blocks = {
-            req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
+            req_id: (
+                pull_meta.transfer_id,
+                pull_meta.local_block_ids,
+                pull_meta.num_computed_tokens,
+            )
             for req_id, pull_meta in pull_metas.items()
         }
         if not include_layout:
@@ -3141,6 +3152,8 @@ class MooncakeConnectorWorker:
                 remote_port=self.rpc_port,
                 remote_tp_size=self.tp_size,
                 remote_tp_rank=self.tp_rank,
+                remote_dcp_size=self.dcp_size,
+                remote_block_size=self.block_size,
                 remote_pp_size=self.pp_size,
                 layout_id=self._kv_layout_id,
                 req_blocks=req_blocks,
@@ -3153,6 +3166,8 @@ class MooncakeConnectorWorker:
             remote_port=self.rpc_port,
             remote_tp_size=self.tp_size,
             remote_tp_rank=self.tp_rank,
+            remote_dcp_size=self.dcp_size,
+            remote_block_size=self.block_size,
             remote_pp_size=self.pp_size,
             layout_id=self._kv_layout_id,
             req_blocks=req_blocks,
