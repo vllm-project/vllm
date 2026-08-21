@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
+from typing import cast
 
 import torch
 
@@ -107,11 +108,20 @@ class LatentMoERunner(MoERunner):
             from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
                 TrtLlmMxfp4ExpertsMonolithic,
             )
+            from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+                TrtLlmNvFp4ExpertsMonolithic,
+            )
 
             experts_cls = getattr(self._quant_method, "experts_cls", None)
+            moe_kernel = self._quant_method.moe_kernel
             self.moe_config.defer_moe_finalize = (
-                experts_cls is TrtLlmMxfp4ExpertsMonolithic
+                (
+                    experts_cls is TrtLlmMxfp4ExpertsMonolithic
+                    or experts_cls is TrtLlmNvFp4ExpertsMonolithic
+                )
                 and self.moe_config.hidden_dim == self.moe_config.hidden_dim_unpadded
+                and moe_kernel is not None
+                and moe_kernel.supports_deferred_moe_finalize()
             )
             from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import (
                 KimiK3LatentMoETailOp,
@@ -354,8 +364,7 @@ class LatentMoERunner(MoERunner):
             else 0,
         )
 
-        shared_output, fused_output = _unpack(result)
-        assert shared_output is not None
+        shared_output, fused_output = cast(tuple[torch.Tensor, torch.Tensor], result)
 
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
