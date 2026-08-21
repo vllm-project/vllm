@@ -99,6 +99,7 @@ from .utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+from .vision import FusedInputNorm
 
 logger = init_logger(__name__)
 
@@ -511,6 +512,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5ForCausalLM(
@@ -727,6 +729,7 @@ class Qwen3_5MoeForConditionalGeneration(
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5MoeForCausalLM(

@@ -56,6 +56,7 @@ from .qwen3_vl import (
     Qwen3VLProcessingInfo,
 )
 from .utils import StageMissingLayer, maybe_prefix
+from .vision import FusedInputNorm
 
 logger = init_logger(__name__)
 
@@ -252,6 +253,7 @@ class Qwen3VLMoeForConditionalGeneration(
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         self.use_deepstack = hasattr(
             config.vision_config, "deepstack_visual_indexes"
