@@ -643,6 +643,34 @@ def test_default_cudagraph_capture_sizes_keep_token_grid_bounded():
     )
 
 
+def test_cudagraph_capture_sizes_respect_sequence_parallelism():
+    """Sequence-parallel capture sizes stay divisible by tensor parallel size."""
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    compilation_config.pass_config.enable_sp = True
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=32,
+        num_speculative_tokens=16,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+    )
+    config.parallel_config = ParallelConfig(tensor_parallel_size=2)
+    config.update_sizes_for_sequence_parallelism = lambda sizes: (
+        VllmConfig.update_sizes_for_sequence_parallelism(config, sizes)
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=False,
+    ):
+        VllmConfig._set_cudagraph_sizes(config)
+
+    assert all(size % 2 == 0 for size in compilation_config.cudagraph_capture_sizes)
+    assert 544 in compilation_config.cudagraph_capture_sizes
+
+
 @pytest.mark.parametrize("max_num_seqs", [8, 32, 256, 300, 512, 600, 1024, 2048])
 def test_default_cudagraph_capture_size_unchanged_without_speculation(max_num_seqs):
     """Without speculation the default must reproduce the historical formula.
