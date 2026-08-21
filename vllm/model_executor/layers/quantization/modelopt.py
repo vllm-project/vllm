@@ -99,6 +99,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -2057,28 +2058,26 @@ class KFp8Block128(QuantKeyScheme):
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
             self.reject(role)
-        if (
-            shapes.output_size_per_partition % 128 != 0
-            or shapes.input_size_per_partition % 128 != 0
-        ):
-            raise ValueError(
-                f"FP8_PB_WO requires out/in divisible by 128, got "
-                f"{shapes.output_size_per_partition}x{shapes.input_size_per_partition}"
-            )
+        out = shapes.output_size_per_partition
+        in_ = shapes.input_size_per_partition
+        # Scale sized by cdiv to match the checkpoint's block grid (the last
+        # output block may be partial). Weight is registered at its logical
+        # size; a non-128 output width is padded to a block boundary by the
+        # _Fp8PbWoPartialBlock format scheme. Input must be 128-aligned (same as
+        # #53132, which only pads the output).
+        if in_ % 128 != 0:
+            raise ValueError(f"FP8_PB_WO requires in divisible by 128, got {in_}")
         self.register_params(
             layer,
             "weight",
-            (shapes.output_size_per_partition, shapes.input_size_per_partition),
+            (out, in_),
             torch.float8_e4m3fn,
             ModelWeightParameter,
             wl,
             input_dim=1,
             output_dim=0,
         )
-        ob, ib = (
-            shapes.output_size_per_partition // 128,
-            shapes.input_size_per_partition // 128,
-        )
+        ob, ib = cdiv(out, 128), in_ // 128
         self.register_params(
             layer,
             "weight_scale",
@@ -2245,6 +2244,53 @@ class FormatScheme:
     def post_process(self, layer) -> None:
         """Run after the key schemes' ``process``, before the kernel's."""
 
+    def apply(self, layer, x, bias, kernel_apply):
+        """Wrap the kernel's forward. ``kernel_apply(layer, x, bias) -> Tensor``.
+
+        Default: delegate unchanged. A format whose residue lives at compute
+        time (e.g. run the GEMM on a padded weight then slice the output back
+        to its logical width, #53132-style) overrides this and calls
+        ``kernel_apply`` in the middle.
+        """
+        return kernel_apply(layer, x, bias)
+
+
+class _Fp8PbWoPartialBlock(FormatScheme):
+    """FP8_PB_WO output width that is not a multiple of 128 (a partial trailing
+    block; e.g. GLM's replicated ``fused_qkv_a_proj`` = 2048 + 576 = 2624).
+
+    The block kernel needs full 128-blocks, so pad the weight up to the block
+    boundary with zeros before the kernel's post-load, then slice the GEMM
+    output back to the logical width. This is #53132's approach, expressed as
+    the format's compute-time residue on the generic method. The cdiv-sized
+    scale from ``KFp8Block128`` already matches the padded block count, so only
+    the weight rows and the output need adjusting.
+    """
+
+    def post_process(self, layer) -> None:
+        w = layer.weight
+        out = w.shape[0]
+        pad = (-out) % 128
+        if not pad:
+            return
+        layer._pbwo_logical_out = out
+        padded = w.data.new_zeros(out + pad, w.shape[1])
+        padded[:out].copy_(w.data)
+        layer.weight = Parameter(padded, requires_grad=False)
+
+    def apply(self, layer, x, bias, kernel_apply):
+        logical = getattr(layer, "_pbwo_logical_out", None)
+        if logical is None:  # width was block-aligned: nothing to trim
+            return kernel_apply(layer, x, bias)
+        # Run the GEMM on the padded weight without bias, then trim to the
+        # logical width and add bias (the padded rows produce zeros we drop).
+        out = kernel_apply(layer, x, None)
+        out = out[..., :logical].contiguous()
+        return out if bias is None else out.add_(bias)
+
+
+_PB_WO_PARTIAL_BLOCK = _Fp8PbWoPartialBlock()
+
 
 class _DropInputScale(FormatScheme):
     """Interim: register then drop a W4A16 checkpoint's on-disk input_scale.
@@ -2355,7 +2401,12 @@ class ModelOptLinearMethod(LinearMethodBase):
         self.kernel.process_weights_after_loading(layer)
 
     def apply(self, layer, x, bias=None):
-        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+        return self.fmt.apply(
+            layer,
+            x,
+            bias,
+            lambda lyr, inp, b: self.kernel.apply_weights(layer=lyr, x=inp, bias=b),
+        )
 
 
 def resolve(algo: str, subcfg, prefix: str):
@@ -2384,12 +2435,14 @@ def resolve(algo: str, subcfg, prefix: str):
     if algo == "FP8_PB_WO":
         # PbWo: 128x128 block-static weight, dynamic per-block activation (W8A8).
         # The block kernel's post-load runs here; CompressedTensors block-FP8
-        # is the reference for this path.
+        # is the reference for this path. The FormatScheme pads a non-128 output
+        # width to a block boundary and trims the output back (#53132) -- a no-op
+        # for the common block-aligned case.
         ctx = CkptCtx()
         return (
             QuantSpec(weight=kFp8Static128BlockSym, activation=kFp8Dynamic128Sym),
             ctx,
-            None,
+            _PB_WO_PARTIAL_BLOCK,
         )
     if algo == "MXFP8":
         # MXFP8: block(32) e4m3 weight + e8m0 scale, dynamic activation.

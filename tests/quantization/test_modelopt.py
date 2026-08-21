@@ -809,3 +809,93 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
 
     assert config.nvfp4_config.quant_method == "NVFP4"
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
+
+
+def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
+    """FP8_PB_WO output width that is not a multiple of 128 (a partial trailing
+    block) is padded up to a block boundary before the kernel post-load, the
+    GEMM runs on the padded weight, and the output is trimmed back to the
+    logical width with bias added after. Faithful port of wei-zhao #53132's
+    test_modelopt_fp8_pb_wo_hides_output_padding for the generic method +
+    _Fp8PbWoPartialBlock FormatScheme.
+
+    Width is the real motivating case -- GLM's fused qkv_a_proj, q_a 2048 +
+    kv_a 576 = 2624 (replicated, so no TP degree makes it a 128-multiple),
+    padded to 2688 = 21 * 128.
+    """
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.layers.quantization import modelopt as mo
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Dynamic128Sym,
+        kFp8Static128BlockSym,
+    )
+
+    kernel = Mock()
+    monkeypatch.setattr(mo, "select_linear_kernel", lambda spec, layer, rt: kernel)
+    monkeypatch.setattr(mo, "expose_input_quant_key", lambda layer, k: None)
+
+    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    method.spec = QuantSpec(weight=kFp8Static128BlockSym, activation=kFp8Dynamic128Sym)
+    method.ctx = mo.CkptCtx()
+    method.fmt = mo._PB_WO_PARTIAL_BLOCK
+    method.wkey = mo.SCHEME_FOR[kFp8Static128BlockSym]
+    method.akey = mo.SCHEME_FOR[kFp8Dynamic128Sym]
+    method.input_dtype = method.out_dtype = torch.bfloat16
+    method.marlin_input_dtype = None
+
+    layer = torch.nn.Module()
+    with (
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+            return_value=1,
+        ),
+    ):
+        # output 2624 = 2048 + 576, input 128
+        method.create_weights(
+            layer, 128, [2048, 576], 128, 2624, torch.bfloat16, weight_loader=Mock()
+        )
+
+    # loaded at logical size; scale is cdiv(2624, 128) = 21 block rows
+    assert layer.weight.shape == (2624, 128)
+    assert layer.weight_scale.shape == (21, 1, 1, 1)
+
+    layer.weight.data.fill_(1)
+    method.process_weights_after_loading(layer)
+
+    # weight padded to the block boundary; the pad rows are zero
+    assert layer.weight.shape == (2688, 128)
+    assert torch.count_nonzero(layer.weight[2624:].float()) == 0
+    kernel.process_weights_after_loading.assert_called_once_with(layer)
+
+    # apply: GEMM on padded weight (bias=None), output trimmed + bias added
+    physical_output = torch.randn(4, 2688, dtype=torch.bfloat16)
+    kernel.apply_weights.return_value = physical_output
+    bias = torch.randn(2624, dtype=torch.bfloat16)
+    output = method.apply(layer, torch.randn(4, 128), bias)
+
+    torch.testing.assert_close(output, physical_output[:, :2624] + bias)
+    assert output.shape == (4, 2624)
+    assert output.is_contiguous()
+    kernel.apply_weights.assert_called_once()
+    assert kernel.apply_weights.call_args.kwargs["bias"] is None
+
+
+def test_modelopt_fp8_pb_wo_rejects_non_128_input():
+    """Input width must still be a multiple of 128 (same as #53132, which only
+    pads the output). A partial input block is refused loudly, not silently
+    mis-scaled."""
+    from vllm.model_executor.layers.quantization import modelopt as mo
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Static128BlockSym,
+    )
+
+    scheme = mo.SCHEME_FOR[kFp8Static128BlockSym]
+    shapes = mo.Shapes([128], 100, torch.bfloat16)  # input 100 not divisible by 128
+    with pytest.raises(ValueError, match="in divisible by 128"):
+        scheme.create_weights(
+            torch.nn.Module(), mo.WEIGHT, mo.CkptCtx(), shapes, Mock()
+        )
