@@ -419,6 +419,21 @@ To enable this feature:
 --kv-transfer-config '{..., "kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'
 ```
 
+## Performance Tuning
+
+### Block size and descriptor fragmentation
+
+NixlConnector builds one memory descriptor per KV block (per layer), so transfer latency is highly sensitive to `--block-size`. With the default block size of 16, a multi-thousand-token transfer decomposes into tens of thousands of small (~KB-scale, dtype/model dependent) descriptors and per-descriptor overhead dominates the transfer time, especially on hosts without GPU P2P or with TCP transports.
+
+Increasing `--block-size` on **both** the prefiller and the decoder reduces the descriptor count proportionally. As a reference point, on an 8×L20 host (Qwen3-32B-FP8, TP2, fp8 KV cache, ~5k-token prompts), moving from `--block-size 16` to `--block-size 64` cut the per-request KV pull from ~105ms to ~47ms.
+
+Notes:
+
+- Both sides must use the same block size (heterogeneous block sizes fall back to a slower post-processing path).
+- Attention backends cap the physical kernel page size (e.g. 64 for FlashInfer). Requesting a larger logical block size than the kernel supports gives no further benefit: NixlConnector logs `User-specified logical block size (...) does not match physical kernel block size (...)` and descriptors stay at the kernel granularity.
+- Watch the `Avg number of descriptors` field of the periodic `KV Transfer metrics` log line (see [Metrics Reference](#metrics-reference)) to verify the effect.
+- The [Cross layers blocks](#cross-layers-blocks) experimental feature further reduces the descriptor count on supported attention backends by making each logical block contiguous across layers.
+
 ## Metrics Reference
 
 vLLM periodically logs a `KV Transfer metrics` line summarising NIXL transfer

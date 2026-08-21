@@ -48,6 +48,9 @@ class NewRequestData:
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
 
+    # Tokens already sampled elsewhere (P/D first-token seeding).
+    output_token_ids: list[int] | None = None
+
     @classmethod
     def from_request(
         cls,
@@ -72,6 +75,9 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            output_token_ids=(
+                list(request.output_token_ids) if request.output_token_ids else None
+            ),
         )
 
     @property

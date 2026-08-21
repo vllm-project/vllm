@@ -2,20 +2,33 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
+import pickle
+import threading
 import time
 from typing import TYPE_CHECKING
+
+import zmq
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.fast_kv import (
+    fast_dispatch_enabled,
+    fast_kv_dispatch_path,
+    fast_kv_notify_path,
+    fast_notify_enabled,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
+    ReqId,
     ReqMeta,
+    TransferHandle,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
 )
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -38,6 +51,34 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Fast KV side channels (opt-in, see nixl/fast_kv.py).
+        self.fast_dispatch_enabled = fast_dispatch_enabled(vllm_config)
+        self.fast_notify_enabled = fast_notify_enabled(vllm_config)
+        if self.fast_dispatch_enabled or self.fast_notify_enabled:
+            self._fast_zmq_ctx = zmq.Context()
+        if self.fast_notify_enabled:
+            self._fast_poller_t = threading.Thread(
+                target=self._fast_poller_loop,
+                daemon=True,
+                name="nixl-fast-kv-poller",
+            )
+            self._fast_poller_t.start()
+        if self.fast_dispatch_enabled:
+            self._fast_dispatch_t = threading.Thread(
+                target=self._fast_dispatch_loop,
+                daemon=True,
+                name="nixl-fast-kv-dispatch",
+            )
+            self._fast_dispatch_t.start()
+        if self.fast_dispatch_enabled or self.fast_notify_enabled:
+            logger.info(
+                "NIXL fast KV side channels enabled (dispatch=%s notify=%s) "
+                "dispatch_path=%s notify_path=%s",
+                self.fast_dispatch_enabled,
+                self.fast_notify_enabled,
+                fast_kv_dispatch_path(vllm_config),
+                fast_kv_notify_path(vllm_config),
+            )
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
@@ -45,36 +86,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.reqs_to_recv.items():
-            meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids, self._physical_blocks_per_logical_kv_block
-            )
-            assert meta.remote is not None
-            # Remote block IDs are kept logical here; expanded in
-            # _read_blocks_for_req using the remote engine's phys ratio.
-            remote_engine_id = meta.remote.engine_id
-            logger.debug(
-                "start_load_kv for request %s from remote engine %s. "
-                "Num local_block_ids: %s. Num remote_block_ids: %s. ",
-                req_id,
-                remote_engine_id,
-                len(meta.local_physical_block_ids),
-                len(meta.remote.block_ids),
-            )
-            # always store metadata for failure recovery
-            self._recving_metadata[req_id] = meta
-            if remote_engine_id not in self._remote_agents:
-                # Initiate handshake with remote engine to exchange metadata.
-                with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_nixl_handshake(req_id, remote_engine_id, meta)
-                        continue
-
-            # Handshake already completed, start async read xfer.
-            self._read_blocks_for_req(req_id, meta)
+            with self._fast_lock:
+                if self._fast_dispatched.pop(req_id, None) is not None:
+                    # Already initiated by the fast-dispatch listener.
+                    continue
+                self._initiate_recv(req_id, meta)
 
         # Start transfers for requests whose handshakes have now finished.
-        while not self._ready_requests.empty():
-            self._read_blocks_for_req(*self._ready_requests.get_nowait())
+        with self._fast_lock:
+            while not self._ready_requests.empty():
+                self._read_blocks_and_mark(*self._ready_requests.get_nowait())
 
         # Keep around the requests that have been part of a batch. This is
         # needed because async scheduling pushes the misalignment between the
@@ -111,6 +132,213 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Send heartbeats to P-side engines to keep KV blocks alive while
         # requests sit in the D scheduler WAITING queue.
         self._send_heartbeats(metadata)
+
+    def _initiate_recv(self, req_id: ReqId, meta: ReqMeta):
+        """Bookkeep and start (or defer to handshake) one recv request.
+        Callers must hold _fast_lock."""
+        meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
+            meta.local_block_ids, self._physical_blocks_per_logical_kv_block
+        )
+        assert meta.remote is not None
+        # Remote block IDs are kept logical here; expanded in
+        # _read_blocks_for_req using the remote engine's phys ratio.
+        remote_engine_id = meta.remote.engine_id
+        logger.debug(
+            "start_load_kv for request %s from remote engine %s. "
+            "Num local_block_ids: %s. Num remote_block_ids: %s. ",
+            req_id,
+            remote_engine_id,
+            len(meta.local_physical_block_ids),
+            len(meta.remote.block_ids),
+        )
+        # always store metadata for failure recovery
+        self._recving_metadata[req_id] = meta
+        self._recv_initiated[req_id] = time.monotonic()
+        if remote_engine_id not in self._remote_agents:
+            # Initiate handshake with remote engine to exchange metadata.
+            with self._handshake_lock:
+                if remote_engine_id not in self._remote_agents:
+                    self._background_nixl_handshake(req_id, remote_engine_id, meta)
+                    return
+
+        # Handshake already completed, start async read xfer.
+        self._read_blocks_and_mark(req_id, meta)
+
+    def _read_blocks_and_mark(self, req_id: ReqId, meta: ReqMeta):
+        """_read_blocks_for_req + fast-notify eligibility marking.
+        Callers must hold _fast_lock."""
+        self._read_blocks_for_req(req_id, meta)
+        if not self.fast_notify_enabled:
+            return
+        assert meta.remote is not None and self.transfer_topo is not None
+        # Only fast-notify requests whose KV is usable the instant the
+        # transfer finishes (no host-buffer sync, no post-processing).
+        remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+        block_size_ratio = self.transfer_topo.block_size_ratio(
+            remote_info.remote_block_size
+        )
+        hetero_ppl = (
+            remote_info.remote_physical_blocks_per_logical
+            != self._physical_blocks_per_logical_kv_block
+        )
+        if (
+            self.use_host_buffer
+            or self.enable_permute_local_kv
+            or self.enable_heterogeneous_attn_post_process
+            or block_size_ratio != 1
+            or hetero_ppl
+            or (current_platform.is_rocm() and self._has_mamba)
+        ):
+            return
+        self._fast_eligible.add(req_id)
+
+    def _fast_dispatch_loop(self):
+        """Listener thread: initiate NIXL pulls as soon as the EngineCore
+        publishes new recv metadata."""
+        assert self._fast_zmq_ctx is not None
+        sock = self._fast_zmq_ctx.socket(zmq.SUB)
+        sock.setsockopt(zmq.SUBSCRIBE, b"")
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(fast_kv_dispatch_path(self.vllm_config))
+        poller = zmq.Poller()
+        poller.register(sock, zmq.POLLIN)
+        last_prune = time.monotonic()
+        try:
+            while not self._fast_stop_event.is_set():
+                if not poller.poll(timeout=200):
+                    continue
+                reqs: dict[ReqId, ReqMeta] = pickle.loads(sock.recv())
+                with self._fast_lock:
+                    now = time.monotonic()
+                    if now - last_prune > 60:
+                        last_prune = now
+                        self._recv_initiated = {
+                            r: t
+                            for r, t in self._recv_initiated.items()
+                            if now - t < 600
+                        }
+                    for req_id, meta in reqs.items():
+                        if (
+                            req_id in self._fast_dispatched
+                            or req_id in self._recv_initiated
+                        ):
+                            continue
+                        self._fast_dispatched[req_id] = time.monotonic()
+                        try:
+                            self._initiate_recv(req_id, meta)
+                        except Exception:
+                            logger.exception(
+                                "Fast-dispatch initiation failed for %s; "
+                                "deferring to the regular path.",
+                                req_id,
+                            )
+                            self._fast_dispatched.pop(req_id, None)
+                            self._recv_initiated.pop(req_id, None)
+                            self._recving_metadata.pop(req_id, None)
+                            self._fast_eligible.discard(req_id)
+        except Exception:
+            logger.exception(
+                "NIXL fast-dispatch listener died; falling back to the "
+                "regular per-step dispatch path."
+            )
+        finally:
+            sock.close(linger=0)
+
+    def _fast_poller_loop(self):
+        """Poller thread: detect recv-transfer completion and push
+        (req_id, tp_rank) to the EngineCore bridge."""
+        assert self._fast_zmq_ctx is not None
+        sock = self._fast_zmq_ctx.socket(zmq.PUSH)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.setsockopt(zmq.SNDHWM, 1000)
+        sock.connect(fast_kv_notify_path(self.vllm_config))
+        last_prune = time.monotonic()
+        try:
+            while not self._fast_stop_event.is_set():
+                done_reqs: list[ReqId] = []
+                with self._fast_lock:
+                    # Start transfers whose handshakes have now finished.
+                    while not self._ready_requests.empty():
+                        self._read_blocks_and_mark(*self._ready_requests.get_nowait())
+                    for req_id in list(self._fast_eligible):
+                        if not self._fast_poll_req(req_id):
+                            continue
+                        self._fast_eligible.discard(req_id)
+                        if req_id in self._fast_failed:
+                            # Failures are reported via the slow path.
+                            self._fast_failed.discard(req_id)
+                            continue
+                        self._fast_done_recving.add(req_id)
+                        done_reqs.append(req_id)
+                    now = time.monotonic()
+                    if now - last_prune > 60:
+                        last_prune = now
+                        self._fast_dispatched = {
+                            r: t
+                            for r, t in self._fast_dispatched.items()
+                            if now - t < 600
+                        }
+                for req_id in done_reqs:
+                    try:
+                        sock.send(pickle.dumps((req_id, self.tp_rank)), zmq.NOBLOCK)
+                    except zmq.Again:
+                        logger.warning(
+                            "Fast KV notify queue full; dropping hint for %s",
+                            req_id,
+                        )
+                time.sleep(0.0005)
+        except Exception:
+            logger.exception(
+                "NIXL fast-notify poller died; completions fall back to the "
+                "regular get_finished path."
+            )
+            with self._fast_lock:
+                self._fast_eligible.clear()
+        finally:
+            sock.close(linger=0)
+
+    def _fast_poll_req(self, req_id: ReqId) -> bool:
+        """Poll one request's recv transfers (called with _fast_lock held);
+        returns True when no transfer is left in progress."""
+        handles = self._recving_transfers.get(req_id)
+        if not handles:
+            # E.g. full local prefix hit: no read was posted at all.
+            self._recving_transfers.pop(req_id, None)
+            return True
+        in_progress: list[TransferHandle] = []
+        for handle in handles:
+            try:
+                xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                if xfer_state == "DONE":
+                    res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                    self.xfer_stats.record_transfer(res)
+                    self.nixl_wrapper.release_xfer_handle(handle)
+                elif xfer_state == "PROC":
+                    in_progress.append(handle)
+                    continue
+                else:
+                    self._log_failure(
+                        failure_type="transfer_failed",
+                        msg="Marking blocks as invalid",
+                        req_id=req_id,
+                        xfer_state=xfer_state,
+                    )
+                    self._handle_failed_transfer(req_id, handle)
+                    self._fast_failed.add(req_id)
+            except Exception as e:
+                self._log_failure(
+                    failure_type="transfer_exception",
+                    msg="Marking blocks as invalid",
+                    req_id=req_id,
+                    error=e,
+                )
+                self._handle_failed_transfer(req_id, handle)
+                self._fast_failed.add(req_id)
+        if in_progress:
+            self._recving_transfers[req_id] = in_progress
+            return False
+        del self._recving_transfers[req_id]
+        return True
 
     def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
         """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""
