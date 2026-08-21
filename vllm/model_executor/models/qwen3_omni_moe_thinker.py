@@ -1558,7 +1558,11 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> tuple[torch.Tensor, ...]:
         input_features = audio_input["input_features"]
-        audio_feature_lengths = audio_input["audio_feature_lengths"]
+        # audio_feature_lengths is keep_on_cpu; the audio tower derives
+        # device placement from feature_lens, so move it explicitly.
+        audio_feature_lengths = audio_input["audio_feature_lengths"].to(
+            input_features.device, non_blocking=True
+        )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
@@ -1590,6 +1594,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             "thinker.lm_head.": "language_model.lm_head.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
+            "talker.": None,
+            "code2wav.": None,
             # Adapter trained/saved directly from the thinker model
             "model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
@@ -1952,10 +1958,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["talker.", "code2wav."],
-        )
+        loader = AutoWeightsLoader(self)
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
         return loaded_weights
