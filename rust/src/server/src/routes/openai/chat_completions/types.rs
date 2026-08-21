@@ -14,8 +14,8 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StringOrArray, Tool, ToolCall,
-    ToolCallDelta, ToolChoice, UNKNOWN_MODEL_ID, Usage, default_true, validate_messages,
-    validate_stop, validate_top_p_value,
+    ToolCallDelta, ToolChoice, Usage, default_true, validate_messages, validate_stop,
+    validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -33,8 +33,7 @@ pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
 
     /// ID of the model to use
-    #[serde(default = "default_model")]
-    pub model: String,
+    pub model: Option<String>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
     /// on their existing frequency in the text so far
@@ -254,7 +253,7 @@ impl Default for ChatCompletionRequest {
     fn default() -> Self {
         Self {
             messages: Vec::new(),
-            model: default_model(),
+            model: None,
             frequency_penalty: None,
             logit_bias: None,
             logprobs: false,
@@ -427,10 +426,6 @@ pub(super) struct ChatMessageDelta {
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
     pub reasoning: Option<String>,
-}
-
-fn default_model() -> String {
-    UNKNOWN_MODEL_ID.to_string()
 }
 
 /// Schema-level validation for cross-field dependencies

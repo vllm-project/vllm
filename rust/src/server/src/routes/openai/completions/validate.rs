@@ -12,8 +12,10 @@ pub(super) fn validate_request_compat(
     // This path is intentionally scoped to the minimum surface needed by
     // `vllm-bench` random workload compatibility, so unsupported legacy
     // completions features fail early here.
-    if !served_model_names.iter().any(|n| n == &request.model) {
-        return Err(ApiError::model_not_found(request.model.clone()));
+    if let Some(model) = request.model.as_ref().filter(|model| !model.is_empty())
+        && !served_model_names.iter().any(|name| name == model)
+    {
+        return Err(ApiError::model_not_found(model.clone()));
     }
 
     if request.stream_options.is_some() && !request.stream {
@@ -133,6 +135,17 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_default_model_inputs() {
+        for model in [None, Some(String::new())] {
+            let request = CompletionRequest {
+                model,
+                ..base_request()
+            };
+            assert!(validate_request_compat(&request, &served_names(&["served-model"])).is_ok());
+        }
     }
 
     #[test]

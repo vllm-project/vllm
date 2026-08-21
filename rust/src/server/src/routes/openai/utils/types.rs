@@ -13,9 +13,6 @@ use vllm_llm::TokenUsage;
 // Constants
 // ============================================================================
 
-/// Default model identifier used when no model is specified.
-pub const UNKNOWN_MODEL_ID: &str = "unknown";
-
 // ============================================================================
 // Default value helpers
 // ============================================================================

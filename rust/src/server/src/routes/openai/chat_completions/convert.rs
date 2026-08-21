@@ -466,7 +466,7 @@ mod tests {
 
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "Qwen/Qwen1.5-0.5B-Chat".to_string(),
+            model: Some("Qwen/Qwen1.5-0.5B-Chat".to_string()),
             messages: vec![ChatMessage::User {
                 content: MessageContent::Text("hello".to_string()),
                 name: None,
@@ -474,6 +474,33 @@ mod tests {
             stream: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn chat_http_request_defaults_missing_or_null_model() {
+        for model in [None, Some(serde_json::Value::Null)] {
+            let mut value = json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true,
+            });
+            if let Some(model) = model {
+                value
+                    .as_object_mut()
+                    .expect("request object")
+                    .insert("model".to_string(), model);
+            }
+
+            let request: ChatCompletionRequest =
+                serde_json::from_value(value).expect("parse request without model");
+            assert!(request.model.is_none());
+        }
+
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "model": "",
+        }))
+        .expect("parse empty model");
+        assert_eq!(request.model.as_deref(), Some(""));
     }
 
     #[test]
@@ -506,7 +533,7 @@ mod tests {
     #[test]
     fn prepare_chat_request_passes_response_format_to_kimi_k3_renderer() {
         let mut request = base_request();
-        request.model = "moonshotai/Kimi-K3".to_string();
+        request.model = Some("moonshotai/Kimi-K3".to_string());
         let response_format = ResponseFormat::JsonSchema {
             json_schema: JsonSchemaFormat {
                 name: "answer".to_string(),
@@ -913,7 +940,7 @@ mod tests {
     #[test]
     fn prepare_chat_request_accepts_audio_content_parts() {
         let request = ChatCompletionRequest {
-            model: "Qwen/Qwen3-ASR-1.7B".to_string(),
+            model: Some("Qwen/Qwen3-ASR-1.7B".to_string()),
             messages: vec![ChatMessage::User {
                 content: MessageContent::Parts(vec![
                     ContentPart::InputAudio {

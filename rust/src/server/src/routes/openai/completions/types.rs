@@ -30,7 +30,7 @@ fn default_completion_max_tokens() -> Option<u32> {
 pub struct CompletionRequest {
     // -------- Standard OpenAI API Parameters --------
     /// ID of the model to use
-    pub model: String,
+    pub model: Option<String>,
 
     /// The prompt(s) to generate completions for.
     ///

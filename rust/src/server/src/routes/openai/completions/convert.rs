@@ -245,7 +245,35 @@ mod tests {
             serde_json::from_value(base_request_json()).expect("parse request");
 
         assert_eq!(request.prompt, Prompt::Text("hello".to_string()));
-        assert_eq!(request.model, "Qwen/Qwen1.5-0.5B-Chat");
+        assert_eq!(request.model.as_deref(), Some("Qwen/Qwen1.5-0.5B-Chat"));
+    }
+
+    #[test]
+    fn completion_http_request_defaults_missing_or_null_model() {
+        for model in [None, Some(serde_json::Value::Null)] {
+            let mut value = base_request_json();
+            let object = value.as_object_mut().expect("request object");
+            match model {
+                Some(model) => {
+                    object.insert("model".to_string(), model);
+                }
+                None => {
+                    object.remove("model");
+                }
+            }
+
+            let request: CompletionRequest =
+                serde_json::from_value(value).expect("parse request without model");
+            assert!(request.model.is_none());
+        }
+
+        let mut value = base_request_json();
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("model".to_string(), json!(""));
+        let request: CompletionRequest = serde_json::from_value(value).expect("parse empty model");
+        assert_eq!(request.model.as_deref(), Some(""));
     }
 
     #[test]
