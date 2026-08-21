@@ -151,6 +151,7 @@ def test_embedding_only_mode_skips_encoder_cudagraph_manager():
     """Embedding-only inputs must not create an encoder CUDA graph manager."""
     vllm_config = _make_model_state_vllm_config()
     model = nn.Module()
+    encoder_cache = EncoderCache()
 
     with (
         patch.object(
@@ -169,11 +170,12 @@ def test_embedding_only_mode_skips_encoder_cudagraph_manager():
         state = _ModelStateForTest(
             vllm_config,
             model,
-            EncoderCache(),
+            encoder_cache,
             torch.device("cpu"),
         )
 
     manager.assert_not_called()
+    assert state.encoder_cache is encoder_cache
     assert not state.encoder_runner.has_cudagraph()
 
 
