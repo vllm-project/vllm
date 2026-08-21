@@ -87,14 +87,17 @@ class ECExampleConnector(ECConnectorBase):
                 "In connector.start_load_caches, but the connector metadata is None"
             )
             return
+        # A bare "cuda" makes safetensors load onto cuda:0. Pin the load to the
+        # selected device so tensor-parallel workers load the cache locally.
+        device = current_platform.device_type
+        if current_platform.is_cuda_alike():
+            device = f"{device}:{current_platform.current_device()}"
         # Load the EC for each mm data
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
             filename = self._generate_filename_debug(mm_data.mm_hash)
-            ec_cache = safetensors.torch.load_file(
-                filename, device=current_platform.device_type
-            )["ec_cache"]
+            ec_cache = safetensors.torch.load_file(filename, device=device)["ec_cache"]
             encoder_cache[mm_data.mm_hash] = ec_cache
             logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
 
