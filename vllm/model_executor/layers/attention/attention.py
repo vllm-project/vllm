@@ -43,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
+    TQFullAttentionSpec,
     get_kv_quant_mode,
 )
 
@@ -286,6 +287,22 @@ class Attention(nn.Module, AttentionLayerBase):
             and kv_cache_scheme.get("strategy") == "attn_head"
         )
 
+        # TurboQuant only supports full-attention (non-sliding-window) layers.
+        # Fall back to fp8 for sliding-window layers so they use quantized
+        # KV cache (2x smaller than bf16/auto) via TRITON_ATTN, which fully
+        # supports fp8 on ROCm. This recovers most of the memory vs auto/bf16.
+        if sliding_window is not None and isinstance(
+            kv_cache_dtype, str
+        ) and kv_cache_dtype.startswith("turboquant_"):
+            kv_cache_dtype = "fp8"
+
+        # TurboQuant only supports full-attention layers. Sliding-window
+        # layers fall back to fp8 so they use TRITON_ATTN on ROCm.
+        if (sliding_window is not None
+                and isinstance(kv_cache_dtype, str)
+                and kv_cache_dtype.startswith("turboquant_")):
+            kv_cache_dtype = "fp8"
+
         # Skip quantization for specified layers
         if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
             from vllm.model_executor.models.utils import extract_layer_index
@@ -302,7 +319,16 @@ class Attention(nn.Module, AttentionLayerBase):
             if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
                 skip = True
             if skip:
-                kv_cache_dtype = "auto"
+                # For turboquant_* global dtype, use fp8 instead of auto/bf16
+                # for skip layers (boundary + sliding-window). fp8 is 2x smaller
+                # than bf16 and is supported by TRITON_ATTN on ROCm, so it
+                # reduces the shared page size that TQ blocks must pad up to.
+                if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith(
+                    "turboquant_"
+                ):
+                    kv_cache_dtype = "fp8"
+                else:
+                    kv_cache_dtype = "auto"
             logger.debug(
                 "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
                 prefix,
@@ -645,6 +671,23 @@ class Attention(nn.Module, AttentionLayerBase):
                 page_size_padded=shared_page,
             )
         else:
+            if quant_mode.is_turboquant:
+                from vllm.model_executor.layers.quantization.turboquant.config import (
+                    TurboQuantConfig,
+                )
+
+                tq_cfg = TurboQuantConfig.from_cache_dtype(
+                    self.kv_cache_dtype, self.head_size
+                )
+                return TQFullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                    head_size_v=self.head_size_v,
+                    dtype=self.kv_cache_torch_dtype,
+                    kv_quant_mode=quant_mode,
+                    tq_slot_size=tq_cfg.slot_size_aligned,
+                )
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,

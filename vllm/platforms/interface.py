@@ -709,7 +709,15 @@ class Platform:
         # Per-token page of every higher-precision padded spec sharing the pool.
         padded_pages: list[int] = []
         if cache_config.kv_cache_dtype_skip_layers:
-            padded_pages.append(per_token_page_bytes(model_config.dtype, "auto"))
+            # For turboquant_* global dtype, skip layers use fp8 (not auto/bf16):
+            # Attention.__init__ resets kv_cache_dtype to "fp8" for skip layers
+            # when the global dtype is turboquant_*. fp8 is 2x smaller than
+            # bf16 and reduces the shared page that TQ blocks must pad up to.
+            if cache_config.cache_dtype.startswith("turboquant_"):
+                _skip_dtype = cls.fp8_dtype() if hasattr(cls, "fp8_dtype") else model_config.dtype
+                padded_pages.append(per_token_page_bytes(_skip_dtype, "fp8"))
+            else:
+                padded_pages.append(per_token_page_bytes(model_config.dtype, "auto"))
         # To add the first/last-N sibling:
         #   padded_pages.append(per_token_page_bytes(<sibling_dtype>, "auto"))
         if not padded_pages:
@@ -811,8 +819,12 @@ class Platform:
             # TQ has a packed K|V layout; the standard FullAttentionSpec
             # formula over-sizes it and trips unify_kv_cache_spec_page_size
             # when all attention layers are TQ. With mixed skip+TQ the skip
-            # layers still use the standard layout — take max so mamba
+            # layers still use the standard layout — take lcm so mamba
             # padding covers the largest actual page.
+            # Also account for sliding-window layers that fall back to fp8
+            # (Attention.__init__ resets kv_cache_dtype to "fp8" for SW layers
+            # when the global dtype is turboquant_*). These fp8 pages must be
+            # unified with the TQ pages via lcm.
             from vllm.v1.attention.backends.turboquant_attn import (
                 TurboQuantAttentionBackend,
             )
@@ -825,6 +837,26 @@ class Platform:
                 kv_quant_mode=kv_quant_mode,
             )
             tq_page = TurboQuantAttentionBackend.customize_spec(tq_spec).page_size_bytes
+            # Sliding-window layers use fp8 when global dtype is turboquant_*.
+            # Compute fp8 page for SW layers (use SW head_dim if heterogeneous).
+            # Newer transformers raises AmbiguousGlobalPerLayerAttributeError
+            # when head_dim varies per layer; fall back to get_head_size().
+            try:
+                _sw_head_dim = getattr(
+                    model_config.hf_text_config, "head_dim",
+                    model_config.get_head_size()
+                )
+            except Exception:
+                _sw_head_dim = model_config.get_head_size()
+            _fp8_quant_mode = get_kv_quant_mode("fp8")
+            fp8_sw_page = FullAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=_sw_head_dim,
+                dtype=cls.fp8_dtype() if hasattr(cls, "fp8_dtype") else model_config.dtype,
+                kv_quant_mode=_fp8_quant_mode,
+            ).page_size_bytes
+            attn_page_size_1_token = lcm(tq_page, fp8_sw_page)
             if cache_config.kv_cache_dtype_skip_layers:
                 skip_page = FullAttentionSpec(
                     block_size=1,
@@ -835,9 +867,7 @@ class Platform:
                 # lcm, not max: skip_page is often not a multiple of
                 # tq_page, so max would leave per-layer page sizes
                 # un-unifiable downstream.
-                attn_page_size_1_token = lcm(tq_page, skip_page)
-            else:
-                attn_page_size_1_token = tq_page
+                attn_page_size_1_token = lcm(attn_page_size_1_token, skip_page)
         else:
             attn_spec = FullAttentionSpec(
                 block_size=1,
