@@ -275,30 +275,30 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
 
         if "audios" in mm_data:
             mm_data["audio"] = mm_data.pop("audios")
-        processed_outputs = self.info.ctx.call_hf_processor(
+
+        processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_processor_mm_kwargs),
             dict(text=prompt_text, **mm_data),
             hf_processor_mm_kwargs,
         )
 
-        if "input_features" in processed_outputs:
+        if "input_features" in processed_data:
             # Padding enables audio_tower to run in batched mode
-            processed_outputs["input_features_padded"] = processed_outputs[
-                "input_features"
-            ]
+            processed_data["input_features_padded"] = processed_data["input_features"]
 
             # Unpad features here since we need the output of each item to be
             # independent of other items for the cache to work correctly
             unpadded_features = [
                 f[mask]
                 for f, mask in zip(
-                    processed_outputs["input_features"],
-                    processed_outputs["input_features_mask"],
+                    processed_data["input_features"],
+                    processed_data["input_features_mask"],
                 )
             ]
-            processed_outputs["input_features"] = unpadded_features
-        processed_data = processed_outputs
+            processed_data["input_features"] = unpadded_features
+
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
     def _get_mm_fields_config(

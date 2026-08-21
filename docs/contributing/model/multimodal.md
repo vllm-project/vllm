@@ -448,48 +448,37 @@ return a schema of the tensors outputted by the HF processor that are related to
     like in LLaVA, each image's features must be independent of the others (which
     is also required for prefix caching to work correctly). So, we un-pad each image
     back to its own size by overriding
-    [BaseMultiModalProcessor._apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main]
-    and post-processing the outputs of the HF processor:
+    [BaseMultiModalProcessor._postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data]
+    to post-process the outputs of the HF processor:
 
     ??? code
 
         ```python
-        def _apply_hf_processor_main(
-            self,
-            prompt: list[int],
-            mm_items: MultiModalDataItems,
-            hf_processor_mm_kwargs: Mapping[str, object],
-        ) -> tuple[list[int], BatchFeature]:
-            valid_mm_items = mm_items.select(
-                {k for k, c in mm_items.get_all_counts().items() if c > 0}
-            )
-            mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-            if not mm_data:
-                return prompt, BatchFeature(dict(passthrough_data))
-
+        def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
             # Mistral3Processor requires text corresponding to the images
-            prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+            return self.dummy_inputs.get_dummy_text(mm_counts)
 
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**hf_processor_mm_kwargs),
-                dict(text=prompt_text, **mm_data),
-                hf_processor_mm_kwargs,
-            )
+        def _postprocess_hf_mm_data(
+            self,
+            mm_data: Mapping[str, object],
+            hf_processor_mm_kwargs: Mapping[str, object],
+            processed_data: BatchFeature,
+        ) -> BatchFeature:
+            if not mm_data:
+                return processed_data
 
-            pixel_values = processed_outputs.get("pixel_values")
+            pixel_values = processed_data.get("pixel_values")
             if pixel_values is not None:
                 # Avoid padding since we need the output for each image to be
                 # independent of other images for the cache to work correctly
-                image_sizes = processed_outputs["image_sizes"]
+                image_sizes = processed_data["image_sizes"]
                 assert len(pixel_values) == len(image_sizes)
 
-                processed_outputs["pixel_values"] = [
+                processed_data["pixel_values"] = [
                     p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
                 ]
 
-            processed_outputs.update(passthrough_data)
-            return prompt, processed_outputs
+            return processed_data
         ```
 
     The default implementation of
@@ -499,11 +488,13 @@ return a schema of the tensors outputted by the HF processor that are related to
     you should override
     [_get_hf_processor_text][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_processor_text]
     to return the dummy text from
-    [BaseDummyInputsBuilder.get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text].
-    If you need additional control over how the HF processor is called or its
-    outputs are post-processed, you can override
+    [BaseDummyInputsBuilder.get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text]
+    like in the example above. If you need to modify the output of the HF processor,
+    you should override
+    [_postprocess_hf_mm_data][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_hf_mm_data].
+    For even more control over how the HF processor is called, you can override
     [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main]
-    directly like in the example above.
+    directly.
 
     Since `pixel_values` is now a list with one tensor per image, we can override
     [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:

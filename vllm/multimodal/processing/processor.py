@@ -1320,6 +1320,21 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         return None
 
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        """
+        Post-process the output of the HF processor.
+
+        By default, the output is returned as-is. If you need to modify the
+        output of the HF processor before it is converted into multi-modal
+        keyword arguments, you should override this method.
+        """
+        return processed_data
+
     def _apply_hf_processor_main(
         self,
         prompt: list[int],
@@ -1346,7 +1361,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             )
             processed_data.update(passthrough_data)
         else:
-            processed_data = BatchFeature(dict(passthrough_data))
+            processed_data = cast("BatchFeature", dict(passthrough_data))
+
+        processed_data = self._postprocess_hf_mm_data(
+            processor_data,
+            hf_processor_mm_kwargs,
+            processed_data,
+        )
 
         return prompt, processed_data
 

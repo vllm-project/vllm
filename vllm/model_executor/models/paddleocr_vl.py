@@ -264,18 +264,17 @@ class PaddleOCRVLMultiModalProcessor(
         final_mm_kwargs.setdefault("images_kwargs", {})
         # vLLM use PIL.Image, always set channel_last
         final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**final_mm_kwargs),
             dict(text=prompt_text, **mm_data),
             hf_processor_mm_kwargs,
         )
-        num_patches_per_image = processed_outputs["image_grid_thw"].prod(-1)
-        processed_outputs["pixel_values"] = processed_outputs["pixel_values"].split(
+        num_patches_per_image = processed_data["image_grid_thw"].prod(-1)
+        processed_data["pixel_values"] = processed_data["pixel_values"].split(
             num_patches_per_image.tolist()
         )
-
-        processed_data = processed_outputs
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
     def _get_mm_fields_config(

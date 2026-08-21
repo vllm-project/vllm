@@ -212,7 +212,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         videos = mm_data.get("videos")
 
         # batchify input as a single item
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             hf_processor=self.info.get_hf_processor(**hf_processor_mm_kwargs),
             data=dict(
                 images=None if images is None else [images],
@@ -220,17 +220,17 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
             ),
         )
 
-        for k, v in processed_outputs.items():
+        for k, v in processed_data.items():
             if isinstance(v, list) and len(v) > 0:
                 assert len(v) == 1
-                processed_outputs[k] = v[0]
+                processed_data[k] = v[0]
 
         if images:
-            processed_outputs["image_sizes_images"] = torch.tensor(
-                processed_outputs["image_sizes_images"]
+            processed_data["image_sizes_images"] = torch.tensor(
+                processed_data["image_sizes_images"]
             )
-            processed_outputs["vision_query_lengths_images"] = torch.tensor(
-                processed_outputs["vision_query_lengths_images"]
+            processed_data["vision_query_lengths_images"] = torch.tensor(
+                processed_data["vision_query_lengths_images"]
             )
 
         if videos:
@@ -238,23 +238,23 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
                 0,
                 *accumulate(get_num_combined_frames(len(video)) for video in videos),
             ]
-            processed_outputs["pixel_values_videos"] = [
-                processed_outputs["pixel_values_videos"][
+            processed_data["pixel_values_videos"] = [
+                processed_data["pixel_values_videos"][
                     _idx_per_video[i] : _idx_per_video[i + 1]
                 ]
                 for i in range(len(videos))
             ]
-            processed_outputs["vision_query_lengths_videos"] = [
+            processed_data["vision_query_lengths_videos"] = [
                 torch.tensor(
-                    processed_outputs["vision_query_lengths_videos"][
+                    processed_data["vision_query_lengths_videos"][
                         _idx_per_video[i] : _idx_per_video[i + 1]
                     ]
                 )
                 for i in range(len(videos))
             ]
 
-        processed_data = processed_outputs
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
     def _get_prompt_updates(

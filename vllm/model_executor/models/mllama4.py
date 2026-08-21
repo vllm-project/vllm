@@ -589,33 +589,23 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
 
 
 class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]):
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: list[int],
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         if not mm_data:
-            return prompt, BatchFeature(dict(passthrough_data))
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        processed_outputs = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
-        )
+            return processed_data
 
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = processor.image_processor
         vision_config = self.info.get_hf_config().vision_config
 
-        if processed_outputs.get("pixel_values") is not None:
+        if processed_data.get("pixel_values") is not None:
             assert "images" in mm_data, (
                 "images expected to be in mm_data when pixel_values is present"
             )
@@ -646,12 +636,10 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                 1 if r_h * r_w == 1 else 1 + r_h * r_w for (r_h, r_w) in aspect_ratios
             ]
 
-            processed_outputs["aspect_ratios"] = torch.tensor(aspect_ratios)
-            processed_outputs["patches_per_image"] = torch.tensor(patches_per_image)
+            processed_data["aspect_ratios"] = torch.tensor(aspect_ratios)
+            processed_data["patches_per_image"] = torch.tensor(patches_per_image)
 
-        processed_data = processed_outputs
-        processed_data.update(passthrough_data)
-        return prompt, processed_data
+        return processed_data
 
     def _get_mm_fields_config(
         self,

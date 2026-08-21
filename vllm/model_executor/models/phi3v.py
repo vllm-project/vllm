@@ -396,29 +396,19 @@ class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
 
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: list[int],
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         if not mm_data:
-            return prompt, BatchFeature(dict(passthrough_data))
+            return processed_data
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        processed_outputs = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
-        )
-
-        input_ids = processed_outputs["input_ids"]
+        input_ids = processed_data["input_ids"]
         assert isinstance(input_ids, torch.Tensor)
 
         # Phi3v processor has inserted -1, -2 etc as placeholder in prompt_ids,
@@ -426,9 +416,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         # Therefore, we need to do an early replacement here
         input_ids.masked_fill_(input_ids < 0, _IMAGE_TOKEN_ID)
 
-        processed_data = processed_outputs
-        processed_data.update(passthrough_data)
-        return prompt, processed_data
+        return processed_data
 
     def _get_mm_fields_config(
         self,

@@ -39,30 +39,19 @@ _I = TypeVar("_I", bound=Mistral3ProcessingInfo)
 
 
 class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: list[int],
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         if not mm_data:
-            return prompt, BatchFeature(dict(passthrough_data))
+            return processed_data
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        processed_outputs = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
-        )
-
-        # NOTE: LightOnOCR does not use break/end tokens, so we remove them here.
-        input_ids = processed_outputs.get("input_ids")
+        input_ids = processed_data.get("input_ids")
         if input_ids is not None:
             processor = self.info.get_hf_processor()
             tokenizer = self.info.get_tokenizer()
@@ -77,24 +66,22 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingIn
                 torch.tensor([break_id, end_id]),
             )
 
-            processed_outputs["input_ids"] = input_ids[keep_mask].unsqueeze(0)
-            if "attention_mask" in processed_outputs:
-                processed_outputs["attention_mask"] = processed_outputs[
-                    "attention_mask"
-                ][keep_mask].unsqueeze(0)
+            processed_data["input_ids"] = input_ids[keep_mask].unsqueeze(0)
+            if "attention_mask" in processed_data:
+                processed_data["attention_mask"] = processed_data["attention_mask"][
+                    keep_mask
+                ].unsqueeze(0)
 
         # un-pad pixel_values per-image so caches remain independent.
-        pixel_values = processed_outputs.get("pixel_values")
+        pixel_values = processed_data.get("pixel_values")
         if pixel_values is not None:
-            image_sizes = processed_outputs["image_sizes"]
+            image_sizes = processed_data["image_sizes"]
             assert len(pixel_values) == len(image_sizes)
-            processed_outputs["pixel_values"] = [
+            processed_data["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
             ]
 
-        processed_data = processed_outputs
-        processed_data.update(passthrough_data)
-        return prompt, processed_data
+        return processed_data
 
     def _get_mm_fields_config(
         self,

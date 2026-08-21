@@ -261,29 +261,18 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
 
 
 class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
-    def _apply_hf_processor_main(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: list[int],
-        mm_items: MultiModalDataItems,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature]:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         if not mm_data:
-            return prompt, BatchFeature(dict(passthrough_data))
+            return processed_data
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        processed_outputs = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
-        )
-
-        # HF processor pops the `num_crops` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
             parsed_images = mm_items.get_items("image", ImageProcessorItems)
@@ -301,11 +290,9 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
                 )
                 for size in image_sizes
             ]
-            processed_outputs["num_patches"] = torch.tensor(num_crops) + 1
+            processed_data["num_patches"] = torch.tensor(num_crops) + 1
 
-        processed_data = processed_outputs
-        processed_data.update(passthrough_data)
-        return prompt, processed_data
+        return processed_data
 
     def _get_mm_fields_config(
         self,

@@ -1663,21 +1663,19 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             video_outputs = dict()
             swap_video_frame_tokens = False
 
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_processor_mm_kwargs),
             dict(text=prompt_text, **mm_data),
             hf_processor_mm_kwargs,
         )
         if swap_video_frame_tokens:
-            input_ids = processed_outputs["input_ids"]
+            input_ids = processed_data["input_ids"]
             input_ids[input_ids == processor.video_token_id] = processor.image_token_id
-            processed_outputs["input_ids"] = input_ids
-        combined_outputs = dict(
-            processed_outputs,
-            **video_outputs,
-        )
-        processed_data = BatchFeature(combined_outputs)
+            processed_data["input_ids"] = input_ids
+
+        processed_data.update(video_outputs)
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
     def _get_mm_fields_config(

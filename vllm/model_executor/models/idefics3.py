@@ -260,7 +260,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
                 **hf_processor_mm_kwargs,
             }
 
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_processor_mm_kwargs),
             mm_data,
             hf_processor_mm_kwargs,
@@ -283,14 +283,14 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
             )
             for size in image_sizes
         ]
-        processed_outputs["num_patches"] = torch.tensor(num_patches)
+        processed_data["num_patches"] = torch.tensor(num_patches)
 
         # Remove the extra batch dimension
-        processed_outputs["pixel_values"].squeeze_(0)
-        processed_outputs["pixel_attention_mask"].squeeze_(0)
+        processed_data["pixel_values"].squeeze_(0)
+        processed_data["pixel_attention_mask"].squeeze_(0)
 
-        processed_data = processed_outputs
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
     def _get_mm_fields_config(

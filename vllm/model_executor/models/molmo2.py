@@ -2057,7 +2057,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         else:
             all_video_outputs = dict()
 
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             patched_call,
             dict(text=prompt_text, **mm_data),
             hf_processor_mm_kwargs,
@@ -2080,22 +2080,22 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 for image_size in image_sizes
             ]
             num_crops = torch.tensor(tilings).prod(-1) + 1
-            assert sum(num_crops) == len(processed_outputs["pixel_values"])
-            assert sum(num_crops) == processed_outputs["image_num_crops"].sum().item()
+            assert sum(num_crops) == len(processed_data["pixel_values"])
+            assert sum(num_crops) == processed_data["image_num_crops"].sum().item()
 
-            image_grids = processed_outputs.pop("image_grids")
+            image_grids = processed_data.pop("image_grids")
             image_num_pooled_patches = image_grids[:, :2].prod(dim=1) + image_grids[
                 :, 2:
             ].prod(dim=1)
 
-            processed_outputs["image_num_pooled_patches"] = image_num_pooled_patches
-            n_patches = processed_outputs["pixel_values"].shape[1]
-            processed_outputs["image_num_patches"] = (
-                processed_outputs["image_num_crops"] * n_patches
+            processed_data["image_num_pooled_patches"] = image_num_pooled_patches
+            n_patches = processed_data["pixel_values"].shape[1]
+            processed_data["image_num_patches"] = (
+                processed_data["image_num_crops"] * n_patches
             )
             (
-                processed_outputs["image_tokens"],
-                processed_outputs["num_image_tokens"],
+                processed_data["image_tokens"],
+                processed_data["num_image_tokens"],
             ) = build_flat_image_bool_length(
                 image_grids,
                 hf_config,
@@ -2104,7 +2104,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 use_single_crop_start_token=hf_processor.use_single_crop_start_token,
             )
 
-        processed_data = BatchFeature({**processed_outputs, **all_video_outputs})
+        processed_data.update(all_video_outputs)
         processed_data.update(passthrough_data)
         processed_data.pop("input_ids")
 

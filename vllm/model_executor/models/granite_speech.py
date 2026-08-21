@@ -203,7 +203,7 @@ class GraniteSpeechMultiModalProcessor(
             # GraniteSpeechFeatureExtractor accepts "audio"
             mm_data["audio"] = audios
 
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_processor_mm_kwargs),
             dict(text=prompt_text, **mm_data),
             hf_processor_mm_kwargs,
@@ -213,12 +213,12 @@ class GraniteSpeechMultiModalProcessor(
             # Calculate the number of audio tokens per entry in the batch;
             # This is used to split the batch back out after padding.
             audio_token_index = self.info.get_hf_config().audio_token_index
-            processed_outputs["audio_embed_sizes"] = (
-                processed_outputs["input_ids"] == audio_token_index
+            processed_data["audio_embed_sizes"] = (
+                processed_data["input_ids"] == audio_token_index
             ).sum(-1)
 
-        processed_data = processed_outputs
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
 

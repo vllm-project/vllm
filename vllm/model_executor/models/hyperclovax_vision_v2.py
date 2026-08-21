@@ -292,14 +292,13 @@ class HCXVisionV2MultiModalProcessor(
             videos=videos,
         )
 
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             hf_processor=hf_processor,
             data=data,
             kwargs=hf_processor_mm_kwargs,
         )
-
-        processed_data = processed_outputs
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
     def _get_prompt_updates(

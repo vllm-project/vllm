@@ -888,7 +888,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         if audio_data := mm_data.get("audios", []):
             mm_data["audios"] = [(data, sr) for data in audio_data]
 
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_processor_mm_kwargs),
             dict(text=prompt_text, **mm_data),
             hf_processor_mm_kwargs,
@@ -901,20 +901,19 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
                 image_height=img_size[1],
                 processor=hf_processor,
             )
-            for img_size in processed_outputs["image_sizes"]
+            for img_size in processed_data["image_sizes"]
         ]
-        processed_outputs["num_img_tokens"] = num_img_tokens
+        processed_data["num_img_tokens"] = num_img_tokens
 
-        audio_features = processed_outputs["input_audio_embeds"]
+        audio_features = processed_data["input_audio_embeds"]
         feature_sizes = [
             self.info.get_audio_num_frames(len(audio), sr) for audio in audio_data
         ]
-        processed_outputs["input_audio_embeds"] = [
+        processed_data["input_audio_embeds"] = [
             audio_features[idx, :size] for idx, size in enumerate(feature_sizes)
         ]
-
-        processed_data = processed_outputs
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
     def _get_mm_fields_config(

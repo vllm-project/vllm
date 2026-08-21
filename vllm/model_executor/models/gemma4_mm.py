@@ -726,7 +726,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**patched_mm_kwargs),
             dict(text=prompt_text, **mm_data),
             patched_mm_kwargs,
@@ -734,34 +734,33 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
         # HF uses 'image_position_ids'; vLLM uses 'pixel_position_ids'.
         # Remap here to keep a single translation point.
-        if "image_position_ids" in processed_outputs:
-            processed_outputs["pixel_position_ids"] = processed_outputs.pop(
+        if "image_position_ids" in processed_data:
+            processed_data["pixel_position_ids"] = processed_data.pop(
                 "image_position_ids"
             )
 
-        if "input_features" in processed_outputs:
+        if "input_features" in processed_data:
             # Unpad per-item so each item's cache entry is
             # self-contained. The batched() field config in
             # _get_mm_fields_config stacks equal-length items and leaves
             # the rest as a list; _process_audio_input re-pads that list
             # to the batch's max length.
-            masks = processed_outputs["input_features_mask"]
+            masks = processed_data["input_features_mask"]
             unpadded_features = [
                 f[mask]
                 for f, mask in zip(
-                    processed_outputs["input_features"],
+                    processed_data["input_features"],
                     masks,
                 )
             ]
             unpadded_masks = [mask[mask] for mask in masks]
-            processed_outputs["input_features"] = unpadded_features
-            processed_outputs["input_features_padded"] = unpadded_features
-            processed_outputs["input_features_mask"] = unpadded_masks
+            processed_data["input_features"] = unpadded_features
+            processed_data["input_features_padded"] = unpadded_features
+            processed_data["input_features_mask"] = unpadded_masks
 
-        # Merge video outputs into the final result
-        combined_outputs = dict(processed_outputs, **video_outputs)
-        processed_data = BatchFeature(combined_outputs)
+        processed_data.update(video_outputs)
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
     def _get_mm_fields_config(

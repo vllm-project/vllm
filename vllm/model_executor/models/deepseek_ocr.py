@@ -301,7 +301,7 @@ class DeepseekOCRMultiModalProcessor(
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
         if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
+            processed_data = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**hf_processor_mm_kwargs),
                 dict(prompt=prompt_text, **mm_data),
                 hf_processor_mm_kwargs,
@@ -310,11 +310,10 @@ class DeepseekOCRMultiModalProcessor(
         else:
             tokenizer = self.info.get_tokenizer()
             assert isinstance(tokenizer, HfTokenizer)
-            processed_outputs = tokenizer(
+            processed_data = tokenizer(
                 prompt_text, add_special_tokens=True, return_tensors="pt"
             )
 
-        processed_data = processed_outputs
         processed_data.update(passthrough_data)
         return prompt, processed_data
 

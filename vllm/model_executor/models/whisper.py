@@ -776,15 +776,16 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
             **hf_processor_mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
         )
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_processor_mm_kwargs),
             mm_data,
             hf_processor_mm_kwargs,
         )
-        if "labels" in processed_outputs:
-            processed_outputs["input_ids"] = processed_outputs.pop("labels")
-        processed_data = processed_outputs
+        if "labels" in processed_data:
+            processed_data["input_ids"] = processed_data.pop("labels")
+
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
     def _get_mm_fields_config(

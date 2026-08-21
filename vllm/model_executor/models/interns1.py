@@ -373,14 +373,14 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
         if images:
             image_pixel_values = []
             for image in images:
-                processed_outputs = self.info.ctx.call_hf_processor(
+                processed_data = self.info.ctx.call_hf_processor(
                     self.info.get_hf_processor(**hf_processor_mm_kwargs),
                     dict(text=hf_processor.image_token, **{"images": image}),
                     hf_processor_mm_kwargs,
                 )
-                image_pixel_values.append(processed_outputs.pop("pixel_values"))
+                image_pixel_values.append(processed_data.pop("pixel_values"))
 
-                input_ids = processed_outputs.pop("input_ids")
+                input_ids = processed_data.pop("input_ids")
                 image_placeholder = tokenizer.batch_decode(input_ids)[0]
                 prompt_text = prompt_text.replace(
                     "<image_placeholder>", image_placeholder, 1
@@ -397,14 +397,14 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
         if videos:
             video_pixel_values = []
             for video in videos:
-                processed_outputs = self.info.ctx.call_hf_processor(
+                processed_data = self.info.ctx.call_hf_processor(
                     self.info.get_hf_processor(**hf_processor_mm_kwargs),
                     dict(text=hf_processor.video_token, **{"videos": video}),
                     hf_processor_mm_kwargs,
                 )
-                video_pixel_values.append(processed_outputs.pop("pixel_values"))
+                video_pixel_values.append(processed_data.pop("pixel_values"))
 
-                input_ids = processed_outputs.pop("input_ids")
+                input_ids = processed_data.pop("input_ids")
                 input_ids[input_ids == hf_processor.image_token_id] = video_token_id
 
                 video_placeholder = tokenizer.batch_decode(input_ids)[0]
@@ -427,10 +427,11 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
         )
         text_outputs = tokenizer(prompt_text, return_tensors="pt")
 
-        processed_data = BatchFeature(
-            {**text_outputs, **image_outputs, **video_outputs}
-        )
+        processed_data.update(text_outputs)
+        processed_data.update(image_outputs)
+        processed_data.update(video_outputs)
         processed_data.update(passthrough_data)
+
         return prompt, processed_data
 
     def _get_mm_fields_config(
