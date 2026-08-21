@@ -56,6 +56,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let loaded = load_model_backends(
         &config.model,
         LoadModelBackendsOptions {
+            generation_config: Default::default(),
             renderer: config.renderer,
             language_model_only: true,
             chat_template: config.chat_template.clone(),

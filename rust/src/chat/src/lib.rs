@@ -44,6 +44,7 @@ pub use request::{
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
+pub use vllm_text::GenerationConfigMode;
 
 mod backend;
 mod error;
