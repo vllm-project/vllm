@@ -2,6 +2,17 @@ group: Entrypoints
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (H200) CLI Response Time"
+  device: h200_18gb
+  optional: true
+  timeout_in_minutes: 5
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/test_cli_response_times.py
+  commands:
+  - pytest -v -s entrypoints/test_cli_response_times.py
+
 - label: ":nvidia: (H200) Entrypoints Unit"
   device: h200_35gb
   key: entrypoints-unit-tests
