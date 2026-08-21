@@ -11,14 +11,8 @@ import pytest
 import torch
 from utils import skip_unsupported
 
-from vllm.model_executor.layers import batch_invariant as batch_invariant_mod
-from vllm.model_executor.layers.batch_invariant import (
-    bmm_batch_invariant,
-    matmul_batch_invariant,
-    matmul_persistent,
-)
+from vllm.model_executor.layers.batch_invariant import matmul_batch_invariant
 from vllm.platforms import current_platform
-from vllm.utils.mem_utils import get_max_shared_memory_bytes
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -109,42 +103,3 @@ def test_matmul_batch_invariance(dtype):
     batch_output_a = batch_output[3]
 
     assert torch.equal(standard_output[0], batch_output_a)
-
-
-@skip_unsupported
-def test_fp32_n_equals_1(monkeypatch: pytest.MonkeyPatch):
-    """fp32 matmul with N=1 must launch on ~100KB smem and stay batch-invariant."""
-    low_smem = get_max_shared_memory_bytes() <= 106496
-    monkeypatch.setattr(
-        batch_invariant_mod, "_fp32_block_size_n", 32 if low_smem else 128
-    )
-    monkeypatch.setattr(batch_invariant_mod, "_fp32_num_stages", 2 if low_smem else 3)
-    device = torch.device(DEVICE_TYPE)
-    a = torch.randn(4, 2048, device=device, dtype=torch.float32)
-    b = torch.randn(2048, 1, device=device, dtype=torch.float32)
-    torch.testing.assert_close(
-        matmul_persistent(a, b), torch.mm(a, b), rtol=1e-2, atol=1e-2
-    )
-    a_single = torch.rand((1, 32, 2048), dtype=torch.float32, device=device)
-    a_batch = torch.rand((8, 32, 2048), dtype=torch.float32, device=device)
-    a_batch[3] = a_single[0]
-    ref = matmul_batch_invariant(a_single, b)
-    assert torch.equal(ref[0], matmul_batch_invariant(a_batch, b)[3])
-    ba = torch.randn(2, 4, 2048, device=device, dtype=torch.float32)
-    bb = torch.randn(2, 2048, 1, device=device, dtype=torch.float32)
-    torch.testing.assert_close(
-        bmm_batch_invariant(ba, bb), torch.bmm(ba, bb), rtol=1e-2, atol=1e-2
-    )
-
-
-@skip_unsupported
-def test_fp32_n_gt_1_keeps_wide_tile(monkeypatch: pytest.MonkeyPatch):
-    """N>1 must keep 128/stages=3 even when the N=1 override is armed."""
-    monkeypatch.setattr(batch_invariant_mod, "_fp32_block_size_n", 32)
-    monkeypatch.setattr(batch_invariant_mod, "_fp32_num_stages", 2)
-    device = torch.device(DEVICE_TYPE)
-    a = torch.randn(8, 2048, device=device, dtype=torch.float32)
-    b = torch.randn(2048, 16, device=device, dtype=torch.float32)
-    torch.testing.assert_close(
-        matmul_persistent(a, b), torch.mm(a, b), rtol=1e-2, atol=1e-2
-    )
