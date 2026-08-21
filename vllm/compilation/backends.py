@@ -1074,7 +1074,10 @@ class VllmBackend:
         self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_index
-        local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}", self.prefix)
+        dev = torch.accelerator.current_device_index()
+        local_cache_dir = os.path.join(
+            cache_dir, f"rank_{rank}_{dp_rank}_dev{dev}", self.prefix
+        )
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
@@ -1261,11 +1264,12 @@ class VllmBackend:
             # code adapted from
             # https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30
             # use `print_readable` because it can include submodules
-            src = (
-                "from __future__ import annotations\nimport torch\n"
-                + self.split_gm.print_readable(print_output=False)
-            )
-            src = src.replace("<lambda>", "GraphModule")
+            with dynamo_timed("vllm_print_readable"):
+                src = (
+                    "from __future__ import annotations\nimport torch\n"
+                    + self.split_gm.print_readable(print_output=False)
+                )
+                src = src.replace("<lambda>", "GraphModule")
             with open(graph_path, "w") as f:
                 f.write(src)
 
