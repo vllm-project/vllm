@@ -1442,7 +1442,21 @@ def test_humming_rejects_invalid_gemm_type(monkeypatch: pytest.MonkeyPatch):
         get_humming_moe_gemm_type()
 
 
-def test_humming_rejects_deepep_low_latency(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(
+    ("all2all_backend", "expected_reason"),
+    [
+        (
+            "deepep_low_latency",
+            "DeepEP low-latency does not support deferred input quantization",
+        ),
+        ("nixl_ep", "NIXL EP does not support deferred input quantization"),
+    ],
+)
+def test_humming_rejects_prepare_finalize_without_deferred_input_quant(
+    monkeypatch: pytest.MonkeyPatch,
+    all2all_backend: str,
+    expected_reason: str,
+):
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
         BatchedHummingGroupedExperts,
@@ -1457,7 +1471,7 @@ def test_humming_rejects_deepep_low_latency(monkeypatch: pytest.MonkeyPatch):
     moe_config = make_dummy_moe_config()
     moe_config.moe_parallel_config.dp_size = 2
     moe_config.moe_parallel_config.use_ep = True
-    moe_config.moe_parallel_config.all2all_backend = "deepep_low_latency"
+    moe_config.moe_parallel_config.all2all_backend = all2all_backend
 
     supported, reason = HummingExpertsBase.is_supported_config(
         BatchedHummingGroupedExperts,
@@ -1468,7 +1482,44 @@ def test_humming_rejects_deepep_low_latency(monkeypatch: pytest.MonkeyPatch):
     )
 
     assert not supported
-    assert reason == "DeepEP low-latency does not support deferred input quantization"
+    assert reason == expected_reason
+
+
+@pytest.mark.parametrize(
+    ("dp_token_counts", "topk_shape", "expected"),
+    [
+        pytest.param(None, (7, 3), 21, id="runtime-layout"),
+        pytest.param([3, 5], (48, 1), 48, id="expanded-dp-layout"),
+    ],
+)
+def test_humming_global_valid_shape_m(
+    monkeypatch: pytest.MonkeyPatch,
+    dp_token_counts: list[int] | None,
+    topk_shape: tuple[int, int],
+    expected: int,
+):
+    from types import SimpleNamespace
+
+    import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
+
+    dp_metadata = (
+        None
+        if dp_token_counts is None
+        else SimpleNamespace(
+            num_tokens_across_dp_cpu=torch.tensor(dp_token_counts, dtype=torch.int32)
+        )
+    )
+    monkeypatch.setattr(
+        humming,
+        "get_forward_context",
+        lambda: SimpleNamespace(dp_metadata=dp_metadata),
+    )
+    experts = SimpleNamespace(moe_config=make_dummy_moe_config(experts_per_token=6))
+    topk_ids = torch.empty(topk_shape, dtype=torch.int64)
+
+    result = humming.HummingExpertsBase.get_global_valid_shape_m(experts, topk_ids)
+
+    assert result == expected
 
 
 @pytest.mark.parametrize(
@@ -2008,10 +2059,25 @@ def test_batched_fused_marlin_moe(
             assert self.is_valid()
 
             batched_hidden_states = self._scatter(hidden_states)
+            expert_num_tokens = self.expert_num_tokens_cpu.to("cuda")
+
+            def activation_func(
+                activation: MoEActivation,
+                output: torch.Tensor,
+                input: torch.Tensor,
+                **_: Any,
+            ) -> None:
+                apply_moe_activation(
+                    activation,
+                    output.view(self.e, self.max_tokens_per_batch, -1),
+                    input.view(self.e, self.max_tokens_per_batch, -1),
+                    valid_token_counts=expert_num_tokens,
+                )
 
             kwargs = fused_marlin_moe_kwargs | {
                 "hidden_states": batched_hidden_states,
-                "expert_num_tokens": self.expert_num_tokens_cpu.to("cuda"),
+                "expert_num_tokens": expert_num_tokens,
+                "activation_func": activation_func,
             }
             batched_outputs = batched_fused_marlin_moe(**kwargs)
 

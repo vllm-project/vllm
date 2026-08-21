@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
     apply_moe_activation,
     apply_moe_activation_masked_supported,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -94,6 +95,27 @@ def test_masked_moe_activation_validates_tensor_contract() -> None:
             torch.empty(1, 1, 4)[..., ::2],
             valid_token_counts=valid_token_counts,
         )
+
+
+def test_moe_silu_clamp_uses_native_xpu_fallback(
+    default_vllm_config, monkeypatch
+) -> None:
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    clamp_limit = 3.0
+    input = torch.tensor([[12.0, -12.0, 8.0, -8.0], [-2.0, 2.0, -4.0, 4.0]])
+    output = torch.empty(2, 2)
+
+    apply_moe_activation(
+        MoEActivation.SILU,
+        output,
+        input,
+        activation_config=ApplyMoEActivationConfig(clamp_limit=clamp_limit),
+    )
+
+    expected = SiluAndMulWithClamp(clamp_limit, compile_native=False).forward_native(
+        input
+    )
+    torch.testing.assert_close(output, expected)
 
 
 @pytest.mark.parametrize(
@@ -345,6 +367,7 @@ def test_masked_situ_and_mul(
 )
 @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
 @pytest.mark.parametrize("mask_layout", ["flat", "batched_experts"])
+@pytest.mark.parametrize("d", [512, 513])
 @torch.inference_mode()
 def test_masked_moe_activation(
     default_vllm_config,
@@ -352,10 +375,11 @@ def test_masked_moe_activation(
     activation_config: ApplyMoEActivationConfig,
     dtype: torch.dtype,
     mask_layout: str,
+    d: int,
 ) -> None:
     """Count-aware MoE activation computes only valid row prefixes."""
     device = CUDA_DEVICES[0]
-    num_experts, max_num_tokens, d = 4, 7, 128
+    num_experts, max_num_tokens = 4, 7
     input_dim = 2 * d if activation.is_gated else d
     if mask_layout == "flat":
         input = torch.randn(max_num_tokens, input_dim, dtype=dtype, device=device)
@@ -398,6 +422,98 @@ def test_masked_moe_activation(
                 rtol=get_default_rtol(output),
             )
         assert torch.all(batched_output[expert, num_tokens:] == 42.0)
+
+
+@pytest.mark.parametrize(
+    ("mask_layout", "counts"),
+    [
+        pytest.param("flat", [-2], id="flat_negative"),
+        pytest.param("flat", [70], id="flat_over_capacity"),
+        pytest.param("batched_experts", [-2, 70], id="batched"),
+    ],
+)
+@torch.inference_mode()
+def test_masked_moe_activation_clamps_valid_token_counts(
+    default_vllm_config,
+    mask_layout: str,
+    counts: list[int],
+) -> None:
+    """Counts outside [0, T] clamp without touching padded output rows."""
+    device = CUDA_DEVICES[0]
+    max_num_tokens, d = 67, 513
+    num_experts = len(counts) if mask_layout == "batched_experts" else 1
+    leading_shape = (
+        (max_num_tokens,) if mask_layout == "flat" else (num_experts, max_num_tokens)
+    )
+    input = torch.randn(*leading_shape, 2 * d, dtype=torch.half, device=device)
+    output = torch.full((*leading_shape, d), 42.0, dtype=torch.half, device=device)
+    valid_token_counts = torch.tensor(counts, dtype=torch.int32, device=device)
+
+    apply_moe_activation(
+        MoEActivation.SILU,
+        output,
+        input,
+        valid_token_counts=valid_token_counts,
+    )
+
+    batched_input = input.view(-1, max_num_tokens, 2 * d)
+    batched_output = output.view(-1, max_num_tokens, d)
+    for expert, raw_count in enumerate(counts):
+        num_tokens = max(0, min(raw_count, max_num_tokens))
+        if num_tokens:
+            expected = torch.empty((num_tokens, d), dtype=torch.half, device=device)
+            apply_moe_activation(
+                MoEActivation.SILU,
+                expected,
+                batched_input[expert, :num_tokens].clone(),
+            )
+            torch.testing.assert_close(
+                batched_output[expert, :num_tokens],
+                expected,
+                atol=get_default_atol(output),
+                rtol=get_default_rtol(output),
+            )
+        assert torch.all(batched_output[expert, num_tokens:] == 42.0)
+
+
+@pytest.mark.parametrize("mask_layout", ["flat", "batched_experts"])
+@torch.inference_mode()
+def test_masked_moe_activation_zero_features(
+    default_vllm_config,
+    mask_layout: str,
+) -> None:
+    """A zero-width activation is a no-op instead of an invalid launch."""
+    device = CUDA_DEVICES[0]
+    if mask_layout == "flat":
+        input = torch.empty(3, 0, dtype=torch.half, device=device)
+        output = torch.empty(3, 0, dtype=torch.half, device=device)
+        valid_token_counts = torch.tensor([2], dtype=torch.int32, device=device)
+    else:
+        input = torch.empty(2, 3, 0, dtype=torch.half, device=device)
+        output = torch.empty(2, 3, 0, dtype=torch.half, device=device)
+        valid_token_counts = torch.tensor([1, 3], dtype=torch.int32, device=device)
+
+    apply_moe_activation(
+        MoEActivation.SILU,
+        output,
+        input,
+        valid_token_counts=valid_token_counts,
+    )
+
+    assert output.numel() == 0
+
+
+@torch.inference_mode()
+def test_masked_situ_and_mul_zero_features(default_vllm_config) -> None:
+    """The legacy masked SITU entry point also accepts zero-width tensors."""
+    device = CUDA_DEVICES[0]
+    input = torch.empty(2, 3, 0, dtype=torch.half, device=device)
+    output = torch.empty(2, 3, 0, dtype=torch.half, device=device)
+    expert_num_tokens = torch.tensor([1, 3], dtype=torch.int32, device=device)
+
+    torch.ops._C.masked_situ_and_mul(output, input, expert_num_tokens, 1.5, -1.0)
+
+    assert output.numel() == 0
 
 
 @pytest.mark.parametrize("mask_layout", ["flat", "batched_experts"])

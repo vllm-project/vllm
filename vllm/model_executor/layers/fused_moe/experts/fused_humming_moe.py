@@ -245,12 +245,12 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         return scratch
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
-        num_tokens = topk_ids.size(0)
         ctx = get_forward_context()
         if ctx.dp_metadata is not None:
             num_tokens = ctx.dp_metadata.num_tokens_across_dp_cpu.sum().item()
+            return num_tokens * self.moe_config.experts_per_token
 
-        return num_tokens * topk_ids.size(1)
+        return topk_ids.size(0) * topk_ids.size(1)
 
     def estimate_local_valid_shape_m(self, topk_ids: torch.Tensor):
         # estimate shape_m for kernel tuning
@@ -584,6 +584,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if supported and moe_config.use_deepep_ll_kernels:
             supported = False
             reason = "DeepEP low-latency does not support deferred input quantization"
+
+        if supported and moe_config.use_nixl_ep_kernels:
+            supported = False
+            reason = "NIXL EP does not support deferred input quantization"
 
         if supported:
             assert hasattr(cls, "humming_gemm_type")

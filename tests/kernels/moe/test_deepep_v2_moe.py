@@ -28,7 +28,10 @@ from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.flashinfer import (
+    has_flashinfer,
+    has_flashinfer_trtllm_fused_moe,
+)
 from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -42,6 +45,15 @@ if has_deep_ep_v2():
 requires_deep_ep_v2 = pytest.mark.skipif(
     not has_deep_ep_v2(),
     reason="Requires DeepEP v2 (ElasticBuffer)",
+)
+requires_humming = pytest.mark.skipif(
+    not HummingGroupedExperts._supports_current_device(),
+    reason="Requires Humming on a supported GPU",
+)
+requires_flashinfer_trtllm = pytest.mark.skipif(
+    not has_flashinfer_trtllm_fused_moe()
+    or not current_platform.is_device_capability_family(100),
+    reason="Requires FlashInfer TRTLLM fused MoE on Blackwell",
 )
 
 
@@ -1055,6 +1067,7 @@ def _run_deep_ep_v2_backend_case(
                 weight_format="fp8",
             ),
             id="flashinfer_trtllm-silu-padded",
+            marks=requires_flashinfer_trtllm,
         ),
         pytest.param(
             DeepEPV2BackendCase(
@@ -1065,6 +1078,7 @@ def _run_deep_ep_v2_backend_case(
                 weight_format="fp8",
             ),
             id="humming-situ-padded",
+            marks=requires_humming,
         ),
         pytest.param(
             DeepEPV2BackendCase(
@@ -1075,6 +1089,7 @@ def _run_deep_ep_v2_backend_case(
                 weight_format="fp8",
             ),
             id="humming-situ-expanded-idle-rank",
+            marks=requires_humming,
         ),
     ],
 )
@@ -1133,11 +1148,12 @@ def _launch_deep_ep_v2_case(
 
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
+@requires_humming
 def test_deep_ep_v2_humming_dsv4_expert_topology(workspace_init):
     _launch_deep_ep_v2_case(
         m=8,
-        n=2048,
-        k=4096,
+        n=256,
+        k=1024,
         num_experts=256,
         topk=6,
         world_dp_size=(2, 2),

@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
+
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEConfig,
@@ -294,7 +296,12 @@ def silu_and_mul_with_clamp(
     topk_ids: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
 ) -> None:
-    if topk_ids is not None and expert_map is not None:
+    if current_platform.is_xpu():
+        d = input.shape[-1] // 2
+        gate = torch.clamp(input[..., :d], max=clamp_limit)
+        up = torch.clamp(input[..., d:], min=-clamp_limit, max=clamp_limit)
+        output.copy_(gate * torch.sigmoid(gate) * up)
+    elif topk_ids is not None and expert_map is not None:
         from vllm.model_executor.layers.fused_moe.utils import swiglu_limit_func
 
         swiglu_limit_func(output, input, clamp_limit, topk_ids, expert_map)

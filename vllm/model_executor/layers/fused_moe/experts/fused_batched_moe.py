@@ -840,20 +840,18 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        supported = activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.GELU_TANH_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
-        return supported and (
-            current_platform.is_xpu()
-            or apply_moe_activation_masked_supported(activation)
-        )
+        if current_platform.is_xpu():
+            return activation in [
+                MoEActivation.SILU,
+                MoEActivation.GELU,
+                MoEActivation.GELU_TANH,
+                MoEActivation.SWIGLUOAI,
+                MoEActivation.SILU_NO_MUL,
+                MoEActivation.GELU_NO_MUL,
+                MoEActivation.GELU_TANH_NO_MUL,
+                MoEActivation.RELU2_NO_MUL,
+            ]
+        return apply_moe_activation_masked_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:

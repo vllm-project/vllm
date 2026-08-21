@@ -8,6 +8,7 @@ import torch
 
 from tests.kernels.moe.utils import (
     batched_moe,
+    make_dummy_moe_config,
     make_quantized_test_activations,
     make_test_weights,
     naive_batched_moe,
@@ -16,7 +17,14 @@ from tests.kernels.quant_utils import native_batched_masked_quant_matmul
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+    apply_moe_activation,
+    apply_moe_activation_masked_supported,
+)
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+    BatchedTritonExperts,
     invoke_moe_batched_triton_kernel,
 )
 from vllm.platforms import current_platform
@@ -496,11 +504,158 @@ def test_batched_mm_td_zero_expert_tokens():
 
 # BatchedTritonExperts device enablement (XPU)
 def test_batched_triton_experts_supports_current_device():
-    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
-        BatchedTritonExperts,
+    assert BatchedTritonExperts._supports_current_device()
+
+
+@pytest.mark.parametrize("is_xpu", [False, True], ids=["cuda-rocm", "xpu"])
+def test_batched_triton_activation_support_contract(monkeypatch, is_xpu: bool):
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: is_xpu)
+
+    supported = {
+        activation
+        for activation in MoEActivation
+        if BatchedTritonExperts._supports_activation(activation)
+    }
+    if is_xpu:
+        expected = {
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SILU_NO_MUL,
+            MoEActivation.GELU_NO_MUL,
+            MoEActivation.GELU_TANH_NO_MUL,
+            MoEActivation.RELU2_NO_MUL,
+        }
+    else:
+        expected = {
+            activation
+            for activation in MoEActivation
+            if apply_moe_activation_masked_supported(activation)
+        }
+
+    assert supported == expected
+
+
+def _torch_experts_with_shared_activation(
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: MoEActivation,
+    activation_config: ApplyMoEActivationConfig,
+) -> torch.Tensor:
+    num_tokens, hidden_dim = a.shape
+    topk = topk_ids.shape[1]
+    routed_input = a[:, None, :].expand(-1, topk, -1).reshape(-1, hidden_dim)
+    routed_experts = topk_ids.reshape(-1)
+    routed_output = torch.zeros_like(routed_input)
+
+    for expert in range(w1.shape[0]):
+        expert_mask = routed_experts == expert
+        if not expert_mask.any():
+            continue
+        projected = routed_input[expert_mask] @ w1[expert].T
+        activated = torch.empty(
+            projected.shape[0], w2.shape[2], dtype=a.dtype, device=a.device
+        )
+        apply_moe_activation(
+            activation,
+            activated,
+            projected,
+            activation_config=activation_config,
+        )
+        routed_output[expert_mask] = activated @ w2[expert].T
+
+    return (
+        (
+            routed_output.view(num_tokens, topk, hidden_dim).float()
+            * topk_weights[..., None]
+        )
+        .sum(dim=1)
+        .to(a.dtype)
     )
 
-    assert BatchedTritonExperts._supports_current_device()
+
+_NEW_BATCHED_ACTIVATION_CASES = [
+    pytest.param(
+        MoEActivation.SITU,
+        ApplyMoEActivationConfig(
+            activation_situ_beta=1.5,
+            activation_situ_linear_beta=2.0,
+        ),
+        id="situ",
+    ),
+    pytest.param(
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ApplyMoEActivationConfig(clamp_limit=3.0, alpha=1.3, beta=0.5),
+        id="swigluoai-uninterleave",
+    ),
+    pytest.param(
+        MoEActivation.SWIGLUSTEP,
+        ApplyMoEActivationConfig(),
+        id="swiglustep",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("activation", "activation_config"), _NEW_BATCHED_ACTIVATION_CASES
+)
+@torch.inference_mode()
+def test_batched_experts_new_activation_end_to_end(
+    activation: MoEActivation,
+    activation_config: ApplyMoEActivationConfig,
+):
+    if current_platform.is_xpu():
+        pytest.skip("The new masked activations are not enabled on XPU")
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Requires CUDA or ROCm")
+
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    set_random_seed(7)
+    device = current_platform.device_type
+    init_workspace_manager(torch.device(f"{device}:0"))
+    m, n, k, e, topk = 16, 128, 128, 8, 2
+
+    a = torch.randn((m, k), device=device, dtype=torch.bfloat16) / 10
+    score = torch.randn((m, e), device=device, dtype=torch.bfloat16)
+    w1 = torch.randn((e, 2 * n, k), device=device, dtype=torch.bfloat16) / 15
+    w2 = torch.randn((e, k, n), device=device, dtype=torch.bfloat16) / 15
+    moe_config = make_dummy_moe_config(
+        num_experts=e,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size=n,
+        in_dtype=a.dtype,
+        activation=activation,
+    )
+    moe_config.swiglu_limit = activation_config.clamp_limit
+    moe_config.swiglu_alpha = activation_config.alpha
+    moe_config.swiglu_beta = activation_config.beta
+    moe_config.activation_situ_beta = activation_config.activation_situ_beta
+    moe_config.activation_situ_linear_beta = (
+        activation_config.activation_situ_linear_beta
+    )
+
+    with set_current_vllm_config(vllm_config):
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+        baseline_output = _torch_experts_with_shared_activation(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            activation,
+            activation_config,
+        )
+        triton_output = batched_moe(
+            a, w1, w2, topk_weights, topk_ids, moe_config=moe_config
+        )
+
+    torch.testing.assert_close(triton_output, baseline_output, atol=3e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize("m,n,k,e,topk", [(32, 512, 512, 8, 2), (45, 1024, 128, 8, 1)])
