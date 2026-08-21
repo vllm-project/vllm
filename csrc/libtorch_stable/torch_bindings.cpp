@@ -538,23 +538,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "float scale, float norm_eps=1e-5) -> ()");
 #endif
 
-#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
-  ops.def(
-      "fused_kda_prologue("
-      "Tensor q, Tensor k, Tensor v, Tensor raw_g, Tensor raw_beta, "
-      "Tensor A_log, Tensor dt_bias, Tensor! qg, Tensor! w, Tensor! u, "
-      "Tensor! kg_t, Tensor! aqk, Tensor! decay, Tensor cu_seqlens, "
-      "Tensor chunk_indices, Tensor? conv_weight, Tensor(e!)? conv_state, "
-      "Tensor? conv_state_indices, Tensor? conv_has_initial_state, "
-      "float scale, float lower_bound) -> ()");
-  ops.def(
-      "fused_kda_chunk("
-      "Tensor qg, Tensor w, Tensor u, Tensor kg_t, Tensor aqk, Tensor decay, "
-      "Tensor? initial_state, Tensor(a!)? final_state, Tensor! out, "
-      "Tensor cu_seqlens, Tensor chunk_offsets, float scale, "
-      "Tensor(b!)? group_state, int groups) -> ()");
-#endif
-
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(
       "kimi_k3_attn_res("
@@ -819,11 +802,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifdef VLLM_ENABLE_FUSED_GDN_DECODE
   ops.impl("fused_gdn_decode_post_conv_mtp",
            TORCH_BOX(&fused_gdn_decode_post_conv_mtp));
-#endif
-
-#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
-  ops.impl("fused_kda_prologue", TORCH_BOX(&fused_kda_prologue));
-  ops.impl("fused_kda_chunk", TORCH_BOX(&fused_kda_chunk));
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
