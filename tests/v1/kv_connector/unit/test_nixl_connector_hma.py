@@ -751,6 +751,15 @@ def test_get_block_descs_ids_selects_attention_regions_by_group():
 
     assert result.tolist() == [1, 2, 11, 12, 27]
 
+    remapped = worker._compute_desc_ids(
+        block_ids=([1, 2], [7]),
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+        region_group_ids=[1, 1, 0],
+    )
+    assert remapped.tolist() == [21, 22, 7, 17]
+
 
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_uses_per_region_pool_capacity():
