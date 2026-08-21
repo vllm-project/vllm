@@ -580,18 +580,67 @@ def test_default_cudagraph_capture_size_covers_widest_uniform_decode(
     default_max_graph_size = (
         1024 if current_platform.is_device_capability_family(100) else 512
     )
-    size_ceiling = max(
-        default_max_graph_size,
-        min(max_num_seqs, default_max_graph_size) * decode_query_len,
-    )
-    expected_max_size = min(
+    token_grid_max = min(
         max_num_seqs * decode_query_len * 2,
-        size_ceiling,
+        default_max_graph_size,
     )
     widest_uniform_decode = max_num_seqs * decode_query_len
+    expected_max_size = max(token_grid_max, widest_uniform_decode)
     assert compilation_config.max_cudagraph_capture_size == expected_max_size
-    assert compilation_config.max_cudagraph_capture_size >= widest_uniform_decode
+    assert (
+        compilation_config.max_cudagraph_capture_size
+        == compilation_config.cudagraph_capture_sizes[-1]
+    )
     assert widest_uniform_decode in compilation_config.cudagraph_capture_sizes
+
+
+def test_default_cudagraph_capture_sizes_keep_token_grid_bounded():
+    """Keep the token grid bounded; only request counts may exceed the default.
+
+    This guards the measured 581 versus 100 capture-size regression at
+    max_num_seqs=512 with 16 draft tokens.
+    """
+    max_num_seqs = 512
+    decode_query_len = 17
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=16,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=False,
+    ):
+        default_max_graph_size = (
+            1024 if current_platform.is_device_capability_family(100) else 512
+        )
+        VllmConfig._set_cudagraph_sizes(config)
+
+    token_grid_max = min(max_num_seqs * decode_query_len * 2, default_max_graph_size)
+    token_grid = [size for size in [1, 2, 4] if size <= token_grid_max]
+    token_grid += list(range(8, min(token_grid_max + 1, 256), 8))
+    token_grid += list(range(256, token_grid_max + 1, 16))
+
+    max_request_count = min(max_num_seqs, default_max_graph_size)
+    request_counts = [count for count in [1, 2, 4] if count <= max_request_count]
+    request_counts += list(range(8, min(max_request_count + 1, 256), 8))
+    request_counts += list(range(256, max_request_count + 1, 16))
+    request_counts.append(max_request_count)
+    expected_sizes = sorted(
+        set(token_grid + [count * decode_query_len for count in request_counts])
+    )
+
+    assert compilation_config.cudagraph_capture_sizes == expected_sizes
+    assert all(
+        size <= default_max_graph_size or size % decode_query_len == 0
+        for size in compilation_config.cudagraph_capture_sizes
+    )
 
 
 @pytest.mark.parametrize("max_num_seqs", [8, 32, 256, 300, 512, 600, 1024, 2048])
@@ -619,7 +668,13 @@ def test_default_cudagraph_capture_size_unchanged_without_speculation(max_num_se
     ):
         VllmConfig._set_cudagraph_sizes(config)
 
-    assert compilation_config.max_cudagraph_capture_size == min(max_num_seqs * 2, 512)
+    default_max_graph_size = (
+        1024 if current_platform.is_device_capability_family(100) else 512
+    )
+    assert compilation_config.max_cudagraph_capture_size == min(
+        max_num_seqs * 2,
+        default_max_graph_size,
+    )
 
 
 def test_default_cudagraph_capture_size_covers_a_single_speculative_token():
@@ -645,12 +700,13 @@ def test_default_cudagraph_capture_size_covers_a_single_speculative_token():
     default_max_graph_size = (
         1024 if current_platform.is_device_capability_family(100) else 512
     )
-    expected_size_ceiling = max(
-        default_max_graph_size,
-        min(300, default_max_graph_size) * 2,
-    )
-    assert compilation_config.max_cudagraph_capture_size == min(
-        1200, expected_size_ceiling
+    token_grid_max = min(300 * 2 * 2, default_max_graph_size)
+    widest_uniform_decode = 300 * 2
+    expected_max_size = max(token_grid_max, widest_uniform_decode)
+    assert compilation_config.max_cudagraph_capture_size == expected_max_size
+    assert (
+        compilation_config.max_cudagraph_capture_size
+        == compilation_config.cudagraph_capture_sizes[-1]
     )
     assert 600 in compilation_config.cudagraph_capture_sizes
 
@@ -676,7 +732,16 @@ def test_default_cudagraph_capture_size_caps_requests_not_tokens():
     default_max_graph_size = (
         1024 if current_platform.is_device_capability_family(100) else 512
     )
-    assert compilation_config.max_cudagraph_capture_size == default_max_graph_size * 17
+    decode_query_len = 17
+    token_grid_max = min(1024 * decode_query_len * 2, default_max_graph_size)
+    widest_covered_decode = min(1024, default_max_graph_size) * decode_query_len
+    expected_max_size = max(token_grid_max, widest_covered_decode)
+    assert compilation_config.max_cudagraph_capture_size == expected_max_size
+    assert (
+        compilation_config.max_cudagraph_capture_size
+        == compilation_config.cudagraph_capture_sizes[-1]
+    )
+    assert expected_max_size == default_max_graph_size * 17
 
 
 def _widest_covered_request_count(capture_sizes, query_len, max_num_seqs):
@@ -778,17 +843,24 @@ def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
 
     VllmConfig._set_cudagraph_sizes(config)
 
-    # The platform ceiling is still clamped by the token budget.
+    # The token budget still clamps the final capture size.
     default_max_graph_size = (
         1024 if current_platform.is_device_capability_family(100) else 512
     )
-    expected_size_ceiling = max(
+    decode_query_len = 17
+    token_grid_max = min(
+        32 * decode_query_len * 2,
         default_max_graph_size,
-        min(32, default_max_graph_size) * 17,
     )
-    assert compilation_config.max_cudagraph_capture_size == min(
+    widest_capturable_decode = min(
+        32 * decode_query_len,
         512,
-        min(32 * 17 * 2, expected_size_ceiling),
+    )
+    expected_max_size = max(token_grid_max, widest_capturable_decode)
+    assert compilation_config.max_cudagraph_capture_size == expected_max_size
+    assert (
+        compilation_config.max_cudagraph_capture_size
+        == compilation_config.cudagraph_capture_sizes[-1]
     )
     assert 544 not in compilation_config.cudagraph_capture_sizes
 

@@ -1874,11 +1874,9 @@ class VllmConfig:
         ```python
         default_max_graph_size = 1024 if is_data_center_blackwell else 512
         decode_query_len = self.uniform_decode_query_len
-        size_ceiling = max(
-            default_max_graph_size,
-            min(max_num_seqs, default_max_graph_size) * decode_query_len,
+        max_graph_size = min(
+            max_num_seqs * decode_query_len * 2, default_max_graph_size
         )
-        max_graph_size = min(max_num_seqs * decode_query_len * 2, size_ceiling)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
         cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
@@ -1940,22 +1938,17 @@ class VllmConfig:
                 )
                 decode_query_len = self.uniform_decode_query_len
                 max_num_seqs = self.scheduler_config.max_num_seqs
-                size_ceiling = max(
-                    default_max_graph_size,
-                    min(max_num_seqs, default_max_graph_size) * decode_query_len,
-                )
                 max_cudagraph_capture_size = min(
-                    max_num_seqs * decode_query_len * 2, size_ceiling
+                    max_num_seqs * decode_query_len * 2, default_max_graph_size
                 )
                 if decode_query_len > 1:
                     # A speculative decode batch is decode_query_len tokens per
                     # request, so the widest one is far outside this ceiling.
-                    # It is covered by adding the decode sizes themselves rather
-                    # than by raising the ceiling: the range below is strided in
-                    # tokens, and extending it would multiply the whole grid --
-                    # at max_num_seqs=256 and 16 draft tokens, 51 entries become
-                    # 291, each captured for PIECEWISE and again as a FULL
-                    # decode descriptor.
+                    # Coverage comes from appending the decode sizes rather than
+                    # extending the token-strided grid. Extending that grid to
+                    # the widest decode size produces 581 sizes at
+                    # max_num_seqs=512 and 16 draft tokens, versus 100 with the
+                    # request-count grid.
                     #
                     # The grid would not buy decode coverage anyway. Dispatch
                     # requires an exact multiple of decode_query_len, so a
@@ -2072,8 +2065,10 @@ class VllmConfig:
                     and max_num_tokens not in cudagraph_capture_sizes
                 ):
                     cudagraph_capture_sizes.append(max_num_tokens)
-                # Not gated on max_cudagraph_capture_size: these deliberately
-                # reach past a ceiling that counts one token per request.
+                # These extend past the token-strided ceiling, which counts one
+                # token per request. valid_max_size below raises the final
+                # max_cudagraph_capture_size to the widest of them. They remain
+                # filtered by max_num_tokens.
                 cudagraph_capture_sizes += [
                     size for size in uniform_decode_sizes if size <= max_num_tokens
                 ]

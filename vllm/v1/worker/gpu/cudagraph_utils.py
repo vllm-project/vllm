@@ -30,6 +30,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
@@ -202,21 +203,23 @@ class CudaGraphManager:
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
         ):
-            num_spec_per_batch_size = (
-                speculative_config.num_speculative_tokens_per_batch_size
-            )
-            # uses_dynamic_speculative_decoding() guarantees this is set.
-            assert num_spec_per_batch_size is not None
             # decode_query_len = num_speculative_steps + num_new_sampled_tokens
             # _per_step. Recover num_new_sampled_tokens_per_step
             # from the values the manager already has.
             num_new_sampled_tokens_per_step = (
                 self.decode_query_len - self.vllm_config.num_speculative_tokens
             )
-            # Each entry is (range_start, range_end, num_speculative_tokens).
-            decode_query_lens = [
-                x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
-            ]
+            dense_schedule = build_dynamic_sd_schedule_lookup(
+                speculative_config.num_speculative_tokens_per_batch_size,
+                vllm_max_batch_size=self.max_num_reqs,
+                vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
+            )
+            decode_query_lens = sorted(
+                {
+                    num_spec + num_new_sampled_tokens_per_step
+                    for num_spec in dense_schedule[1:]
+                }
+            )
         else:
             decode_query_lens = [self.decode_query_len]
 
