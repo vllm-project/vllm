@@ -569,6 +569,115 @@ class TestRdtRouter:
             RdtRouter(4, 2, [[0, 1]], [0, 7], ["a", "b"], [2]).validate()
 
 
+class TestReplicaOverlay:
+    """[RDT-SHARE-SLOTS] Several inference deployments carve the same blocks.
+
+    The producer can serve R deployments out of ONE slot only if the R copies of
+    a worker meet on the same producer asking for the same bytes. Identical
+    plans give the second half for free; this is the first half. Carving over
+    the whole fleet instead spreads the multi-owner (replicated) names of
+    different deployments onto different producers, so a producer ends up
+    holding a ring per distinct worker index and nothing can merge.
+    """
+
+    def _fleet(
+        self,
+        num_producers,
+        workers,
+        replicas,
+        owner_sets=None,
+        name_owner_class=None,
+        n_names=6,
+    ):
+        names = [f"g{i}" for i in range(n_names)]
+        return (
+            RdtRouter(
+                num_producers,
+                workers * replicas,
+                owner_sets,
+                name_owner_class,
+                names,
+                [1] * n_names,
+                workers_per_replica=workers,
+            ),
+            names,
+        )
+
+    def test_every_replica_of_a_worker_resolves_the_same_producer(self):
+        r, names = self._fleet(16, 8, 4)
+        for worker in range(8):
+            for name in names:
+                picks = {r.producer_for(worker + rep * 8, name) for rep in range(4)}
+                assert len(picks) == 1, (
+                    f"worker {worker} split across producers {picks}"
+                )
+
+    def test_adding_a_deployment_does_not_move_the_first_one(self):
+        """The strongest form: an existing consumer's routes are byte-identical
+        before and after another deployment is provisioned."""
+        one, names = self._fleet(16, 8, 1)
+        two, _ = self._fleet(16, 8, 2)
+        for consumer_id in range(8):
+            assert [one.producer_for(consumer_id, n) for n in names] == [
+                two.producer_for(consumer_id, n) for n in names
+            ]
+
+    def test_one_deployment_is_the_historical_carve(self):
+        """Default (no width) and width == the whole fleet must agree with the
+        plain block rule, so a single-deployment fleet is untouched."""
+        plain = _router(16, 8, group_lens=[1] * 6)
+        explicit, names = self._fleet(16, 8, 1)
+        for consumer_id in range(8):
+            block = assign_producer_indices(16, 8, consumer_id)
+            for name in names:
+                assert plain.producer_for(consumer_id, name) == explicit.producer_for(
+                    consumer_id, name
+                )
+                assert explicit.producer_for(consumer_id, name) in block
+
+    def test_the_overlay_holds_for_partially_owned_names(self):
+        """Pipeline stages and experts too: two owner sets, one narrow. The
+        narrow one already forced agreement (one owner, no block to carve); the
+        wide one is what the carve decides."""
+        r, names = self._fleet(
+            8,
+            4,
+            2,
+            owner_sets=[[0, 1, 2, 3], [5]],
+            name_owner_class=[0, 1, 0, 1, 0, 1],
+        )
+        for worker in range(4):
+            for name in names:
+                assert r.producer_for(worker, name) == r.producer_for(worker + 4, name)
+        assert {r.producer_for(c, "g1") for c in range(8)} == {5}
+
+    def test_a_width_that_does_not_divide_the_fleet_raises(self):
+        """A uniform fleet is asserted upstream in ``get_world_size``; if it ever
+        is not, the overlay would map two workers of one deployment onto the same
+        block index, so refuse rather than serve the wrong bytes."""
+        with pytest.raises(ValueError, match="does not divide"):
+            RdtRouter(4, 6, None, None, ["a"], [1], workers_per_replica=4)
+
+    def test_pulls_still_carry_the_global_consumer_id(self):
+        """The carve uses the index WITHIN a deployment, but the wire must keep
+        the fleet-global id: it is what lets the producer tell the sharers of a
+        slot apart, and count their arrivals separately."""
+
+        class _Method:
+            def __init__(self):
+                self.calls = []
+
+            def remote(self, keys, consumer_id, seq):
+                self.calls.append((keys, consumer_id, seq))
+
+        r, _ = self._fleet(4, 2, 2)
+        methods = [_Method() for _ in range(4)]
+        r.bind([object()] * 4, methods, consumer_id=3)  # replica 1, worker 1
+        r.pull(2, ["k"], 7)
+
+        assert methods[2].calls == [(["k"], 3, 7)]
+
+
 # ---------------------------------------------------------------------------
 # Packed layout: the cross-process invariant
 # ---------------------------------------------------------------------------

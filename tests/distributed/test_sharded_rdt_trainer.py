@@ -69,9 +69,10 @@ class _FakeProducerServer:
     def inflight(self):
         return self._inflight_groups
 
-    def begin_sync(self, live_count):
+    def begin_sync(self, live_count, live_consumer_ids=None):
         self.order.append("begin")
         self.live_count = max(1, int(live_count))
+        self.live_ids = live_consumer_ids
 
     def publish_group(self, group_idx, entries):
         self.order.append("publish")
@@ -402,8 +403,8 @@ def test_sharded_rdt_begin_sync_carries_the_live_count(monkeypatch):
 
 class TestLiveCountPlumbing:
     """``send_weights(live_consumer_ids)`` -> the barrier target. The
-    provisioned geometry is frozen; a degraded sync only lowers the one integer
-    every owned group's barrier counts to."""
+    provisioned geometry is frozen; a degraded sync only lowers the target and
+    narrows each slot-sharing group's rendezvous."""
 
     @staticmethod
     def _engine(num_consumers, world=2, rank=0):
@@ -415,24 +416,24 @@ class TestLiveCountPlumbing:
         )
         engine.source = object()  # send_weights asserts a source is present
         received: list = []
-        engine._send_weights_inner = received.append
+        engine._send_weights_inner = lambda count, ids: received.append((count, ids))
         return engine, received
 
     def test_none_counts_the_whole_provisioned_fleet(self):
         engine, got = self._engine(num_consumers=8)
         engine.send_weights(None)
-        assert got == [8]
+        assert got == [(8, list(range(8)))]
 
     def test_a_live_set_counts_its_distinct_members(self):
         engine, got = self._engine(num_consumers=8)
         engine.send_weights([0, 1, 4, 5, 5])
-        assert got == [4]
+        assert got == [(4, [0, 1, 4, 5])]
 
     def test_a_full_live_set_matches_the_provisioned_count(self):
         engine, got = self._engine(num_consumers=8)
         engine.send_weights(list(range(8)))
         engine.send_weights(None)
-        assert got == [8, 8]
+        assert got == [(8, list(range(8)))] * 2
 
     def test_which_consumers_died_does_not_matter_only_how_many(self):
         """The whole point of the barrier: no routed per-producer targets, so
@@ -441,8 +442,17 @@ class TestLiveCountPlumbing:
         for live in ([0, 1, 2, 3], [4, 5, 6, 7], [0, 2, 4, 6]):
             engine, got = self._engine(num_consumers=8)
             engine.send_weights(live)
-            counts += got
+            counts += [c for c, _ids in got]
         assert counts == [4, 4, 4]
+
+    def test_the_live_ids_travel_with_the_count(self):
+        """The count sizes the free barrier, the ids size the slot-sharing
+        rendezvous, so a producer that shares slots can tell WHICH consumers it
+        is still waiting for. They must describe the same set."""
+        engine, got = self._engine(num_consumers=8)
+        engine.send_weights([6, 0, 2, 2])
+        ((count, ids),) = got
+        assert ids == [0, 2, 6] and count == len(ids)
 
 
 def test_sharded_rdt_worker_init_info_carries_the_ownership_table(monkeypatch):
