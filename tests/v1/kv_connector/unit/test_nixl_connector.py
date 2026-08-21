@@ -570,6 +570,58 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
 
 
 class TestNixlHandshake:
+    @pytest.mark.parametrize("pcp_rank", [0, 1])
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_pcp_producer_uses_canonical_replica(
+        self, default_vllm_config, dist_init, pcp_rank
+    ):
+        """Only PCP rank zero publishes and reports sending completion."""
+        vllm_config = create_vllm_config(kv_role="kv_producer")
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+        with (
+            patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
+                "base_worker.get_current_attn_backends",
+                return_value=[FlashAttentionBackend],
+            ),
+            patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
+                "base_worker.get_pcp_group"
+            ) as mock_get_pcp_group,
+        ):
+            mock_get_pcp_group.return_value.rank_in_group = pcp_rank
+            connector = NixlConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                make_kv_cache_config(block_size=16),
+            )
+
+        worker = connector.connector_worker
+        assert worker is not None
+        assert worker.pcp_rank == pcp_rank
+
+        req_id = "req"
+        metadata = NixlConnectorMetadata()
+        metadata.reqs_in_batch.add(req_id)
+        metadata.reqs_to_send[req_id] = time.perf_counter() + 10
+        worker.start_load_kv(metadata)
+        expected_tracked = pcp_rank == 0
+        assert (req_id in worker._reqs_to_process) == expected_tracked
+        assert (req_id in worker._reqs_to_send) == expected_tracked
+
+        payload = MagicMock(spec=NixlHandshakePayload)
+        worker.xfer_handshake_metadata = payload
+        worker.get_finished = MagicMock(return_value=({"sent"}, set()))
+
+        expected_payload = payload if pcp_rank == 0 else None
+        assert connector.get_handshake_metadata() is expected_payload
+        done_sending, done_recving = connector.get_finished(set())
+        assert done_sending == ({"sent"} if pcp_rank == 0 else set())
+        assert done_recving == set()
+
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
