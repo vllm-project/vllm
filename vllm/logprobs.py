@@ -75,21 +75,21 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         self,
         token_ids: list[int],
         logprobs: list[float],
-        ranks: itertools.chain[int],
-        decoded_tokens: Iterable[str | None],
+        ranks: list[int | None],
+        decoded_tokens: list[str | None],
     ) -> None:
         """
         Appends logprobs for the next position without creating
         the intermediate logprob dictionary.
+
+        All inputs must be pre-sliced to the correct length
+        (num_logprobs + 1).
         """
         self.start_indices.append(len(self.logprobs))
-        for token_id, logprob, rank, decoded_token in zip(
-            token_ids, logprobs, ranks, decoded_tokens
-        ):
-            self.token_ids.append(token_id)
-            self.logprobs.append(logprob)
-            self.ranks.append(rank)
-            self.decoded_tokens.append(decoded_token)
+        self.token_ids.extend(token_ids)
+        self.logprobs.extend(logprobs)
+        self.ranks.extend(ranks)
+        self.decoded_tokens.extend(decoded_tokens)
         self.end_indices.append(len(self.logprobs))
 
     def extend(self, logprobs_multi_positions) -> None:
@@ -186,12 +186,23 @@ def append_logprobs_for_next_position(
     # We do not need a special case for the sampled token
     # being in the topk, since inserting duplicated data
     # into a dictionary twice is the same as doing it once.
-    topk_ranks = range(1, num_logprobs + 1)
-    ranks = itertools.chain((rank,), topk_ranks)
+    # n = number of items to store (sampled + top-k), capped by input size.
+    n = min(num_logprobs + 1, len(token_ids))
 
     if isinstance(request_logprobs, FlatLogprobs):
-        request_logprobs.append_fast(token_ids, logprobs, ranks, decoded_tokens)
+        # Pre-slice inputs and materialize ranks for bulk extend.
+        if len(token_ids) > n:
+            token_ids = token_ids[:n]
+            logprobs = logprobs[:n]
+        if isinstance(decoded_tokens, list):
+            decoded_tokens = decoded_tokens[:n]
+        else:
+            decoded_tokens = list(itertools.islice(decoded_tokens, n))
+        ranks_list: list[int | None] = [rank, *range(1, n)] if n > 0 else []
+        request_logprobs.append_fast(token_ids, logprobs, ranks_list, decoded_tokens)
     else:
+        topk_ranks = range(1, n)
+        ranks = itertools.chain((rank,), topk_ranks)
         request_logprobs.append(
             {
                 token_id: Logprob(
