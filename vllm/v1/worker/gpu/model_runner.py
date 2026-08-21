@@ -779,6 +779,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+            attn_metadata, slot_mappings_by_layer = (
+                pcp._maybe_prepare_replicated_pcp_attn(
+                    self.pcp_manager,
+                    self.speculator,
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings_by_layer,
+                    skip_attn=skip_attn,
+                )
+            )
             with use_workspace_lane(self._draft_workspace_lane):
                 self.speculator.propose(
                     input_batch=input_batch,
@@ -1916,6 +1926,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     pre_hc_hidden_states,
                 )
                 spec_hidden_states = spec_hidden_states[: hidden_states.shape[0]]
+            attn_metadata, slot_mappings_by_layer = (
+                pcp._maybe_prepare_replicated_pcp_attn(
+                    self.pcp_manager,
+                    self.speculator,
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings_by_layer,
+                )
+            )
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
