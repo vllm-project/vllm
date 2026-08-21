@@ -941,7 +941,6 @@ def init_mxfp6_linear_kernel(
                 f"--linear-backend={linear_backend} was requested but no "
                 f"'{linear_backend}' kernel exists for MXFP6 layers."
             )
-        possible = filtered
 
     failure_reasons = []
     for kernel_cls in possible:

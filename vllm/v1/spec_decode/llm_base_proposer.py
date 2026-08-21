@@ -1564,11 +1564,19 @@ class SpecDecodeBaseProposer:
                 )
         else:
             # MTP model
-            share_lm_head = True
-            logger.info(
-                "Detected MTP model. "
-                "Sharing target model lm_head weights with the draft model."
-            )
+            import os as _os
+            share_lm_head = _os.environ.get("VLLM_MTP_NO_SHARE_LMHEAD") is None
+            if share_lm_head:
+                logger.info(
+                    "Detected MTP model. "
+                    "Sharing target model lm_head weights with the draft model."
+                )
+            else:
+                logger.info(
+                    "Detected MTP model. "
+                    "Keeping a separate lm_head for the draft model "
+                    "(VLLM_MTP_NO_SHARE_LMHEAD is set)."
+                )
 
         if share_lm_head and hasattr(target_language_model, "lm_head"):
             if hasattr(self.model, "lm_head"):

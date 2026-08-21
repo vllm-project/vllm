@@ -879,6 +879,75 @@ class TestPostprocessMambaFusedKernel:
         torch.testing.assert_close(conv_state, conv_state_orig)
         torch.testing.assert_close(temporal_state, temporal_state_orig)
 
+    @pytest.mark.parametrize(
+        ("num_computed", "source_col", "destination_col", "conv_unchanged"),
+        [
+            (60, 1, 3, True),  # destination is an in-row NULL_BLOCK_ID
+            (76, 1, 4, True),  # destination is the next row's first column
+            (60, 4, 3, True),  # source is the next row's first column
+            (60, 3, 3, False),  # temporal bias crosses into the next row
+        ],
+    )
+    def test_invalid_block_table_lookup_does_not_copy_state(
+        self,
+        device,
+        num_computed,
+        source_col,
+        destination_col,
+        conv_unchanged,
+    ):
+        """Invalid columns and NULL_BLOCK_ID must not reach state address math."""
+        cfg = _TestConfig(num_blocks=8)
+        layer_names = ["layer_0"]
+        kv_cache_config = _make_kv_cache_config(cfg, layer_names)
+        conv_state = torch.randn(
+            cfg.num_blocks,
+            cfg.conv_width,
+            cfg.conv_inner_dim,
+            dtype=cfg.dtype,
+            device=device,
+        )
+        temporal_state = torch.randn(
+            cfg.num_blocks,
+            cfg.temporal_state_dim,
+            dtype=cfg.dtype,
+            device=device,
+        )
+        conv_before = conv_state.clone()
+        temporal_before = temporal_state.clone()
+        forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+
+        block_table_storage = torch.zeros(2, 4, dtype=torch.int32, device=device)
+        block_table_storage[0, 1] = 1
+        if destination_col < block_table_storage.stride(0):
+            is_null_destination = (
+                destination_col == 3 and num_computed == 60 and source_col == 1
+            )
+            block_table_storage[0, destination_col] = 0 if is_null_destination else 3
+        block_table_storage[1, 0] = 2
+
+        _run_gpu_postprocess(
+            gpu_ctx,
+            kv_cache_config=kv_cache_config,
+            forward_context=forward_context,
+            copy_funcs=_COPY_FUNCS,
+            block_table=block_table_storage[:1],
+            req_ids=["req_0"],
+            num_accepted_tokens=[3],
+            mamba_state_idx=[source_col],
+            num_scheduled_tokens={"req_0": 3},
+            num_computed_tokens=[num_computed],
+            num_draft_tokens={},
+            device=device,
+        )
+
+        expected_destination = (num_computed + 3 + 3 - 1) // cfg.block_size - 1
+        assert expected_destination == destination_col
+        if conv_unchanged:
+            torch.testing.assert_close(conv_state, conv_before)
+        torch.testing.assert_close(temporal_state, temporal_before)
+
     @pytest.mark.parametrize("num_reqs", [1, 2, 8, 16])
     def test_various_batch_sizes(self, device, test_config, num_reqs):
         """Verify kernel works correctly with different batch sizes."""
