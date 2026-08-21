@@ -22,6 +22,7 @@ from vllm.config import (
     HiSparseConfig,
     KernelConfig,
     ModelConfig,
+    ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
     SchedulerConfig,
@@ -85,6 +86,19 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def test_per_request_spec_decode_metrics_requires_spec_decode():
+    # The flag only makes sense with speculative decoding configured; enabling
+    # it without --speculative-config should fail fast rather than silently
+    # produce no metrics.
+    for level in ("summary", "detailed"):
+        with pytest.raises(ValueError, match="speculative"):
+            VllmConfig(
+                observability_config=ObservabilityConfig(
+                    per_request_spec_decode_metrics=level
+                )
+            )
 
 
 def test_compile_config_repr_succeeds():
@@ -237,6 +251,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ),
     )
     config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash2_draft = lambda: False
     config._is_default_v2_model_runner_model = lambda: (
         VllmConfig._is_default_v2_model_runner_model(config)
     )
@@ -328,6 +343,29 @@ def test_v2_model_runner_supports_extract_hidden_states():
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
+
+
+def test_dflash2_draft_forces_v2_model_runner():
+    """A DFlash2 draft must reach the V2 speculator, the only one that runs its
+    candidate selector; on V1 it would draft as DFlash1 without raising."""
+
+    def config(method, architectures):
+        return SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method=method,
+                draft_model_config=SimpleNamespace(architectures=architectures),
+            )
+        )
+
+    assert VllmConfig._is_dflash2_draft(config("dflash", ["DFlash2DraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(config("dflash", ["DFlashDraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(config("eagle", ["DFlash2DraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(SimpleNamespace(speculative_config=None))
+    assert not VllmConfig._is_dflash2_draft(
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
+        )
+    )
 
 
 @pytest.mark.parametrize(
