@@ -36,7 +36,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
 
 class _RecordingBlockHashes:
@@ -173,7 +174,7 @@ def _make_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMeta:
     return ReqMeta(
         req_id=req_id,
         token_len_chunk=32,
-        block_ids=([0, 1],),
+        block_ids=([1, 2],),
         block_hashes=block_hashes,
         can_save=True,
     )
@@ -183,7 +184,7 @@ def _make_multi_group_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMe
     return ReqMeta(
         req_id=req_id,
         token_len_chunk=32,
-        block_ids=([0, 1], [2, 3]),
+        block_ids=([1, 2], [3, 4]),
         block_hashes=block_hashes,
         can_save=True,
     )
@@ -230,6 +231,7 @@ def _make_vllm_config(
     extra_config: dict[str, object] | None = None,
     rank: int = 0,
     decode_context_parallel_size: int = 1,
+    kv_role: str = "kv_both",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
@@ -240,7 +242,9 @@ def _make_vllm_config(
             decode_context_parallel_size=decode_context_parallel_size,
             prefill_context_parallel_size=1,
         ),
-        kv_transfer_config=_FakeKVTransferConfig(extra_config=extra_config),
+        kv_transfer_config=_FakeKVTransferConfig(
+            kv_role=kv_role, extra_config=extra_config
+        ),
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=10),
         kv_events_config=SimpleNamespace(enable_kv_cache_events=False),
         speculative_config=None,
@@ -514,7 +518,7 @@ def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -540,7 +544,7 @@ def test_store_sending_thread_delta_strides_with_local_phase():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -566,7 +570,7 @@ def test_tp_sharded_group_saves_every_block_on_every_rank():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -592,7 +596,7 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=16,
-            block_ids=([0],),
+            block_ids=([1],),
             block_hashes=[b"a0"],
             can_save=True,
         ),
@@ -611,7 +615,7 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -683,6 +687,69 @@ def test_partial_tail_offload_skips_null_source_blocks():
     assert addrs == [[0x1000 + 2 * 256], [0x1000 + 3 * 256]]
 
 
+def test_store_sending_thread_skips_null_sparse_group_blocks():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = (
+        lambda keys, addrs, sizes, replicate_config: [256] * len(keys)
+    )
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=16,
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([256])
+    db_mamba = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+    )
+    db_mamba.set_kv_caches_base_addr([0x2000])
+    db_mamba.set_block_len([512])
+
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db_full, db_mamba],
+    )
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=48,
+            block_ids=([1, 2, 3], [NULL_BLOCK_ID, 4, NULL_BLOCK_ID]),
+            block_hashes=[b"a0", b"a1", b"a2"],
+            can_save=True,
+        ),
+    )
+
+    keys, addrs, _, _ = store.batch_put_from_multi_buffers.call_args.args
+    mamba_keys = [key for key in keys if "@group:1" in key]
+    assert [key.rsplit("@", 1)[-1] for key in mamba_keys] == [b"a1".hex()]
+    assert all(addr[0] >= 0x2000 for key, addr in zip(keys, addrs) if "@group:1" in key)
+
+
 def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
     store = MagicMock()
     store.batch_is_exist.return_value = [1, 0, 0]
@@ -749,7 +816,7 @@ def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
-            block_ids=([0, 1, 2, 3],),
+            block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
         ),
@@ -856,7 +923,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
         ReqMeta(
             req_id="req-a",
             token_len_chunk=48,
-            block_ids=([0, 1, 2], [2, 1, 0]),
+            block_ids=([1, 2, 3], [3, 2, 1]),
             block_hashes=[b"a0", b"a1", b"a2"],
             can_save=True,
         ),
@@ -864,8 +931,8 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
 
     db0.prepare_value.assert_not_called()
     db1.prepare_value.assert_not_called()
-    db0.prepare_values.assert_called_once_with([(0, 16), (32, 48)], [0, 1, 2])
-    db1.prepare_values.assert_called_once_with([(16, 32), (32, 48)], [2, 1, 0])
+    db0.prepare_values.assert_called_once_with([(0, 16), (32, 48)], [1, 2, 3])
+    db1.prepare_values.assert_called_once_with([(16, 32), (32, 48)], [3, 2, 1])
 
     keys, addrs, sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     assert [key.rsplit("@", 1)[-1] for key in keys] == [
@@ -874,7 +941,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
         "6131",
         "6132",
     ]
-    assert addrs == [[0x1000], [0x1200], [0x2200], [0x2000]]
+    assert addrs == [[0x1100], [0x1300], [0x2400], [0x2200]]
     assert sizes == [[256], [256], [512], [512]]
 
 
@@ -943,15 +1010,20 @@ def test_stale_store_job_cannot_touch_a_reused_request_id():
     live = _make_store_req("req-a", [b"a0", b"a1"])
     live.store_job_id = 2
     thread.add_request(live)
+    thread._retry_token_ids["req-a"] = (32, list(range(32, 64)))
 
     thread.finish_store_job(stale)
     thread._record_saved(stale, 64)
     thread._mark_request_skipped_for_pressure(stale)
+    thread._update_retry_token_ids(stale, False, 0, list(range(32)))
+    thread._update_retry_token_ids(stale, True, 0, None)
 
     assert thread.is_live_store_job(live)
     assert not thread.is_live_store_job(stale)
     assert thread._saved_offset.get("req-a") is None
     assert "req-a" not in thread._skip_store_requests
+    assert thread._get_retry_token_ids(stale) is None
+    assert thread._get_retry_token_ids(live) == (32, list(range(32, 64)))
 
 
 def test_store_recving_thread_reports_failed_block_ids():
@@ -1242,7 +1314,7 @@ def test_store_sending_thread_multiple_segments_share_logical_group_id():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
     ]
-    assert addrs == [[0x1000, 0x2000], [0x1100, 0x2100]]
+    assert addrs == [[0x1100, 0x2100], [0x1200, 0x2200]]
     assert sizes == [[256, 256], [256, 256]]
     assert config.group_ids == [
         "vllm-mooncake-store:test-model@6130",
@@ -1293,7 +1365,7 @@ def test_store_sending_thread_group_ids_share_across_kv_cache_groups():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6130",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6131",
     ]
-    assert addrs == [[0x1000], [0x1100], [0x3200], [0x3300]]
+    assert addrs == [[0x1100], [0x1200], [0x3300], [0x3400]]
     assert sizes == [[256], [256], [256], [256]]
     # Different vLLM KV cache groups for the same prefix chunk share the
     # same Mooncake lifecycle group id.
@@ -1655,6 +1727,39 @@ def test_requester_worker_init_skips_disk_budget_when_offload_disabled(
     assert w.disk_offload_buffer_budget_bytes is None
 
 
+def test_save_decode_cache_keeps_transfer_path_enabled(tmp_path, monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(
+            kv_role="kv_consumer",
+            extra_config={
+                "enable_lookup": False,
+                "save_decode_cache": True,
+            },
+        ),
+        _make_kv_cache_config(),
+    )
+
+    assert w.can_put is True
+    assert w._capacity_only is False
+
+
 def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
     tmp_path,
     monkeypatch,
@@ -1894,7 +1999,7 @@ def test_store_sending_thread_clamps_token_len_to_lcm():
         ReqMeta(
             req_id="r0",
             token_len_chunk=33,
-            block_ids=([0, 1, 2],),
+            block_ids=([1, 2, 3],),
             block_hashes=[b"a0", b"a1", b"a2"],
             can_save=True,
         ),
@@ -1933,7 +2038,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
-            block_ids=([0, 1],),
+            block_ids=([1, 2],),
             block_hashes=[b"a0", b"a1"],
             can_save=True,
         ),
@@ -1962,7 +2067,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = (
-        lambda keys, addrs, sizes, *_args: [256] * len(keys)
+        lambda keys, addrs, sizes, *_args: ([256] * len(keys))
     )
 
     full_spec = FullAttentionSpec(
@@ -2009,7 +2114,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
         ReqMeta(
             req_id="r0",
             token_len_chunk=64,
-            block_ids=([0, 1], list(range(8))),
+            block_ids=([1, 2], list(range(1, 9))),
             block_hashes=hs,
             can_save=True,
         ),
@@ -2085,7 +2190,7 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
         ReqMeta(
             req_id="r0",
             token_len_chunk=64,
-            block_ids=([0, 1], list(range(8))),
+            block_ids=([1, 2], list(range(1, 9))),
             block_hashes=hs,
             can_save=True,
         ),
@@ -2155,7 +2260,7 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
-            block_ids=([0], list(range(4))),
+            block_ids=([1], list(range(1, 5))),
             block_hashes=hs,
             can_save=True,
             token_ids=list(range(32)),
@@ -2174,6 +2279,85 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     assert swa_event.block_size == 8
     assert swa_event.token_ids == list(range(24, 32))
     assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
+
+
+def _make_event_store_req(token_len: int, token_ids_start: int = 0) -> ReqMeta:
+    num_blocks = token_len // 16
+    return ReqMeta(
+        req_id="r0",
+        token_len_chunk=token_len,
+        block_ids=(list(range(1, num_blocks + 1)),),
+        block_hashes=[f"a{i}".encode() for i in range(num_blocks)],
+        can_save=True,
+        token_ids=list(range(token_ids_start, token_len)),
+        token_ids_start=token_ids_start,
+    )
+
+
+@pytest.mark.parametrize(
+    ("saved_offset", "put_step", "exists", "stored_indices", "parent_indices"),
+    [
+        pytest.param(16, 1, [0, 0, 0], [1, 2, 3], [0, 1, 2], id="suffix"),
+        pytest.param(0, 1, [1, 0, 1, 0], [1, 3], [0, 2], id="dedup-holes"),
+        pytest.param(0, 2, [0, 0], [0, 2], [None, 1], id="tp-stride"),
+    ],
+)
+def test_store_sending_thread_kv_events_use_request_chain_parents(
+    saved_offset, put_step, exists, stored_indices, parent_indices
+):
+    store = MagicMock()
+    store.batch_is_exist.return_value = exists
+    store.batch_put_from_multi_buffers.return_value = [256] * len(stored_indices)
+    thread = _make_store_sending_thread(store, put_step=put_step)
+    thread.enable_kv_event = True
+
+    thread._saved_offset["r0"] = saved_offset
+    _run_store_req(thread, _make_event_store_req(64, saved_offset))
+
+    events = thread.get_kv_events()
+    assert [event.block_hashes for event in events] == [
+        [maybe_convert_block_hash(BlockHash(f"a{i}".encode()))] for i in stored_indices
+    ]
+    assert [event.parent_block_hash for event in events] == [
+        (None if i is None else maybe_convert_block_hash(BlockHash(f"a{i}".encode())))
+        for i in parent_indices
+    ]
+    assert thread._retry_token_ids == {}
+
+
+def test_store_sending_thread_kv_events_retry_without_covered_tokens():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+
+    _run_store_req(thread, _make_event_store_req(32, 16))
+
+    retry_event, suffix_event = thread.get_kv_events()
+    assert retry_event.token_ids == []
+    assert suffix_event.token_ids == list(range(16, 32))
+
+
+def test_store_sending_thread_kv_events_recover_suffix_after_put_failure():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = ([0], [0, 0])
+    store.batch_put_from_multi_buffers.side_effect = ([-1], [256, 256])
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+
+    _run_store_req(thread, _make_event_store_req(16))
+
+    assert thread.get_kv_events() == []
+    assert thread._retry_token_ids["r0"] == (0, list(range(16)))
+
+    _run_store_req(thread, _make_event_store_req(32, 16))
+
+    retry_event, suffix_event = thread.get_kv_events()
+    assert retry_event.token_ids == list(range(16))
+    assert suffix_event.token_ids == list(range(16, 32))
+    assert thread._retry_token_ids == {}
+    assert thread._saved_offset["r0"] == 32
 
 
 def _auto_set_ready_event(*args, **kwargs):
@@ -2214,6 +2398,7 @@ def _make_bare_worker(
     num_gpu_blocks: int = 10,
     block_size: int = 16,
     kv_role: str = "kv_both",
+    save_decode_cache: bool = False,
 ) -> mooncake_store_worker.MooncakeStoreWorker:
     """Construct a MooncakeStoreWorker via __new__, bypassing __init__.
 
@@ -2227,14 +2412,17 @@ def _make_bare_worker(
     worker.store = MagicMock()
     worker.store.register_buffer.return_value = 0
     worker.kv_role = kv_role
+    worker.can_put = kv_role in ("kv_producer", "kv_both") or save_decode_cache
     worker._capacity_only = False
     worker.block_size = block_size
     worker.tp_rank = 0
     worker.enable_kv_events = False
+    worker.load_async = True
     worker.kv_send_thread = None
     worker.kv_recv_threads = []
     worker.num_recv_threads = 1
     worker.recv_request_queue = queue.Queue()
+    worker.finished_store_req = set()
     worker.tp_size = 1
     worker.num_kv_head = 1
     worker.pp_size = 1
@@ -2741,6 +2929,36 @@ def test_lookup_applies_swa_mask_before_accessing_hashes():
 # ---------------------------------------------------------------------------
 # register_kv_caches tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("save_decode_cache", [False, True])
+def test_consumer_starts_send_thread_only_when_put_is_enabled(save_decode_cache):
+    num_blocks = 10
+    tensor = torch.zeros(num_blocks, 64, dtype=torch.float16)
+
+    worker = _make_bare_worker(
+        kv_role="kv_consumer", save_decode_cache=save_decode_cache
+    )
+    _register_with_mocked_threads(worker, {"layer0": tensor})
+    assert (worker.kv_send_thread is not None) == save_decode_cache
+
+
+def test_putting_consumer_queues_decode_save():
+    w = _make_bare_worker(kv_role="kv_consumer", save_decode_cache=True)
+    send_thread = MagicMock()
+    w.kv_send_thread = send_thread
+    req = _make_store_req("decode-req", [b"h0", b"h1"])
+    req.store_job_id = 1
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    meta.add_request(req)
+
+    with patch.object(torch.cuda, "Event") as event_cls:
+        event = event_cls.return_value
+        w.get_finished(set(), meta)
+
+    event.record.assert_called_once_with()
+    send_thread.add_request.assert_called_once_with(req)
+    assert req.current_event is event
 
 
 def test_register_kv_caches_blocks_first_single_segment():
