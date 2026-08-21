@@ -222,7 +222,13 @@ class QuarkConfig(QuantizationConfig):
         if method_cls is QuarkKVCacheMethod:
             return QuarkKVCacheMethod(self)
         if method_cls is not None and issubclass(method_cls, QuarkMoEMethod):
-            return QuarkMoEMethod.get_moe_method(self, module=layer, layer_name=prefix)
+            return QuarkMoEMethod.get_moe_method(
+                self,
+                module=layer,
+                method_cls=method_cls,
+                weight_quant_key=weight_quant_key,
+                act_quant_key=act_quant_key,
+            )
 
         return None
 

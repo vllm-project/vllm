@@ -177,20 +177,10 @@ class QuarkMoEMethod(FusedMoEMethodBase):
     def get_moe_method(
         quant_config: "QuarkConfig",  # type: ignore # noqa E501 # noqa F821
         module: RoutedExperts,
-        layer_name: str,
+        method_cls: type["QuarkMoEMethod"],
+        weight_quant_key: QuantKey | None,
+        act_quant_key: QuantKey | None,
     ) -> "QuarkMoEMethod":
-        layer_quant_config = quant_config._find_matched_config(layer_name, module)
-
-        if layer_quant_config.get("output_tensors") or layer_quant_config.get("bias"):
-            raise NotImplementedError(
-                "Currently, Quark models with "
-                "output_tensors and bias "
-                "quantized are not supported"
-            )
-
-        weight_quant_key, act_quant_key, method_cls = (
-            QuarkMoEMethod.get_moe_method_target(quant_config, type(module), layer_name)
-        )
         if weight_quant_key is None:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
