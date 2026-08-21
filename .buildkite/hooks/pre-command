@@ -29,10 +29,18 @@ if [[ "${BUILDKITE_STEP_KEY:-}" == "image-build" ]]; then
   (
     trap '' PIPE
     sleep 25
+    n=0
     while true; do
       if [ -s "$SFILE" ]; then
+        n=$((n+1))
+        cp "$SFILE" "/tmp/hbsample-latest.log"
+        (cd /tmp && buildkite-agent artifact upload "hbsample-latest.log" \
+          >> "$SFILE.shiplog" 2>&1) || echo "upload $n failed" >> "$SFILE.shiplog"
         printf '```\n%s\n```\n' "$(tail -c 60000 "$SFILE")" | \
-          buildkite-agent annotate --context hbsample --style info >/dev/null 2>&1
+          buildkite-agent annotate --context hbsample --style info \
+          >> "$SFILE.shiplog" 2>&1 || echo "annotate $n failed" >> "$SFILE.shiplog"
+        (cd /tmp && cp "$SFILE.shiplog" hbsample-shiplog.log && \
+          buildkite-agent artifact upload "hbsample-shiplog.log" >/dev/null 2>&1)
       fi
       sleep 30
     done
