@@ -3244,7 +3244,9 @@ def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
 
 def _make_scheduler_for_structured_output_advance(
     request: Request,
+    sampled_token_ids: list[int] | None = None,
 ) -> tuple[Scheduler, SchedulerOutput, ModelRunnerOutput]:
+    sampled_token_ids = sampled_token_ids or [10]
     scheduler = object.__new__(Scheduler)
     scheduler.perf_metrics = None
     scheduler.connector = None
@@ -3283,8 +3285,8 @@ def _make_scheduler_for_structured_output_advance(
     output = SchedulerOutput(
         scheduled_new_reqs=[],
         scheduled_cached_reqs=CachedRequestData.make_empty(),
-        num_scheduled_tokens={request.request_id: 1},
-        total_num_scheduled_tokens=1,
+        num_scheduled_tokens={request.request_id: len(sampled_token_ids)},
+        total_num_scheduled_tokens=len(sampled_token_ids),
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={},
         num_common_prefix_blocks=[],
@@ -3295,7 +3297,7 @@ def _make_scheduler_for_structured_output_advance(
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id],
         req_id_to_index={request.request_id: 0},
-        sampled_token_ids=[[123]],
+        sampled_token_ids=[sampled_token_ids],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -3318,6 +3320,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
     request.structured_output_request.grammar.accept_tokens.return_value = False
+    request.structured_output_request.grammar.validate_tokens.return_value = [10]
     request.structured_output_request.grammar.is_terminated.return_value = False
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
@@ -3327,8 +3330,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
+    request.structured_output_request.grammar.validate_tokens.assert_not_called()
     request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
-        request.request_id, [123]
+        request.request_id, [10]
     )
     assert request.resumable is False
     assert request.status == RequestStatus.FINISHED_ERROR
@@ -3338,7 +3342,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert len(engine_core_outputs[0].outputs) == 1
     engine_core_output = engine_core_outputs[0].outputs[0]
     assert engine_core_output.request_id == request.request_id
-    assert engine_core_output.new_token_ids == [123]
+    assert engine_core_output.new_token_ids == [10]
     assert engine_core_output.finish_reason == FinishReason.ERROR
 
 
@@ -3357,6 +3361,7 @@ def test_stop_request_when_terminated_structured_output_rejects_next_token():
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
     request.structured_output_request.grammar.accept_tokens.return_value = False
+    request.structured_output_request.grammar.validate_tokens.return_value = []
     request.structured_output_request.grammar.is_terminated.return_value = True
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
@@ -3366,8 +3371,9 @@ def test_stop_request_when_terminated_structured_output_rejects_next_token():
     )
     engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
+    request.structured_output_request.grammar.validate_tokens.assert_not_called()
     request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
-        request.request_id, [123]
+        request.request_id, [10]
     )
     request.structured_output_request.grammar.is_terminated.assert_called_once()
     assert request.status == RequestStatus.FINISHED_STOPPED
@@ -3380,6 +3386,51 @@ def test_stop_request_when_terminated_structured_output_rejects_next_token():
     engine_core_output = engine_core_outputs[0].outputs[0]
     assert engine_core_output.request_id == request.request_id
     assert engine_core_output.new_token_ids == []
+    assert engine_core_output.finish_reason == FinishReason.STOP
+
+
+@pytest.mark.skip_global_cleanup
+def test_stop_request_when_structured_output_rejects_after_accepted_prefix():
+    sampling_params = SamplingParams(ignore_eos=True, max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+
+    request = Request(
+        request_id="0",
+        prompt_token_ids=[0, 1],
+        mm_features=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    request.structured_output_request = Mock()
+    request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
+    request.structured_output_request.grammar.validate_tokens.return_value = [10]
+    request.structured_output_request.grammar.accept_tokens.return_value = True
+    request.structured_output_request.grammar.is_terminated.return_value = True
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = request.num_tokens
+
+    scheduler, output, model_runner_output = (
+        _make_scheduler_for_structured_output_advance(request, [10, 11])
+    )
+    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
+
+    request.structured_output_request.grammar.validate_tokens.assert_called_once_with(
+        [10, 11]
+    )
+    request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
+        request.request_id, [10]
+    )
+    request.structured_output_request.grammar.is_terminated.assert_called_once()
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert list(request.output_token_ids) == [10]
+    assert list(request.all_token_ids) == [0, 1, 10]
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.running
+    scheduler._free_request.assert_called_once_with(request)
+    assert len(engine_core_outputs[0].outputs) == 1
+    engine_core_output = engine_core_outputs[0].outputs[0]
+    assert engine_core_output.request_id == request.request_id
+    assert engine_core_output.new_token_ids == [10]
     assert engine_core_output.finish_reason == FinishReason.STOP
 
 
@@ -3397,6 +3448,7 @@ def test_stop_request_when_structured_output_fsm_terminates():
     )
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
+    request.structured_output_request.grammar.validate_tokens.return_value = [10]
     request.structured_output_request.grammar.accept_tokens.return_value = True
     request.structured_output_request.grammar.is_terminated.return_value = True
     request.status = RequestStatus.RUNNING
@@ -3408,7 +3460,7 @@ def test_stop_request_when_structured_output_fsm_terminates():
     engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
     request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
-        request.request_id, [123]
+        request.request_id, [10]
     )
     request.structured_output_request.grammar.is_terminated.assert_called_once()
     assert request.status == RequestStatus.FINISHED_STOPPED
@@ -3418,7 +3470,7 @@ def test_stop_request_when_structured_output_fsm_terminates():
     assert len(engine_core_outputs[0].outputs) == 1
     engine_core_output = engine_core_outputs[0].outputs[0]
     assert engine_core_output.request_id == request.request_id
-    assert engine_core_output.new_token_ids == [123]
+    assert engine_core_output.new_token_ids == [10]
     assert engine_core_output.finish_reason == FinishReason.STOP
 
 
