@@ -41,6 +41,7 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkMoEMethod,
+    QuarkOCP_MX_MoEMethod,
     QuarkW4A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
 )
@@ -413,6 +414,25 @@ QTENSOR_CONFIGS = [
         weight_quant_key=kMxfp4Static,
         act_quant_key=kMxfp4Dynamic,
         dispatch_cls=QuarkOCP_MX,
+    ),
+    QTensorConfig(
+        name="ocp_mx_mxfp4_static_fp8_moe",
+        weight={
+            "dtype": "fp4",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_tensor",
+            "is_dynamic": False,
+            "symmetric": True,
+        },
+        weight_quant_key=kMxfp4Static,
+        act_quant_key=kFp8StaticTensorSym,
+        dispatch_cls=QuarkOCP_MX_MoEMethod,
     ),
     QTensorConfig(
         name="ocp_mx_mxfp6_e3m2",

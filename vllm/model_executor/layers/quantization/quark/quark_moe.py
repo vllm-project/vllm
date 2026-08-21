@@ -159,7 +159,9 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 match.act_quant_key,
                 QuarkW8A8Fp8MoEMethod,
             )
-        if match := quant_config._is_w_ocp_mx_a_x(weight_config, input_config):
+        if match := quant_config._is_w_ocp_mx_a_x(
+            weight_config, input_config, allow_static_fp8=True
+        ):
             return (
                 match.weight_quant_key,
                 match.act_quant_key,

@@ -655,6 +655,7 @@ class QuarkConfig(QuantizationConfig):
         self,
         weight_quant: dict[str, Any] | None,
         input_quant: dict[str, Any] | None,
+        allow_static_fp8: bool = False,
     ) -> QuantKeyMatch:
         """
         This check returns True only if it is an OCP-MX weight quantization.
@@ -712,11 +713,19 @@ class QuarkConfig(QuantizationConfig):
         if input_quant is None:
             act_quant_key = None
         elif not input_quant.get("is_dynamic"):
-            logger.debug(
-                "Quark model's OCP MX quantization is incompatible with static "
-                "input scales."
-            )
-            return QuantKeyMatch(False, None, None)
+            if (
+                allow_static_fp8
+                and input_quant.get("dtype") == "fp8_e4m3"
+                and input_quant.get("qscheme") == "per_tensor"
+                and input_quant.get("symmetric") is True
+            ):
+                act_quant_key = kFp8StaticTensorSym
+            else:
+                logger.debug(
+                    "Quark model's OCP MX quantization is incompatible with static "
+                    "input scales."
+                )
+                return QuantKeyMatch(False, None, None)
         elif input_quant["dtype"] == "fp8_e4m3":
             act_quant_key = kFp8DynamicTensorSym
         else:
