@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 
@@ -394,6 +395,53 @@ def test_fail_closed_cases():
     assert _try_mapping(spec, swapped, _ctx(0, tp=4)) is None
     # Non-attention specs
     assert _try_mapping(KVCacheSpec(block_size=4), None, _ctx(0, tp=4, total=8)) is None
+
+
+def _packed_nhd_quant_cache(spec) -> torch.Tensor:
+    """Per-token-head packed form: fp32 scale inline after each row's data."""
+    scale_pad = 4 // spec.dtype.itemsize
+    inner = 2 * (spec.head_size + scale_pad)
+    return torch.zeros(
+        NUM_BLOCKS, spec.block_size, spec.num_kv_heads, inner, dtype=torch.int8
+    ).permute(0, 2, 1, 3)
+
+
+def test_per_token_head_packed_rows_certify():
+    """Padded rows carry scales inline, so head shards stay portable; the
+    page spans the scale carve, matching the worker's offload refs."""
+    spec = _full_spec(kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD)
+    cache = _packed_nhd_quant_cache(spec)
+    per_rank = [_mapping(spec, cache, _ctx(rank=r, tp=2)) for r in range(2)]
+    mapping = per_rank[0]
+    assert mapping.parallelism_agnostic
+    assert mapping.local_page_size_bytes == spec.unpadded_page_size_bytes
+    assert mapping.canonical_page_size_bytes == 2 * spec.unpadded_page_size_bytes
+    _verify_tiling("quant", per_rank)
+
+
+def test_streams_packed_into_head_size_certify():
+    """Short-conv state caches (Inkling) pack several streams into head_size
+    with head_size_v=0, head-major [num_blocks, H, N, D]: a head shard is one
+    contiguous run, so the canonical page is global head order."""
+    spec = SlidingWindowSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=256,
+        head_size_v=0,
+        dtype=torch.int8,
+        sliding_window=4,
+    )
+    cache = torch.zeros(
+        NUM_BLOCKS, spec.num_kv_heads, spec.block_size, spec.head_size, dtype=torch.int8
+    )
+    per_rank = [_mapping(spec, cache, _ctx(rank=r, tp=2, heads=2)) for r in range(2)]
+    _verify_tiling("sconv", per_rank)
+    page = spec.unpadded_page_size_bytes
+    assert [_triples(m.runs) for m in per_rank] == [
+        [(0, 0, page)],
+        [(0, page, page)],
+    ]
+    assert all(m.parallelism_agnostic for m in per_rank)
 
 
 def test_opaque_fallback_places_page_whole():
