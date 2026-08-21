@@ -21,7 +21,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
-    int4_w4a16_moe_quant_config,
     int8_w8a8_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
@@ -183,8 +182,7 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
             )
         if weight_config.get("is_dynamic"):
             raise NotImplementedError(
-                "QuarkW4A16Int4MoEMethod only supports static weight "
-                "quantization."
+                "QuarkW4A16Int4MoEMethod only supports static weight quantization."
             )
         self.weight_quant = weight_config
         self.quant_config = quant_config
@@ -447,12 +445,8 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
             elif weight_name.endswith("_weight_scale"):
                 loaded_weight = loaded_weight.T
 
-            if (
-                layer.group_size_div_factor > 1
-                and (
-                    "weight_zero_point" in weight_name
-                    or "weight_scale" in weight_name
-                )
+            if layer.group_size_div_factor > 1 and (
+                "weight_zero_point" in weight_name or "weight_scale" in weight_name
             ):
                 loaded_weight = loaded_weight.repeat_interleave(
                     layer.group_size_div_factor, 1

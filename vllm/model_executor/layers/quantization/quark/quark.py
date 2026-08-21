@@ -31,8 +31,8 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkNVFP4,
     QuarkOCP_MX,
     QuarkScheme,
-    QuarkW4A16Int4,
     QuarkW4A8_MXFP4_FP8,
+    QuarkW4A16Int4,
     QuarkW8A8Fp8,
     QuarkW8A8Fp8PerBlock,
     QuarkW8A8Int8,
@@ -56,6 +56,7 @@ logger = init_logger(__name__)
 # model_type values that use dynamic MXFP4 re-quantization for
 # OCP MX fp4 Quark checkpoints
 _DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
+
 
 class QuarkConfig(QuantizationConfig):
     def __init__(

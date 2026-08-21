@@ -791,9 +791,7 @@ def _dequantize_quark_signed_awq_torch(
     iweights = iweights.view(qweight.shape[0], -1, 8)[:, :, order].reshape(
         qweight.shape[0], -1
     )
-    zeros = zeros.view(qzeros.shape[0], -1, 8)[:, :, order].reshape(
-        qzeros.shape[0], -1
-    )
+    zeros = zeros.view(qzeros.shape[0], -1, 8)[:, :, order].reshape(qzeros.shape[0], -1)
     iweights = _sign_extend_int4_nibbles(iweights & 0xF)
     zeros = _sign_extend_int4_nibbles(zeros & 0xF)
 
@@ -824,9 +822,7 @@ def _dequantize_awq_unsigned_torch(
     iweights = iweights.view(qweight.shape[0], -1, 8)[:, :, order].reshape(
         qweight.shape[0], -1
     )
-    zeros = zeros.view(qzeros.shape[0], -1, 8)[:, :, order].reshape(
-        qzeros.shape[0], -1
-    )
+    zeros = zeros.view(qzeros.shape[0], -1, 8)[:, :, order].reshape(qzeros.shape[0], -1)
 
     scales = scales.repeat_interleave(group_size, dim=0)
     zeros = zeros.repeat_interleave(group_size, dim=0)
@@ -951,9 +947,7 @@ class TestQuarkInt4Format:
         def load_w2_zero_point(raw_zp, tp_size, tp_rank):
             from unittest.mock import MagicMock, patch
 
-            quant_config = QuarkConfig.from_config(
-                _quark_int4_config(symmetric=False)
-            )
+            quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
             moe_config = _FakeMoEConfig(tp_size, tp_rank)
             with patch(
                 "vllm.model_executor.layers.quantization.quark.quark_moe"
@@ -1087,6 +1081,7 @@ class TestQuarkInt4Format:
         assert not should_ignore_layer(
             "language_model.model.layers.0.mlp.gate", ignore=exclude_layers
         )
+
 
 @pytest.mark.parametrize("symmetric", [False, True])
 @pytest.mark.parametrize("pack_method", ["order", "reorder"])

@@ -59,9 +59,7 @@ class QuarkW4A16Int4(QuarkScheme):
         self.pack_factor = 8
         self.pack_reorder = pack_method == "reorder"
         self.is_symmetric = is_symmetric
-        self.quant_type = (
-            scalar_types.uint4b8 if is_symmetric else scalar_types.uint4
-        )
+        self.quant_type = scalar_types.uint4b8 if is_symmetric else scalar_types.uint4
         self.kernel: MPLinearKernel | None = None
 
     @classmethod
@@ -190,7 +188,8 @@ class QuarkW4A16Int4(QuarkScheme):
             layer.weight_scale.data[:, output_size:].zero_()
 
         _convert_awq_to_standard_format(
-            layer, "weight",
+            layer,
+            "weight",
             "weight_zero_point" if not self.is_symmetric else None,
             self.quant_type.size_bits,
         )

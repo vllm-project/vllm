@@ -137,9 +137,7 @@ def parse_w4a16_int4_weight_config(
             "Quark W4A16 INT4/UINT4 configs must specify weight.group_size"
         )
     if "symmetric" not in weight_config:
-        raise ValueError(
-            "Quark W4A16 INT4/UINT4 configs must specify weight.symmetric"
-        )
+        raise ValueError("Quark W4A16 INT4/UINT4 configs must specify weight.symmetric")
 
     group_size = weight_config["group_size"]
     is_symmetric = weight_config["symmetric"]
@@ -149,8 +147,7 @@ def parse_w4a16_int4_weight_config(
         )
     if not isinstance(is_symmetric, bool):
         raise ValueError(
-            "Quark W4A16 weight.symmetric must be a bool, "
-            f"got {is_symmetric!r}"
+            f"Quark W4A16 weight.symmetric must be a bool, got {is_symmetric!r}"
         )
     return group_size, is_symmetric
 
