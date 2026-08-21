@@ -43,7 +43,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-    HostReadStager,
+    HostWriteStager,
     _ReqState,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -1747,7 +1747,7 @@ def test_host_stager_read_failure_reaches_terminal_state():
         queued=[(np.array([2]), np.array([0]), 7, 16)],
         reading=[(1, slot, np.array([0]))],
     )
-    stager = object.__new__(HostReadStager)
+    stager = object.__new__(HostWriteStager)
     stager._reqs = {"request": state}
     stager.nixl_wrapper = MagicMock()
     stager.nixl_wrapper.check_xfer_state.return_value = "ERR"
@@ -1763,7 +1763,7 @@ def test_host_stager_abort_drains_read_before_reusing_slot():
     pool = SimpleNamespace(free_slots=[])
     slot = SimpleNamespace(pool=pool)
     state = _ReqState(reading=[(1, slot, np.array([0]))])
-    stager = object.__new__(HostReadStager)
+    stager = object.__new__(HostWriteStager)
     stager._reqs = {"request": state}
     stager.nixl_wrapper = MagicMock()
     stager.nixl_wrapper.check_xfer_state.side_effect = ["PROC", "DONE"]
@@ -1784,7 +1784,7 @@ def test_host_stager_copy_failure_waits_for_recorded_event():
     event.query.side_effect = [False, True]
     slot = SimpleNamespace(pool=pool, event=event)
     state = _ReqState(reading=[(1, slot, np.array([0]))])
-    stager = object.__new__(HostReadStager)
+    stager = object.__new__(HostWriteStager)
     stager._reqs = {"request": state}
     stager.nixl_wrapper = MagicMock()
     stager.nixl_wrapper.check_xfer_state.return_value = "DONE"
@@ -1816,7 +1816,7 @@ def test_host_stager_is_only_initialized_for_same_host_reads(monkeypatch):
         "local-host",
     )
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.HostReadStager",
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.HostWriteStager",
         return_value=stager,
     ) as stager_factory:
         assert worker._maybe_init_host_stager("remote-host") is None
