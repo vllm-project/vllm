@@ -14,6 +14,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 logger = init_logger(__name__)
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
+IndexerLogitsDType = Literal["auto", "float16", "float32"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 
@@ -77,6 +78,10 @@ class AttentionConfig:
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
     support in the backend."""
+
+    indexer_logits_dtype: IndexerLogitsDType = "auto"
+    """Output data type for sparse-attention indexer logits. "auto" uses
+    float16 on CUDA and float32 on other platforms."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""

@@ -10,6 +10,7 @@
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include <cstdint>
+#include <type_traits>
 
 #include "topk_histogram_4096.cuh"
 
@@ -1024,16 +1025,41 @@ struct FilteredTopKTraits<float> {
   }
 };
 
+// FP16 keys are already the precision being selected. The coarse pass consumes
+// the high byte of the ordered 16-bit key and one refinement pass resolves the
+// low byte exactly.
+template <>
+struct FilteredTopKTraits<__half> {
+  using OrderedType = uint16_t;
+  static constexpr int NUM_REFINE_ROUNDS = 1;
+  static constexpr int FIRST_REFINE_SHIFT = 0;
+
+  __device__ __forceinline__ static OrderedType ToOrdered(__half x) {
+    const uint16_t bits = __half_as_ushort(x);
+    return (bits & 0x8000) ? static_cast<uint16_t>(~bits)
+                           : static_cast<uint16_t>(bits | 0x8000);
+  }
+
+  __device__ __forceinline__ static uint8_t ToCoarseKey(__half x) {
+    return static_cast<uint8_t>(ToOrdered(x) >> 8);
+  }
+};
+
 constexpr uint32_t FILTERED_TOPK_BLOCK_THREADS = 1024;
 constexpr uint32_t FILTERED_TOPK_SMEM_INPUT_SIZE =
     16 * 1024;  // 16K indices per buffer
-constexpr size_t FILTERED_TOPK_SMEM_DYNAMIC =
-    sizeof(int) * 2 * FILTERED_TOPK_SMEM_INPUT_SIZE;  // 128KB
+
+template <typename DType>
+constexpr size_t filtered_topk_smem_dynamic() {
+  constexpr int kBuffers =
+      FilteredTopKTraits<DType>::NUM_REFINE_ROUNDS == 1 ? 1 : 2;
+  return sizeof(int) * kBuffers * FILTERED_TOPK_SMEM_INPUT_SIZE;
+}
 
 /*!
  * \brief Filtered Top-K kernel for ragged sequences.
  *
- * \tparam DType Data type (float, half, nv_bfloat16)
+ * \tparam DType Data type (float or half)
  * \tparam IdType Index type (int32_t)
  * \tparam VEC_SIZE Vector size for input loads (1, 2, 4, or 8)
  */
@@ -1071,13 +1097,17 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   if (length <= 32768) {
     extern __shared__ uint8_t _smem_reg[];
     if constexpr (UsePredicatedShortLoads) {
-      hist4096::histogram_4096_topk_predicated<MAX_K, 12, 8>(score, dst, length,
-                                                             _smem_reg);
+      if constexpr (std::is_same_v<DType, float>) {
+        hist4096::histogram_4096_topk_predicated<MAX_K, 12, 8>(
+            score, dst, length, _smem_reg);
+        return;
+      }
     } else {
-      hist4096::histogram_4096_topk<MAX_K, 12, 8>(score, dst, length,
-                                                  _smem_reg);
+      constexpr uint32_t kVecsPerThread = std::is_same_v<DType, __half> ? 4 : 8;
+      hist4096::histogram_4096_topk<DType, MAX_K, 12, kVecsPerThread>(
+          score, dst, length, _smem_reg);
+      return;
     }
-    return;
   }
 
   // Static shared memory
@@ -1306,6 +1336,41 @@ constexpr int ComputeFilteredTopKVecSize(uint32_t max_len) {
   return static_cast<int>(g);
 }
 
+template <typename DType, typename IdType, uint32_t MAX_K, int VEC_SIZE>
+cudaError_t UpdateFilteredTopKStaticSmem(size_t* max_static_smem) {
+  constexpr int MAX_VEC = 16 / sizeof(DType);
+  auto kernel = FilteredTopKUnifiedKernel<DType, IdType, VEC_SIZE, MAX_K,
+                                          (VEC_SIZE != MAX_VEC)>;
+  cudaFuncAttributes attributes{};
+  cudaError_t status = cudaFuncGetAttributes(&attributes, kernel);
+  if (status != cudaSuccess) return status;
+  if (attributes.sharedSizeBytes > *max_static_smem) {
+    *max_static_smem = attributes.sharedSizeBytes;
+  }
+  return cudaSuccess;
+}
+
+template <typename DType, typename IdType, uint32_t MAX_K = 2048>
+cudaError_t GetFilteredTopKRequiredSmem(size_t* required_smem) {
+  size_t max_static_smem = 0;
+#define QUERY_STATIC_SMEM(VS)                                   \
+  {                                                             \
+    cudaError_t status =                                        \
+        UpdateFilteredTopKStaticSmem<DType, IdType, MAX_K, VS>( \
+            &max_static_smem);                                  \
+    if (status != cudaSuccess) return status;                   \
+  }
+  QUERY_STATIC_SMEM(1)
+  QUERY_STATIC_SMEM(2)
+  QUERY_STATIC_SMEM(4)
+  if constexpr (16 / sizeof(DType) >= 8) {
+    QUERY_STATIC_SMEM(8)
+  }
+#undef QUERY_STATIC_SMEM
+  *required_smem = filtered_topk_smem_dynamic<DType>() + max_static_smem;
+  return cudaSuccess;
+}
+
 template <typename DType, typename IdType, uint32_t MAX_K = 2048>
 cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         IdType* output_indices,
@@ -1313,7 +1378,7 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         uint32_t num_rows, uint32_t top_k_val,
                                         uint32_t max_len,
                                         cudaStream_t stream = 0) {
-  constexpr size_t smem_size = FILTERED_TOPK_SMEM_DYNAMIC;
+  constexpr size_t smem_size = filtered_topk_smem_dynamic<DType>();
   constexpr int MAX_VEC = 16 / sizeof(DType);
 
   dim3 grid(num_rows);
@@ -1346,6 +1411,12 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
 }
 
 }  // namespace filtered_topk
+
+template <typename DType, typename IdType, uint32_t MAX_K = 2048>
+cudaError_t GetFilteredTopKRequiredSmem(size_t* required_smem) {
+  return filtered_topk::GetFilteredTopKRequiredSmem<DType, IdType, MAX_K>(
+      required_smem);
+}
 
 template <typename DType, typename IdType, uint32_t MAX_K = 2048>
 cudaError_t FilteredTopKRaggedTransform(const DType* input,

@@ -7,12 +7,74 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
-from vllm.config import CUDAGraphMode
+from vllm.config import AttentionConfig, CUDAGraphMode
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
 MLA_LAYER = "model.layers.0.self_attn.attn"
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [
+        ("auto", torch.float16),
+        ("float16", torch.float16),
+        ("float32", torch.float32),
+    ],
+)
+def test_indexer_logits_dtype_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    expected: torch.dtype,
+) -> None:
+    monkeypatch.setattr(
+        sparse_indexer,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(
+            attention_config=AttentionConfig(indexer_logits_dtype=setting)
+        ),
+    )
+    monkeypatch.setattr(sparse_indexer.current_platform, "is_cuda", lambda: True)
+
+    assert sparse_indexer._get_indexer_logits_dtype() == expected
+
+
+def test_auto_indexer_logits_uses_fp32_off_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sparse_indexer,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(attention_config=AttentionConfig()),
+    )
+    monkeypatch.setattr(sparse_indexer.current_platform, "is_cuda", lambda: False)
+
+    assert sparse_indexer._get_indexer_logits_dtype() == torch.float32
+
+
+@pytest.mark.parametrize(
+    ("dtype", "num_rows", "max_seq_len", "expected"),
+    [
+        (torch.float16, 128, 10000, False),
+        (torch.float16, 8192, 32768, False),
+        (torch.float16, 767, 65536, False),
+        (torch.float16, 768, 65536, True),
+        (torch.float16, 511, 100000, False),
+        (torch.float16, 512, 100000, True),
+        (torch.float16, 1023, 131072, False),
+        (torch.float16, 1024, 131072, True),
+        (torch.float16, 1024, 131073, False),
+        (torch.float32, 1024, 50000, False),
+    ],
+)
+def test_native_fp16_decode_topk_selection(
+    dtype: torch.dtype, num_rows: int, max_seq_len: int, expected: bool
+) -> None:
+    assert (
+        sparse_indexer._should_use_native_fp16_decode_topk(dtype, num_rows, max_seq_len)
+        is expected
+    )
 
 
 def make_indexer_metadata(
