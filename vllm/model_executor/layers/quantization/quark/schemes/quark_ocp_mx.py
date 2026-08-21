@@ -3,7 +3,6 @@
 
 from collections.abc import Callable
 from fractions import Fraction
-from typing import Any
 
 import torch
 
@@ -41,62 +40,40 @@ logger = init_logger(__name__)
 class QuarkOCP_MX(QuarkScheme):
     ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel
 
-    @classmethod
-    def get_quant_keys(
-        cls,
-        weight_quant_spec: dict[str, Any] | None,
-        input_quant_spec: dict[str, Any] | None,
-    ) -> tuple[QuantKey, QuantKey | None]:
-        if weight_quant_spec is None:
-            raise ValueError("OCP MX requires a weight quantization config.")
-
-        weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
-        weight_quant_key = _WEIGHT_QUANT_KEY_MAP[weight_dtype]
-
-        input_dtype = (
-            input_quant_spec["dtype"].replace("fp", "mxfp")
-            if input_quant_spec is not None
-            else None
-        )
-        activation_key = (
-            _ACTIVATION_QUANT_KEY_MAP[input_dtype] if input_dtype is not None else None
-        )
-        return weight_quant_key, activation_key
-
     def __init__(
         self,
-        weight_quant_spec: dict[str, Any],
-        input_quant_spec: dict[str, Any] | None,
+        weight_quant_key: QuantKey,
+        act_quant_key: QuantKey | None,
         dynamic_mxfp4_quant: bool = False,
     ):
-        self.weight_quant_spec = weight_quant_spec
-        self.input_quant_spec = input_quant_spec
         self.dynamic_mxfp4_quant = dynamic_mxfp4_quant
-        self.weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
-        self.input_dtype: str | None = None
-        if input_quant_spec is not None:
-            self.input_dtype = input_quant_spec["dtype"].replace("fp", "mxfp")
-
-        if self.input_dtype not in [None, *_ACTIVATION_QUANT_KEY_MAP]:
-            raise ValueError(
-                f"Unsupported input_dtype={self.input_dtype} for QuarkOCP_MX. "
-                f"Supported activation dtypes are {_ACTIVATION_QUANT_KEY_MAP.keys()}, "
-                "or None for weight-only quantization."
-            )
-
-        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
-            weight_quant_spec, input_quant_spec
+        if act_quant_key not in {*_ACTIVATION_QUANT_KEY_MAP.values(), None}:
+            raise ValueError(f"Unsupported activation quant key: {act_quant_key}")
+        if weight_quant_key not in _WEIGHT_QUANT_KEY_MAP.values():
+            raise ValueError(f"Unsupported weight quant key: {weight_quant_key}")
+        self.weight_dtype = next(
+            dtype
+            for dtype, quant_key in _WEIGHT_QUANT_KEY_MAP.items()
+            if quant_key == weight_quant_key
         )
+        self.input_dtype = (
+            next(
+                dtype
+                for dtype, quant_key in _ACTIVATION_QUANT_KEY_MAP.items()
+                if quant_key == act_quant_key
+            )
+            if act_quant_key is not None
+            else None
+        )
+        self.weight_quant_key = weight_quant_key
+        self.activation_quant_key = act_quant_key
 
         if self.weight_dtype == "mxfp4":
             self.packed_factor: int | Fraction = 2
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
 
-        if input_quant_spec is None:
-            self.static_input_scales = False
-        else:
-            self.static_input_scales = not input_quant_spec.get("is_dynamic")
+        self.static_input_scales = False
 
         if self.static_input_scales:
             raise NotImplementedError(

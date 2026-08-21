@@ -3,7 +3,6 @@
 
 from collections.abc import Callable
 from fractions import Fraction
-from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -41,24 +40,21 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
     Uses the AITER Triton kernel and falls back to emulation if AITER not available.
     """
 
-    @classmethod
-    def get_quant_keys(cls) -> tuple[QuantKey, QuantKey]:
-        return kMxfp4Static, kFp8StaticTensorSym
-
     def __init__(
         self,
-        weight_quant_spec: dict[str, Any],
-        input_quant_spec: dict[str, Any],
+        act_quant_key: QuantKey | None,
     ):
         self.out_dtype = None
-        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys()
+        if act_quant_key != kFp8StaticTensorSym:
+            raise ValueError(f"Unsupported activation quant key: {act_quant_key}")
+        self.weight_quant_key = kMxfp4Static
+        self.activation_quant_key = act_quant_key
 
         self.weight_dtype = "mxfp4"
         self.packed_factor: Fraction = Fraction(2, 1)  # 2 FP4 values per byte
         self.weight_block_size = OCP_MX_BLOCK_SIZE
 
-        self.is_static_input_scheme = not input_quant_spec.get("is_dynamic")
-        self.input_qscheme = input_quant_spec.get("qscheme")  # "per_tensor"
+        self.is_static_input_scheme = True
 
         self.fp8_min, self.fp8_max = get_fp8_min_max()
         self.fp8_dtype = current_platform.fp8_dtype()

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import Any, cast
 
 import torch
 from torch.nn import Parameter
@@ -20,7 +19,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
+    kFp8Static128BlockE8M0Sym,
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
@@ -43,57 +44,25 @@ logger = init_logger(__name__)
 
 
 class QuarkW8A8Fp8(QuarkScheme):
-    @classmethod
-    def get_quant_keys(
-        cls,
-        weight_config: dict[str, Any] | None,
-        input_config: dict[str, Any] | None,
-    ) -> tuple[QuantKey, QuantKey]:
-        assert weight_config is not None
-
-        weight_qscheme = cast(str, weight_config.get("qscheme"))
-        input_qscheme = (
-            cast(str, input_config.get("qscheme")) if input_config is not None else None
-        )
-        static_input_scales = input_config is not None and not input_config.get(
-            "is_dynamic"
-        )
-        per_token_activation = (
-            not static_input_scales and input_qscheme == "per_channel"
-        )
-        per_channel_weight = weight_qscheme == "per_channel"
-
-        activation_quant_key = (
-            kFp8DynamicTokenSym if per_token_activation else kFp8StaticTensorSym
-        )
-
-        # A per-output-channel weight scale is one fp32 value per weight row
-        # (length N). Tag it as ``GroupShape.PER_CHANNEL`` to match the
-        # canonical compressed-tensors CHANNEL strategy, so kernel selection
-        # (e.g. AITER's pre-shuffled FP8 GEMM) treats it uniformly.
-        weight_quant_key = (
-            kFp8StaticChannelSym if per_channel_weight else kFp8StaticTensorSym
-        )
-        return weight_quant_key, activation_quant_key
-
     def __init__(
-        self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
+        self,
+        weight_quant_key: QuantKey,
+        act_quant_key: QuantKey | None,
     ):
-        self.weight_qscheme = cast(str, weight_config.get("qscheme"))
-        self.is_static_input_scheme: bool = False
-        self.input_qscheme: str | None = None
-        if input_config is not None:
-            self.is_static_input_scheme = not cast(bool, input_config.get("is_dynamic"))
-            self.input_qscheme = cast(str, input_config.get("qscheme"))
-
-        if self.weight_qscheme == "per_block":
-            raise ValueError(
-                "Quark W8A8 FP8 per-block weight quantization should use "
-                "QuarkW8A8Fp8PerBlock."
-            )
-        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
-            weight_config, input_config
+        if act_quant_key not in {
+            kFp8DynamicTensorSym,
+            kFp8DynamicTokenSym,
+            kFp8StaticTensorSym,
+        }:
+            raise ValueError(f"Unsupported activation quant key: {act_quant_key}")
+        if weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
+            raise ValueError(f"Unsupported weight quant key: {weight_quant_key}")
+        self.weight_qscheme = (
+            "per_channel" if weight_quant_key == kFp8StaticChannelSym else "per_tensor"
         )
+        self.is_static_input_scheme = act_quant_key == kFp8StaticTensorSym
+        self.weight_quant_key = weight_quant_key
+        self.activation_quant_key = act_quant_key
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
@@ -232,33 +201,25 @@ class QuarkW8A8Fp8(QuarkScheme):
 
 
 class QuarkW8A8Fp8PerBlock(QuarkScheme):
-    @classmethod
-    def get_quant_keys(
-        cls,
-        weight_config: dict[str, Any] | None,
-        input_config: dict[str, Any] | None,
-    ) -> tuple[QuantKey, QuantKey]:
-        assert weight_config is not None
-        assert input_config is not None
-        return kFp8Static128BlockSym, kFp8Dynamic128Sym
-
     def __init__(
-        self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
+        self,
+        weight_quant_key: QuantKey,
+        act_quant_key: QuantKey | None,
     ):
-        self.weight_qscheme = cast(str, weight_config.get("qscheme"))
-        if self.weight_qscheme != "per_block":
-            raise ValueError("QuarkW8A8Fp8PerBlock requires per-block weights.")
-        block_size = weight_config.get("block_size")
-        if not block_size:
-            raise ValueError(
-                "Quark W8A8 FP8 per-block weight quantization requires "
-                "`block_size` in the weight quantization config."
-            )
-        self.weight_config = weight_config
-        self.weight_block_size = list(block_size)
-        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
-            weight_config, input_config
-        )
+        if act_quant_key != kFp8Dynamic128Sym:
+            raise ValueError(f"Unsupported activation quant key: {act_quant_key}")
+        if weight_quant_key not in {
+            kFp8Static128BlockSym,
+            kFp8Static128BlockE8M0Sym,
+        }:
+            raise ValueError(f"Unsupported weight quant key: {weight_quant_key}")
+        self.weight_scale_dtype = weight_quant_key.scale.dtype
+        if weight_quant_key == kFp8Static128BlockE8M0Sym:
+            # TODO: oracle needs to support kFp8Static128BlockE8M0Sym.
+            weight_quant_key = kFp8Static128BlockSym
+        self.weight_block_size = list(weight_quant_key.scale.group_shape)
+        self.weight_quant_key = weight_quant_key
+        self.activation_quant_key = act_quant_key
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
@@ -305,8 +266,8 @@ class QuarkW8A8Fp8PerBlock(QuarkScheme):
         layer.register_parameter("weight", weight)
 
         scale_dtype = (
-            torch.float8_e8m0fnu
-            if self.weight_config.get("scale_type") == "float8_e8m0fnu"
+            self.weight_scale_dtype
+            if self.weight_scale_dtype != torch.float32
             else None
         )
         weight_scale = create_fp8_scale_parameter(

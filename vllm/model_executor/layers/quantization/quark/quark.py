@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import torch
 from transformers import PretrainedConfig
@@ -41,8 +41,30 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare,
     should_ignore_layer,
 )
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    _ACTIVATION_QUANT_KEY_MAP,
+    _WEIGHT_QUANT_KEY_MAP,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockE8M0Sym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+    kInt4W4A8StaticChannelSym,
+    kInt8DynamicTensorAsym,
+    kInt8DynamicTensorSym,
+    kInt8DynamicTokenAsym,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorAsym,
+    kInt8StaticTensorSym,
+    kMxfp4Static,
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
@@ -57,6 +79,15 @@ logger = init_logger(__name__)
 # model_type values that use dynamic MXFP4 re-quantization for
 # OCP MX fp4 Quark checkpoints
 _DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
+
+
+class QuantKeyMatch(NamedTuple):
+    matches: bool
+    act_quant_key: QuantKey | None
+    weight_quant_key: QuantKey | None
+
+    def __bool__(self) -> bool:
+        return self.matches
 
 
 class QuarkConfig(QuantizationConfig):
@@ -159,7 +190,9 @@ class QuarkConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        _, _, method_cls = self.get_quant_method_target(prefix, type(layer))
+        weight_quant_key, act_quant_key, method_cls = self.get_quant_method_target(
+            prefix, type(layer)
+        )
 
         exclude_layers = cast(list[str], self.quant_config.get("exclude"))
         is_ignored = should_ignore_layer(
@@ -180,7 +213,8 @@ class QuarkConfig(QuantizationConfig):
             _, _, scheme_cls = self.get_scheme_cls(type(layer), prefix)
             scheme = self.init_scheme(
                 scheme_cls,
-                self._find_matched_config(prefix, layer),
+                weight_quant_key=weight_quant_key,
+                act_quant_key=act_quant_key,
                 dynamic_mxfp4_quant=dynamic_mxfp4_quant,
             )
             layer.scheme = scheme
@@ -224,15 +258,17 @@ class QuarkConfig(QuantizationConfig):
                 return None, None, UnquantizedFusedMoEMethod
             if issubclass(layer_type, LinearBase):
                 if "self_attn" in prefix and self.dynamic_mxfp4_quant:
-                    weight_key, activation_key, _ = self.get_scheme_cls(
+                    weight_quant_key, activation_key, _ = self.get_scheme_cls(
                         layer_type, prefix
                     )
-                    return weight_key, activation_key, QuarkLinearMethod
+                    return weight_quant_key, activation_key, QuarkLinearMethod
                 return None, None, UnquantizedLinearMethod
             return None, None, None
         if issubclass(layer_type, LinearBase):
-            weight_key, activation_key, _ = self.get_scheme_cls(layer_type, prefix)
-            return weight_key, activation_key, QuarkLinearMethod
+            weight_quant_key, activation_key, _ = self.get_scheme_cls(
+                layer_type, prefix
+            )
+            return weight_quant_key, activation_key, QuarkLinearMethod
         if issubclass(layer_type, Attention):
             return None, None, QuarkKVCacheMethod
         if is_routed_experts:
@@ -346,18 +382,18 @@ class QuarkConfig(QuantizationConfig):
         self,
         weight_quant: QuarkQTensorHint,
         input_quant: QuarkQTensorHint,
-    ) -> bool:
+    ) -> QuantKeyMatch:
         # Confirm weights and input quantized.
         if isinstance(input_quant, list):
             if len(input_quant) != 1:
-                return False
+                return QuantKeyMatch(False, None, None)
             input_quant = input_quant[0]
         if (
             not isinstance(weight_quant, list)
             or len(weight_quant) != 2
             or not isinstance(input_quant, dict)
         ):
-            return False
+            return QuantKeyMatch(False, None, None)
 
         # Confirm weight scheme is supported
         is_w4a8_dtype = (
@@ -380,24 +416,26 @@ class QuarkConfig(QuantizationConfig):
             and is_static_weight
             and is_per_tensor_fp8_and_per_channel_int4_weight
         ):
-            return False
+            return QuantKeyMatch(False, None, None)
 
         # Dynamic quantization is always supported if weights supported.
         if input_quant.get("is_dynamic"):
-            return True
+            return QuantKeyMatch(True, kFp8DynamicTokenSym, kInt4W4A8StaticChannelSym)
 
         # Confirm activation scheme is supported.
         is_per_tensor_activation = input_quant.get("qscheme") == "per_tensor"
-        return is_per_tensor_activation
+        if not is_per_tensor_activation:
+            return QuantKeyMatch(False, None, None)
+        return QuantKeyMatch(True, kFp8StaticTensorSym, kInt4W4A8StaticChannelSym)
 
     def _is_fp8_w8a8(
         self,
         weight_quant: dict[str, Any] | None,
         input_quant: dict[str, Any] | None,
-    ) -> bool:
+    ) -> QuantKeyMatch:
         # Confirm weights and input quantized.
         if not isinstance(weight_quant, dict) or not isinstance(input_quant, dict):
-            return False
+            return QuantKeyMatch(False, None, None)
 
         # Confirm weight scheme is supported
         is_fp8_dtype = (
@@ -417,64 +455,125 @@ class QuarkConfig(QuantizationConfig):
         )
 
         if not is_fp8_dtype or not is_static_weight:
-            return False
+            return QuantKeyMatch(False, None, None)
 
         if is_per_block_weight:
             if not input_quant.get("is_dynamic"):
-                return False
-            return (
+                return QuantKeyMatch(False, None, None)
+            matches = (
                 input_quant.get("qscheme") == "per_group"
                 and input_quant.get("group_size") == block_size[1]
                 and input_quant.get("symmetric") is True
             )
+            if not matches:
+                return QuantKeyMatch(False, None, None)
+            weight_quant_key = (
+                kFp8Static128BlockE8M0Sym
+                if weight_quant.get("scale_type") == "float8_e8m0fnu"
+                else kFp8Static128BlockSym
+            )
+            return QuantKeyMatch(True, kFp8Dynamic128Sym, weight_quant_key)
 
         if not is_per_tensor_or_channel_weight:
-            return False
+            return QuantKeyMatch(False, None, None)
 
         # Dynamic quantization is always supported if tensor/channel weights
         # are supported.
         if input_quant.get("is_dynamic"):
-            return True
+            act_quant_key = (
+                kFp8DynamicTokenSym
+                if input_quant.get("qscheme") == "per_channel"
+                else kFp8DynamicTensorSym
+            )
+            weight_quant_key = (
+                kFp8StaticChannelSym
+                if weight_quant.get("qscheme") == "per_channel"
+                else kFp8StaticTensorSym
+            )
+            return QuantKeyMatch(True, act_quant_key, weight_quant_key)
 
         # Confirm activation scheme is supported.
         is_per_tensor_activation = input_quant.get("qscheme") == "per_tensor"
-        return is_per_tensor_activation
+        if not is_per_tensor_activation:
+            return QuantKeyMatch(False, None, None)
+        weight_quant_key = (
+            kFp8StaticChannelSym
+            if weight_quant.get("qscheme") == "per_channel"
+            else kFp8StaticTensorSym
+        )
+        return QuantKeyMatch(True, kFp8StaticTensorSym, weight_quant_key)
 
-    def _is_static_tensor_w8a8(
+    def _is_w8a8_int8(
         self,
         weight_quant: dict[str, Any] | None,
         input_quant: dict[str, Any] | None,
-    ) -> bool:
+    ) -> QuantKeyMatch:
         # Confirm weights and input quantized.
         if not isinstance(weight_quant, dict) or not isinstance(input_quant, dict):
-            return False
+            return QuantKeyMatch(False, None, None)
 
         is_int8_dtype = (
             weight_quant.get("dtype") == "int8" and input_quant.get("dtype") == "int8"
         )
 
-        is_tensor = (
-            weight_quant.get("qscheme") in ["per_tensor", "per_channel"]
-            and input_quant.get("qscheme") == "per_tensor"
+        is_valid_weight_scheme = weight_quant.get("qscheme") in [
+            "per_tensor",
+            "per_channel",
+        ]
+        is_static_input = input_quant.get(
+            "qscheme"
+        ) == "per_tensor" and not input_quant.get("is_dynamic")
+        is_dynamic_input = (
+            input_quant.get("qscheme") == "per_channel"
+            and input_quant.get("is_dynamic") is True
         )
-
-        is_static = not weight_quant.get("is_dynamic") and not input_quant.get(
-            "is_dynamic"
-        )
-
         is_weight_symmetric = weight_quant.get("symmetric") is True
 
         # Both symmetric and asymmetric input quantization supported.
         # Only symmetric weight quantization supported.
-        return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
+        matches = (
+            is_int8_dtype
+            and is_valid_weight_scheme
+            and is_weight_symmetric
+            and (
+                (is_static_input and not weight_quant.get("is_dynamic"))
+                or is_dynamic_input
+            )
+        )
+        if not matches:
+            return QuantKeyMatch(False, None, None)
+        weight_quant_key = (
+            kInt8StaticChannelSym
+            if weight_quant.get("qscheme") == "per_channel"
+            else kInt8StaticTensorSym
+        )
+        if is_static_input:
+            act_quant_key = (
+                kInt8StaticTensorSym
+                if input_quant.get("symmetric") is True
+                else kInt8StaticTensorAsym
+            )
+        elif weight_quant.get("qscheme") == "per_channel":
+            act_quant_key = (
+                kInt8DynamicTokenSym
+                if input_quant.get("symmetric") is True
+                else kInt8DynamicTokenAsym
+            )
+        else:
+            act_quant_key = (
+                kInt8DynamicTensorSym
+                if input_quant.get("symmetric") is True
+                else kInt8DynamicTensorAsym
+            )
+        return QuantKeyMatch(True, act_quant_key, weight_quant_key)
 
     def _is_w4a8_mxfp4_fp8(
         self,
         weight_quant: dict[str, Any] | None,
         input_quant: dict[str, Any] | None,
-    ) -> bool:
+    ) -> QuantKeyMatch:
         if weight_quant is None or input_quant is None:
-            return False
+            return QuantKeyMatch(False, None, None)
 
         is_weight_mxfp4 = (
             weight_quant.get("dtype") == "fp4"
@@ -491,53 +590,24 @@ class QuarkConfig(QuantizationConfig):
             and input_quant.get("symmetric") is True  # Symmetric quantization
         )
 
-        return is_weight_mxfp4 and is_input_fp8
-
-    def _is_dynamic_per_token_w8a8(
-        self,
-        weight_quant: dict[str, Any] | None,
-        input_quant: dict[str, Any] | None,
-    ) -> bool:
-        """Detect W8A8 INT8 with per-tensor or per-channel
-        weights and dynamic per-token input."""
-        if not isinstance(weight_quant, dict) or not isinstance(input_quant, dict):
-            return False
-
-        is_int8_dtype = (
-            weight_quant.get("dtype") == "int8" and input_quant.get("dtype") == "int8"
-        )
-
-        is_valid_weight_scheme = weight_quant.get("qscheme") in [
-            "per_tensor",
-            "per_channel",
-        ]
-        is_per_token_input = input_quant.get("qscheme") == "per_channel"
-
-        is_dynamic_input = input_quant.get("is_dynamic") is True
-        is_weight_symmetric = weight_quant.get("symmetric") is True
-
-        return (
-            is_int8_dtype
-            and is_valid_weight_scheme
-            and is_per_token_input
-            and is_dynamic_input
-            and is_weight_symmetric
-        )
+        if not (is_weight_mxfp4 and is_input_fp8):
+            return QuantKeyMatch(False, None, None)
+        return QuantKeyMatch(True, kFp8StaticTensorSym, kMxfp4Static)
 
     def _is_nvfp4(
         self,
         weight_quant: QuarkQTensorHint,
         input_quant: QuarkQTensorHint,
-    ) -> bool:
+    ) -> QuantKeyMatch:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
-            return False
+            return QuantKeyMatch(False, None, None)
 
         # Confirm both weight_quant and input_quant are lists with 2 elements
         if not isinstance(weight_quant, list) or len(weight_quant) != 2:
-            return False
+            return QuantKeyMatch(False, None, None)
         if not isinstance(input_quant, list) or len(input_quant) != 2:
-            return False
+            return QuantKeyMatch(False, None, None)
 
         # First element should be fp4 with per_group quantization
         is_fp4_per_group_weight = (
@@ -565,21 +635,24 @@ class QuarkConfig(QuantizationConfig):
             and not input_quant[1].get("is_dynamic")
         )
 
-        return (
+        matches = (
             is_fp4_per_group_weight  # type: ignore[return-value]
             and is_fp4_per_group_input
             and is_fp8_per_tensor_weight
             and is_fp8_per_tensor_input
         )
+        if not matches:
+            return QuantKeyMatch(False, None, None)
+        return QuantKeyMatch(True, kNvfp4Dynamic, kNvfp4Static)
 
     def _is_w_ocp_mx_a_x(
         self,
         weight_quant: dict[str, Any] | None,
         input_quant: dict[str, Any] | None,
-    ) -> bool:
+    ) -> QuantKeyMatch:
         """
         This check returns True only if it is an OCP-MX weight quantization.
-        The activation can be any data type (e.g., FP16/BF16, FP8, or OCP-MX format).
+        The activation can be FP16/BF16, OCP MXFP4, MXFP8, FP8.
         The rationale for checking only the weight type is that
         the model loading concept and process primarily concerns the weights themselves.
         """
@@ -589,7 +662,7 @@ class QuarkConfig(QuantizationConfig):
                 "Quark model's weight quantization is incompatible with OCP_MX format: "
                 "weight_quant is not a dictionary."
             )
-            return False
+            return QuantKeyMatch(False, None, None)
 
         # Input and weight qscheme needs to be per group.
         if weight_quant.get("qscheme") != "per_group":
@@ -597,7 +670,7 @@ class QuarkConfig(QuantizationConfig):
                 "Quark model's weight quantization is incompatible with OCP MX format: "
                 "weight is not per_group."
             )
-            return False
+            return QuantKeyMatch(False, None, None)
 
         # Input and weight group size needs to be 32.
         if weight_quant.get("group_size") != 32:
@@ -605,7 +678,7 @@ class QuarkConfig(QuantizationConfig):
                 "Quark model's weight quantization is incompatible with OCP MX format: "
                 "group_size of weight is not 32."
             )
-            return False
+            return QuantKeyMatch(False, None, None)
 
         # Activations and weight scales need to be in e8m0 format.
         if weight_quant.get("scale_format") != "e8m0":
@@ -613,7 +686,7 @@ class QuarkConfig(QuantizationConfig):
                 "Quark model's weight quantization is incompatible with OCP MX format: "
                 "scale_format of weight is not e8m0."
             )
-            return False
+            return QuantKeyMatch(False, None, None)
 
         # Input and weight dtypes need to be any of fp4,
         # fp6_e3m2 or fp6_e3m2, possibly mixed.
@@ -626,9 +699,22 @@ class QuarkConfig(QuantizationConfig):
                 "Quark model's weight quantization is incompatible with OCP MX format: "
                 "dtype is not in {fp4, fp6_e3m2, fp6_e2m3}."
             )
-            return False
+            return QuantKeyMatch(False, None, None)
 
-        return True
+        weight_dtype = weight_quant["dtype"].replace("fp", "mxfp")
+        weight_quant_key = _WEIGHT_QUANT_KEY_MAP[weight_dtype]
+        if input_quant is None:
+            act_quant_key = None
+        elif input_quant["dtype"] == "fp8_e4m3":
+            act_quant_key = (
+                kFp8DynamicTensorSym
+                if input_quant.get("is_dynamic")
+                else kFp8StaticTensorSym
+            )
+        else:
+            input_dtype = input_quant["dtype"].replace("fp", "mxfp")
+            act_quant_key = _ACTIVATION_QUANT_KEY_MAP[input_dtype]
+        return QuantKeyMatch(True, act_quant_key, weight_quant_key)
 
     @staticmethod
     def _unwrap_single_quant_config(
@@ -742,9 +828,12 @@ class QuarkConfig(QuantizationConfig):
             or isinstance(input_config, list)
             and len(input_config) > 1
         ):
-            if self._is_nvfp4(weight_config, input_config):
-                weight_key, activation_key = QuarkNVFP4.get_quant_keys()
-                return weight_key, activation_key, QuarkNVFP4
+            if match := self._is_nvfp4(weight_config, input_config):
+                return (
+                    match.weight_quant_key,
+                    match.act_quant_key,
+                    QuarkNVFP4,
+                )
 
             raise NotImplementedError(
                 "Multi-entry weight or activation quantization configs are only "
@@ -754,37 +843,29 @@ class QuarkConfig(QuantizationConfig):
         weight_config = self._unwrap_single_quant_config(weight_config)
         input_config = self._unwrap_single_quant_config(input_config)
 
-        if self._is_fp8_w8a8(weight_config, input_config):
+        if match := self._is_fp8_w8a8(weight_config, input_config):
             assert weight_config is not None
             if weight_config.get("qscheme") == "per_block":
-                weight_key, activation_key = QuarkW8A8Fp8PerBlock.get_quant_keys(
-                    weight_config, input_config
+                return (
+                    match.weight_quant_key,
+                    match.act_quant_key,
+                    QuarkW8A8Fp8PerBlock,
                 )
-                return weight_key, activation_key, QuarkW8A8Fp8PerBlock
-            weight_key, activation_key = QuarkW8A8Fp8.get_quant_keys(
-                weight_config, input_config
+            return match.weight_quant_key, match.act_quant_key, QuarkW8A8Fp8
+        elif match := self._is_w8a8_int8(weight_config, input_config):
+            return (
+                match.weight_quant_key,
+                match.act_quant_key,
+                QuarkW8A8Int8,
             )
-            return weight_key, activation_key, QuarkW8A8Fp8
-        elif self._is_static_tensor_w8a8(weight_config, input_config):
-            assert weight_config is not None
-            weight_key, activation_key = QuarkW8A8Int8.get_quant_keys(
-                cast(str, weight_config.get("qscheme")), True
+        elif match := self._is_w4a8_mxfp4_fp8(weight_config, input_config):
+            return (
+                match.weight_quant_key,
+                match.act_quant_key,
+                QuarkW4A8_MXFP4_FP8,
             )
-            return weight_key, activation_key, QuarkW8A8Int8
-        elif self._is_w4a8_mxfp4_fp8(weight_config, input_config):
-            weight_key, activation_key = QuarkW4A8_MXFP4_FP8.get_quant_keys()
-            return weight_key, activation_key, QuarkW4A8_MXFP4_FP8
-        elif self._is_dynamic_per_token_w8a8(weight_config, input_config):
-            assert weight_config is not None
-            weight_key, activation_key = QuarkW8A8Int8.get_quant_keys(
-                cast(str, weight_config.get("qscheme")), False
-            )
-            return weight_key, activation_key, QuarkW8A8Int8
-        elif self._is_w_ocp_mx_a_x(weight_config, input_config):
-            ocp_weight_key, ocp_activation_key = QuarkOCP_MX.get_quant_keys(
-                weight_config, input_config
-            )
-            return ocp_weight_key, ocp_activation_key, QuarkOCP_MX
+        elif match := self._is_w_ocp_mx_a_x(weight_config, input_config):
+            return match.weight_quant_key, match.act_quant_key, QuarkOCP_MX
 
         raise NotImplementedError(
             "No quark compatible scheme was found. "
@@ -803,42 +884,33 @@ class QuarkConfig(QuantizationConfig):
     def init_scheme(
         self,
         scheme_cls: type["QuarkScheme"],
-        config: dict[str, Any],
+        weight_quant_key: QuantKey | None,
+        act_quant_key: QuantKey | None,
         dynamic_mxfp4_quant: bool = False,
     ) -> "QuarkScheme":
         """Construct a Quark scheme selected by get_scheme_cls."""
-        weight_config = cast(QuarkQTensorHint, config.get("weight"))
-        input_config = cast(QuarkQTensorHint, config.get("input_tensors"))
-        kwargs: dict[str, Any]
-
-        if scheme_cls is QuarkNVFP4:
-            kwargs = {}
-        elif scheme_cls in (QuarkW8A8Fp8, QuarkW8A8Fp8PerBlock):
-            kwargs = {
-                "weight_config": weight_config,
-                "input_config": input_config,
-            }
-        elif scheme_cls is QuarkW8A8Int8:
-            assert isinstance(weight_config, dict)
-            assert isinstance(input_config, dict)
-            kwargs = {
-                "qscheme": cast(str, weight_config.get("qscheme")),
-                "is_static_input_scheme": not input_config.get("is_dynamic"),
-                "input_symmetric": input_config.get("symmetric"),
-            }
-        elif scheme_cls is QuarkW4A8_MXFP4_FP8:
-            kwargs = {
-                "weight_quant_spec": weight_config,
-                "input_quant_spec": input_config,
-            }
-        elif scheme_cls is QuarkOCP_MX:
-            kwargs = {
-                "weight_quant_spec": weight_config,
-                "input_quant_spec": input_config,
-                "dynamic_mxfp4_quant": dynamic_mxfp4_quant,
-            }
-        else:
+        if scheme_cls not in (
+            QuarkW8A8Fp8,
+            QuarkW8A8Fp8PerBlock,
+            QuarkW8A8Int8,
+            QuarkOCP_MX,
+            QuarkNVFP4,
+        ):
             raise AssertionError(f"Unsupported Quark scheme class: {scheme_cls}")
+
+        kwargs: dict[str, Any] = {"act_quant_key": act_quant_key}
+
+        # These classes handle different possible `weight_quant_key`.
+        if scheme_cls in (
+            QuarkW8A8Fp8,
+            QuarkW8A8Fp8PerBlock,
+            QuarkW8A8Int8,
+            QuarkOCP_MX,
+        ):
+            kwargs["weight_quant_key"] = weight_quant_key
+
+        if scheme_cls is QuarkOCP_MX:
+            kwargs["dynamic_mxfp4_quant"] = dynamic_mxfp4_quant
 
         scheme = scheme_cls(**kwargs)
 

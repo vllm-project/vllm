@@ -12,9 +12,12 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kInt8DynamicTensorAsym,
     kInt8DynamicTensorSym,
+    kInt8DynamicTokenAsym,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
+    kInt8StaticTensorAsym,
     kInt8StaticTensorSym,
 )
 from vllm.model_executor.parameter import (
@@ -28,32 +31,29 @@ logger = init_logger(__name__)
 
 
 class QuarkW8A8Int8(QuarkScheme):
-    @classmethod
-    def get_quant_keys(
-        cls, qscheme: str, is_static_input_scheme: bool
-    ) -> tuple[QuantKey, QuantKey]:
-        weight_quant_key = (
-            kInt8StaticChannelSym if qscheme == "per_channel" else kInt8StaticTensorSym
-        )
-        if is_static_input_scheme:
-            return weight_quant_key, kInt8StaticTensorSym
-        activation_quant_key = (
-            kInt8DynamicTokenSym if qscheme == "per_channel" else kInt8DynamicTensorSym
-        )
-        return weight_quant_key, activation_quant_key
-
     def __init__(
         self,
-        qscheme: str,
-        is_static_input_scheme: bool | None,
-        input_symmetric: bool | None,
+        weight_quant_key: QuantKey,
+        act_quant_key: QuantKey | None,
     ):
-        self.qscheme = qscheme
-        self.is_static_input_scheme = is_static_input_scheme
-        self.input_symmetric = input_symmetric
-        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
-            qscheme, bool(is_static_input_scheme)
+        if act_quant_key not in {
+            kInt8StaticTensorSym,
+            kInt8StaticTensorAsym,
+            kInt8DynamicTensorSym,
+            kInt8DynamicTensorAsym,
+            kInt8DynamicTokenSym,
+            kInt8DynamicTokenAsym,
+        }:
+            raise ValueError(f"Unsupported activation quant key: {act_quant_key}")
+        if weight_quant_key not in {kInt8StaticChannelSym, kInt8StaticTensorSym}:
+            raise ValueError(f"Unsupported weight quant key: {weight_quant_key}")
+        self.qscheme = (
+            "per_channel" if weight_quant_key == kInt8StaticChannelSym else "per_tensor"
         )
+        self.is_static_input_scheme = act_quant_key.scale.static
+        self.input_symmetric = act_quant_key.symmetric
+        self.weight_quant_key = weight_quant_key
+        self.activation_quant_key = act_quant_key
 
     @classmethod
     def get_min_capability(cls) -> int:
