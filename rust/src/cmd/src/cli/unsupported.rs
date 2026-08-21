@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 #![allow(clippy::doc_lazy_continuation)]
 
 use std::fmt::Display;
@@ -237,15 +240,12 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub hf_overrides: Option<Unsupported>,
 
-    /// The folder path to the generation config. Defaults to `"auto"`, the
-    /// generation config will be loaded from model path. If set to `"vllm"`, no
-    /// generation config is loaded, vLLM defaults will be used. If set to a
-    /// folder path, the generation config will be loaded from the specified
-    /// folder path. If `max_new_tokens` is specified in generation config,
-    /// then it sets a server-wide limit on the number of output tokens for
-    /// all requests.
+    /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
+    /// used with `--generation-config auto`, the override parameters will be
+    /// merged with the default config from the model. If used with
+    /// `--generation-config vllm`, only the override parameters are used.
     #[arg(long)]
-    pub generation_config: Option<Unsupported>,
+    pub override_generation_config: Option<Unsupported>,
 
     /// IOProcessor plugin name to load at model startup
     #[arg(long)]
@@ -295,11 +295,6 @@ pub struct EngineUnsupportedArgs {
         num_args = 0..=1
     )]
     pub kv_sharing_fast_prefill: Option<Unsupported>,
-
-    /// The maximum number of input items and options allowed per
-    /// prompt for each modality.
-    #[arg(long)]
-    pub limit_mm_per_prompt: Option<Unsupported>,
 
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
@@ -456,13 +451,17 @@ pub struct ServerUnsupportedArgs {
 
     /// Enable the `/tokenizer_info` endpoint. May expose chat
     /// templates and other tokenizer configuration.
+    ///
+    /// Accepted as a no-op: the Rust frontend serves `/tokenize` and
+    /// `/detokenize`, but does not implement `/tokenizer_info` yet.
     #[arg(
         long,
         visible_alias = "no-enable-tokenizer-info-endpoint",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub enable_tokenizer_info_endpoint: Option<Unsupported>,
+    pub enable_tokenizer_info_endpoint: Option<Noop>,
 
     /// If set to True, log model outputs (generations).
     /// Requires `--enable-log-requests`. As with `--enable-log-requests`,
@@ -526,18 +525,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub disable_access_log_for_endpoints: Option<Noop>,
 
-    /// The file path to the SSL key file.
-    #[arg(long)]
-    pub ssl_keyfile: Option<Unsupported>,
-
-    /// The file path to the SSL cert file.
-    #[arg(long)]
-    pub ssl_certfile: Option<Unsupported>,
-
-    /// The CA certificates file.
-    #[arg(long)]
-    pub ssl_ca_certs: Option<Unsupported>,
-
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
         long,
@@ -546,15 +533,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_ssl_refresh: Option<Unsupported>,
-
-    /// Whether client certificate is required (see stdlib ssl module's).
-    #[arg(long)]
-    pub ssl_cert_reqs: Option<Unsupported>,
-
-    /// SSL cipher suites for HTTPS (TLS 1.2 and below only).
-    /// Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305'
-    #[arg(long)]
-    pub ssl_ciphers: Option<Unsupported>,
 
     /// FastAPI root_path when app is behind a path based routing proxy.
     #[arg(long)]

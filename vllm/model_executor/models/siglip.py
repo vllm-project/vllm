@@ -33,10 +33,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -58,11 +54,12 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .interfaces_base import default_pooling_type
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
     VisionFeatureSelectStrategy,
@@ -571,6 +568,14 @@ class SiglipEncoder(nn.Module):
 
 
 class SiglipTextTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: SiglipTextConfig,
@@ -615,30 +620,8 @@ class SiglipTextTransformer(nn.Module):
         return last_hidden_state
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class SiglipMultiheadAttentionPoolingHead(nn.Module):
@@ -682,6 +665,14 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
 
 
 class SiglipVisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: SiglipVisionConfig,
@@ -747,6 +738,16 @@ class SiglipVisionTransformer(nn.Module):
         )
         self.last_hs_proc = partial(self.maybe_layer_norm_and_apply_head)
 
+        drops = dict[str, None]()
+        if self.post_layernorm is None:
+            drops["post_layernorm."] = None
+        if self.head is None:
+            drops["head."] = None
+        if drops:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix=drops
+            )
+
     @property
     def dtype(self):
         return next(self.parameters()).dtype
@@ -806,46 +807,20 @@ class SiglipVisionTransformer(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loader = AutoWeightsLoader(self)
+
         layer_count = len(self.encoder.layers)
 
-        for name, loaded_weight in weights:
-            # post_layernorm is not needed in SiglipVisionTransformer
-            if name.startswith("post_layernorm") and self.post_layernorm is None:
-                continue
-
-            # if the model configuration is not going to use
-            # the pooling head for inference, don't load its weights
-            if self.head is None and name.startswith("head"):
-                continue
-
-            # omit layers when num_hidden_layers_override is set
-            if name.startswith("encoder.layers"):
-                layer_idx = int(name.split(".")[2])
-                if layer_idx >= layer_count:
+        def _filter(ws):
+            for name, w in ws:
+                # omit layers when num_hidden_layers_override is set
+                if name.startswith("encoder.layers.") and (
+                    int(name.split(".")[2]) >= layer_count
+                ):
                     continue
+                yield name, w
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
 
 
 class SiglipVisionModel(nn.Module):
@@ -896,67 +871,6 @@ class SiglipVisionModel(nn.Module):
             feature_select_strategy=feature_select_strategy,
         )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        layer_count = len(self.vision_model.encoder.layers)
-
-        for name, loaded_weight in weights:
-            # post_layernorm is optional in SiglipVisionModel
-            if (
-                name.startswith("vision_model.post_layernorm")
-                and self.vision_model.post_layernorm is None
-            ):
-                continue
-
-            # if the model configuration is not going to use
-            # the pooling head for inference, don't load its weights
-            if self.vision_model.head is None and name.startswith("vision_model.head"):
-                continue
-
-            # omit layers when num_hidden_layers_override is set
-            if name.startswith("vision_model.encoder.layers"):
-                layer_idx = int(name.split(".")[3])
-                if layer_idx >= layer_count:
-                    continue
-
-            # Check if this is a scale parameter that needs remapping first
-            if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
-                # Try to remap the scale name first
-                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                if remapped_name is not None and remapped_name in params_dict:
-                    # Successfully remapped, use the remapped name
-                    param = params_dict[remapped_name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(remapped_name)
-                    continue
-                # If remapping failed, continue with normal processing
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 # Adapted from: https://github.com/huggingface/transformers/blob/v4.54.1/src/transformers/models/siglip/modeling_siglip.py#L200
 class SiglipTextEmbeddings(nn.Module):
@@ -1002,6 +916,8 @@ class SiglipTextEmbeddings(nn.Module):
 )
 class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".position_ids": None})
 
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
@@ -1090,27 +1006,31 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         position_diffs = position_ids[1:] - position_ids[:-1]
         boundary_mask = position_diffs <= 0
 
-        boundary_indices = torch.cat(
-            [
-                torch.tensor([0], device=features.device),
-                torch.where(boundary_mask)[0] + 1,
-                torch.tensor([len(features)], device=features.device),
-            ]
-        )
+        with gpu_sync_allowed():
+            boundary_mid_cpu = torch.where(boundary_mask.cpu())[0] + 1
+
+        zero = torch.zeros(1, dtype=boundary_mid_cpu.dtype)
+        end = torch.full((1,), len(features), dtype=boundary_mid_cpu.dtype)
+        boundary_indices_cpu = torch.cat([zero, boundary_mid_cpu, end])
 
         # For each sequence [start, end), position i flips to: start + end - 1 - i
-        lengths = boundary_indices[1:] - boundary_indices[:-1]
-        starts = boundary_indices[:-1]
-        ends = boundary_indices[1:]
+        lengths_cpu = boundary_indices_cpu[1:] - boundary_indices_cpu[:-1]
+        starts_cpu = boundary_indices_cpu[:-1]
+        ends_cpu = boundary_indices_cpu[1:]
 
         # Assign sequence ID to each element
-        sequence_ids = torch.arange(
-            len(lengths), device=features.device
-        ).repeat_interleave(lengths)
+        sequence_ids_cpu = torch.arange(
+            len(lengths_cpu), dtype=boundary_mid_cpu.dtype
+        ).repeat_interleave(lengths_cpu)
 
         # Calculate flipped indices for all positions at once
-        current_positions = torch.arange(len(features), device=features.device)
-        flip_indices = starts[sequence_ids] + ends[sequence_ids] - 1 - current_positions
+        current_positions_cpu = torch.arange(
+            len(features), dtype=boundary_mid_cpu.dtype
+        )
+        flip_indices_cpu = (
+            starts_cpu[sequence_ids_cpu] + ends_cpu[sequence_ids_cpu]
+        ) - (1 + current_positions_cpu)
+        flip_indices = flip_indices_cpu.to(features.device, non_blocking=True)
 
         return features[flip_indices]
 
@@ -1241,8 +1161,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            skip_substrs=[".position_ids"],
             ignore_unexpected_prefixes=["logit_scale.", "logit_bias."],
         )
 
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

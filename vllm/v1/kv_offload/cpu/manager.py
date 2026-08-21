@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
-from typing import Literal
 
 from typing_extensions import override
 
@@ -11,6 +10,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
+    LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadingManager,
     OffloadKey,
@@ -22,19 +23,15 @@ from vllm.v1.kv_offload.cpu.common import (
     CPULoadStoreSpec,
     CPUOffloadingMetrics,
 )
-from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
-from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-
-_CACHE_POLICIES: dict[str, type[CachePolicy]] = {
-    "lru": LRUCachePolicy,
-    "arc": ARCCachePolicy,
-}
+from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 
 
 class CPUOffloadingManager(OffloadingManager):
     """
-    An OffloadingManager with a pluggable CachePolicy (LRU or ARC).
+    An OffloadingManager with a pluggable CachePolicy, resolved by name via
+    CachePolicyFactory (built in: "lru", "arc"; external policies can either
+    register their own or be loaded out-of-tree via cache_policy_module_path).
 
     The manager owns all shared logic: ref-counting, event emission,
     block pool management, and the prepare_store/complete_store skeletons.
@@ -45,29 +42,30 @@ class CPUOffloadingManager(OffloadingManager):
     def __init__(
         self,
         num_blocks: int,
-        cache_policy: Literal["lru", "arc"] = "lru",
+        cache_policy: str = "lru",
+        cache_policy_module_path: str | None = None,
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
-        self.medium: str = CPULoadStoreSpec.medium()
+        self.medium: Medium = Medium.CPU
         self._num_blocks: int = num_blocks
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
-        policy_cls = _CACHE_POLICIES.get(cache_policy)
-        if policy_cls is None:
-            raise ValueError(
-                f"Unknown cache policy: {cache_policy!r}. "
-                f"Supported: {list(_CACHE_POLICIES)}"
-            )
+        policy_cls = CachePolicyFactory.get_cache_policy_cls(
+            cache_policy, cache_policy_module_path
+        )
         self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
         # Track the number of blocks in the cache that are evictable. i.e. ref_cnt 0.
         self._num_evictable_cache_blocks: int = 0
+        # Track blocks with an in-flight store (ref_cnt -1, not yet completed).
+        self._num_write_pending_blocks: int = 0
 
         self.store_threshold: int = store_threshold
         self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
+        self.allocation_sizes_in_current_batch: list[int] = []
 
         # Number of block references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -112,7 +110,7 @@ class CPUOffloadingManager(OffloadingManager):
         return RequestOffloadingContext()
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         if self.counts is not None:
             if key in self.counts:
                 self.counts.move_to_end(key)
@@ -123,10 +121,10 @@ class CPUOffloadingManager(OffloadingManager):
                 self.counts[key] = 1
         block = self._policy.get(key)
         if block is None:
-            return False
+            return LookupResult.MISS
         if not block.is_ready:
-            return None  # write in-flight; caller should retry
-        return True
+            return LookupResult.HIT_PENDING
+        return LookupResult.HIT
 
     @override
     def prepare_load(
@@ -149,7 +147,7 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        self._policy.touch(keys)
+        self._policy.touch(keys, req_context)
 
     @override
     def complete_load(
@@ -184,6 +182,7 @@ class CPUOffloadingManager(OffloadingManager):
                 evicted_keys=[],
             )
 
+        self.allocation_sizes_in_current_batch.append(len(keys_to_store))
         num_blocks_to_evict = len(keys_to_store) - self._get_num_free_blocks()
 
         to_evict: list[OffloadKey] = []
@@ -225,6 +224,7 @@ class CPUOffloadingManager(OffloadingManager):
 
         for key, block in zip(keys_to_store, blocks):
             self._policy.insert(key, block)
+        self._num_write_pending_blocks += len(keys_to_store)
 
         # build store specs for allocated blocks
         store_spec = self._get_load_store_spec(keys_to_store, blocks)
@@ -249,6 +249,7 @@ class CPUOffloadingManager(OffloadingManager):
                 block = self._policy.get(key)
                 if block is not None and not block.is_ready:
                     block.ref_cnt = 0
+                    self._num_write_pending_blocks -= 1
                     self._num_evictable_cache_blocks += 1
                     self._policy.mark_evictable(key)
                     stored_keys.append(key)
@@ -256,6 +257,7 @@ class CPUOffloadingManager(OffloadingManager):
             for key in keys:
                 block = self._policy.get(key)
                 if block is not None and not block.is_ready:
+                    self._num_write_pending_blocks -= 1
                     self._policy.remove(key)
                     self._free_block(block)
 
@@ -277,6 +279,7 @@ class CPUOffloadingManager(OffloadingManager):
         # can begin, preventing a cross-direction data race on reused offload block IDs.
         self._policy.clear()
         self._num_evictable_cache_blocks = 0
+        self._num_write_pending_blocks = 0
 
         self._free_list.clear()
         self._num_allocated_blocks = 0
@@ -299,10 +302,26 @@ class CPUOffloadingManager(OffloadingManager):
         usage = num_used / self._num_blocks if self._num_blocks > 0 else 0.0
         stats.set_gauge(CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC, usage)
 
+        for allocation_size in self.allocation_sizes_in_current_batch:
+            stats.observe_histogram(
+                CPUOffloadingMetrics.CPU_ALLOCATION_SIZE, allocation_size
+            )
+        self.allocation_sizes_in_current_batch.clear()
+
+        write_usage = (
+            self._num_write_pending_blocks / self._num_blocks
+            if self._num_blocks > 0
+            else 0.0
+        )
+        read_usage = max(usage - write_usage, 0.0)
+        stats.set_gauge(CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC, write_usage)
+        stats.set_gauge(CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC, read_usage)
+
         if self.store_threshold >= 2:
             stats.increase_counter(
                 CPUOffloadingMetrics.STORES_SKIPPED,
                 self.stores_skipped_in_current_batch,
             )
             self.stores_skipped_in_current_batch = 0
+
         return stats

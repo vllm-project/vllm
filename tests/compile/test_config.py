@@ -83,9 +83,33 @@ def test_copy_pass():
 def test_custom_op():
     # proper syntax
     _ = CompilationConfig(custom_ops=["+quant_fp8", "-silu_and_mul"])
+    _ = CompilationConfig(custom_ops=["none", "+rms_norm"])
+    _ = CompilationConfig(custom_ops=["+rms_norm", "+rms_norm"])
 
-    with pytest.raises(ValueError, match="Invalid syntax '"):
-        _ = CompilationConfig(custom_ops=["quant_fp8"])
+    for custom_ops in (["quant_fp8"], ["+"], ["-"]):
+        with pytest.raises(ValueError, match="Invalid syntax '"):
+            CompilationConfig(custom_ops=custom_ops)
+
+
+@pytest.mark.parametrize(
+    ("custom_ops", "config_kwargs", "match"),
+    [
+        (["all", "none"], {}, "can contain only one base mode"),
+        (
+            ["none", "+rms_norm", "-rms_norm"],
+            {},
+            "cannot both enable and disable.*rms_norm",
+        ),
+        (
+            ["-rotary_embedding"],
+            {"pass_config": PassConfig(enable_qk_norm_rope_fusion=True)},
+            "cannot both enable and disable.*rotary_embedding",
+        ),
+    ],
+)
+def test_reject_contradictory_custom_ops(custom_ops, config_kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        CompilationConfig(custom_ops=custom_ops, **config_kwargs)
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
@@ -228,6 +252,11 @@ def test_splitting_ops_dynamic():
     # populated when the engine decides to use piecewise compilation.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
     assert config.compilation_config.splitting_ops_contain_attention()
+    splitting_ops = config.compilation_config.splitting_ops
+    assert splitting_ops is not None
+    assert {
+        "vllm::qwen_gdn_attention_core_fused_norm_packed",
+    } <= set(splitting_ops)
 
     # When use_inductor_graph_partition=True
     config = VllmConfig(
@@ -466,6 +495,38 @@ def test_cudagraph_sizes_post_init(
             vllm_config.compilation_config.max_cudagraph_capture_size
             == expected_max_size
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if static graph mode is not supported",
+)
+@pytest.mark.parametrize(
+    ("is_blackwell", "expected_max_size"), [(False, 512), (True, 1024)]
+)
+def test_blackwell_cudagraph_default(is_blackwell, expected_max_size):
+    vllm_config = VllmConfig()
+    vllm_config.model_config = MagicMock(enforce_eager=False)
+    vllm_config.scheduler_config = SchedulerConfig(
+        max_num_seqs=512,
+        max_num_batched_tokens=2048,
+        max_model_len=2048,
+        is_encoder_decoder=False,
+    )
+    vllm_config.compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=is_blackwell,
+    ):
+        vllm_config._set_cudagraph_sizes()
+
+    assert (
+        vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
+    )
 
 
 @pytest.mark.skipif(
