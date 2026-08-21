@@ -87,7 +87,9 @@ def _make_runner(
         kv_cache_config=SimpleNamespace(
             kv_cache_groups=kv_cache_groups, num_blocks=1024
         ),
-        vllm_config=SimpleNamespace(num_lookahead_tokens=num_lookahead_tokens),
+        vllm_config=SimpleNamespace(
+            num_lookahead_tokens=num_lookahead_tokens, is_mm_encoder_only=False
+        ),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
     )

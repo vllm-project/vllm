@@ -7,6 +7,8 @@ encoder-cache disaggregation -- encodes the multi-modal items and publishes the
 embeddings. It runs no language model: no KV cache, no sampler, no CUDA graphs.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -19,7 +21,6 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     make_empty_encoder_model_runner_output,
 )
-from vllm.v1.worker.gpu.buffer_utils import get_default_max_concurrency
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -38,24 +39,32 @@ class MMEncoderModelRunner(GPUModelRunner):
         )
         assert self.dp_size == 1, "An encoder-only instance does not support DP."
 
-        depth = get_default_max_concurrency()
-        # `UvaBufferPool` recycles a slot every `depth` steps and the device
-        # reads the pooled host buffers in place. A sampling step is ordered by
-        # the device wait in `AsyncOutput.get_output()`; this one never waits, so
-        # it keeps one event per slot generation. Blocking: no driver busy-poll.
-        self._input_reuse_events = [torch.Event(blocking=True) for _ in range(depth)]
-        self._input_reuse_idx = 0
+        depth = vllm_config.max_concurrent_batches
+        # Blocking (sleep) events: busy-polling the driver lock can make this
+        # rank a straggler under contention.
+        self._input_events = [torch.Event(blocking=True) for _ in range(depth)]
+        self._input_event_idx = 0
 
-    def _wait_for_input_reuse(self) -> None:
-        """Wait for the step that last wrote the slots this step will reuse."""
-        self._input_reuse_events[self._input_reuse_idx].synchronize()
+    @contextmanager
+    def input_tensor_semaphore(self) -> Iterator[None]:
+        """Guard the host writes into the pooled input buffers.
 
-    def _mark_input_reuse(self) -> None:
-        """Mark this step's last host write into the pooled input buffers."""
-        self._input_reuse_events[self._input_reuse_idx].record()
-        self._input_reuse_idx = (self._input_reuse_idx + 1) % len(
-            self._input_reuse_events
-        )
+        `UvaBufferPool` recycles a slot every `max_concurrent_batches` steps and
+        the device reads the pooled host buffers in place. A sampling step is
+        ordered by the device wait in `AsyncOutput.get_output()`; this one never
+        waits, so entering blocks until the step that last wrote these slots is
+        done with them and leaving records this step's last write.
+
+        Leave before the encoder runs: it reads no pooled metadata, and holding
+        the guard across it costs ~22% throughput.
+        """
+        idx = self._input_event_idx
+        self._input_events[idx].synchronize()
+        try:
+            yield
+        finally:
+            self._input_events[idx].record()
+            self._input_event_idx = (idx + 1) % len(self._input_events)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return {}
@@ -92,32 +101,25 @@ class MMEncoderModelRunner(GPUModelRunner):
     ) -> ModelRunnerOutput:
         assert not dummy_run, "An encoder-only instance runs no dummy batch."
 
-        self._wait_for_input_reuse()
-        self.update_pp_decode_requests()
-        self.finish_requests(scheduler_output)
-        self.free_states(scheduler_output)
-        self.add_requests(scheduler_output)
-        self.update_requests(scheduler_output)
-        self.block_tables.apply_staged_writes()
-        if scheduler_output.total_num_scheduled_tokens == 0:
-            self._mark_input_reuse()
-            return self._no_forward(scheduler_output)
+        with self.input_tensor_semaphore():
+            self.update_pp_decode_requests()
+            self.finish_requests(scheduler_output)
+            self.free_states(scheduler_output)
+            self.add_requests(scheduler_output)
+            self.update_requests(scheduler_output)
+            self.block_tables.apply_staged_writes()
+            if scheduler_output.total_num_scheduled_tokens == 0:
+                return self._no_forward(scheduler_output)
 
-        batch_req_state, _ = self.gather_batch_req_state(scheduler_output, False)
-        assert batch_req_state is not None
-        # No CUDA graph, and no DP peer to agree a padded shape with.
-        self.prepare_inputs(
-            scheduler_output,
-            batch_req_state,
-            BatchExecutionDescriptor(
+            batch_req_state, _ = self.gather_batch_req_state(scheduler_output, False)
+            assert batch_req_state is not None
+            # No CUDA graph, and no DP peer to agree a padded shape with.
+            batch_desc = BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
                 num_tokens=batch_req_state.num_tokens,
                 num_reqs=None,
-            ),
-        )
-        # Before the encoder, not after: it reads no pooled metadata, and
-        # waiting on it costs ~22% throughput.
-        self._mark_input_reuse()
+            )
+            self.prepare_inputs(scheduler_output, batch_req_state, batch_desc)
 
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if self.lora_config is not None:
@@ -130,8 +132,6 @@ class MMEncoderModelRunner(GPUModelRunner):
                 scheduled_encoder_inputs=scheduled_encoder_inputs,
             )
 
-        # `prepare_inputs_embeds` would build an inputs_embeds nobody reads and
-        # raise "Encoder cache miss" for items this instance did not encode.
         with self.ec_connector.maybe_get_output(
             scheduler_output
         ) as ec_connector_output:

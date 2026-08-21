@@ -23,10 +23,6 @@ def set_default_max_concurrency(n: int) -> None:
     _DEFAULT_MAX_CONCURRENCY = max(2, n)
 
 
-def get_default_max_concurrency() -> int:
-    return _DEFAULT_MAX_CONCURRENCY
-
-
 def async_copy_to_gpu(
     x: torch.Tensor | np.ndarray,
     out: torch.Tensor | None = None,

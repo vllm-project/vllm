@@ -209,6 +209,10 @@ def warmup_kernels(
     We must call the provided worker's execute_model for pipeline parallel
     coordination.
     """
+    if model_runner.vllm_config.is_mm_encoder_only:
+        # No language model to warm up.
+        return
+
     num_spec_steps = model_runner.num_speculative_steps
     decode_query_len = model_runner.decode_query_len
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query

@@ -810,9 +810,8 @@ class Worker(WorkerBase):
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
-        if self.use_v2_model_runner and not self.vllm_config.is_mm_encoder_only:
+        if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
-            # An encoder-only instance runs no language model to warm up.
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
         elif get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other
