@@ -49,6 +49,7 @@ from vllm.multimodal.processing.processor import (
     ResolvedPromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import Idefics2VisionTransformer
@@ -396,12 +397,23 @@ class Phi4MMImageEncoder(nn.Module):
                         w * base_feat_width // base_feat_height_reduction,
                     )
                 )
-                useful_height = int(reshaped_image_attention_mask[0, :, 0].sum().item())
-                useful_width = int(reshaped_image_attention_mask[0, 0, :].sum().item())
+                # The mask stays on device for the encoder above, so these
+                # per-image counts have to come back to the host to drive the
+                # slicing and the Python-level length arithmetic.
+                with gpu_sync_allowed():
+                    useful_height = int(
+                        reshaped_image_attention_mask[0, :, 0].sum().item()
+                    )
+                    useful_width = int(
+                        reshaped_image_attention_mask[0, 0, :].sum().item()
+                    )
+                    mask_token_count = int(
+                        image_attention_mask[_bs, : B_ + 1, 0::2, 0::2].sum().item()
+                    )
                 sub_img = sub_img[:, :useful_height, :useful_width]
                 temp_sub_GN = self.sub_GN.repeat(1, useful_height, 1, 1)
                 temp_len = (
-                    int(image_attention_mask[_bs, : B_ + 1, 0::2, 0::2].sum().item())
+                    mask_token_count
                     + (useful_height + 1)
                     + base_feat_height // base_feat_height_reduction
                 )
@@ -861,7 +873,6 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             prompt_ids = self.info.get_tokenizer().encode(prompt)
@@ -872,9 +883,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         if audio_data := mm_data.get("audios", []):
             mm_data["audios"] = [(data, sr) for data in audio_data]
 
-        processed_outputs = super()._call_hf_processor(
-            prompt, mm_data, mm_kwargs, tok_kwargs
-        )
+        processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         num_img_tokens = [
@@ -905,8 +914,8 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         return dict(
             input_image_embeds=MultiModalFieldConfig.batched("image"),
             image_attention_mask=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
-            num_img_tokens=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            num_img_tokens=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             input_audio_embeds=MultiModalFieldConfig.batched("audio"),
         )
 
@@ -1004,6 +1013,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             "base_layer.": "",
+            "lora": None,
         },
         orig_to_new_prefix={
             "model.embed_tokens_extend.audio_embed.audio_projection.vision.": "embed_tokens_extend.audio_projection_for_vision.",  # noqa: E501
@@ -1246,7 +1256,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
-        loader = AutoWeightsLoader(self, skip_substrs=["lora"])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

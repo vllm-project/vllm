@@ -69,6 +69,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 
@@ -559,31 +560,11 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
-    def _apply_hf_processor_text_only(
-        self,
-        prompt_text: str,
-        tokenization_kwargs: Mapping[str, object],
-    ) -> list[int]:
-        # Bypass the HF processor and tokenize directly.  The HF
-        # processor expands multimodal placeholders (<|video|>, etc.)
-        # via get_text_with_replacements, which raises StopIteration
-        # when the prompt contains placeholders without matching data.
-        # The text-only path only needs token IDs, so the tokenizer
-        # alone is sufficient.
-        processor = self.info.get_hf_processor()
-        text_inputs = processor.tokenizer([prompt_text], **tokenization_kwargs)
-        input_ids = text_inputs["input_ids"]
-        if not isinstance(input_ids, list):
-            input_ids = input_ids.tolist()
-        (prompt_ids,) = input_ids
-        return prompt_ids
-
     def _call_hf_processor(
         self,
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         merged_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
         val, is_top_level_max_soft_tokens = _get_max_soft_tokens(merged_kwargs)
@@ -639,7 +620,6 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                     prompt=dummy_prompt,
                     mm_data={"images": frames},
                     mm_kwargs=video_mm_kwargs,
-                    tok_kwargs=tok_kwargs,
                 )
 
                 # Remap HF key name
@@ -740,7 +720,6 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             prompt,
             mm_data,
             patched_mm_kwargs,
-            tok_kwargs,
         )
 
         # HF uses 'image_position_ids'; vLLM uses 'pixel_position_ids'.
@@ -800,7 +779,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                     MultiModalFieldConfig.flat_from_sizes("video", vfc)
                 ),
                 video_frame_counts=MultiModalFieldConfig.batched(
-                    "video",
+                    "video", keep_on_cpu=True
                 ),
                 video_num_soft_tokens=MultiModalFieldConfig.batched(
                     "video", keep_on_cpu=True
@@ -999,6 +978,7 @@ class Gemma4ForConditionalGeneration(
     # window instead of dropping them (which would make image attention
     # causal-only for images larger than the sliding window).
     mm_prefix_clamp_sliding_window: bool = True
+    supports_tower_connector_lora = True
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -1365,11 +1345,14 @@ class Gemma4ForConditionalGeneration(
                     pp_tensor,
                     pad_tensor,
                 ).to(self.model_dtype)
-                encoder_outputs = vt.encoder(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=~pad_tensor,
-                    pixel_position_ids=pp_tensor,
-                )
+                # HuggingFace's mask builder probes `padding_mask.all()` to
+                # decide whether the mask can be skipped, which syncs.
+                with gpu_sync_allowed():
+                    encoder_outputs = vt.encoder(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=~pad_tensor,
+                        pixel_position_ids=pp_tensor,
+                    )
                 hidden_states = encoder_outputs.last_hidden_state
 
                 for i, (orig_idx, _, _) in enumerate(chunk_items):
@@ -1387,13 +1370,17 @@ class Gemma4ForConditionalGeneration(
             single_pos_ids = pool_position_ids[orig_idx].unsqueeze(0)
             padding_positions = (single_pos_ids == -1).all(dim=-1)
 
-            pooled_states, valid_mask = vt.pooler(
-                hidden_states=single_hidden,
-                pixel_position_ids=single_pos_ids,
-                padding_positions=padding_positions,
-                output_length=output_length,
-            )
-            valid_states = pooled_states[valid_mask]
+            # The pooler goes through HuggingFace's mask builder, which probes
+            # `padding_mask.all()`, and the mask indexing below needs the
+            # selected count on the host.
+            with gpu_sync_allowed():
+                pooled_states, valid_mask = vt.pooler(
+                    hidden_states=single_hidden,
+                    pixel_position_ids=single_pos_ids,
+                    padding_positions=padding_positions,
+                    output_length=output_length,
+                )
+                valid_states = pooled_states[valid_mask]
 
             if getattr(vt.config, "standardize", False):
                 valid_states = (valid_states - vt.std_bias) * vt.std_scale
@@ -1444,7 +1431,9 @@ class Gemma4ForConditionalGeneration(
         pooling_k2 = vision_cfg.pooling_kernel_size**2
 
         if isinstance(frame_counts, torch.Tensor):
-            fc_list = frame_counts.tolist()
+            # Per-video frame counts drive the Python-level batching below.
+            with gpu_sync_allowed():
+                fc_list = frame_counts.tolist()
         else:
             fc_list = list(frame_counts)
 
@@ -1474,11 +1463,13 @@ class Gemma4ForConditionalGeneration(
                 pp_chunk,
                 pad_chunk,
             ).to(self.model_dtype)
-            encoder_outputs = vt.encoder(
-                inputs_embeds=inputs_embeds,
-                attention_mask=~pad_chunk,
-                pixel_position_ids=pp_chunk,
-            )
+            # HuggingFace's mask builder probes `padding_mask.all()`.
+            with gpu_sync_allowed():
+                encoder_outputs = vt.encoder(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=~pad_chunk,
+                    pixel_position_ids=pp_chunk,
+                )
             last_hidden_states_list.append(encoder_outputs.last_hidden_state)
 
         last_hidden_states = torch.cat(last_hidden_states_list, dim=0)
@@ -1493,13 +1484,15 @@ class Gemma4ForConditionalGeneration(
             single_pos_ids = pixel_position_ids[i].unsqueeze(0)
             single_pad_pos = padding_positions[i].unsqueeze(0)
 
-            pooled_states, valid_mask = vt.pooler(
-                hidden_states=single_hidden,
-                pixel_position_ids=single_pos_ids,
-                padding_positions=single_pad_pos,
-                output_length=output_length,
-            )
-            valid_states = pooled_states[valid_mask]
+            # As above, plus mask indexing that needs the count on the host.
+            with gpu_sync_allowed():
+                pooled_states, valid_mask = vt.pooler(
+                    hidden_states=single_hidden,
+                    pixel_position_ids=single_pos_ids,
+                    padding_positions=single_pad_pos,
+                    output_length=output_length,
+                )
+                valid_states = pooled_states[valid_mask]
 
             if getattr(vt.config, "standardize", False):
                 valid_states = (valid_states - vt.std_bias) * vt.std_scale
@@ -1553,9 +1546,11 @@ class Gemma4ForConditionalGeneration(
 
         # Strip padding per-batch element: only keep valid (non-padding)
         # tokens.
+        # Boolean-mask indexing needs the selected count on the host.
         per_audio = []
-        for enc, mask in zip(audio_features, audio_mask, strict=True):
-            per_audio.append(enc[mask])  # [num_real, hidden_size]
+        with gpu_sync_allowed():
+            for enc, mask in zip(audio_features, audio_mask, strict=True):
+                per_audio.append(enc[mask])  # [num_real, hidden_size]
 
         return per_audio
 
