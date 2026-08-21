@@ -195,6 +195,8 @@ def _flashkda_prefill(
     out: torch.Tensor,
     final_state: torch.Tensor,
     workspace: torch.Tensor,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import vllm._flashkda_C  # noqa: F401
 
@@ -217,6 +219,8 @@ def _flashkda_prefill(
         initial_state.contiguous(),
         final_state,
         cu_seqlens.contiguous(),
+        checkpoint_state,
+        checkpoint_offsets.contiguous() if checkpoint_offsets is not None else None,
     )
     return out, final_state
 
@@ -860,64 +864,32 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     if checkpoint is not None:
                         assert non_spec_query_start_loc is not None
                         num_sequences = initial_state.shape[0]
-                        assert len(checkpoint.splits) == num_sequences
-                        assert checkpoint.cu_seqlens.shape == (num_sequences, 2, 2)
+                        assert checkpoint.checkpoint_offsets.shape == (num_sequences,)
                         final_state = final_state[:num_sequences]
                         checkpoint_state = checkpoint_state[:num_sequences]
-
-                        # TODO: let native FlashKDA return requested checkpoint states
-                        # from one packed call and remove this path.
-                        start = 0
-                        for seq_idx, (first_len, tail_len) in enumerate(
-                            checkpoint.splits
-                        ):
-                            first_end = start + first_len
-                            end = first_end + tail_len
-                            first_final_state = (
-                                checkpoint_state[seq_idx : seq_idx + 1]
-                                if tail_len
-                                else final_state[seq_idx : seq_idx + 1]
-                            )
-                            _flashkda_prefill(
-                                q=q_ns[:, start:first_end],
-                                k=k_ns[:, start:first_end],
-                                v=v_ns[:, start:first_end],
-                                g=g1_ns[:, start:first_end],
-                                beta=beta_ns[:, start:first_end],
-                                A_log=self.A_log,
-                                dt_bias=self.dt_bias,
-                                lower_bound=self.gate_lower_bound,
-                                initial_state=initial_state[seq_idx : seq_idx + 1],
-                                cu_seqlens=checkpoint.cu_seqlens[seq_idx, 0],
-                                out=flashkda_out[:, start:first_end],
-                                final_state=first_final_state,
-                                workspace=workspace,
-                            )
-                            if tail_len:
-                                _flashkda_prefill(
-                                    q=q_ns[:, first_end:end],
-                                    k=k_ns[:, first_end:end],
-                                    v=v_ns[:, first_end:end],
-                                    g=g1_ns[:, first_end:end],
-                                    beta=beta_ns[:, first_end:end],
-                                    A_log=self.A_log,
-                                    dt_bias=self.dt_bias,
-                                    lower_bound=self.gate_lower_bound,
-                                    initial_state=checkpoint_state[
-                                        seq_idx : seq_idx + 1
-                                    ],
-                                    cu_seqlens=checkpoint.cu_seqlens[seq_idx, 1],
-                                    out=flashkda_out[:, first_end:end],
-                                    final_state=final_state[seq_idx : seq_idx + 1],
-                                    workspace=workspace,
-                                )
-                            start = end
+                        checkpoint_offsets = checkpoint.checkpoint_offsets
+                        _flashkda_prefill(
+                            q=q_ns,
+                            k=k_ns,
+                            v=v_ns,
+                            g=g1_ns,
+                            beta=beta_ns,
+                            A_log=self.A_log,
+                            dt_bias=self.dt_bias,
+                            lower_bound=self.gate_lower_bound,
+                            initial_state=initial_state,
+                            cu_seqlens=non_spec_query_start_loc,
+                            out=flashkda_out,
+                            final_state=final_state,
+                            workspace=workspace,
+                            checkpoint_state=checkpoint_state,
+                            checkpoint_offsets=checkpoint_offsets,
+                        )
                         core_attn_out_non_spec = flashkda_out
                         last_recurrent_state = final_state
                         state_len = conv_state.shape[-1]
                         width = mixed_qkv_ns.shape[-1]
                         recurrent_row_size = checkpoint_state[0].numel()
-                        checkpoint_offsets = checkpoint.cu_seqlens[:, 0, 1]
                         block_size = 256
                         _store_cache_checkpoints_kernel[
                             (

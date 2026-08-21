@@ -144,15 +144,31 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary():
         actual.checkpoint.state_indices,
         torch.tensor([2, NULL_BLOCK_ID], dtype=torch.int32, device=device),
     )
-    assert actual.checkpoint.splits == ((48, 2), (16, 0))
     torch.testing.assert_close(
-        actual.checkpoint.cu_seqlens,
-        torch.tensor(
-            [[[0, 48], [0, 2]], [[0, 16], [0, 0]]],
-            dtype=torch.int32,
-            device=device,
-        ),
+        actual.checkpoint.checkpoint_offsets,
+        torch.tensor([48, 0], dtype=torch.int32, device=device),
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_internal_checkpoint_metadata_skips_unaligned_offset():
+    device = torch.device("cuda")
+    # The checkpoint block boundary is 48, but this query starts at token 1,
+    # making the real checkpoint offset 47, which is not FlashKDA-aligned.
+    batch = BatchSpec(seq_lens=[50], query_lens=[49])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    ).replace(is_prefilling=torch.tensor([True]))
+    actual = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+        mamba_cache_mode="align",
+        num_prefill_checkpoint_blocks=1,
+        device=device,
+    ).build(0, common_attn_metadata)
+
+    assert actual.checkpoint is None
 
 
 @pytest.mark.parametrize(
