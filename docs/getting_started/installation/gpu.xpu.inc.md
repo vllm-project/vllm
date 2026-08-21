@@ -142,6 +142,24 @@ vllm serve facebook/opt-13b \
 
 By default, a ray instance will be launched automatically if no existing one is detected in the system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the [examples/ray_serving/run_cluster.sh](https://github.com/vllm-project/vllm/blob/main/examples/ray_serving/run_cluster.sh) helper script.
 
+#### Selecting a specific XPU device
+
+By default each worker binds `xpu:{local_rank}`, so a single-GPU server always
+runs on `xpu:0`. To place a standalone worker on a different card, set
+`VLLM_XPU_DEVICE_OFFSET`; the physical device index becomes `local_rank + offset`.
+For example, `VLLM_XPU_DEVICE_OFFSET=1` puts a single-GPU server on `xpu:1`:
+
+```bash
+VLLM_XPU_DEVICE_OFFSET=1 vllm serve Qwen/Qwen3-0.6B
+```
+
+Prefer this over `ZE_AFFINITY_MASK` when the worker must run collectives (e.g.
+oneCCL/XCCL) with another process on the same host, such as RL weight sync
+between a trainer and a vLLM server. `ZE_AFFINITY_MASK` narrows device
+visibility to a single card per process, which makes oneCCL fail its
+`comm_dev_uuids ⊆ node_dev_uuids` check and hang; the offset keeps every card
+visible while still pinning the worker to a chosen device.
+
 --8<-- [end:supported-features]
 --8<-- [start:distributed-backend]
 
