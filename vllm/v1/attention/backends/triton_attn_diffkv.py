@@ -24,8 +24,8 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash_diffkv,
+from vllm.v1.attention.ops.reshape_and_cache_flash_diffkv import (
+    reshape_and_cache_flash_diffkv,
 )
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
     unified_attention_diffkv,
