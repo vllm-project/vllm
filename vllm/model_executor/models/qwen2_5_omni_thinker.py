@@ -301,8 +301,12 @@ def create_qwen2_5_omni_thinker_field_factory(
             input_audio_features=MultiModalFieldConfig.flat_from_sizes(
                 "audio", audio_feature_lengths, dim=1
             ),
-            feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-            audio_feature_lengths=MultiModalFieldConfig.batched("audio"),
+            feature_attention_mask=MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
+            audio_feature_lengths=MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_pixel_grid_sizes
             ),
@@ -318,7 +322,9 @@ def create_qwen2_5_omni_thinker_field_factory(
             ),
             video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-            use_audio_in_video=MultiModalFieldConfig.shared("video", num_videos),
+            use_audio_in_video=MultiModalFieldConfig.shared(
+                "video", num_videos, keep_on_cpu=True
+            ),
         )
 
     return _qwen2_5_omni_thinker_field_config
@@ -498,7 +504,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
@@ -546,7 +551,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         input_features = hf_inputs.pop("input_features", None)
@@ -881,44 +885,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             ),
         ]
 
-    def _apply_hf_processor_main(
-        self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        *,
-        enable_hf_prompt_update: bool,
-    ) -> tuple[list[int], BatchFeature, bool]:
-        """
-        Qwen2.5-Omni reimplements this function to handle text only.
-        """
-        if isinstance(prompt, str):
-            if enable_hf_prompt_update:
-                return self._apply_hf_processor_text_mm(
-                    prompt_text=prompt,
-                    mm_items=mm_items,
-                    hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                    tokenization_kwargs=tokenization_kwargs,
-                )
-            tokenizer = self.info.get_tokenizer()
-            prompt_ids = tokenizer.encode(prompt)
-        else:
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt)
-
-        mm_processed_data = self._apply_hf_processor_mm_only(
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
-
-        return prompt_ids, mm_processed_data, False
-
     def _apply_hf_processor_mm_only(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """
         Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
@@ -933,11 +903,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 )
             mm_counts["audio"] -= mm_counts["video"]
 
-        _, mm_processed_data, _ = self._apply_hf_processor_text_mm(
+        _, mm_processed_data = self._apply_hf_processor_text_mm(
             prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
         )
 
         return mm_processed_data
@@ -1031,7 +1000,11 @@ class Qwen2_5OmniConditionalGenerationMixin:
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
-        audio_feature_lengths = audio_input["audio_feature_lengths"]
+        # audio_feature_lengths is keep_on_cpu; the audio tower derives
+        # device placement from feature_lens, so move it explicitly.
+        audio_feature_lengths = audio_input["audio_feature_lengths"].to(
+            input_features.device, non_blocking=True
+        )
 
         audio_feat_lengths, audio_output_lengths = (
             self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths)
@@ -1102,6 +1075,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             "thinker.lm_head.": "language_model.lm_head.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
+            "talker.": None,
+            "token2wav.": None,
         }
     )
     packed_modules_mapping = {
@@ -1581,7 +1556,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["talker.", "token2wav."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

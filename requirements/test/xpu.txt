@@ -808,7 +808,7 @@ scipy==1.18.0
     #   sentence-transformers
 sentence-transformers==5.7.0
     # via mteb
-sentencepiece==0.2.2
+sentencepiece==0.2.1
     # via -r requirements/test/../common.txt
 sentry-sdk==2.68.0
     # via fastapi-cloud-cli
