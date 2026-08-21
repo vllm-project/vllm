@@ -6,6 +6,7 @@ import inspect
 import os
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -1823,6 +1824,49 @@ def test_host_stager_is_only_initialized_for_same_host_reads(monkeypatch):
         stager_factory.assert_not_called()
         assert worker._maybe_init_host_stager("local-host") is stager
         stager_factory.assert_called_once()
+
+
+@pytest.mark.cpu_test
+def test_host_stager_owns_deferred_shutdown():
+    """Worker resources must remain live until staged reads become terminal."""
+    background_started = threading.Event()
+    allow_completion = threading.Event()
+    poll_count = 0
+
+    def poll_shutdown(cancel: bool = False) -> bool:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count < 3:
+            return False
+        background_started.set()
+        allow_completion.wait(timeout=5)
+        return True
+
+    stager = object.__new__(HostWriteStager)
+    stager._closed = False
+    stager._shutdown_thread = None
+    stager._begin_shutdown = MagicMock()
+    stager._poll_shutdown = MagicMock(side_effect=poll_shutdown)
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._handshake_initiation_executor = MagicMock()
+    worker._recving_transfers = {}
+    worker._host_stager = stager
+    worker._finish_shutdown = MagicMock()
+
+    worker.shutdown(drain_timeout=0)
+
+    assert background_started.wait(timeout=5)
+    stager._begin_shutdown.assert_called_once_with()
+    shutdown_thread = stager._shutdown_thread
+    assert shutdown_thread is not None
+    worker._finish_shutdown.assert_not_called()
+
+    allow_completion.set()
+    shutdown_thread.join(timeout=5)
+
+    assert not shutdown_thread.is_alive()
+    worker._finish_shutdown.assert_called_once()
 
 
 def _run_abort_timeout_test(llm: LLM, timeout: int):
