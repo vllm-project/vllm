@@ -3374,3 +3374,165 @@ def test_reachable_block_mask_chunk_to_block_index_conversion(
     # With blocks_per_chunk=3: alignment has 16 blocks, tail 2 -> 1 chunk.
     assert len(reachable_chunks) > 0
     assert len(reachable_chunks) < num_chunks
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_retention_interval_sparsifies_swa_stores(
+    request_runner, async_scheduling: bool
+):
+    """retention_interval reduces the number of SWA chunks stored.
+
+    Uses the same hybrid architecture as test_swa_alignment_skip but with
+    retention_interval=32 (read from kv_connector_extra_config).  With
+    alignment_tokens=16 the default stores a 2-block SWA tail per 16-token
+    segment.  retention_interval=32 widens segments to 32 tokens (8 SWA
+    blocks), so only the trailing 2 of each 8-block segment are stored.
+
+    With 64 tokens (4 full-attn blocks, 16 SWA blocks):
+      - Group 0 (full attn): stores all 4 blocks
+      - Group 1 (SWA) without retention: 4 segments of 4 -> 8 stored
+      - Group 1 (SWA) with retention_interval=32: 2 segments of 8 -> 4 stored
+    """
+    full_attn_block_size = 16
+    swa_block_size = 4
+    sliding_window = 8
+    num_gpu_blocks = 200
+
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["layer0"],
+            FullAttentionSpec(
+                block_size=full_attn_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["layer1"],
+            SlidingWindowSpec(
+                block_size=swa_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=sliding_window,
+            ),
+        ),
+    ]
+
+    runner = request_runner(
+        block_size=swa_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+        kv_cache_groups=kv_cache_groups,
+        extra_config_overrides={"retention_interval": 32},
+    )
+
+    assert runner.connector_scheduler.config.retention_interval == 32
+
+    num_tokens = 64
+    runner.new_request(token_ids=[0] * num_tokens)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0])
+
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        # Group 0 (full attn, block_size=16): 4 blocks stored
+        # Group 1 (SWA, block_size=4): 16 blocks total, retention_interval=32
+        #   Dense segment tails (per_segment=32/4=8, need=2):
+        #     blocks 6, 7 and 14, 15
+        #   Replay boundary (num_prompt_tokens-1=63, aligned to 48):
+        #     end=48/4=12, tail blocks 10, 11
+        expected_stored=(
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 6),
+            (1, 7),
+            (1, 10),
+            (1, 11),
+            (1, 14),
+            (1, 15),
+        ),
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_retention_interval_zero_stores_only_replay_boundary(
+    request_runner, async_scheduling: bool
+):
+    """retention_interval=0 stores only the replay boundary SWA blocks.
+
+    Same hybrid architecture.  With retention_interval=0, no dense segment
+    tails are stored — only blocks reachable from the replay boundary
+    (num_prompt_tokens - 1).
+    """
+    full_attn_block_size = 16
+    swa_block_size = 4
+    sliding_window = 8
+    num_gpu_blocks = 200
+
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["layer0"],
+            FullAttentionSpec(
+                block_size=full_attn_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["layer1"],
+            SlidingWindowSpec(
+                block_size=swa_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=sliding_window,
+            ),
+        ),
+    ]
+
+    runner = request_runner(
+        block_size=swa_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+        kv_cache_groups=kv_cache_groups,
+        extra_config_overrides={"retention_interval": 0},
+    )
+
+    assert runner.connector_scheduler.config.retention_interval == 0
+
+    num_tokens = 64
+    runner.new_request(token_ids=[0] * num_tokens)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0])
+
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        # Group 0 (full attn): all 4 blocks stored
+        # Group 1 (SWA): retention_interval=0 -> only replay boundary
+        #   replay boundary = num_prompt_tokens - 1 = 63
+        #   aligned to alignment_tokens=16 -> 48, end=48/4=12
+        #   tail = ceil(8/4) = 2 blocks -> blocks 10, 11
+        expected_stored=(
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 10),
+            (1, 11),
+        ),
+    )

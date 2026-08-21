@@ -178,12 +178,36 @@ class SchedulerOffloadConfig(NamedTuple):
                 full_attn_tokens_per_chunk.add(tokens_per_block * spec.blocks_per_chunk)
 
         # Only apply the optimization if there's a single consistent
-        # full-attention alignment size.
+        # full-attention alignment size.  For pure SWA/Mamba models (no
+        # full-attention groups), fall back to the largest SWA/Mamba
+        # tokens_per_chunk so retention_interval has a boundary
+        # granularity to work with.
         alignment_tokens: int | None = None
         if len(full_attn_tokens_per_chunk) == 1:
             alignment_tokens = full_attn_tokens_per_chunk.pop()
+        elif not full_attn_tokens_per_chunk:
+            all_tokens_per_chunk = [
+                tpb * spec.blocks_per_chunk for tpb in spec.tokens_per_block
+            ]
+            if all_tokens_per_chunk:
+                alignment_tokens = max(all_tokens_per_chunk)
 
-        retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+        kv_transfer_config = vllm_config.kv_transfer_config
+        extra_config = (
+            kv_transfer_config.kv_connector_extra_config
+            if kv_transfer_config is not None
+            else None
+        ) or {}
+        _sentinel = object()
+        raw_retention = extra_config.get("retention_interval", _sentinel)
+        if raw_retention is not _sentinel:
+            retention_interval: int | None = (
+                int(raw_retention) if raw_retention is not None else None
+            )
+        else:
+            retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+            if retention_interval is None:
+                retention_interval = 0
 
         eagle_groups = {
             idx
@@ -1298,11 +1322,11 @@ class OffloadingConnectorScheduler:
                 # (SWA/Mamba sparsity + retention interval).
                 # reachable_block_mask operates in KV-block coordinates,
                 # so convert chunk indices to block indices.
-                reachable_boundaries = (
-                    (req.num_prompt_tokens - 1,)
-                    if self.config.retention_interval is not None
-                    else ()
-                )
+                reachable_boundaries: tuple[int, ...] = ()
+                if self.config.retention_interval is not None:
+                    reachable_boundaries = (req.num_prompt_tokens - 1,)
+                    if req.shared_prefix_boundary:
+                        reachable_boundaries += (req.shared_prefix_boundary,)
                 manager_cls = KVCacheSpecRegistry.get_manager_class(
                     group_config.kv_cache_spec
                 )

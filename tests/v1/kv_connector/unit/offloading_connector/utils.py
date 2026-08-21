@@ -209,6 +209,9 @@ class RequestRunner:
             # Exercise the self-describing KV events path by default;
             # opt-out tests override this to cover the legacy placeholders.
             "self_describing_kv_events": True,
+            # Default to dense SWA storage for existing tests; retention
+            # interval tests override this explicitly.
+            "retention_interval": None,
         }
         if blocks_per_chunk > 1:
             extra_config["block_size"] = block_size * blocks_per_chunk
