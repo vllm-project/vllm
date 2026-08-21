@@ -37,9 +37,10 @@ from vllm.triton_utils.allocation import set_triton_allocator
 
 
 def _is_capturing_or_compiling() -> bool:
-    # torch.cuda.is_current_stream_capturing() is unavailable on non-CUDA (XPU) torch.
-    return torch.compiler.is_compiling() or (
-        current_platform.is_cuda_alike() and torch.cuda.is_current_stream_capturing()
+    # The accelerator API dispatches to the active backend.
+    return (
+        torch.compiler.is_compiling()
+        or torch.accelerator.current_stream().is_capturing()
     )
 
 
@@ -814,13 +815,13 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     ) -> bool:
         p = current_platform
         if p.is_rocm():
-            from vllm.platforms.rocm import get_cdna_version
+            from vllm.platforms.rocm import get_cdna_version, on_rdna4
 
-            _rocm_support_fp8 = get_cdna_version() > 2
+            is_rocm_fp8_supported = get_cdna_version() > 2 or on_rdna4()
         else:
-            _rocm_support_fp8 = False
+            is_rocm_fp8_supported = False
 
-        device_supports_fp8 = _rocm_support_fp8 or (
+        device_supports_fp8 = is_rocm_fp8_supported or (
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 

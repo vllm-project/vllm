@@ -6,7 +6,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Any, ClassVar, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 import regex as re
 from pydantic import (
@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 
+import vllm.envs as envs
 from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.exceptions import VLLMServerError, VLLMValidationError
@@ -26,6 +27,10 @@ from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
+
+StopParam: TypeAlias = (
+    str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
+)
 
 
 class OpenAIBaseModel(BaseModel):
@@ -112,19 +117,48 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     request has no multimodal input."""
 
 
+class CompletionTokenUsageInfo(OpenAIBaseModel):
+    reasoning_tokens: int = 0
+
+
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: int | None = 0
     prompt_tokens_details: PromptTokenUsageInfo | None = None
+    completion_tokens_details: CompletionTokenUsageInfo | None = None
 
 
-class PerRequestTimingMetrics(OpenAIBaseModel):
+class SpeculativeDecodingMetrics(OpenAIBaseModel):
+    """Per-request speculative-decoding acceptance metrics.
+
+    Experimental, subject to change. Only populated for single-sequence requests
+    (`n == 1`); `null` for `n > 1`, mirroring the timing metrics.
+    """
+
+    mean_acceptance_length: float
+    draft_acceptance_rate: float
+    # Dense histogram: index j holds the number of verify steps that accepted
+    # exactly j draft tokens (length num_spec_tokens + 1). Excludes the
+    # always-accepted bonus token.
+    acceptance_histogram: list[int]
+    num_spec_steps: int
+    num_accepted_draft_tokens: int
+    num_draft_tokens: int
+    num_spec_tokens: int
+    # Ordered per-verify-step arrays; populated only at the `detailed` level.
+    per_step_accepted: list[int] | None = None
+    per_step_drafted: list[int] | None = None
+
+
+class PerRequestMetrics(OpenAIBaseModel):
     time_to_first_token_ms: float | None = None
     generation_time_ms: float | None = None
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
     tokens_per_second: float | None = None
+    # Experimental, subject to change.
+    speculative_decoding: SpeculativeDecodingMetrics | None = None
 
 
 class RequestResponseMetadata(BaseModel):
@@ -256,7 +290,7 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
                 structured_outputs=StructuredOutputsParams(structural_tag=payload)
             )
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, VLLMValidationError) as exc:
         raise VLLMValidationError(
             f"Invalid {parameter} structural_tag specification.",
             parameter=parameter,
@@ -296,6 +330,7 @@ class FunctionDefinition(OpenAIBaseModel):
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
+        data = {k: v for k, v in data.items() if k in type(self).model_fields}
         if self.strict is None:
             data.pop("strict", None)
         if self.defer_loading is None:

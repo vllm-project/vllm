@@ -200,7 +200,7 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        if len(generators) != logits.shape[0] and not self.use_fp64_gumbel:
+        if not generators and not self.use_fp64_gumbel:
             return compiled_random_sample(logits), logits_to_return
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
@@ -338,7 +338,7 @@ class TopKTopPSampler(nn.Module):
 
 # Note: this is a workaround for
 # https://github.com/pytorch/pytorch/pull/151218
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
     probs = logits.softmax(dim=-1, dtype=torch.float32)
     q = torch.empty_like(probs)
