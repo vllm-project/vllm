@@ -957,6 +957,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param = getattr(self, name, self)
             if param is None and name == "bias":
                 continue
+            if not isinstance(param, Parameter):
+                raise ValueError(
+                    f"Cannot load weight {name!r}: expected a torch.nn.Parameter, "
+                    f"but found {type(param).__name__}."
+                )
             param.weight_loader(param, loaded_weight, shard_id)
             logger.debug(
                 "Loaded shard %s with shape %s into %s.%s",
