@@ -43,8 +43,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #      clock-sync timestamp
 #   6: Validate EAGLE/MTP speculative configuration compatibility
 #   7: Include NIXL transfer mode (push vs pull) in the compatibility hash
+#   8: Add per-region transfer geometry to NixlAgentMetadata
 #
-NIXL_CONNECTOR_VERSION: int = 7
+NIXL_CONNECTOR_VERSION: int = 8
 
 
 @dataclass
@@ -60,6 +61,11 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    region_strides: list[int] | None = None
+    region_num_blocks: list[int] | None = None
+    region_group_ids: list[int] | None = None
+    region_block_sizes: list[int] | None = None
+    region_names: list[str] | None = None
 
 
 @dataclass

@@ -730,6 +730,62 @@ def test_get_block_descs_ids_hybrid_ssm():
 
 
 @pytest.mark.cpu_test
+def test_get_block_descs_ids_selects_attention_regions_by_group():
+    """Each attention group's blocks address only that group's regions."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=3,
+        has_mamba=False,
+        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
+        block_len_per_layer=[100, 100, 100],
+    )
+    worker.region_group_ids = [0, 0, 1]
+
+    result = worker._compute_desc_ids(
+        block_ids=([1, 2], [7]),
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+    )
+
+    assert result.tolist() == [1, 2, 11, 12, 27]
+
+    remapped = worker._compute_desc_ids(
+        block_ids=([1, 2], [7]),
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+        region_group_ids=[1, 1, 0],
+    )
+    assert remapped.tolist() == [21, 22, 7, 17]
+
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_uses_per_region_pool_capacity():
+    """Independent host and device pools use cumulative descriptor offsets."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=2,
+        has_mamba=False,
+        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
+        block_len_per_layer=[100, 100],
+    )
+    worker.region_group_ids = [0, 1]
+
+    result = worker._compute_desc_ids(
+        block_ids=([4], [8]),
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+        region_num_blocks=[5, 10],
+    )
+
+    assert result.tolist() == [4, 13]
+
+
+@pytest.mark.cpu_test
 def test_get_block_descs_ids_kernel_block_mismatch():
     """Test _compute_desc_ids uses different strides for FA
     (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
