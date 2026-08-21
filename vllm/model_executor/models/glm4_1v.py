@@ -1581,7 +1581,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         if not mm_data:
@@ -1602,7 +1601,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 prompt=prompt,
                 mm_data=prepared_data,
                 mm_kwargs=prepared_kwargs,
-                tok_kwargs=tok_kwargs,
             )
 
         if (
@@ -1631,7 +1629,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     prompt="<|begin_of_video|><|video|><|end_of_video|>",
                     mm_data=video_mm_data,
                     mm_kwargs=video_mm_kwargs,
-                    tok_kwargs=tok_kwargs,
                 )
                 input_ids = video_outputs.pop("input_ids")
                 if swap_video_frame_tokens:
@@ -1659,7 +1656,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
         if swap_video_frame_tokens:
             input_ids = processed_outputs["input_ids"]
