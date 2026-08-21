@@ -57,6 +57,16 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         self._disabled = False
+        kv_config = vllm_config.kv_transfer_config
+        assert kv_config is not None
+        self._defer_start_load = (
+            kv_config.kv_connector_module_path is None
+            and kv_config.kv_connector == "NixlConnector"
+            and kv_config.kv_role == "kv_consumer"
+            and kv_config.kv_buffer_device != "cpu"
+            and vllm_config.parallel_config.pipeline_parallel_size == 1
+            and vllm_config.model_config.runner_type == "generate"
+        )
 
     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
         if self._disabled:
@@ -67,6 +77,10 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
 
+        if not self._defer_start_load:
+            self._start_load_kv()
+
+    def _start_load_kv(self) -> None:
         # TODO: sort out KV Connectors' use of forward_context
         if is_forward_context_available():
             self.kv_connector.start_load_kv(get_forward_context())
@@ -79,6 +93,9 @@ class ActiveKVConnector(KVConnector):
     ) -> KVConnectorOutput | None:
         if self._disabled:
             return None
+
+        if self._defer_start_load:
+            self._start_load_kv()
 
         output = KVConnectorOutput()
         if wait_for_save:
