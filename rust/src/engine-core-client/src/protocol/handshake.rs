@@ -61,7 +61,7 @@ pub struct EngineCoreReadyResponse {
     pub dtype: ModelDtype,
     /// Python vLLM version reported by the engine process.
     pub vllm_version: String,
-    /// World size (TP * PP) from the parallel config.
+    /// World size (TP * PP * PCP) from the parallel config.
     pub world_size: u64,
     /// Data-parallel size from this EngineCore's effective parallel config.
     /// Dense independent-DP ranks are reconfigured to report `1`; the client
