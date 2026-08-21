@@ -54,6 +54,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -248,13 +249,13 @@ def _audioflamingo3_field_config(hf_inputs: Mapping[str, torch.Tensor]):
             feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
                 "audio", chunk_counts, dim=0
             ),
-            chunk_counts=MultiModalFieldConfig.batched("audio"),
+            chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
     return dict(
         audio_embeds=MultiModalFieldConfig.batched("audio"),
         input_features=MultiModalFieldConfig.batched("audio"),
         feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-        chunk_counts=MultiModalFieldConfig.batched("audio"),
+        chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
     )
 
 
@@ -306,7 +307,10 @@ def _flatten_valid_audio_embeddings(
         < output_lengths[:, None]
     )
 
-    return audio_embeddings[valid_mask], output_lengths
+    # Boolean-mask indexing has a data-dependent output shape, so the count
+    # has to come back to the host.
+    with gpu_sync_allowed():
+        return audio_embeddings[valid_mask], output_lengths
 
 
 def _count_audio_tokens_from_mask(
@@ -630,10 +634,10 @@ class AudioFlamingo3ForConditionalGeneration(
             audio_features,
             feature_attention_mask,
         )
-        chunk_embeddings = torch.split(
-            masked_audio_features,
-            audio_output_lengths.tolist(),
-        )
+        # `split` needs Python int sizes.
+        with gpu_sync_allowed():
+            split_sizes = audio_output_lengths.tolist()
+        chunk_embeddings = torch.split(masked_audio_features, split_sizes)
 
         grouped_embeddings = []
         current_idx = 0

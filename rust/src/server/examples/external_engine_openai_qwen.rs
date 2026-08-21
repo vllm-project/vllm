@@ -58,9 +58,9 @@ async fn main() -> Result<()> {
             local_input_address: None,
             local_output_address: None,
         },
-        data_parallel_size: args.engine_count,
         coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,
+        generation_config: Default::default(),
         served_model_name: vec![],
         listener_mode: HttpListenerMode::BindTcp {
             host: "127.0.0.1".to_string(),

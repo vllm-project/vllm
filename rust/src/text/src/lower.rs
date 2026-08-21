@@ -188,6 +188,7 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
+        routed_experts_prompt_start: 0,
     };
     validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
@@ -321,8 +322,8 @@ mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
-    use crate::backend::hf::HfTextBackend;
-    use crate::backend::{SamplingHints, TextBackend as _};
+    use crate::backend::hf::{HfTextBackend, ResolvedModelFiles};
+    use crate::backend::{GenerationConfigMode, SamplingHints, TextBackend as _};
     use crate::error::{LogprobsError, SamplingParamsError, TokenIdsError};
     use crate::request::{Prompt, TextRequest};
 
@@ -645,6 +646,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -694,6 +696,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -782,9 +785,14 @@ mod tests {
     #[tokio::test]
     #[file_serial(hf_qwen3)]
     async fn lower_text_request_uses_real_qwen_generation_defaults() {
-        let backend = HfTextBackend::from_model("Qwen/Qwen3-0.6B")
-            .await
-            .expect("load qwen tokenizer and generation config");
+        let model_id = "Qwen/Qwen3-0.6B";
+        let files = ResolvedModelFiles::new(model_id).await.expect("resolve qwen model files");
+        let backend = HfTextBackend::from_resolved_model_files(
+            files,
+            model_id.to_string(),
+            GenerationConfigMode::Auto,
+        )
+        .expect("load qwen tokenizer and generation config");
         let hints = backend.sampling_hints().expect("collect sampling hints");
 
         expect_test::expect![[r#"
@@ -859,6 +867,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -926,6 +935,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -986,6 +996,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1235,6 +1246,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
