@@ -9,6 +9,12 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if speculative_config.method == "dflash":
+        if "DFlash2DraftModel" in speculative_config.draft_model_config.architectures:
+            from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import (
+                DFlash2Speculator,
+            )
+
+            return DFlash2Speculator(vllm_config, device)
         from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
             DFlashSpeculator,
         )
