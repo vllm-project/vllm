@@ -60,10 +60,10 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
 
         self.ark = ark
         self.ark_moe_op = ark.moe
+        self.weight_bits = quant_config.weight_bits
         self.remap_hidden_states_op = None
         self.moe_gather_op = None
         self.moe_quant_config: FusedMoEQuantConfig | None = None
-        self.local_to_global_experts: tuple[int, ...] | None = None
         self.group_size: int | None = None
         self.local_num_experts: int | None = None
         self.global_num_experts: int | None = None
@@ -74,7 +74,9 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         self.w2_scales: torch.Tensor | None = None
         self.rows_per_expert: torch.Tensor | None = None
         self.unpermuted_row_to_permuted_row: torch.Tensor | None = None
+        self.router_weight_ones: torch.Tensor | None = None
         self.apply_router_weight_on_input: bool | None = None
+        self.router_weights_fn = self._keep_router_weights
         self.activation = None
 
         logger.info_once("Using ARK XPU WNA16 MoE kernel.")
@@ -102,17 +104,6 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
         num_local_experts = layer.w13_weight.shape[0]
-        if layer.expert_map is None:
-            self.local_to_global_experts = tuple(range(num_local_experts))
-        else:
-            local_to_global = [-1] * num_local_experts
-            expert_map_cpu = layer.expert_map.detach().cpu()
-            for global_expert_id, local_expert_id_tensor in enumerate(expert_map_cpu):
-                local_expert_id = int(local_expert_id_tensor)
-                if 0 <= local_expert_id < num_local_experts:
-                    local_to_global[local_expert_id] = global_expert_id
-            self.local_to_global_experts = tuple(local_to_global)
-
         self.group_size = layer.group_size
         self.local_num_experts = num_local_experts
         self.global_num_experts = layer.global_num_experts
@@ -127,11 +118,16 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             device=layer.w13_weight.device,
         )
         self.unpermuted_row_to_permuted_row = None
+        self.router_weight_ones = None
         self.apply_router_weight_on_input = layer.apply_router_weight_on_input
-        if self.apply_router_weight_on_input and layer.top_k != 1:
-            raise NotImplementedError(
-                "apply_router_weight_on_input is only supported for topk=1."
-            )
+        if self.apply_router_weight_on_input:
+            if layer.top_k != 1:
+                raise NotImplementedError(
+                    "apply_router_weight_on_input is only supported for topk=1."
+                )
+            self.router_weights_fn = self._apply_router_weight_to_input
+        else:
+            self.router_weights_fn = self._keep_router_weights
         self.activation = layer.activation
         self.remap_hidden_states_op = torch.ops._moe_C.remap_hidden_states
         self.moe_gather_op = torch.ops._moe_C.moe_gather
@@ -156,12 +152,12 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         group_size: int,
     ) -> torch.Tensor:
         return self.ark_moe_op(
-            activations.contiguous(),
+            activations,
             weights,
             num_tokens_per_expert,
             scales=scales,
             zeros=None,
-            weight_bits=self.quant_config.weight_bits,
+            weight_bits=self.weight_bits,
             group_size=group_size,
             asym=False,
             phase="auto",
@@ -204,6 +200,53 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             self.unpermuted_row_to_permuted_row = mapping
         return mapping[:num_rows]
 
+    def _get_router_weight_ones(
+        self,
+        num_rows: int,
+        topk: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        router_weight_ones = self.router_weight_ones
+        if (
+            router_weight_ones is None
+            or router_weight_ones.device != device
+            or router_weight_ones.dtype != dtype
+            or router_weight_ones.shape[0] < num_rows
+            or router_weight_ones.shape[1] != topk
+        ):
+            router_weight_ones = torch.ones(
+                (num_rows, topk),
+                dtype=dtype,
+                device=device,
+            )
+            self.router_weight_ones = router_weight_ones
+        return router_weight_ones[:num_rows]
+
+    def _keep_router_weights(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_rows: int,
+        topk: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del num_rows, topk
+        return x, topk_weights
+
+    def _apply_router_weight_to_input(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_rows: int,
+        topk: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x = x * topk_weights.to(x.dtype)
+        return x, self._get_router_weight_ones(
+            num_rows,
+            topk,
+            topk_weights.dtype,
+            topk_weights.device,
+        )
 
     def apply(
         self,
@@ -216,14 +259,16 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
     ) -> torch.Tensor:
         del layer, shared_experts, shared_experts_input
 
-        if self.apply_router_weight_on_input:
-            x = x * topk_weights.to(x.dtype)
-            gather_topk_weights = torch.ones_like(topk_weights)
-        else:
-            gather_topk_weights = topk_weights
-
         num_rows, hidden_size = x.shape
         topk = topk_ids.shape[1]
+
+        x, gather_topk_weights = self.router_weights_fn(
+            x,
+            topk_weights,
+            num_rows,
+            topk,
+        )
+
         num_moe_inputs = num_rows * topk
         output = torch.empty_like(x)
 
