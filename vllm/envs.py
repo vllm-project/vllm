@@ -313,6 +313,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
+    VLLM_XPU_DEVICE_OFFSET: int = 0
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
@@ -2112,6 +2113,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
     ),
+    # Offset added to a worker's local rank to pick its physical XPU device
+    # index, keeping all cards visible (unlike ZE_AFFINITY_MASK). Lets a
+    # standalone worker run on a non-zero card, e.g. VLLM_XPU_DEVICE_OFFSET=1
+    # places a single-GPU server on xpu:1 so oneCCL/XCCL collectives with
+    # another process still work.
+    "VLLM_XPU_DEVICE_OFFSET": lambda: int(os.getenv("VLLM_XPU_DEVICE_OFFSET", "0")),
     # Kernel backend for INC weight-only intN (WNA16) linear layers on XPU.
     # "auto" keeps the default preference order (ARK when importable, else the
     # oneDNN w4a16 path). "ark" forces the auto_round_kernel backend, "w4a16"

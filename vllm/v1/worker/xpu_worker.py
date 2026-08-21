@@ -5,6 +5,7 @@ import os
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -74,12 +75,27 @@ class XPUWorker(Worker):
             and device.type == "xpu"
             and current_platform.is_xpu()
         ):
-            self.device = torch.device(f"xpu:{self.local_rank}")
+            # Offset the physical device index from the distributed local rank
+            # so a worker can be pinned to a specific card while all cards stay
+            # visible. Keeping every card visible is required for oneCCL/XCCL
+            # collectives across separate processes (e.g. RL weight sync between
+            # a trainer and a standalone vLLM server); narrowing visibility with
+            # ZE_AFFINITY_MASK breaks those collectives.
+            device_index = self.local_rank + envs.VLLM_XPU_DEVICE_OFFSET
+            device_count = torch.accelerator.device_count()
+            if not 0 <= device_index < device_count:
+                raise ValueError(
+                    f"XPU device index {device_index} (local rank "
+                    f"{self.local_rank} + VLLM_XPU_DEVICE_OFFSET "
+                    f"{envs.VLLM_XPU_DEVICE_OFFSET}) is out of range for "
+                    f"{device_count} visible device(s)."
+                )
+            self.device = torch.device(f"xpu:{device_index}")
             torch.accelerator.set_device_index(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
             torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
-                self.local_rank
+                device_index
             ).total_memory
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
