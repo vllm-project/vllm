@@ -660,6 +660,15 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     int64_t batch_size,
     std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
 
+// Gather and upconvert an nvfp4_fp8_ds_mla KV cache to a BF16 workspace
+void cp_gather_and_upconvert_nvfp4_kv_cache(
+    torch::stable::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE,
+                                                    // 352]
+    torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::stable::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size);
+
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(
     torch::stable::Tensor& k,             // [num_tokens, head_dim]
