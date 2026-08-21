@@ -721,7 +721,8 @@ class KeyeSiglipVisionModel(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        orig_to_new_prefix={"vision_model.head.": None},
     )
 
     def __init__(
@@ -782,7 +783,7 @@ class KeyeSiglipVisionModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["vision_model.head."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
@@ -1166,11 +1167,10 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Override to use the text path instead of token path to use the
         # video-specific logic in processing_keye.py
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
 
     def _get_prompt_updates(
         self,
