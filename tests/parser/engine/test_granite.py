@@ -194,6 +194,10 @@ class TestNonStreaming:
         _, _, tools = parser.parse(text, mock_request)
         assert not tools
 
+    def test_empty_array_is_not_a_tool_call(self, parser, mock_request):
+        _, _, tools = parser.parse(f"{TOOL_TOKEN} []", mock_request)
+        assert not tools
+
 
 class TestStreaming:
     @pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 11])
