@@ -655,7 +655,7 @@ def test_cudagraph_capture_sizes_respect_sequence_parallelism():
         max_num_batched_tokens=32768,
         compilation_config=compilation_config,
     )
-    config.parallel_config = ParallelConfig(tensor_parallel_size=2)
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=2)
     config.update_sizes_for_sequence_parallelism = lambda sizes: (
         VllmConfig.update_sizes_for_sequence_parallelism(config, sizes)
     )
