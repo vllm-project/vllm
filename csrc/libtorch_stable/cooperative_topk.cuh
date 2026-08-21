@@ -467,7 +467,7 @@ __device__ __forceinline__ ClusterCandidateOffsets candidate_offsets(
 // The probe either resolves an exact FP16-grid pivot or leaves enough state
 // for recovery to resume at the second radix digit.
 template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType>
-__device__ __noinline__ OverflowProbeStatus probe_coarse_overflow(
+__device__ __noinline__ OverflowProbeStatus probe_reduced_precision_overflow(
     const float* __restrict__ row_input, uint32_t my_start, uint32_t my_len,
     uint32_t coarse_bin, uint32_t coarse_above, SmemType* smem,
     int32_t* scratch) {
@@ -655,6 +655,93 @@ __device__ __noinline__ OverflowProbeStatus probe_coarse_overflow(
   }
   __syncthreads();
   return static_cast<OverflowProbeStatus>(smem->match.equal_count);
+}
+
+// Arbitrary-FP32 overflow path: build the first exact radix digit directly.
+template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType>
+__device__ __noinline__ OverflowProbeStatus probe_arbitrary_fp32_overflow(
+    const float* __restrict__ row_input, uint32_t my_start, uint32_t my_len,
+    uint32_t coarse_bin, uint32_t coarse_above, SmemType* smem,
+    int32_t* scratch) {
+  constexpr uint32_t kDigitBits = 11;
+  const uint32_t tx = threadIdx.x;
+  const uint32_t needed = TopK - coarse_above;
+  auto* exact_histogram = reinterpret_cast<uint32_t*>(scratch);
+
+  const auto range = coarse_bin_range(coarse_bin);
+  if (!range.finite) {
+    return OverflowProbeStatus::kFullRescan;
+  }
+
+  for (uint32_t bin = tx; bin < kExactHistBins;
+       bin += hist4096::kBlockSize) {
+    exact_histogram[bin] = 0;
+  }
+  __syncthreads();
+
+  // A finite coarse bin is fully covered by the two 11-bit radix digits.
+  for_each_partition_score<UseResident>(
+      row_input + my_start, my_len, smem, [&](uint32_t, float score) {
+        if (extract_coarse_bin(score) != coarse_bin) return;
+        const uint32_t ordered = hist4096::convert_to_uint32_v2(score);
+        const uint32_t delta = ordered - range.base_key;
+        atomicAdd(&exact_histogram[delta >> kDigitBits], 1);
+      });
+  __syncthreads();
+
+  dsmem_hist_reduce<CS, kExactHistBins>(exact_histogram);
+  find_threshold_exact(exact_histogram, smem->warp_sum, needed, &smem->match);
+
+  if (tx == 0) {
+    const uint32_t first_prefix = smem->match.bin << kDigitBits;
+    const uint32_t remaining = needed - smem->match.above_count;
+    smem->match = {
+        .bin = first_prefix,
+        .above_count = remaining,
+        .equal_count =
+            static_cast<uint32_t>(OverflowProbeStatus::kFirstDigitReady)};
+  }
+  __syncthreads();
+  return OverflowProbeStatus::kFirstDigitReady;
+}
+
+// Every CTA reads the same sample, making the choice cluster-uniform without a
+// cluster synchronization. A missed arbitrary-FP32 input only takes the slower
+// general probe; both paths remain exact.
+__device__ __forceinline__ bool prefer_direct_fp32_probe(
+    const float* __restrict__ row_input) {
+  const uint32_t tx = threadIdx.x;
+  __shared__ uint32_t use_direct;
+  if (tx < hist4096::kWarpSize) {
+    const float score = row_input[tx];
+    const uint32_t raw = __float_as_uint(score);
+    const bool is_bf16 = (raw & 0xFFFFu) == 0;
+    const bool is_fp16 =
+        raw == __float_as_uint(__half2float(__float2half_rn(score)));
+    const uint32_t arbitrary_mask =
+        __ballot_sync(0xFFFFFFFFu, !is_bf16 && !is_fp16);
+    const uint32_t unequal_mask =
+        __ballot_sync(0xFFFFFFFFu,
+                      raw != __float_as_uint(row_input[0]));
+    if (tx == 0) {
+      use_direct = arbitrary_mask != 0 && unequal_mask != 0;
+    }
+  }
+  __syncthreads();
+  return use_direct != 0;
+}
+
+template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType>
+__device__ __noinline__ OverflowProbeStatus probe_coarse_overflow(
+    const float* __restrict__ row_input, uint32_t my_start, uint32_t my_len,
+    uint32_t coarse_bin, uint32_t coarse_above, SmemType* smem,
+    int32_t* scratch) {
+  if (prefer_direct_fp32_probe(row_input)) {
+    return probe_arbitrary_fp32_overflow<TopK, CS, UseResident>(
+        row_input, my_start, my_len, coarse_bin, coarse_above, smem, scratch);
+  }
+  return probe_reduced_precision_overflow<TopK, CS, UseResident>(
+      row_input, my_start, my_len, coarse_bin, coarse_above, smem, scratch);
 }
 
 template <uint32_t TopK, uint32_t CS, typename SmemType>
