@@ -113,7 +113,7 @@ class DirectPCPFusedNormRopeWorkspace(DirectCPWorkspace):
         mla_cache: torch.Tensor,
         index_cache: torch.Tensor | None,
         num_decode_tokens: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         local_tokens = q_c.shape[0]
         if local_tokens > self.max_local_tokens:
             raise ValueError(
@@ -130,8 +130,6 @@ class DirectPCPFusedNormRopeWorkspace(DirectCPWorkspace):
             raise ValueError(f"PCP ubatch {ubatch} exceeds {self.num_ubatches} slots")
         payload_multicast_ptr, signal_multicast_ptr = self.multicast_ptrs[ubatch]
         q_out = q_c.new_empty(q_c.shape)
-        kv_out = kv_c.new_empty(kv_c.shape)
-        k_pe_out = k_pe.new_empty(k_pe.shape)
         torch.ops._C.fused_norm_rope_pcp(
             positions,
             q_c,
@@ -140,11 +138,9 @@ class DirectPCPFusedNormRopeWorkspace(DirectCPWorkspace):
             q_out,
             kv_c,
             kv_weight,
-            kv_out,
             mla_k_scale,
             kv_eps,
             k_pe,
-            k_pe_out,
             k_pe_cos_sin,
             index_k,
             index_weight,
@@ -168,7 +164,7 @@ class DirectPCPFusedNormRopeWorkspace(DirectCPWorkspace):
             payload_multicast_ptr,
             signal_multicast_ptr,
         )
-        return q_out, kv_out, k_pe_out
+        return q_out
 
 
 @functools.cache

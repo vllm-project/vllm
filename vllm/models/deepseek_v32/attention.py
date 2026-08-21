@@ -408,7 +408,7 @@ class DeepseekV32Attention(MLAAttention):
                 indexer_slot = slot_mapping.get(self.indexer.k_cache.prefix)
                 assert indexer_slot is not None
                 indexer_cache = self.indexer.k_cache.kv_cache
-            q_c, kv_c_out, k_pe_out = self._fused_pcp_norm_rope_workspace.forward(
+            q_c = self._fused_pcp_norm_rope_workspace.forward(
                 positions=positions,
                 q_c=q_c,
                 q_weight=self.q_a_layernorm.weight,
@@ -431,6 +431,8 @@ class DeepseekV32Attention(MLAAttention):
                 index_cache=indexer_cache,
                 num_decode_tokens=attn_metadata.num_decode_tokens,
             )
+            kv_c_out = None
+            k_pe_out = None
 
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
