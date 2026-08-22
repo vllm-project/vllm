@@ -168,6 +168,7 @@ pub(super) fn prepare_chat_request(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
+            routed_experts_prompt_start: None,
         },
         chat_options: ChatOptions {
             generation_prompt_mode,

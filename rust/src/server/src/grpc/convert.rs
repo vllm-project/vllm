@@ -262,6 +262,7 @@ fn build_sampling_params(
 
     // ResponseOptions → logprobs
     if let Some(r) = response {
+        params.routed_experts_prompt_start = r.routed_experts_prompt_start;
         if r.output_logprobs {
             let (count, token_ids) = candidate_logprob_spec(r.output_candidates.as_ref());
             params.logprobs = Some(count);
@@ -395,6 +396,20 @@ pub fn to_sequence_output(
         ranks: rank_values,
         candidate_tokens: candidates,
         finish_info: finished.map(|f| to_finish_info(f, token_ids)),
+        routed_experts: finished.and_then(|f| f.routed_experts.as_ref()).map(|routed| {
+            pb::RoutedExperts {
+                data: routed.data.clone(),
+                shape: routed
+                    .shape
+                    .iter()
+                    .map(|dimension| {
+                        u32::try_from(*dimension)
+                            .expect("routed-experts dimensions must fit in uint32")
+                    })
+                    .collect(),
+                dtype: routed.dtype.clone(),
+            }
+        }),
     }
 }
 
@@ -578,6 +593,7 @@ impl ResponseOpts {
 #[cfg(test)]
 mod tests {
     use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::routed_experts::RoutedExperts;
     use vllm_text::{FinishReason, Finished, Prompt};
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
@@ -664,6 +680,19 @@ mod tests {
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
     }
 
+    #[test]
+    fn routed_experts_prompt_start_is_forwarded_to_sampling_params() {
+        let req = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                routed_experts_prompt_start: Some(3),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        assert_eq!(text.sampling_params.routed_experts_prompt_start, Some(3));
+    }
+
     fn finished(reason: FinishReason) -> Finished {
         Finished {
             usage: vllm_llm::TokenUsage {
@@ -674,6 +703,7 @@ mod tests {
             finish_reason: reason,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            routed_experts: None,
         }
     }
 
@@ -756,5 +786,25 @@ mod tests {
         let finish = out.finish_info.expect("finish_info should be present");
         assert_eq!(finish.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(finish.stop_reason, Some(PbStopReason::EosTokenId(30)));
+    }
+
+    #[test]
+    fn terminal_sequence_output_carries_native_routed_experts_tensor() {
+        let mut fin = finished(FinishReason::Length);
+        fin.routed_experts = Some(RoutedExperts {
+            dtype: "uint8".to_string(),
+            shape: vec![2, 1, 2],
+            data: vec![1, 2, 3, 4],
+        });
+        let out = to_sequence_output("", &[10], None, Some(&fin), &ResponseOpts::default());
+        let routed = out.routed_experts.expect("routed experts");
+        assert_eq!(
+            routed,
+            pb::RoutedExperts {
+                data: vec![1, 2, 3, 4],
+                shape: vec![2, 1, 2],
+                dtype: "uint8".to_string(),
+            }
+        );
     }
 }

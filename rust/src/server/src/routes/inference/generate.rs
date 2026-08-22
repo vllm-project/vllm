@@ -433,6 +433,7 @@ mod tests {
                 cached_token_count: 0,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                routed_experts: None,
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -446,6 +447,7 @@ mod tests {
                 cached_token_count: 2,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -512,6 +514,7 @@ mod tests {
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
+            routed_experts: None,
             prompt_token_ids,
         };
 
