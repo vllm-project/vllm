@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import functools
 import time
 from collections import deque
@@ -34,20 +35,24 @@ from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
 
 logger = init_logger(__name__)
 
+_HIP_HOST_REGISTER_MAPPED = 2
+
 
 def _select_swap_blocks_fn(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
+    src_addr_delta: int = 0,
 ):
     """Resolve the swap_blocks function for a handler at init time."""
     # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
     if gpu_to_cpu:
         return ops.swap_blocks_batch
-    # Fall back to the C++ DMA path on platforms where Triton isn't usable
-    # (e.g. ROCm host mappings) or where GPU kernels cannot directly
-    # dereference CPU pointers (XPU lacks CUDA's unified virtual address space,
-    # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
-    if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
+    # XPU lacks CUDA's unified address space, so tl.load(cpu_ptr) is invalid
+    # there. ROCm mmaps are non-unified; Triton is safe only once
+    # pin_mmap_region has a device remap (src_addr_delta != 0).
+    if not HAS_TRITON or current_platform.is_xpu():
+        return ops.swap_blocks_batch
+    if current_platform.is_rocm() and not src_addr_delta:
         return ops.swap_blocks_batch
     page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
     # Triton wins only on small, 8-byte-aligned payloads.
@@ -58,7 +63,9 @@ def _select_swap_blocks_fn(
     ):
         return ops.swap_blocks_batch
     chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
-    return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
+    return functools.partial(
+        swap_blocks_batch, bytes_per_chunk=chunk, src_addr_delta=src_addr_delta
+    )
 
 
 @dataclass
@@ -203,6 +210,35 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
     rank = region.rank
 
     base_ptr = region._base.data_ptr()
+    if current_platform.is_rocm():
+        # ROCm mmaps are non-unified; register Mapped and keep the device pointer.
+        hip = ctypes.CDLL("libamdhip64.so")
+        size = ctypes.c_size_t(region.total_size_bytes)
+        rc = hip.hipHostRegister(
+            ctypes.c_void_p(base_ptr), size, _HIP_HOST_REGISTER_MAPPED
+        )
+        dev = ctypes.c_void_p()
+        rc2 = hip.hipHostGetDevicePointer(
+            ctypes.byref(dev), ctypes.c_void_p(base_ptr), 0
+        )
+        if rc == 0 and rc2 == 0 and dev.value is not None:
+            region.device_delta = dev.value - base_ptr
+            region.is_pinned = True
+            logger.debug(
+                "hipHostRegister rank=%d %.2f GB (device_delta=%d)",
+                rank,
+                region.total_size_bytes / 1e9,
+                region.device_delta,
+            )
+        else:
+            logger.warning(
+                "hipHostRegister failed for rank=%d (rc=%d, rc2=%d); "
+                "CPU->GPU transfers fall back to DMA",
+                rank,
+                rc,
+                rc2,
+            )
+        return
     result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.total_size_bytes, 0)
     if result.value != 0:
         logger.warning(
@@ -249,6 +285,7 @@ class SingleDirectionOffloadingHandler:
         layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
+        mmap_region: SharedOffloadRegion | None = None,
     ):
         """
         Initialize a SingleDirectionOffloadingHandler.
@@ -299,7 +336,9 @@ class SingleDirectionOffloadingHandler:
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
         self._swap_blocks_batch = _select_swap_blocks_fn(
-            layer_refs_per_group, gpu_to_cpu
+            layer_refs_per_group,
+            gpu_to_cpu,
+            src_addr_delta=mmap_region.device_delta if mmap_region else 0,
         )
 
         # GPU blocks may be smaller
@@ -811,6 +850,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=True,
             canonical_layout=canonical_layout,
+            mmap_region=mmap_region,
         )
 
         self._load_handler = SingleDirectionOffloadingHandler(
@@ -820,6 +860,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=False,
             canonical_layout=canonical_layout,
+            mmap_region=mmap_region,
         )
 
     def submit_store(
