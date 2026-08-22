@@ -47,6 +47,12 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
                 f"num_kv_heads == 1, got {self.num_kv_heads}"
             )
 
+        # Set only when the layer's indexer emitted the page table alongside its
+        # selection; otherwise these stay None and the table is built below.
+        sparse_bt_buf = getattr(layer, "sparse_bt_buffer", None)
+        sparse_ctx_buf = getattr(layer, "sparse_ctx_buffer", None)
+        kvh = self.num_kv_heads
+
         hd = self.head_size
         q = query[:num_tokens].view(-1, self.num_heads, hd)
         out = output[:num_tokens].view(-1, self.num_heads, hd)
@@ -70,6 +76,10 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
                 k_scale=k_scale,
                 v_scale=v_scale,
                 decode_query_len=d.decode_query_len,
+                sparse_bt=None if sparse_bt_buf is None else sparse_bt_buf[: nd * kvh],
+                sparse_ctx=(
+                    None if sparse_ctx_buf is None else sparse_ctx_buf[: nd * kvh]
+                ),
             )
 
         if main_md.num_prefills > 0:
@@ -88,5 +98,15 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
                 out[nd:],
                 k_scale=k_scale,
                 v_scale=v_scale,
+                sparse_bt=(
+                    None
+                    if sparse_bt_buf is None
+                    else sparse_bt_buf[nd * kvh : num_tokens * kvh]
+                ),
+                sparse_ctx=(
+                    None
+                    if sparse_ctx_buf is None
+                    else sparse_ctx_buf[nd * kvh : num_tokens * kvh]
+                ),
             )
         return output
