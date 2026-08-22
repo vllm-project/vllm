@@ -1556,6 +1556,13 @@ def scaled_fp4_quant(
     assert input.ndim >= 1, f"input.ndim needs to be >= 1, but got {input.ndim}."
     other_dims = 1 if input.ndim == 1 else -1
     input = input.reshape(other_dims, input.shape[-1])
+    if not input.is_contiguous():
+        # The quant kernels read the input buffer linearly. reshape() keeps
+        # a strided view whenever it can (e.g. for a column-sliced tensor),
+        # in which case the kernel would silently quantize the wrong memory:
+        # row 0 comes out right and every following row is garbage, with no
+        # error raised.
+        input = input.contiguous()
     m, n = input.shape
     block_size = 16
 
