@@ -616,7 +616,16 @@ static PyObject* py_init_module(PyObject* self, PyObject* args) {
   g_python_malloc_callback = malloc_callback;
   g_python_free_callback = free_callback;
 
-  Py_RETURN_NONE;
+  // Return None via Py_IncRef(Py_None) instead of Py_RETURN_NONE. cumem is an
+  // abi3 extension (USE_SABI 3.8), so Py_RETURN_NONE's inlined Py_INCREF is
+  // compiled against whatever Python.h is on the include path. When the wheel
+  // is built against 3.12+ headers (immortal None, PEP 683) but loaded by an
+  // older interpreter, that increment can be dropped; sleep()/wake_up() call
+  // these every cycle, so the leak eventually crashes with "none_dealloc".
+  // Py_IncRef is out-of-line and uses the running interpreter's semantics, so
+  // it is immune to this compile/runtime header skew.
+  Py_IncRef(Py_None);
+  return Py_None;
 }
 
 static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
@@ -737,7 +746,10 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
     return nullptr;
   }
 
-  Py_RETURN_NONE;
+  // See py_init_module: Py_IncRef instead of Py_RETURN_NONE avoids a dropped
+  // None reference under abi3 header/runtime skew. Called on every sleep().
+  Py_IncRef(Py_None);
+  return Py_None;
 }
 
 static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
@@ -805,7 +817,10 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
     return nullptr;
   }
 
-  Py_RETURN_NONE;
+  // See py_init_module: Py_IncRef instead of Py_RETURN_NONE avoids a dropped
+  // None reference under abi3 header/runtime skew. Called on every wake_up().
+  Py_IncRef(Py_None);
+  return Py_None;
 }
 
 static PyMethodDef module_methods[] = {
