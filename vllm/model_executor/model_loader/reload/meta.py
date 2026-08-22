@@ -57,6 +57,12 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
         dtype=meta_tensor.dtype,
         requires_grad=False,
     )
+    # Padded weights are zero-initialized by create_weights() and only their
+    # checkpoint-backed slices are written by weight loaders, so any region a
+    # loader does not cover must rematerialize as zeros. Reusing allocator
+    # garbage there changes the values that post-load processing packs into
+    # the kernel weights, silently corrupting every reload of a padded layer.
+    tensor.zero_()
     tensor.__class__ = meta_tensor.__class__
     tensor.__dict__ = meta_tensor.__dict__.copy()
     return tensor
