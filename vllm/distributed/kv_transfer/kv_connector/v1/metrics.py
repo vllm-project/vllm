@@ -21,7 +21,9 @@ class KVConnectorStats:
     Base class for KV Connector Stats, a container for transfer performance
     metrics or otherwise important telemetry from the connector.
     All sub-classes need to be serializable as stats are sent from worker to
-    logger process.
+    logger process. The logger observes serialized stats, aggregates them over
+    the logging interval, reduces the aggregate to summary values, and logs the
+    resulting metrics.
     """
 
     data: dict[str, Any] = field(default_factory=dict)
@@ -32,7 +34,8 @@ class KVConnectorStats:
 
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         """
-        Aggregate stats with another `KVConnectorStats` object.
+        Aggregate stats with another `KVConnectorStats` object from the same
+        logging interval.
         """
         raise NotImplementedError
 
@@ -67,8 +70,9 @@ class KVConnectorLogging:
         assert self.connector_cls is not None
         # Called periodically when connector syncs with the scheduler.
         # Note that this is not the same as the logging interval.
-        # We expect transfer_stats_data to be aggregated across all workers and
-        # consist of observations from a single connector or a MultiConnector.
+        # transfer_stats_data has already been collected from workers and may
+        # contain observations aggregated across workers or ranks for a single
+        # connector or a MultiConnector.
         transfer_stats = self.connector_cls.build_kv_connector_stats(
             transfer_stats_data
         )
@@ -91,13 +95,13 @@ class KVConnectorLogging:
             )
 
     def log(self, log_fn=logger.info):
-        """Log transfer metrics periodically, similar to throughput logging"""
+        """Reduce accumulated transfer stats and log them periodically."""
         if (
             self.transfer_stats_accumulator
             and not self.transfer_stats_accumulator.is_empty()
         ):
-            # Produce a single cumulative stats object for the last time
-            # interval from the recorded observations.
+            # reduce() summarizes the observations accumulated by observe()
+            # during the last logging interval.
             xfer_metrics = self.transfer_stats_accumulator.reduce()
             xfer_metrics_str = ", ".join(f"{k}={v}" for k, v in xfer_metrics.items())
             log_fn("KV Transfer metrics: %s", xfer_metrics_str)
