@@ -18,6 +18,7 @@ from .common import (
 from .models import (
     FLASHINFER_ATTN,
     FLASHINFER_MLA_ATTN,
+    ROCM_AITER_MLA_ATTN,
     ROCM_AITER_UNIFIED_ATTN,
     ROCM_ATTN,
     TRITON_ATTN,
@@ -38,26 +39,41 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only test CUDA/ROCm"
 )
 
-
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize(
-    "model_name, matches_fn, model_kwargs, hf_overrides",
-    # qwen3 & dsv3 should still fuse AR+rms even though group quant is not yet supported
+TP2_FP8_MODELS = (
     [
         llama3_8b_fp8,
         llama4_scout_fp8,
         qwen3_a3b_fp8,
         deepseek_coder_v2_lite_fp8,
         deepseek_v3_fp8,
-    ],
+    ]
+    if current_platform.is_cuda()
+    else [
+        llama3_8b_fp8,
+        qwen3_a3b_fp8,
+        deepseek_coder_v2_lite_fp8,
+    ]
 )
+
+TP2_FP8_ATTN_BACKENDS = (
+    [TRITON_ATTN, FLASHINFER_ATTN, FLASHINFER_MLA_ATTN]
+    if current_platform.is_cuda()
+    else [ROCM_AITER_UNIFIED_ATTN, ROCM_AITER_MLA_ATTN]
+)
+
+
+@multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "attn_backend", [TRITON_ATTN, FLASHINFER_ATTN, FLASHINFER_MLA_ATTN]
+    "model_name, matches_fn, model_kwargs, hf_overrides",
+    # Platform-specific lists above retain CUDA's full matrix while adding
+    # only ROCm payloads supported by the selected attention backends.
+    TP2_FP8_MODELS,
 )
+@pytest.mark.parametrize("attn_backend", TP2_FP8_ATTN_BACKENDS)
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("quant_fp8", "rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Only test CUDA/ROCm")
 def test_tp2_ar_rms_fp8_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],
@@ -72,7 +88,23 @@ def test_tp2_ar_rms_fp8_fusions(
 ):
     matches = matches_fn(n_layers)
 
-    block_fp8 = "qwen" in model_name.lower() or "deepseek" in model_name.lower()
+    model_name_lower = model_name.lower()
+    rocm_static_fp8_mla = (
+        current_platform.is_rocm()
+        and "deepseek-coder" in model_name_lower
+        and attn_backend.backend.name == "ROCM_AITER_MLA"
+    )
+    # Preserve CUDA's existing treatment of all DeepSeek payloads. The ROCm
+    # DeepSeek-Coder checkpoint is the static-FP8 exception validated with the
+    # native QuantFP8 MLA pattern.
+    block_fp8 = "qwen" in model_name_lower or "deepseek" in model_name_lower
+    if rocm_static_fp8_mla:
+        block_fp8 = False
+        if custom_ops != "-quant_fp8,-rms_norm":
+            pytest.skip("ROCm static-FP8 MLA parity uses native quant and RMSNorm")
+        # AITER's MoE GEMM does not support this reduced dummy model shape;
+        # use the supported Triton MoE path while retaining AITER MLA and AR.
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
     if block_fp8 and "-quant_fp8" in custom_ops:
         # This is why config forces +quant_fp8 by default
         pytest.skip("native QuantFP8 matching not supported for group quant")
@@ -104,6 +136,21 @@ def test_tp2_ar_rms_fp8_fusions(
         "ar_rms_fusion",
     ]
 
+    use_aiter = current_platform.is_rocm()
+    if use_aiter:
+        matches = matches._replace(aiter_ar_rms_fusion=matches.ar_rms_fusion)
+        # The AITER all-reduce pass registers the larger AR+RMS(+group-quant)
+        # patterns before its AR+RMS-only patterns. Consequently, the
+        # standalone AITER RMS-quant pass does not own the post-AR sites in
+        # this test. ROCm's supported contract here is native QK-norm+RoPE and
+        # attention-output quant fusion plus AITER AR+RMS; CUDA keeps the full
+        # checks above.
+        matches_check = [
+            "norm_rope_fusion",
+            "attn_quant_fusion",
+            "aiter_ar_rms_fusion",
+        ]
+
     run_e2e_fusion_test(
         model_name,
         matches,
@@ -112,6 +159,7 @@ def test_tp2_ar_rms_fp8_fusions(
         compilation_config,
         matches_check,
         tp_size=2,
+        use_aiter=use_aiter,
     )
 
 
