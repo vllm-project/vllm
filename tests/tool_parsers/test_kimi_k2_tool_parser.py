@@ -3,7 +3,7 @@
 # ruff: noqa: E501
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -174,6 +174,43 @@ class TestExtractToolCalls:
         content, tool_calls = run_tool_extraction(parser, model_output, streaming=False)
         assert len(tool_calls) == 1
         assert tool_calls[0].function.name == "valid"
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    def test_openai_style_id_header_degrades_gracefully(self, parser, streaming):
+        """A ``call_<uuid>`` header (#50768) drops that call without leaking
+        special tokens, and leaves a sibling well-formed call parseable.
+
+        The malformed call is placed last on purpose: a dropped *leading* call
+        leaves the survivor on its raw slot index, so streaming emits index=1
+        with no index=0 before it. Renumbering that is a ParserEngine-wide
+        change, out of scope here.
+        """
+        model_output = (
+            "Working. "
+            + SECTION_BEGIN
+            + _tool("functions.exec_command:0", '{"cmd": "pwd"}')
+            + _tool("call_4144fac2c5e1f3e0", '{"cmd": "ls"}')
+            + SECTION_END
+        )
+        content, tool_calls = run_tool_extraction(
+            parser, model_output, streaming=streaming
+        )
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "exec_command"
+        for marker in (SECTION_BEGIN, SECTION_END, TOOL_BEGIN, TOOL_END, ARG_BEGIN):
+            assert marker not in (content or "")
+        assert "call_4144fac2c5e1f3e0" not in (content or "")
+
+    def test_malformed_header_is_logged(self, parser):
+        """The drop is silent to the client, so it must not be silent in logs."""
+        model_output = _wrap(_tool("call_9c1d3b7a2e5f", '{"cmd": "ls"}'))
+        with patch("vllm.parser.kimi_k2.logger") as mock_logger:
+            _, tool_calls = run_tool_extraction(parser, model_output, streaming=False)
+
+        assert tool_calls == []
+        mock_logger.warning_once.assert_called_once()
+        assert "call_9c1d3b7a2e5f" in str(mock_logger.warning_once.call_args)
 
     def test_native_id_extracted(self, parser):
         """Regression: parser extracts native ID onto ToolCall (PR #32768)."""
