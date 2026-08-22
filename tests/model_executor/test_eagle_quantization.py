@@ -157,3 +157,53 @@ def test_eagle3_lm_head_receives_quant_config():
         assert call_kwargs["quant_config"] is mock_quant_config, (
             "ParallelLMHead must receive the draft model's quant_config"
         )
+
+
+@pytest.mark.parametrize(
+    ("draft_vocab_size", "vocab_size", "target_vocab_size", "expects_d2t"),
+    [
+        # Full-vocab draft: d2t is dropped so compute_logits returns the
+        # logits as-is instead of scattering through an identity map.
+        pytest.param(32000, 32000, 32000, False, id="full-vocab"),
+        # draft_vocab_size absent: defaults to vocab_size (full vocab).
+        pytest.param(None, 32000, 32000, False, id="default-draft-vocab"),
+        # Reduced-vocab draft: needs the d2t mapping.
+        pytest.param(32000, 128256, 128256, True, id="reduced-vocab"),
+    ],
+)
+def test_eagle3_d2t_conditional_on_vocab_size(
+    draft_vocab_size, vocab_size, target_vocab_size, expects_d2t
+):
+    """draft_id_to_target_id must only exist for reduced-vocab drafts."""
+    from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+
+    mock_hf_config = Mock()
+    mock_hf_config.draft_vocab_size = draft_vocab_size
+    mock_hf_config.hidden_size = 256
+    mock_hf_config.vocab_size = vocab_size
+    mock_hf_config.logit_scale = 1.0
+
+    mock_vllm_config = Mock()
+    mock_vllm_config.speculative_config.draft_model_config.hf_config = mock_hf_config
+    mock_vllm_config.model_config.get_num_layers.return_value = 32
+    mock_vllm_config.model_config.get_vocab_size.return_value = target_vocab_size
+    mock_vllm_config.speculative_config.parallel_drafting = False
+
+    with (
+        patch("vllm.model_executor.models.llama_eagle3.LlamaModel") as MockModel,
+        patch("vllm.model_executor.models.llama_eagle3.ParallelLMHead"),
+        patch("vllm.model_executor.models.llama_eagle3.LogitsProcessor"),
+        patch(
+            "vllm.model_executor.models.llama_eagle3.get_draft_quant_config",
+            return_value=None,
+        ),
+    ):
+        MockModel.return_value.use_aux_hidden_state = True
+
+        model = Eagle3LlamaForCausalLM(vllm_config=mock_vllm_config)
+
+    if expects_d2t:
+        assert isinstance(model.draft_id_to_target_id, torch.nn.Parameter)
+        assert model.draft_id_to_target_id.shape == (draft_vocab_size,)
+    else:
+        assert model.draft_id_to_target_id is None
