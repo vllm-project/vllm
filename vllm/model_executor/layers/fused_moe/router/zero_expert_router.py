@@ -37,11 +37,13 @@ class ZeroExpertRouter(BaseRouter):
         renormalize: bool = False,
         routed_scaling_factor: float = 1.0,
         eplb_state: EplbLayerState | None = None,
+        layer_idx: int = -1,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
+            layer_idx=layer_idx,
         )
         self.e_score_correction_bias = e_score_correction_bias
         self.num_logical_experts = num_logical_experts

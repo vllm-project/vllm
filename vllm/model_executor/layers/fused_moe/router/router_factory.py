@@ -60,6 +60,8 @@ def create_fused_moe_router(
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    # riy parameters
+    layer_idx: int = -1,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -117,6 +119,7 @@ def create_fused_moe_router(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
+            layer_idx=layer_idx,
         )
 
     if zero_expert_type is not None:
@@ -136,6 +139,7 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
+            layer_idx=layer_idx,
         )
 
     if use_grouped_topk:
@@ -195,6 +199,7 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             custom_routing_function=custom_routing_function,
             renormalize=renormalize,
+            layer_idx=layer_idx,
         )
 
     assert scoring_func in ["sigmoid", "softmax", "sqrtsoftplus"]
@@ -211,6 +216,7 @@ def create_fused_moe_router(
             hash_indices_table=hash_indices_table,
             num_fused_shared_experts=num_fused_shared_experts,
             shared_expert_weight=shared_expert_weight,
+            layer_idx=layer_idx,
         )
 
     if (
@@ -225,6 +231,7 @@ def create_fused_moe_router(
             num_fused_shared_experts=num_fused_shared_experts,
             renormalize=renormalize,
             scoring_func=scoring_func,
+            layer_idx=layer_idx,
         )
 
     return FusedTopKRouter(
@@ -233,4 +240,5 @@ def create_fused_moe_router(
         eplb_state=eplb_state,
         renormalize=renormalize,
         scoring_func=scoring_func,
+        layer_idx=layer_idx,
     )
