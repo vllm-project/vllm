@@ -110,6 +110,10 @@ def _per_token_group_quant_fp8(
     # representable-value boundaries).
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
     scale_raw = _absmax * (1.0 / fp8_max)
+    if use_ue8m0:
+        # Match the native kernel's hard-coded scale floor before the
+        # power-of-two rounding (per_token_group_quant.cu).
+        scale_raw = tl.maximum(scale_raw, 1e-10)
     y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
@@ -374,6 +378,10 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     # quant
     _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
     scale_raw = _absmax * (1.0 / fp8_max)
+    if use_ue8m0:
+        # Match the native kernel's hard-coded 1e-10 scale floor
+        # (per_token_group_quant.cu); keeps fused == decomposed path.
+        scale_raw = tl.maximum(scale_raw, 1e-10)
     y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_s = tl.reshape(y_s, (BLOCK_M, 1))
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
@@ -524,6 +532,10 @@ def _per_token_group_quant_fp8_colmajor(
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
     scale_raw = _absmax * (1.0 / fp8_max)
+    if use_ue8m0:
+        # Match the native kernel's hard-coded scale floor before the
+        # power-of-two rounding (per_token_group_quant.cu).
+        scale_raw = tl.maximum(scale_raw, 1e-10)
     y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 

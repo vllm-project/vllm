@@ -56,6 +56,89 @@ def test_per_token_group_quant_fp8(
     assert torch.allclose(scale, ref_s, atol=0.01, rtol=0.01)
 
 
+@pytest.mark.parametrize("column_major", [False, True])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Native op's UE8M0 scale floor is verified on CUDA/ROCm only.",
+)
+def test_per_token_group_quant_fp8_ue8m0_eps_floor_parity(column_major: bool):
+    """Regression test for #53339: native and Triton-fallback UE8M0
+    scales must match for tiny groups (native floors at 1e-10)."""
+    device = current_platform.device_type
+    group_size = 128
+
+    x = torch.zeros((8, 256), device=device, dtype=torch.bfloat16)
+    x[0, 0] = 1e-12  # tiny-but-nonzero, below the divergence crossover
+    x[1] = 1.0  # control row above the crossover
+
+    out_q, scale = fp8_utils.per_token_group_quant_fp8(
+        x,
+        group_size,
+        column_major_scales=column_major,
+        use_ue8m0=True,
+    )
+    with (
+        patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False),
+        patch("vllm.platforms.current_platform.is_xpu", return_value=False),
+    ):
+        ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
+            x,
+            group_size,
+            column_major_scales=column_major,
+            use_ue8m0=True,
+        )
+
+    assert torch.equal(scale, ref_s)
+    assert torch.equal(out_q, ref_q)
+    # Both backends floor an all-zero / all-tiny group at 2**-33.
+    assert scale[0, 0] == 2.0**-33
+    assert scale[2, 0] == 2.0**-33
+
+    # The floor is hard-coded, not eps-derived: with eps=0 a zero group
+    # still floors at 2**-33.
+    _, scale0 = fp8_utils.per_token_group_quant_fp8(
+        torch.zeros_like(x),
+        group_size,
+        column_major_scales=column_major,
+        use_ue8m0=True,
+        eps=0.0,
+    )
+    with (
+        patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False),
+        patch("vllm.platforms.current_platform.is_xpu", return_value=False),
+    ):
+        _, ref_s0 = fp8_utils.per_token_group_quant_fp8(
+            torch.zeros_like(x),
+            group_size,
+            column_major_scales=column_major,
+            use_ue8m0=True,
+            eps=0.0,
+        )
+    assert torch.equal(scale0, ref_s0)
+    assert (scale0 == 2.0**-33).all()
+
+    # The floor must not leak into the non-UE8M0 path: a zero group keeps
+    # the eps-derived scale (eps / fp8_max << 1e-10) on both backends.
+    _, scale2 = fp8_utils.per_token_group_quant_fp8(
+        x,
+        group_size,
+        column_major_scales=column_major,
+        use_ue8m0=False,
+    )
+    with (
+        patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False),
+        patch("vllm.platforms.current_platform.is_xpu", return_value=False),
+    ):
+        _, ref_s2 = fp8_utils.per_token_group_quant_fp8(
+            x,
+            group_size,
+            column_major_scales=column_major,
+            use_ue8m0=False,
+        )
+    assert torch.allclose(scale2, ref_s2, rtol=1e-3, atol=0.0)
+    assert scale2[2, 0] < 1e-10
+
+
 @pytest.mark.parametrize(
     "num_tokens,hidden_dim,group_size",
     [
