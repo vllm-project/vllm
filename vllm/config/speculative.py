@@ -61,6 +61,7 @@ MTPModelTypes = Literal[
     "inkling_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
+SuffixGPUTypes = Literal["suffix_gpu"]
 DFlashModelTypes = Literal["dflash"]
 DSparkModelTypes = Literal["dspark"]
 EagleModelTypes = Literal[
@@ -75,6 +76,7 @@ SpeculativeMethod = Literal[
     "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
+    SuffixGPUTypes,
     DSparkModelTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
@@ -211,6 +213,37 @@ class SpeculativeConfig:
     """The minimum token probability for suffix decoding. Will only speculate
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
+
+    # Suffix decoding GPU (method="suffix_gpu") configuration. Reuses the
+    # suffix_decoding_* knobs above; the fields below are GPU-specific.
+    suffix_gpu_global_capacity: int = 1 << 22
+    """Token capacity of the GPU-resident global suffix index (cross-request
+    memory built over finished/in-flight responses)."""
+
+    suffix_gpu_delta_capacity: int = 1 << 16
+    """Token capacity of the append-only delta buffer that absorbs new
+    responses between background suffix-array rebuilds."""
+
+    suffix_gpu_max_occurrences: int = 128
+    """Maximum number of pattern occurrences sampled for the frequency-ranked
+    draft vote. Larger samples make the vote (and hence the chain-probability
+    cutoff) closer to exact occurrence counts, at the cost of wider
+    [batch, occurrences, k] draft buffers."""
+
+    suffix_gpu_num_backoff: int = 8
+    """Number of candidate suffix-match lengths scored per step. The longest
+    match is often a rare one-off whose continuation vote splits; shorter,
+    better-supported matches draft deeper. 1 disables the backoff (longest
+    match only); larger values score one more candidate each."""
+
+    suffix_gpu_use_cuda_graph: bool = True
+    """Capture the suffix-gpu draft path into a CUDA graph and replay it each
+    step; falls back to eager Triton kernels if capture fails or when
+    disabled."""
+
+    suffix_gpu_ingest_chunk: int = 64
+    """Minimum number of new response tokens before an in-flight request is
+    incrementally ingested into the global index."""
 
     draft_load_config: LoadConfig | None = None
     """Load config for the draft model. If not specified, will use the load
@@ -792,6 +825,8 @@ class SpeculativeConfig:
                 self.model = "ngram"
             elif self.method == "ngram_gpu":
                 self.model = "ngram_gpu"
+            elif self.method == "suffix_gpu":
+                self.model = "suffix_gpu"
             elif self.method == "suffix":
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
@@ -847,6 +882,8 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "suffix_gpu":
+            self._validate_suffix_gpu()
         elif self.method == "custom_class":
             # Custom class proposer does not need a draft model.
             # It will dynamically load the user-provided class at runtime.
@@ -1194,6 +1231,45 @@ class SpeculativeConfig:
                 f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
             )
 
+    def _validate_suffix_gpu(self):
+        try:
+            import suffix_gpu  # noqa: F401
+        except ImportError as e:
+            raise ImportError(
+                "The suffix_gpu package is required for suffix_gpu "
+                "speculative decoding. Install it via "
+                "`pip install suffix-gpu`."
+            ) from e
+        if self.num_speculative_tokens is None:
+            self.num_speculative_tokens = self.suffix_decoding_max_tree_depth
+            logger.warning(
+                "Defaulted num_speculative_tokens to %s for suffix decoding.",
+                self.num_speculative_tokens,
+            )
+        if self.suffix_decoding_max_tree_depth < 1:
+            raise ValueError(
+                f"suffix_decoding_max_tree_depth="
+                f"{self.suffix_decoding_max_tree_depth} must be >= 1"
+            )
+        if self.suffix_decoding_max_spec_factor < 0:
+            raise ValueError(
+                f"suffix_decoding_max_spec_factor="
+                f"{self.suffix_decoding_max_spec_factor} must be >= 0"
+            )
+        if not 0 <= self.suffix_decoding_min_token_prob <= 1:
+            raise ValueError(
+                f"suffix_decoding_min_token_prob="
+                f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
+            )
+        if self.suffix_gpu_global_capacity < 1:
+            raise ValueError("suffix_gpu_global_capacity must be >= 1")
+        if self.suffix_gpu_delta_capacity < 1:
+            raise ValueError("suffix_gpu_delta_capacity must be >= 1")
+        if self.suffix_gpu_max_occurrences < 1:
+            raise ValueError("suffix_gpu_max_occurrences must be >= 1")
+        if self.suffix_gpu_num_backoff < 1:
+            raise ValueError("suffix_gpu_num_backoff must be >= 1")
+
     @staticmethod
     def _maybe_override_draft_max_model_len(
         speculative_max_model_len: int | None,
@@ -1513,6 +1589,14 @@ class SpeculativeConfig:
     def use_ngram_gpu(self) -> bool:
         return self.method == "ngram_gpu"
 
+    def use_suffix_gpu(self) -> bool:
+        return self.method == "suffix_gpu"
+
+    def use_gpu_state_drafter(self) -> bool:
+        """Drafters that keep token state on device and draft from the
+        previous step's GPU sampled ids (async-scheduling compatible)."""
+        return self.method in ("ngram_gpu", "suffix_gpu")
+
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
             return False
@@ -1528,7 +1612,9 @@ class SpeculativeConfig:
             if method
             in (
                 "ngram",
+                "ngram_gpu",
                 "suffix",
+                "suffix_gpu",
                 "extract_hidden_states",
                 "custom_class",
             )
