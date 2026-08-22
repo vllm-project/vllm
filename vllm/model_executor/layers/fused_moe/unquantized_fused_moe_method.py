@@ -134,6 +134,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             moe_config=layer.moe_config,
             w13_weight=w13,
             w2_weight=w2,
+            layer=layer,
         )
         # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
         # On the first call we replace the parameter normally. On subsequent
@@ -170,6 +171,24 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 # into the grouped-gemm layout (bias included), and capturing
                 # the router config that monolithic apply() cannot carry.
                 self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+            elif self.unquantized_backend == UnquantizedMoeBackend.MOONEP:
+                # Hand the [E+B] layout built by
+                # convert_to_unquantized_kernel_format to the P/F (weight
+                # prefetch) and the experts (up projection).
+                from vllm.model_executor.layers.fused_moe.experts.moonep_experts import (  # noqa: E501
+                    MoonEPExperts,
+                )
+                from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (  # noqa: E501
+                    MoonEPPrepareAndFinalize,
+                )
+
+                layout = layer._moonep_weight_layout
+                pf = self.moe_kernel.prepare_finalize
+                experts = self.moe_kernel.fused_experts
+                assert isinstance(pf, MoonEPPrepareAndFinalize)
+                assert isinstance(experts, MoonEPExperts)
+                pf.set_weight_layout(layout)
+                experts.set_up_weight(layout.full_up_weight)
 
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)

@@ -39,6 +39,7 @@ class UnquantizedMoeBackend(Enum):
     AITER = "ROCm AITER"
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
+    MOONEP = "MOONEP"
     CPU = "CPU"
     XPU = "XPU"
     TPU = "TPU"
@@ -137,6 +138,13 @@ def backend_to_kernel_cls(
         )
 
         return [BatchedTritonExperts]
+
+    elif backend == UnquantizedMoeBackend.MOONEP:
+        from vllm.model_executor.layers.fused_moe.experts.moonep_experts import (
+            MoonEPExperts,
+        )
+
+        return [MoonEPExperts]
 
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExperts
@@ -283,6 +291,13 @@ def select_unquantized_moe_backend(
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
+    # MoonEP owns the expert layout (expert-grouped [NvS, H] + cu_seqlens),
+    # so it is not interchangeable with the token-major experts backends.
+    if moe_config.moe_parallel_config.use_moonep_kernels:
+        return _return_or_raise(
+            UnquantizedMoeBackend.MOONEP, moe_config, activation_format
+        )
+
     runner_backend = moe_config.moe_backend
     # 'humming' is quantization-only; an unquantized layer (e.g. excluded via
     # modules_to_not_convert) falls through to auto instead of erroring.
@@ -331,7 +346,29 @@ def convert_to_unquantized_kernel_format(
     moe_config: FusedMoEConfig,
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
+    layer: torch.nn.Module | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if unquantized_backend == UnquantizedMoeBackend.MOONEP:
+        # MoonEP addresses expert weights by global [E+B] row and needs one
+        # contiguous tensor per projection (gate / up / down). The layer's
+        # w13_weight becomes the gate tensor and w2_weight the down tensor;
+        # the up tensor and the full layout are stashed on the layer for
+        # the kernel wiring in _setup_kernel.
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
+            MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
+            gather_moonep_weight_layout,
+        )
+
+        assert layer is not None
+        layout = gather_moonep_weight_layout(
+            w13_weight,
+            w2_weight,
+            num_global_experts=moe_config.num_experts,
+            num_prefetch_slots=MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
+        )
+        layer._moonep_weight_layout = layout
+        return layout.full_gate_weight, layout.full_down_weight
+
     if unquantized_backend == UnquantizedMoeBackend.AITER:
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
         w13_weight.is_shuffled = True
