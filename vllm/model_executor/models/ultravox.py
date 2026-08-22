@@ -210,6 +210,54 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
 
         return mm_data, hf_processor_mm_kwargs
 
+    def _apply_hf_processor_main(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if processor_data:
+            processor_data, hf_processor_mm_kwargs = self._preprocess_hf_mm_data(
+                processor_data,
+                hf_processor_mm_kwargs,
+            )
+
+            prompt_text = self._get_hf_processor_text(mm_items.get_all_counts())
+            if prompt_text is not None:
+                processor_data = dict(text=prompt_text, **processor_data)
+
+            hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+            def patched_call(**kwargs) -> BatchFeature:
+                # The remote UltravoxProcessor does not support the
+                # `truncation` kwarg injected by `call_hf_processor`: it
+                # passes `truncation` to its audio processor by itself while
+                # also forwarding `**kwargs` there, causing a duplicate
+                # keyword argument error. Its hardcoded `truncation=False`
+                # already matches vLLM's intended behavior.
+                kwargs.pop("truncation", None)
+
+                return hf_processor(**kwargs)
+
+            processed_data = self.info.ctx.call_hf_processor(
+                patched_call,
+                processor_data,
+                hf_processor_mm_kwargs,
+            )
+            processed_data.update(passthrough_data)
+        else:
+            processed_data = BatchFeature(dict(passthrough_data))
+
+        return self._postprocess_hf_mm_data(
+            processor_data,
+            hf_processor_mm_kwargs,
+            processed_data,
+        )
+
     def _postprocess_hf_mm_data(
         self,
         mm_data: Mapping[str, object],

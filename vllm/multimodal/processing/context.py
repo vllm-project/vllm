@@ -262,9 +262,6 @@ class InputProcessingContext:
         hf_processor: Callable[..., BatchFeature] | ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
-        *,
-        num_tries: int = 1,
-        max_tries: int = 5,
     ) -> BatchFeature:
         """
         Call `hf_processor` on the prompt `data`
