@@ -3,11 +3,12 @@
 
 import gc
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call, patch
 
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
@@ -59,6 +60,7 @@ from vllm.v1.worker.block_table import (
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import select_common_block_size
@@ -1808,3 +1810,387 @@ class TestInitFp8KvScalesHybridModels:
         assert (t1 == 0).all()
         assert (t2 == 0).all()
         assert all((t == 0).all() for t in list_entry)
+
+
+class TestReloadDraftWeights:
+    """Disk-backed reload restores draft parameters before the target."""
+
+    def _make_runner(self, cls=GPUModelRunner):
+        runner = object.__new__(cls)
+        runner.load_config = Mock()
+        runner.load_config.load_format = "safetensors"
+        runner.lora_config = None
+        runner.model_config = Mock()
+        runner.model_config.quantization = None
+        runner.speculative_config = SimpleNamespace(
+            draft_model_config=Mock(),
+            draft_load_config=None,
+        )
+        runner.reset_lora_state = Mock()
+        runner.reset_encoder_cache = Mock()
+        runner.reset_mm_cache = Mock()
+        return runner
+
+    def _assert_disk_reload_restores_draft(self, runner):
+        draft_model = Mock()
+        target_model = Mock()
+        target_model.named_parameters.return_value = []
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        reload_order = []
+        draft_weights = iter([("draft", torch.zeros(1))])
+        target_weights = iter([("target", torch.zeros(1))])
+
+        def load_draft(_weights):
+            reload_order.append("draft")
+
+        def load_target(_weights):
+            reload_order.append("target")
+            return set()
+
+        draft_model.load_weights.side_effect = load_draft
+        target_model.load_weights.side_effect = load_target
+
+        def get_loader(_load_config):
+            loader = Mock()
+
+            def get_all_weights(_config, model):
+                return draft_weights if model is draft_model else target_weights
+
+            loader.get_all_weights.side_effect = get_all_weights
+            return loader
+
+        with (
+            patch.object(
+                gpu_model_runner_module, "get_model_loader", side_effect=get_loader
+            ) as get_loader_mock,
+            patch.object(
+                gpu_model_runner_module, "initialize_layerwise_reload"
+            ) as initialize_reload,
+            patch.object(
+                gpu_model_runner_module, "finalize_layerwise_reload"
+            ) as finalize_reload,
+        ):
+            runner.reload_weights()
+
+        assert reload_order == ["draft", "target"]
+        assert get_loader_mock.call_args_list == [
+            call(runner.load_config),
+            call(runner.load_config),
+        ]
+        draft_model.load_weights.assert_called_once_with(draft_weights)
+        target_model.load_weights.assert_called_once_with(target_weights)
+        assert initialize_reload.call_args_list == [
+            call(draft_model),
+            call(target_model),
+        ]
+        assert finalize_reload.call_args_list == [
+            call(draft_model, runner.speculative_config.draft_model_config),
+            call(target_model, runner.model_config),
+        ]
+
+    def test_disk_reload_restores_draft_model(self):
+        self._assert_disk_reload_restores_draft(self._make_runner())
+
+    def test_v2_disk_reload_delegates_to_v1_helper(self):
+        self._assert_disk_reload_restores_draft(self._make_runner(GPUModelRunnerV2))
+
+    def test_disk_reload_without_draft_only_reloads_target(self):
+        runner = self._make_runner()
+        target_model = Mock()
+        target_model.named_parameters.return_value = []
+        target_model.load_weights.return_value = set()
+        runner.get_draft_model = Mock(return_value=None)
+        runner.get_model = Mock(return_value=target_model)
+        target_weights = iter([("target", torch.zeros(1))])
+        model_loader = Mock()
+        model_loader.get_all_weights.return_value = target_weights
+
+        with (
+            patch.object(
+                gpu_model_runner_module,
+                "get_model_loader",
+                return_value=model_loader,
+            ) as get_loader,
+            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights()
+
+        get_loader.assert_called_once_with(runner.load_config)
+        model_loader.get_all_weights.assert_called_once_with(
+            runner.model_config, target_model
+        )
+        target_model.load_weights.assert_called_once_with(target_weights)
+        runner.get_draft_model.assert_called_once_with()
+
+    def test_iterator_reload_does_not_reload_draft_model(self):
+        runner = self._make_runner()
+        target_model = Mock()
+        target_model.named_parameters.return_value = []
+        target_model.load_weights.return_value = set()
+        runner.get_draft_model = Mock()
+        runner.get_model = Mock(return_value=target_model)
+        weights = iter([("weight", torch.zeros(1))])
+
+        with (
+            patch.object(gpu_model_runner_module, "get_model_loader") as get_loader,
+            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights(weights_iterator=weights)
+
+        get_loader.assert_not_called()
+        runner.get_draft_model.assert_not_called()
+        target_model.load_weights.assert_called_once_with(weights)
+
+    def test_disk_reload_skips_dim_mismatched_aliased_embeddings(self):
+        """Skip shared embed load; still fill the tied draft-dim lm_head."""
+
+        class _TiedHead(nn.Module):
+            def __init__(self, weight: nn.Parameter):
+                super().__init__()
+                self.weight = weight
+
+        class _TinyLM(nn.Module):
+            def __init__(self, embed_dim: int):
+                super().__init__()
+                self.embed_tokens = nn.Embedding(8, embed_dim)
+                self.lm_head = _TiedHead(self.embed_tokens.weight)
+                self.proj = nn.Linear(4, 4, bias=False)
+
+            def load_weights(self, weights):
+                from vllm.model_executor.models.utils import AutoWeightsLoader
+
+                return AutoWeightsLoader(self).load_weights(weights)
+
+        target_model = _TinyLM(embed_dim=8)
+        draft_model = _TinyLM(embed_dim=2)
+        original_embed = target_model.embed_tokens.weight.detach().clone()
+        original_lm_head = draft_model.lm_head.weight
+        draft_model.embed_tokens = target_model.embed_tokens
+
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        draft_placeholder = torch.full((8, 2), 7.0)
+        draft_proj = torch.eye(4)
+        target_weights = iter([("proj.weight", torch.eye(4))])
+        seen_during_draft_init: list[nn.Module] = []
+
+        def get_loader(_load_config):
+            loader = Mock()
+
+            def get_all_weights(_config, model):
+                if model is draft_model:
+                    return iter(
+                        [
+                            ("embed_tokens.weight", draft_placeholder),
+                            ("proj.weight", draft_proj),
+                        ]
+                    )
+                return target_weights
+
+            loader.get_all_weights.side_effect = get_all_weights
+            return loader
+
+        def capture_init(model):
+            if model is not draft_model:
+                return
+            seen_during_draft_init.extend(
+                module
+                for _name, module in model.named_modules(remove_duplicate=False)
+                if _name
+            )
+
+        with (
+            patch.object(
+                gpu_model_runner_module, "get_model_loader", side_effect=get_loader
+            ),
+            patch.object(
+                gpu_model_runner_module,
+                "initialize_layerwise_reload",
+                side_effect=capture_init,
+            ),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights()
+
+        assert draft_model.embed_tokens is target_model.embed_tokens
+        assert torch.equal(target_model.embed_tokens.weight, original_embed)
+        assert draft_model.lm_head.weight is original_lm_head
+        assert torch.equal(draft_model.lm_head.weight, draft_placeholder)
+        assert torch.equal(draft_model.proj.weight, draft_proj)
+        assert target_model.embed_tokens not in seen_during_draft_init
+
+    def test_disk_reload_keeps_untied_head_off_shared_embed(self):
+        """Same-width shared embed is discarded.
+        A distinct lm_head loads from its own checkpoint tensor, not embed_tokens.
+        """
+
+        class _Head(nn.Module):
+            def __init__(self, weight: nn.Parameter):
+                super().__init__()
+                self.weight = weight
+
+        class _TinyLM(nn.Module):
+            def __init__(self, embed_dim: int):
+                super().__init__()
+                self.embed_tokens = nn.Embedding(8, embed_dim)
+                self.lm_head = _Head(nn.Parameter(torch.zeros(8, embed_dim)))
+                self.proj = nn.Linear(4, 4, bias=False)
+
+            def load_weights(self, weights):
+                from vllm.model_executor.models.utils import AutoWeightsLoader
+
+                return AutoWeightsLoader(self).load_weights(weights)
+
+        target_model = _TinyLM(embed_dim=8)
+        draft_model = _TinyLM(embed_dim=8)
+        original_embed = target_model.embed_tokens.weight.detach().clone()
+        original_head = draft_model.lm_head.weight.detach().clone()
+        draft_model.embed_tokens = target_model.embed_tokens
+
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        embed_placeholder = torch.full((8, 8), 7.0)
+        head_from_ckpt = torch.full((8, 8), 3.0)
+        draft_proj = torch.eye(4)
+        target_weights = iter([("proj.weight", torch.eye(4))])
+
+        def get_loader(_load_config):
+            loader = Mock()
+
+            def get_all_weights(_config, model):
+                if model is draft_model:
+                    return iter(
+                        [
+                            ("embed_tokens.weight", embed_placeholder),
+                            ("lm_head.weight", head_from_ckpt),
+                            ("proj.weight", draft_proj),
+                        ]
+                    )
+                return target_weights
+
+            loader.get_all_weights.side_effect = get_all_weights
+            return loader
+
+        with (
+            patch.object(
+                gpu_model_runner_module, "get_model_loader", side_effect=get_loader
+            ),
+            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights()
+
+        assert draft_model.embed_tokens is target_model.embed_tokens
+        assert torch.equal(target_model.embed_tokens.weight, original_embed)
+        assert not torch.equal(draft_model.lm_head.weight, original_head)
+        assert torch.equal(draft_model.lm_head.weight, head_from_ckpt)
+        assert torch.equal(draft_model.proj.weight, draft_proj)
+
+    def test_disk_reload_detaches_repeated_lm_head_aliases(self):
+        """MTP shares one target lm_head at draft.lm_head and each shared_head."""
+
+        class _SharedHead(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.head = nn.Linear(2, 8, bias=False)
+
+        class _Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.shared_head = _SharedHead()
+
+        class _Inner(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([_Layer(), _Layer()])
+
+        class _Draft(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lm_head = nn.Linear(2, 8, bias=False)
+                self.model = _Inner()
+                self.proj = nn.Linear(4, 4, bias=False)
+
+            def load_weights(self, weights):
+                from vllm.model_executor.models.utils import AutoWeightsLoader
+
+                return AutoWeightsLoader(self).load_weights(weights)
+
+        class _Target(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lm_head = nn.Linear(8, 8, bias=False)
+                self.proj = nn.Linear(4, 4, bias=False)
+
+            def load_weights(self, weights):
+                from vllm.model_executor.models.utils import AutoWeightsLoader
+
+                return AutoWeightsLoader(self).load_weights(weights)
+
+        target_model = _Target()
+        draft_model = _Draft()
+        original_head = target_model.lm_head.weight.detach().clone()
+        draft_model.lm_head = target_model.lm_head
+        for layer in draft_model.model.layers:
+            layer.shared_head.head = target_model.lm_head
+
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        placeholder = torch.full((8, 2), 7.0)
+        draft_proj = torch.eye(4)
+        target_weights = iter([("proj.weight", torch.eye(4))])
+        seen_target_head: list[bool] = []
+
+        def get_loader(_load_config):
+            loader = Mock()
+
+            def get_all_weights(_config, model):
+                if model is draft_model:
+                    return iter(
+                        [
+                            ("lm_head.weight", placeholder),
+                            ("model.layers.0.shared_head.head.weight", placeholder),
+                            ("model.layers.1.shared_head.head.weight", placeholder),
+                            ("proj.weight", draft_proj),
+                        ]
+                    )
+                return target_weights
+
+            loader.get_all_weights.side_effect = get_all_weights
+            return loader
+
+        def capture_init(model):
+            if model is not draft_model:
+                return
+            seen_target_head.append(
+                any(
+                    module is target_model.lm_head
+                    for _name, module in model.named_modules(remove_duplicate=False)
+                )
+            )
+
+        with (
+            patch.object(
+                gpu_model_runner_module, "get_model_loader", side_effect=get_loader
+            ),
+            patch.object(
+                gpu_model_runner_module,
+                "initialize_layerwise_reload",
+                side_effect=capture_init,
+            ),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights()
+
+        assert seen_target_head == [False]
+        assert draft_model.lm_head is target_model.lm_head
+        assert draft_model.model.layers[0].shared_head.head is target_model.lm_head
+        assert draft_model.model.layers[1].shared_head.head is target_model.lm_head
+        assert torch.equal(target_model.lm_head.weight, original_head)
+        assert torch.equal(draft_model.proj.weight, draft_proj)
