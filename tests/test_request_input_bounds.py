@@ -18,6 +18,8 @@ from pydantic import ValidationError
 
 import vllm.envs as envs
 from vllm import SamplingParams
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
+from vllm.entrypoints.cohere.protocol import CohereChatV2Request
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -36,6 +38,23 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 class _StopRequest(Protocol):
     stop: str | list[str] | None
+
+
+class _StopSequencesRequest(Protocol):
+    """Surfaces that name the field ``stop_sequences`` (Anthropic, Cohere)."""
+
+    stop_sequences: list[str] | None
+
+
+_AnyStopRequest = _StopRequest | _StopSequencesRequest
+
+
+def _stop_values(request: _AnyStopRequest) -> str | list[str] | None:
+    """Read the stop strings from whichever field the surface names."""
+    stop = getattr(request, "stop", None)
+    if stop is not None:
+        return stop
+    return getattr(request, "stop_sequences", None)
 
 
 def _completion_request(stop: list[str]) -> _StopRequest:
@@ -62,28 +81,47 @@ def _responses_request(stop: list[str]) -> _StopRequest:
     return ResponsesRequest(model="test-model", input="hello", stop=stop)
 
 
-REQUEST_BUILDERS: list[Callable[[list[str]], _StopRequest]] = [
+def _anthropic_request(stop: list[str]) -> _StopSequencesRequest:
+    return AnthropicMessagesRequest(
+        model="test-model",
+        max_tokens=16,
+        messages=[{"role": "user", "content": "hello"}],
+        stop_sequences=stop,
+    )
+
+
+def _cohere_request(stop: list[str]) -> _StopSequencesRequest:
+    return CohereChatV2Request(
+        model="test-model",
+        messages=[{"role": "user", "content": "hello"}],
+        stop_sequences=stop,
+    )
+
+
+REQUEST_BUILDERS: list[Callable[[list[str]], _AnyStopRequest]] = [
     _completion_request,
     _chat_request,
     _batch_chat_request,
     _responses_request,
+    _anthropic_request,
+    _cohere_request,
 ]
 
 
 @pytest.mark.parametrize("build_request", REQUEST_BUILDERS)
 def test_public_requests_accept_four_stop_strings(
-    build_request: Callable[[list[str]], _StopRequest],
+    build_request: Callable[[list[str]], _AnyStopRequest],
 ):
     stop = ["one", "two", "three", "four"]
 
     request = build_request(stop)
 
-    assert request.stop == stop
+    assert _stop_values(request) == stop
 
 
 @pytest.mark.parametrize("build_request", REQUEST_BUILDERS)
 def test_public_requests_reject_more_than_four_stop_strings(
-    build_request: Callable[[list[str]], _StopRequest],
+    build_request: Callable[[list[str]], _AnyStopRequest],
 ):
     with pytest.raises(ValidationError, match="at most 4"):
         build_request(["one", "two", "three", "four", "five"])
