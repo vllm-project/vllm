@@ -3,6 +3,7 @@
 import copyreg
 import functools
 import io
+import math
 import os
 import pickle
 import shutil
@@ -121,6 +122,11 @@ class SpinCondition:
     await a notification on the zmq socket after a period of inactivity. This
     allows the readers to spin quickly, hence "SpinCondition".
 
+    `busy_loop_s` is how long a reader keeps spinning after its last successful
+    read before it parks; it defaults to VLLM_SHM_BROADCAST_BUSY_LOOP_S. Note
+    that a window longer than the gap between messages never expires, so the
+    reader spins for as long as traffic continues.
+
     To support clean shutdown, a separate thread in the reader's process must be
     able to wake the reader so that it can exit. A separate cancel() method is
     implemented with an in-process socket to allow this interruption.
@@ -131,7 +137,7 @@ class SpinCondition:
         is_reader: bool,
         context: zmq.Context,
         notify_address: str,
-        busy_loop_s: float = 1,
+        busy_loop_s: float | None = None,
     ):
         self.is_reader = is_reader
 
@@ -140,7 +146,18 @@ class SpinCondition:
             self.last_read = time.monotonic()
 
             # Time to keep busy-looping on the shm buffer before going idle
-            self.busy_loop_s = busy_loop_s
+            self.busy_loop_s = (
+                busy_loop_s
+                if busy_loop_s is not None
+                else envs.VLLM_SHM_BROADCAST_BUSY_LOOP_S
+            )
+            if not math.isfinite(self.busy_loop_s) or self.busy_loop_s < 0:
+                raise ValueError(
+                    "busy_loop_s must be finite and non-negative, got "
+                    f"{self.busy_loop_s!r} (VLLM_SHM_BROADCAST_BUSY_LOOP_S). "
+                    "An infinite window would keep the reader in sched_yield() "
+                    "permanently, so it would never park even when idle."
+                )
 
             # Readers subscribe to write notifications
             self.local_notify_socket: zmq.Socket = context.socket(SUB)
