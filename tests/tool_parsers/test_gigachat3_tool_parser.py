@@ -350,3 +350,65 @@ def test_streaming_tool_call_with_large_steps(
     assert call.function.name == "manage_user_memory"
     args_dict = json.loads(call.function.arguments)
     assert args_dict == COMPLEX_ARGS_DICT
+
+
+@pytest.mark.parametrize(
+    "model_output, expected_content, expected_args",
+    [
+        pytest.param(
+            MIXED_OUTPUT_GIGACHAT3, CONTENT_TEXT, SIMPLE_ARGS_DICT, id="gigachat3"
+        ),
+        pytest.param(
+            MIXED_OUTPUT_GIGACHAT31, CONTENT_TEXT, SIMPLE_ARGS_DICT, id="gigachat31"
+        ),
+        pytest.param(
+            SIMPLE_FUNCTION_OUTPUT_GIGACHAT3,
+            None,
+            SIMPLE_ARGS_DICT,
+            id="gigachat3_no_content",
+        ),
+        pytest.param(
+            SIMPLE_FUNCTION_OUTPUT_GIGACHAT31,
+            None,
+            SIMPLE_ARGS_DICT,
+            id="gigachat31_no_content",
+        ),
+        pytest.param(
+            MIXED_OUTPUT_GIGACHAT31 + EOS_TOKEN,
+            CONTENT_TEXT,
+            SIMPLE_ARGS_DICT,
+            id="gigachat31_eos",
+        ),
+        pytest.param(
+            PARAMETERLESS_FUNCTION_OUTPUT_GIGACHAT31,
+            None,
+            {},
+            id="gigachat31_parameterless",
+        ),
+    ],
+)
+def test_streaming_split_special_tokens(
+    model_output: str,
+    expected_content: str | None,
+    expected_args: dict,
+    gigachat_tokenizer: TokenizerLike,
+):
+    """Special tokens split across deltas must not leak into content or
+    arguments. They are single tokens for the real tokenizer, but proxies
+    and re-chunking layers can split them; the parser previously matched
+    them against delta_text only, so split markers streamed out verbatim
+    and a trailing "}</s" fragment could end up in the arguments.
+    """
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("gigachat3")(
+        gigachat_tokenizer
+    )
+    deltas = [model_output[i : i + 3] for i in range(0, len(model_output), 3)]
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, deltas, assert_one_tool_per_delta=False
+    )
+    assert (reconstructor.other_content or None) == expected_content
+    assert len(reconstructor.tool_calls) == 1
+    call = reconstructor.tool_calls[0]
+    assert call.function.name == "manage_user_memory"
+    assert json.loads(call.function.arguments) == expected_args
+    assert tool_parser.get_remaining_unstreamed_args() == ""
