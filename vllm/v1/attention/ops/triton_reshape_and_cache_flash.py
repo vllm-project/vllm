@@ -421,11 +421,9 @@ def triton_reshape_and_cache_flash(
     else:  # cuda
         num_stages = 10
         num_warps = 16
-        if torch.cuda.get_device_capability(key.device)[0] < 9:
+        if not current_platform.has_device_capability(90):
             TILE_SIZE = min(512, TILE_SIZE)
 
-    # TODO(ngl): maybe replace with static launch grid to avoid overhead if
-    #   using cudagraphs
     grid = lambda meta: (
         slot_mapping.shape[0],
         triton.cdiv(n, meta["TILE_SIZE"]),
@@ -580,8 +578,6 @@ def triton_reshape_and_cache_flash_diffkv(
         num_stages = 10
         num_warps = 16
 
-    # TODO(ngl): maybe replace with static launch grid to avoid overhead if
-    #   using cudagraphs
     grid = lambda meta: (
         slot_mapping.shape[0],
         num_heads,
