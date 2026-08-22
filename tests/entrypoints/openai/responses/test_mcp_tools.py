@@ -4,12 +4,17 @@
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 import pytest_asyncio
 from openai import OpenAI
 from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.mcp.result import MCPClientSessionAdapter, normalize_tool_result
 from vllm.entrypoints.mcp.tool_server import MCPToolServer
 
 from .conftest import (
@@ -108,6 +113,123 @@ class TestMCPToolServerUnit:
             f"BUILTIN_TOOL_TO_MCP_SERVER_LABEL values "
             f"{set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())}"
         )
+
+    @pytest.mark.asyncio
+    async def test_duplicate_server_name_keeps_first_server(self, monkeypatch):
+        responses = iter(
+            [
+                (
+                    SimpleNamespace(
+                        serverInfo=SimpleNamespace(name="duplicate"),
+                        instructions="first server",
+                    ),
+                    SimpleNamespace(tools=[]),
+                ),
+                (
+                    SimpleNamespace(
+                        serverInfo=SimpleNamespace(name="duplicate"),
+                        instructions="second server",
+                    ),
+                    SimpleNamespace(tools=[]),
+                ),
+            ]
+        )
+
+        async def mock_list_server_and_tools(_url):
+            return next(responses)
+
+        monkeypatch.setattr(
+            "vllm.entrypoints.mcp.tool_server.list_server_and_tools",
+            mock_list_server_and_tools,
+        )
+
+        server = MCPToolServer.__new__(MCPToolServer)
+        await server.add_tool_server("first:8000,second:8000")
+
+        description = server.get_tool_description("duplicate")
+        assert description is not None
+        assert description.description == "first server"
+        assert server.urls["duplicate"] == "http://first:8000/sse"
+
+
+class TestMCPToolResultNormalization:
+    def test_plain_text_result_is_unchanged(self):
+        from mcp.types import CallToolResult, TextContent
+
+        result = CallToolResult(content=[TextContent(text="plain output")])
+
+        assert normalize_tool_result(result) is result
+
+    @pytest.mark.parametrize(
+        "result_kwargs",
+        [
+            {"content": []},
+            {
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"},
+                ]
+            },
+            {
+                "content": [{"type": "text", "text": "invalid input"}],
+                "isError": True,
+            },
+            {
+                "content": [{"type": "text", "text": "summary"}],
+                "structuredContent": {"answer": 42},
+            },
+            {
+                "content": [
+                    {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"}
+                ]
+            },
+        ],
+        ids=["empty", "multiple", "error", "structured", "image"],
+    )
+    def test_rich_result_preserves_mcp_fields_as_json(self, result_kwargs):
+        from mcp.types import CallToolResult
+
+        result = CallToolResult.model_validate(result_kwargs)
+        normalized = normalize_tool_result(result)
+
+        assert len(normalized.content) == 1
+        assert normalized.content[0].type == "text"
+        payload = json.loads(normalized.content[0].text)
+        expected = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if result.content and result.content[0].type == "image":
+            expected["content"][0]["data"] = "<omitted 8 base64 characters>"
+        assert payload == expected
+
+    def test_transport_metadata_is_not_exposed_to_model(self):
+        from mcp.types import CallToolResult, TextContent
+
+        result = CallToolResult(
+            content=[TextContent(text="output", _meta={"content-secret": "value"})],
+            _meta={"result-secret": "value"},
+            isError=True,
+        )
+
+        payload = json.loads(normalize_tool_result(result).content[0].text)
+
+        assert "_meta" not in payload
+        assert "_meta" not in payload["content"][0]
+
+    @pytest.mark.asyncio
+    async def test_session_adapter_normalizes_call_tool_result(self):
+        from mcp.types import CallToolResult, TextContent
+
+        result = CallToolResult(
+            content=[TextContent(text="failed")],
+            isError=True,
+        )
+        session = SimpleNamespace(call_tool=AsyncMock(return_value=result))
+
+        normalized = await MCPClientSessionAdapter(session).call_tool(
+            "search", {"query": "vLLM"}
+        )
+
+        session.call_tool.assert_awaited_once_with("search", {"query": "vLLM"})
+        assert json.loads(normalized.content[0].text)["isError"] is True
 
 
 class TestMCPEnabled:
