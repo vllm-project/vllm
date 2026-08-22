@@ -265,7 +265,12 @@ def _expected_tc(scenario: Scenario) -> list[dict] | None:
 
 
 def _expected_tools(scenario: Scenario) -> list[dict] | None:
-    return _tool_defs(scenario.tool_calls) if scenario.tool_calls else None
+    if scenario.tool_calls is None:
+        return None
+    # An empty tool block still implies a tool-calling context: without
+    # declared tools, tool_choice defaults to "none" and the parser passes
+    # tool syntax through as content instead of parsing it.
+    return _tool_defs(scenario.tool_calls or [_READ_TOOL])
 
 
 def _validate_sample(sample: Sample, parser_cls: type, **kwargs) -> None:
