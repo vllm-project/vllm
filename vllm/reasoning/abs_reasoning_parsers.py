@@ -112,6 +112,19 @@ class ReasoningParser:
         """
         return self.is_reasoning_end(input_ids)
 
+    def is_grammar_start_allowed(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        """When structured-output bitmasks may start filling.
+
+        Defaults to ``is_reasoning_end_streaming``. Parsers that keep a
+        user-facing answer channel separate from the tool-handoff channel
+        (Muse Glimmer's ``to=user`` vs tool XML) override this so JSON
+        schemas attach to the answer without flipping the serving parser
+        into the tool phase.
+        """
+        return self.is_reasoning_end_streaming(input_ids, delta_ids)
+
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
