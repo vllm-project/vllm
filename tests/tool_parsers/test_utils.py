@@ -21,6 +21,8 @@ from vllm.tool_parsers.utils import (
     restore_reserved_kwarg_names,
 )
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 class TestCoerceToSchemaType:
     class TestNullHandling:
@@ -228,6 +230,15 @@ class TestCoerceToSchemaType:
         def test_unrecognized_type_falls_back_to_json(self):
             assert coerce_to_schema_type("42", "interval") == 42
 
+        def test_missing_schema_type_allows_json_values(self):
+            schema_type = extract_types_from_schema(
+                {"description": "Enter the requested value here."}
+            )
+
+            assert coerce_to_schema_type("5", schema_type) == 5
+            assert coerce_to_schema_type("true", schema_type) is True
+            assert coerce_to_schema_type('{"value": 5}', schema_type) == {"value": 5}
+
 
 class TestExtractTypesFromSchema:
     def test_direct_type_string(self):
@@ -254,6 +265,28 @@ class TestExtractTypesFromSchema:
         schema = {"allOf": [{"type": "object"}]}
         assert extract_types_from_schema(schema) == ["object"]
 
+    def test_untyped_allof_branch_is_neutral(self):
+        schema = {
+            "allOf": [
+                {"type": "string"},
+                {"description": "A string annotation"},
+            ]
+        }
+        assert extract_types_from_schema(schema) == ["string"]
+
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {"anyOf": [{"type": "string"}, {}]},
+            {"anyOf": [{}, {"type": "string"}]},
+            {"oneOf": [{"type": "string"}, {}]},
+            {"oneOf": [{}, {"type": "string"}]},
+        ],
+    )
+    def test_untyped_union_branch_allows_any_json_type(self, schema):
+        schema_types = extract_types_from_schema(schema)
+        assert coerce_to_schema_type("5", schema_types) == 5
+
     def test_enum_infers_types(self):
         schema = {"enum": [1, "a", None]}
         result = set(extract_types_from_schema(schema))
@@ -278,8 +311,18 @@ class TestExtractTypesFromSchema:
     def test_non_dict_schema_defaults_to_string(self):
         assert extract_types_from_schema("string") == ["string"]
 
-    def test_empty_dict_defaults_to_string(self):
-        assert extract_types_from_schema({}) == ["string"]
+    @pytest.mark.parametrize("schema", [{}, {"description": "Any JSON value"}])
+    def test_schema_without_type_allows_any_json_type(self, schema):
+        result = set(extract_types_from_schema(schema))
+        assert result == {
+            "null",
+            "integer",
+            "number",
+            "boolean",
+            "object",
+            "array",
+            "string",
+        }
 
     def test_nested_anyof(self):
         schema = {
