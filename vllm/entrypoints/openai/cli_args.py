@@ -47,7 +47,7 @@ class LoRAParserAction(argparse.Action):
             if item in [None, ""]:  # Skip if item is None or empty string
                 continue
             if "=" in item and "," not in item:  # Old format: name=path
-                name, path = item.split("=")
+                name, path = item.split("=", 1)
                 lora_list.append(LoRAModulePath(name, path))
             else:  # Assume JSON format
                 try:
