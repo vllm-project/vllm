@@ -111,13 +111,26 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         if kv_cache_config is None:
             return 0
 
-        from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+        from vllm.v1.kv_cache_interface import (
+            HiddenStateCacheSpec,
+            UniformTypeKVCacheSpecs,
+        )
+
+        def _is_hidden_spec(spec) -> bool:
+            if isinstance(spec, HiddenStateCacheSpec):
+                return True
+            if isinstance(spec, UniformTypeKVCacheSpecs) and spec.kv_cache_specs:
+                return all(
+                    isinstance(inner, HiddenStateCacheSpec)
+                    for inner in spec.kv_cache_specs.values()
+                )
+            return False
 
         groups = kv_cache_config.kv_cache_groups
         group_ids = [
             gid
             for gid, group in enumerate(groups)
-            if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+            if _is_hidden_spec(group.kv_cache_spec)
         ]
         if len(group_ids) == 1:
             return group_ids[0]
@@ -126,7 +139,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         raise ValueError(
             "Could not uniquely identify the extract-hidden-states KV cache "
             f"group among {len(groups)} groups; the hidden-states layer must be "
-            "isolated in its own group (MLA verifiers are unsupported)."
+            "isolated in exactly one KV cache group."
         )
 
     @staticmethod
