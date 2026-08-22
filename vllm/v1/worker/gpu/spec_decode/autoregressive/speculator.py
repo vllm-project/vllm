@@ -7,10 +7,8 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -226,7 +224,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
-        intermediate_tensors: IntermediateTensors | None = None,
     ) -> torch.Tensor:
         num_tokens = input_batch.num_tokens
         num_tokens_padded = input_batch.num_tokens_after_padding
@@ -311,7 +308,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
-                intermediate_tensors=intermediate_tensors,
             )
         self.on_prefill_end(num_reqs)
 
@@ -355,7 +351,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             decode_batch_desc,
             num_tokens_across_dp,
             input_batch.seq_lens_cpu_upper_bound,
-            intermediate_tensors=intermediate_tensors,
         )
         self.on_multi_step_decode_end(num_reqs)
 
@@ -370,7 +365,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        intermediate_tensors: IntermediateTensors | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -403,16 +397,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
-            # Only consult the PP group when there are PP intermediate
-            # tensors to consume: at PP=1 (and in unit tests) no PP group is
-            # initialized and none is needed.
-            if intermediate_tensors is not None and not get_pp_group().is_first_rank:
-                n = num_tokens
-                new_tensors = {
-                    k: v[:n].copy_(intermediate_tensors.tensors[k][:n])
-                    for k, v in intermediate_tensors.tensors.items()
-                }
-                model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
                 # Draft prefill with PIECEWISE cudagraph (compiled PW or breakable),
                 # chosen inside run_pw_graph.
@@ -441,7 +425,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        intermediate_tensors: IntermediateTensors | None = None,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
         positions = self.input_buffers.positions[last_token_indices]
@@ -454,7 +437,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
-            intermediate_tensors=intermediate_tensors,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
 
@@ -480,7 +462,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -522,7 +503,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     slot_mappings_by_layer,
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=batch_desc.cg_mode,
-                    intermediate_tensors=intermediate_tensors,
                 )
 
     def _fused_multi_step_decode(
@@ -622,7 +602,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        intermediate_tensors: IntermediateTensors | None = None,
     ) -> None:
         self._prepare_eplb_forward(num_reqs)
 
@@ -635,7 +614,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
-            intermediate_tensors=intermediate_tensors,
         )
         last_hidden_states = last_hidden_states[:num_reqs]
 

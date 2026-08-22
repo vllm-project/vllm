@@ -297,12 +297,6 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
-        if not get_pp_group().is_first_rank and intermediate_tensors is None:
-            intermediate_tensors = self.make_empty_intermediate_tensors(
-                batch_size=hidden_states.shape[0],
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
         hidden_states = self.model(
             input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
         )

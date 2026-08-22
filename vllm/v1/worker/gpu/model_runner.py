@@ -1852,7 +1852,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler.sampling_states.temperature.gpu,
                     self.sampler.sampling_states.seeds.gpu,
                     mm_inputs=mm_inputs,
-                    intermediate_tensors=self.intermediate_tensors,
                 )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.pp_handler is not None:
