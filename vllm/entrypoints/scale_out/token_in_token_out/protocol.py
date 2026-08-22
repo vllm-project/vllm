@@ -199,6 +199,13 @@ class GenerateResponseChoice(BaseModel):
     logprobs: ChatCompletionLogProbs | None = None
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
+    stop_reason: int | str | None = Field(
+        default=None,
+        description=(
+            "The stop string or token id that caused generation to stop; "
+            "None when generation ended for another reason, including EOS."
+        ),
+    )
     token_ids: list[int] | None = None
     # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
     # (numpy serialization). Shape after decode:
@@ -224,6 +231,13 @@ class GenerateResponseStreamChoice(BaseModel):
     index: int
     logprobs: ChatCompletionLogProbs | None = None
     finish_reason: str | None = None
+    stop_reason: int | str | None = Field(
+        default=None,
+        description=(
+            "The stop string or token id that caused generation to stop; "
+            "None when generation ended for another reason, including EOS."
+        ),
+    )
     token_ids: list[int] | None = None
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
