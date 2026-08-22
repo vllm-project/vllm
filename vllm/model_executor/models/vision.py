@@ -718,6 +718,25 @@ class FusedInputNorm(nn.Module):
         patches, size = grid_thw.shape
         patch_size = size // self.channel
 
+        # On XPU, fuse the whole rescale + normalize into a single custom
+        # kernel. The eager path below materializes an fp32 intermediate and
+        # then casts back, which adds device-side compute that cancels the
+        # bandwidth saving of transferring uint8 pixel_values. The fused
+        # kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
+        if (
+            current_platform.is_xpu()
+            and grid_thw.dtype == torch.uint8
+            and self.weight.dtype == torch.float32
+        ):
+            grid_thw = grid_thw.contiguous()
+            out = torch.empty(
+                (patches, size),
+                dtype=visual_dtype,
+                device=grid_thw.device,
+            )
+            torch.ops._C.fused_input_norm(out, grid_thw, self.weight, self.bias)
+            return out
+
         # Apply the per-channel affine transform directly instead of via
         # F.batch_norm. batch_norm dispatches to cuDNN, whose batch-norm
         # kernels cap the batch dimension near the CUDA grid limit (~65535);
