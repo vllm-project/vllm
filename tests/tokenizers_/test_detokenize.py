@@ -30,6 +30,14 @@ TRUTH = [
     # incomplete UTF-8 characters
     # see https://github.com/vllm-project/vllm/pull/9625
     "ပုံပြင်လေးပြောပြပါ်",
+    # Thai: no word delimiters, and a large share of tokens begin with a
+    # combining mark, so token boundaries frequently fall inside a grapheme
+    # cluster as well as inside a UTF-8 sequence.
+    "สวัสดีครับ ยินดีต้อนรับสู่ประเทศไทย",
+    # SARA AM (U+0E33) has a canonical decomposition to U+0E4D + U+0E32, so
+    # the same visible word can arrive as one codepoint or two and tokenize
+    # differently.
+    "น้ำใจ ทำงาน คำถาม",
 ] + SPECIAL_TOKS_TRUTH
 
 TOKENIZERS = [
@@ -359,3 +367,53 @@ def test_logprobs_count_stable_across_k():
     assert len(top4) == 4
     assert len(top10) == 10
     assert top4[" true"] == top10[" true"]
+
+
+def test_thai_combining_marks_survive_token_boundaries():
+    """A token starting with a combining mark must not lose it.
+
+    Thai writing places vowels and tone marks above and below the base
+    consonant, and tokenizers routinely split between the two. Roughly a third
+    of Thai tokens in common BPE vocabularies begin with a combining mark, so a
+    detokenizer that drops or reorders leading marks corrupts ordinary text
+    rather than an exotic edge case.
+    """
+    # "ที่" = base consonant + sara ii + mai ek, split so the second token
+    # begins with U+0E48 (a combining tone mark).
+    tok = _MockTokenizer(
+        raw_tokens={0: "ท", 1: "ี", 2: "่", 3: "น", 4: "ี", 5: "้"},
+        decoded_tokens={0: "ท", 1: "ี", 2: "่", 3: "น", 4: "ี", 5: "้"},
+    )
+    result = convert_ids_list_to_tokens(tok, [0, 1, 2, 3, 4, 5])
+    assert "".join(result) == "ที่นี้"
+    # Each combining mark stays its own distinct token string.
+    assert result[2] == "่"
+    assert result[5] == "้"
+
+
+def test_thai_sara_am_composed_and_decomposed_are_distinct():
+    """U+0E33 and U+0E4D+U+0E32 render alike but must not be conflated.
+
+    SARA AM has a canonical decomposition, so the same visible word can arrive
+    as one codepoint or two. They tokenize differently, and treating the two
+    spellings as one string silently changes output length and logprob keys.
+    """
+    composed = "นำ"  # นำ
+    decomposed = "นํา"  # น + nikhahit + sara aa
+    assert composed != decomposed
+
+    tok = _MockTokenizer(
+        raw_tokens={0: "น", 1: "ำ", 2: "ํ", 3: "า"},
+        decoded_tokens={0: "น", 1: "ำ", 2: "ํ", 3: "า"},
+    )
+    assert "".join(convert_ids_list_to_tokens(tok, [0, 1])) == composed
+    assert "".join(convert_ids_list_to_tokens(tok, [0, 2, 3])) == decomposed
+
+    # Distinct strings, so they cannot collide as top_logprobs keys.
+    both = dict(
+        zip(
+            convert_ids_list_to_tokens(tok, [1, 2]),
+            [-0.1, -0.2],
+        )
+    )
+    assert len(both) == 2
