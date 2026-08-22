@@ -62,7 +62,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py &&
-      VLLM_XPU_ENABLE_XPU_GRAPH=1 pytest -v -s test_config.py'
+      pytest -v -s test_config.py'
 
 - label: V1 e2e (2 GPUs)
   timeout_in_minutes: 30
