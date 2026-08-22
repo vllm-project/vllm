@@ -1007,6 +1007,7 @@ class NixlBaseConnectorWorker:
             self.transfer_topo.cross_layers_blocks,
             transfer_mode=self._TRANSFER_MODE,
         )
+        self.vllm_config.kv_transfer_config.compatibility_hash = self.compat_hash
 
         total_size = storage.nbytes()
         block_stride = total_size // self.num_blocks
@@ -1103,6 +1104,7 @@ class NixlBaseConnectorWorker:
             self.transfer_topo.cross_layers_blocks,
             transfer_mode=self._TRANSFER_MODE,
         )
+        self.vllm_config.kv_transfer_config.compatibility_hash = self.compat_hash
 
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)

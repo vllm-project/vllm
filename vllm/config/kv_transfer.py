@@ -71,6 +71,10 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
+    compatibility_hash: str | None = field(default=None, init=False)
+    """Post-init compatibility hash from the KV connector (e.g. NIXL).
+    Set after KV cache initialization; not a user-facing parameter."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
