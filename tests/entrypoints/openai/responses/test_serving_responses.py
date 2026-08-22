@@ -156,6 +156,44 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.skip_global_cleanup
+def test_response_created_event_defaults_explicit_nulls() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "test-model",
+            "input": "hello",
+            "background": None,
+            "truncation": None,
+        }
+    )
+    sampling_params = request.to_sampling_params(default_max_tokens=16)
+
+    response = ResponsesResponse.from_request(
+        request=request,
+        sampling_params=sampling_params,
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="completed",
+    )
+
+    assert response.background is False
+    assert response.truncation == "disabled"
+
+
+@pytest.mark.skip_global_cleanup
+def test_build_tok_params_treats_explicit_null_truncation_as_disabled() -> None:
+    request = ResponsesRequest.model_validate(
+        {"model": "test-model", "input": "hello", "truncation": None}
+    )
+    model_config = MagicMock()
+    model_config.max_model_len = 128
+
+    tok_params = request.build_tok_params(model_config)
+
+    assert tok_params.truncate_prompt_tokens is None
+
+
+@pytest.mark.skip_global_cleanup
 def test_response_created_event_uses_public_json_schema_alias() -> None:
     schema = {
         "type": "object",
