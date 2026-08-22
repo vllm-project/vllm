@@ -71,7 +71,9 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
                 "for installation instructions."
             ) from e
 
-        self._flexkv_connector = FlexKVConnectorV1Impl(vllm_config, role)
+        self._flexkv_connector = FlexKVConnectorV1Impl(
+            vllm_config, role, kv_cache_config
+        )
 
     def shutdown(self):
         self._flexkv_connector.shutdown()
