@@ -134,11 +134,12 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
         self.dt_bias = nn.Parameter(
-            torch.ones(self.num_v_heads // self.tp_size),
+            torch.ones(self.num_v_heads // self.tp_size, dtype=torch.float32),
         )
         self.A_log = nn.Parameter(
             torch.empty(
                 divide(self.num_v_heads, self.tp_size),
+                dtype=torch.float32,
             )
         )
 
