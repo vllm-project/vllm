@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Rotary Positional Embeddings."""
 
+import math
 from typing import Any
 
 import torch
@@ -28,6 +29,15 @@ from .xdrope import XDRotaryEmbedding
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
 
 _ROPE_DICT: dict[tuple[Any, ...], RotaryEmbedding] = {}
+
+
+def _get_runtime_max_model_len() -> int | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    model_config = getattr(vllm_config, "model_config", None)
+    max_model_len = getattr(model_config, "max_model_len", None)
+    return int(max_model_len) if max_model_len is not None else None
 
 
 def get_rope(
@@ -71,6 +81,35 @@ def get_rope(
             raise ValueError(f"{partial_rotary_factor=} must be between 0.0 and 1.0")
         rotary_dim = int(head_size * partial_rotary_factor)
 
+    runtime_max_model_len = _get_runtime_max_model_len()
+    cache_key_extra = None
+    deepseek_cache_max_position = None
+    # These RoPE variants do not use max_position to compute inv_freq; it only
+    # controls cache length. Variants whose scaling math depends on
+    # max_position are handled separately or left unchanged.
+    can_clamp_max_position = scaling_type in (
+        "default",
+        "proportional",
+        "llama3",
+        "ntk",
+    ) or (scaling_type == "dynamic" and "alpha" in rope_parameters)
+    if scaling_type in ("deepseek_yarn", "deepseek_llama_scaling"):
+        original_max_position = rope_parameters["original_max_position_embeddings"]
+        scaling_factor = rope_parameters["factor"]
+        full_cache_len = math.ceil(float(original_max_position) * float(scaling_factor))
+        deepseek_cache_max_position = full_cache_len
+        if runtime_max_model_len is not None:
+            deepseek_cache_max_position = min(runtime_max_model_len, full_cache_len)
+        cache_key_extra = ("cache_max_position", deepseek_cache_max_position)
+    elif (
+        runtime_max_model_len is not None
+        and dual_chunk_attention_config is None
+        and can_clamp_max_position
+        and not rope_parameters.get("use_fope", False)
+        and max_position > runtime_max_model_len
+    ):
+        max_position = runtime_max_model_len
+
     key = (
         head_size,
         rotary_dim,
@@ -79,6 +118,7 @@ def get_rope(
         rope_parameters_args,
         dual_chunk_attention_args,
         dtype,
+        cache_key_extra,
     )
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
@@ -310,6 +350,7 @@ def get_rope(
             is_neox_style,
             scaling_factor,
             dtype,
+            cache_max_position=deepseek_cache_max_position,
             **extra_kwargs,
         )
     elif scaling_type == "longrope":

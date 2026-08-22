@@ -45,6 +45,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         beta_slow: int = 1,
         mscale: float = 1,
         mscale_all_dim: float = 0,
+        cache_max_position: int | None = None,
         init_cache: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
@@ -57,6 +58,12 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             yarn_get_mscale(self.scaling_factor, float(mscale))
             / yarn_get_mscale(self.scaling_factor, float(mscale_all_dim))
             * attn_factor
+        )
+        full_cache_max_position = math.ceil(max_position_embeddings * scaling_factor)
+        self.cache_max_position = (
+            full_cache_max_position
+            if cache_max_position is None
+            else min(cache_max_position, full_cache_max_position)
         )
         self.use_flashinfer = (
             self.enabled()
@@ -108,10 +115,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
-        t = torch.arange(
-            self.max_position_embeddings * self.scaling_factor,
-            dtype=torch.float32,
-        )
+        t = torch.arange(self.cache_max_position, dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos() * self.mscale
         sin = freqs.sin() * self.mscale
@@ -250,7 +254,7 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(
-            self.max_position_embeddings * self.scaling_factor,
+            self.cache_max_position,
             device=inv_freq.device,
             dtype=torch.float32,
         )
