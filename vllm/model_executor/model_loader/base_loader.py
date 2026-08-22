@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from abc import ABC, abstractmethod
 
 import torch
@@ -52,10 +53,16 @@ class BaseModelLoader(ABC):
         target_device = torch.device(load_device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
+                time_before_load = time.perf_counter()
                 model = initialize_model(
                     vllm_config=vllm_config,
                     model_config=model_config,
                     prefix=prefix,
+                )
+                time_after_load = time.perf_counter()
+                logger.info_once(
+                    "Initializing model took %.6f seconds",
+                    time_after_load - time_before_load,
                 )
 
             log_model_inspection(model)
