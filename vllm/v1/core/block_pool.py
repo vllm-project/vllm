@@ -265,14 +265,26 @@ class BlockPool:
         )
 
         new_block_hashes = block_hashes[num_cached_blocks:]
-        new_hashes: list[ExternalBlockHash] | None = (
-            [] if self.enable_kv_cache_events else None
-        )
+        # KV events must stay dense: split around skipped logical blocks so each
+        # event's parent is the immediate predecessor of its first block.
+        event_runs: list[tuple[int, int, list[ExternalBlockHash]]] = []
+        event_start_idx: int | None = None
+        event_hashes: list[ExternalBlockHash] = []
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
             # in align mode. We skip null blocks here.
             if blk.is_null or (block_mask is not None and not block_mask[i]):
+                if self.enable_kv_cache_events and event_start_idx is not None:
+                    event_runs.append(
+                        (
+                            event_start_idx,
+                            num_cached_blocks + i,
+                            event_hashes,
+                        )
+                    )
+                    event_start_idx = None
+                    event_hashes = []
                 continue
             block_hash = new_block_hashes[i]
             num_hash_tokens = (num_cached_blocks + i + 1) * block_size
@@ -295,51 +307,92 @@ class BlockPool:
                 blk,
                 num_tokens=num_hash_tokens,
             )
-            if new_hashes is not None:
-                new_hashes.append(maybe_convert_block_hash(block_hash))
+            if self.enable_kv_cache_events:
+                if event_start_idx is None:
+                    event_start_idx = num_cached_blocks + i
+                event_hashes.append(maybe_convert_block_hash(block_hash))
 
-        if self.enable_kv_cache_events:
-            if num_cached_blocks == 0:
+        if self.enable_kv_cache_events and event_start_idx is not None:
+            event_runs.append((event_start_idx, num_full_blocks, event_hashes))
+
+        last_event_end_idx = num_cached_blocks
+        for event_start_idx, event_end_idx, event_hashes in event_runs:
+            if event_start_idx == 0:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
                 parent_block_hash = maybe_convert_block_hash(
-                    block_hashes[num_cached_blocks - 1]
+                    block_hashes[event_start_idx - 1]
                 )
 
+            if event_start_idx > last_event_end_idx:
+                skipped_parent_block_hash = (
+                    None
+                    if last_event_end_idx == 0
+                    else maybe_convert_block_hash(block_hashes[last_event_end_idx - 1])
+                )
+                skipped_start_token_idx = last_event_end_idx * block_size
+                skipped_end_token_idx = event_start_idx * block_size
+                skipped_extra_keys = self._generate_block_extra_keys(
+                    request,
+                    last_event_end_idx,
+                    event_start_idx,
+                    block_size,
+                )
+            else:
+                skipped_parent_block_hash = None
+                skipped_start_token_idx = None
+                skipped_end_token_idx = None
+                skipped_extra_keys = None
+
             # Calculate token range for the blocks being cached
-            start_token_idx = num_cached_blocks * block_size
-            end_token_idx = num_full_blocks * block_size
+            start_token_idx = event_start_idx * block_size
+            end_token_idx = event_end_idx * block_size
 
             # Generate extra keys for each block individually.
             # Each block may have different extra_keys (e.g., different MM
             # features, or cache_salt only for the first block).
-            # Skip null/masked-out blocks to match the length of new_hashes.
-            extra_keys_list: list[tuple[Any, ...] | None] = []
-            curr_mm_idx = 0
-            for i in range(num_cached_blocks, num_full_blocks):
-                if blocks[i].is_null:
-                    continue
-                if block_mask is not None and not block_mask[i - num_cached_blocks]:
-                    continue
-                block_start = i * block_size
-                block_end = block_start + block_size
-                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                    request, block_start, block_end, curr_mm_idx
-                )
-                extra_keys_list.append(extra_keys)
+            extra_keys_list = self._generate_block_extra_keys(
+                request,
+                event_start_idx,
+                event_end_idx,
+                block_size,
+            )
 
             self.kv_event_queue.append(
                 self._build_block_stored_event(
                     request,
-                    block_hashes=new_hashes,
+                    block_hashes=event_hashes,
                     parent_block_hash=parent_block_hash,
                     start_token_idx=start_token_idx,
                     end_token_idx=end_token_idx,
                     block_size=block_size,
                     kv_cache_group_id=kv_cache_group_id,
                     extra_keys_list=extra_keys_list,
+                    skipped_parent_block_hash=skipped_parent_block_hash,
+                    skipped_start_token_idx=skipped_start_token_idx,
+                    skipped_end_token_idx=skipped_end_token_idx,
+                    skipped_extra_keys=skipped_extra_keys,
                 )
             )
+            last_event_end_idx = event_end_idx
+
+    def _generate_block_extra_keys(
+        self,
+        request: Request,
+        start_block_idx: int,
+        end_block_idx: int,
+        block_size: int,
+    ) -> list[tuple[Any, ...] | None]:
+        extra_keys_list: list[tuple[Any, ...] | None] = []
+        curr_mm_idx = 0
+        for i in range(start_block_idx, end_block_idx):
+            block_start = i * block_size
+            block_end = block_start + block_size
+            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                request, block_start, block_end, curr_mm_idx
+            )
+            extra_keys_list.append(extra_keys)
+        return extra_keys_list
 
     def _build_block_stored_event(
         self,
@@ -351,6 +404,10 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         extra_keys_list: list[tuple[Any, ...] | None],
+        skipped_parent_block_hash: ExternalBlockHash | None = None,
+        skipped_start_token_idx: int | None = None,
+        skipped_end_token_idx: int | None = None,
+        skipped_extra_keys: list[tuple[Any, ...] | None] | None = None,
     ) -> BlockStored:
         """Build a ``BlockStored`` KV event for ``request``.
 
@@ -367,6 +424,14 @@ class BlockPool:
             medium=MEDIUM_GPU,
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
+            skipped_parent_block_hash=skipped_parent_block_hash,
+            skipped_token_ids=request.all_token_ids[
+                skipped_start_token_idx:skipped_end_token_idx
+            ]
+            if skipped_start_token_idx is not None
+            and skipped_end_token_idx is not None
+            else None,
+            skipped_extra_keys=skipped_extra_keys,
             group_idx=kv_cache_group_id,
         )
 
