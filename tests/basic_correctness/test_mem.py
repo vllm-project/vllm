@@ -73,10 +73,13 @@ def _save_gemma3n_dummy_weights(worker) -> None:
 
 
 def _reload_gemma3n_dummy_weights(worker) -> None:
-    worker.reload_weights(
-        weights_iterator=iter(worker._gemma3n_dummy_weights),
-        is_checkpoint_format=False,
-    )
+    # GPUModelRunner.reload_weights copies into leaf parameters. Real weight
+    # loading runs without autograd, so reproduce that context here as well.
+    with torch.no_grad():
+        worker.reload_weights(
+            weights_iterator=iter(worker._gemma3n_dummy_weights),
+            is_checkpoint_format=False,
+        )
 
 
 def _create_tiny_gemma3n_config(model_dir) -> None:
@@ -90,7 +93,7 @@ def _create_tiny_gemma3n_config(model_dir) -> None:
         num_hidden_layers=3,
         num_attention_heads=4,
         num_key_value_heads=2,
-        head_dim=16,
+        head_dim=32,
         max_position_embeddings=256,
         sliding_window=64,
         layer_types=[
@@ -495,6 +498,14 @@ def test_gemma3n_level2_sleep_wake_preserves_generation(monkeypatch, tmp_path):
         llm.wake_up(tags=["weights"])
         llm.collective_rpc(_reload_gemma3n_dummy_weights)
         after_tensors = llm.apply_model(_gemma3n_sleep_tensor_snapshot)
+
+        # Check the direct corruption signal before running another forward.
+        # A corrupted scale can make generate raise inside the model and hide
+        # the more useful ownership failure behind an unrelated exception.
+        assert after_tensors == before_tensors, (
+            f"cycle {cycle}: Gemma 3n runtime tensors changed after sleep/wake"
+        )
+
         llm.wake_up(tags=["kv_cache"])
 
         after_token_ids, after_logprobs = _generation_signature(
@@ -506,11 +517,6 @@ def test_gemma3n_level2_sleep_wake_preserves_generation(monkeypatch, tmp_path):
         assert after_logprobs == pytest.approx(
             before_logprobs, rel=1e-5, abs=1e-5
         ), f"cycle {cycle}: selected-token logprobs changed after sleep/wake"
-        # CuMem preserves virtual addresses. The model owner must restore the
-        # original semantic values into those addresses after remapping.
-        assert after_tensors == before_tensors, (
-            f"cycle {cycle}: Gemma 3n runtime tensors changed after sleep/wake"
-        )
 
 
 @create_new_process_for_each_test()
