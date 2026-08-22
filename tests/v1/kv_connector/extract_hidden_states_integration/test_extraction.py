@@ -80,7 +80,7 @@ def register_predictable_model():
 
 
 def test_extract_hidden_states_with_predictable_dummy_model(
-    predictable_llama_config_path, tmp_path, monkeypatch
+    predictable_llama_config_path, tmp_path
 ):
     """Test hidden-state extraction with a predictable dummy model.
 
@@ -96,14 +96,18 @@ def test_extract_hidden_states_with_predictable_dummy_model(
        include_output_tokens — verifies per-request kv_transfer_params
        plumbing.
     """
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
-
     layer_ids = [5, 2, 10]
     num_layers = len(layer_ids)
     max_num_batched_tokens = 128
 
     llm = LLM(
         model=predictable_llama_config_path,
+        model_class_overrides={
+            "PredictableLlamaForCausalLM": (
+                "tests.v1.kv_connector.extract_hidden_states_integration."
+                "predictable_llama:PredictableLlamaForCausalLM"
+            )
+        },
         speculative_config={
             "method": "extract_hidden_states",
             "num_speculative_tokens": 1,
