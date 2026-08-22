@@ -30,8 +30,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     _ConnectorMetricName,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    GroupOffloadConfig,
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    SchedulerOffloadConfig,
     get_sliding_window_size_in_chunks,
     is_store_reachable_swa_chunk,
 )
@@ -56,6 +58,7 @@ from vllm.v1.kv_offload.base import (
     get_offload_group_idx,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -2802,8 +2805,234 @@ class TestEagle:
         assert sched._lookup(req_status) == 8
 
     # -------------------------------------------------------------------
-    # Integration tests: store and load via request_runner
+    # Integration tests: scheduler store and load paths
     # -------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        (
+            "num_prompt_tokens",
+            "expected_hit_tokens",
+            "extra_store_keys",
+            "eagle_window_chunks",
+        ),
+        [
+            (30_208, 30_144, 2, 2),
+            (30_272, 30_208, 0, 2),
+            (30_336, 30_208, 0, 2),
+            (30_336, 30_144, 2, None),
+        ],
+    )
+    def test_hybrid_swa_store_preserves_eagle_replay_boundary(
+        self,
+        num_prompt_tokens: int,
+        expected_hit_tokens: int,
+        extra_store_keys: int,
+        eagle_window_chunks: int | None,
+    ):
+        """Chunked prompt stores retain the fixed EAGLE replay boundary."""
+        group_configs = (
+            GroupOffloadConfig(0, 256, 256, 1, MagicMock(), None),
+            GroupOffloadConfig(
+                1,
+                64,
+                64,
+                1,
+                MagicMock(),
+                eagle_window_chunks,
+                alignment_chunk_count=4 if eagle_window_chunks else None,
+                is_eagle_group=True,
+            ),
+            GroupOffloadConfig(
+                2,
+                4,
+                4,
+                1,
+                MagicMock(),
+                2,
+                alignment_chunk_count=64,
+            ),
+        )
+        scheduler = OffloadingConnectorScheduler.__new__(OffloadingConnectorScheduler)
+        scheduler.config = SchedulerOffloadConfig(
+            group_configs,
+            blocks_per_chunk=1,
+            tokens_per_hash=4,
+            num_workers=1,
+            offload_prompt_only=False,
+            supports_partial_tail=False,
+        )
+        full_attention_groups = tuple(
+            group.group_idx
+            for group in group_configs
+            if group.sliding_window_size_in_chunks is None
+        )
+        sliding_window_groups = tuple(
+            group.group_idx
+            for group in group_configs
+            if group.sliding_window_size_in_chunks is not None
+        )
+        scheduler._sliding_window_groups = sliding_window_groups
+        scheduler._lookup_groups = full_attention_groups + sliding_window_groups
+        scheduler._mamba_align_size = None
+        scheduler._chunks_being_loaded = None
+        scheduler._events_tracker = MagicMock()
+        scheduler._connector_stats = MagicMock()
+        scheduler._req_status = {}
+        scheduler._jobs = {}
+        scheduler._job_counter = 0
+        scheduler._stale_job_threshold = 0
+        scheduler._block_id_to_pending_jobs = {}
+        manager = CPUOffloadingManager(num_blocks=1_000)
+        scheduler.manager = manager
+
+        request = SimpleNamespace(
+            request_id="store",
+            num_prompt_tokens=num_prompt_tokens,
+            num_tokens=num_prompt_tokens,
+            num_computed_tokens=0,
+            kv_transfer_params=None,
+            status=RequestStatus.RUNNING,
+            is_finished=lambda: False,
+        )
+
+        req_context = ReqContext(req_id=request.request_id)
+        req_status = RequestOffloadState(
+            config=scheduler.config,
+            req=request,
+            req_context=req_context,
+            offloading_context=RequestOffloadingContext(),
+        )
+        c4_keys = []
+        next_block_id = 1
+        for group_config, group_state in zip(
+            scheduler.config.kv_group_configs, req_status.group_states
+        ):
+            num_chunks = num_prompt_tokens // group_config.tokens_per_chunk
+            keys = self._group_keys(group_config.group_idx, list(range(num_chunks)))
+            if group_config.group_idx == 2:
+                c4_keys = keys
+            group_state.offload_keys = keys
+            group_state.block_ids = list(
+                range(next_block_id, next_block_id + num_chunks)
+            )
+            next_block_id += num_chunks
+
+        scheduler._req_status[request.request_id] = req_status
+        ordinary_store_keys = set()
+        prompt_stored_keys = set()
+        # End the first prefill batch after the replay boundary. This verifies
+        # that the supplemental window is not skipped before prompt-final.
+        for scheduled_tokens in (num_prompt_tokens - 48, 48):
+            num_tokens_after_batch = request.num_computed_tokens + scheduled_tokens
+            for group_config, group_state in zip(
+                scheduler.config.kv_group_configs, req_status.group_states
+            ):
+                num_chunks = req_status.storable_chunks(
+                    group_config, group_state, num_tokens_after_batch
+                )
+                ordinary_store_keys.update(
+                    group_state.offload_keys[chunk_idx]
+                    for chunk_idx in range(
+                        group_state.next_stored_chunk_idx, num_chunks
+                    )
+                    if is_store_reachable_swa_chunk(
+                        chunk_idx,
+                        num_chunks,
+                        group_config.alignment_chunk_count,
+                        group_config.sliding_window_size_in_chunks,
+                        group_config.is_eagle_group,
+                    )
+                )
+
+            output = SimpleNamespace(
+                num_scheduled_tokens={request.request_id: scheduled_tokens},
+                finished_req_ids=None,
+            )
+            jobs = scheduler._build_store_jobs(output)
+            assert len(jobs) == 1
+            job_id = next(iter(jobs))
+            prompt_stored_keys.update(scheduler._jobs[job_id].keys)
+            scheduler.update_connector_output(
+                KVConnectorOutput(
+                    kv_connector_worker_meta=OffloadingWorkerMetadata(
+                        completed_jobs={job_id: 1}
+                    )
+                )
+            )
+            request.num_computed_tokens = num_tokens_after_batch
+            assert not req_status.transfer_jobs
+
+        assert req_status.eagle_replay_boundaries
+        assert req_status.eagle_replay_boundaries[-1] == expected_hit_tokens
+        supplemental_keys = prompt_stored_keys - ordinary_store_keys
+        c4_boundary = expected_hit_tokens // 4
+        expected_supplemental = (
+            set(c4_keys[c4_boundary - 2 : c4_boundary]) if extra_store_keys else set()
+        )
+        assert supplemental_keys == expected_supplemental
+        assert len(supplemental_keys) == extra_store_keys
+
+        replay_request = SimpleNamespace(
+            request_id="replay",
+            num_prompt_tokens=num_prompt_tokens,
+            num_tokens=num_prompt_tokens,
+            kv_transfer_params=None,
+        )
+        replay_status = RequestOffloadState(
+            config=scheduler.config,
+            req=replay_request,
+            req_context=ReqContext(req_id=replay_request.request_id),
+            offloading_context=RequestOffloadingContext(),
+        )
+        for replay_group_state, stored_group_state in zip(
+            replay_status.group_states, req_status.group_states
+        ):
+            replay_group_state.offload_keys = list(stored_group_state.offload_keys)
+
+        assert scheduler._lookup(replay_status) == expected_hit_tokens
+        c4_boundary = expected_hit_tokens // 4
+        for key in c4_keys[c4_boundary - 2 : c4_boundary]:
+            assert manager.lookup(key, replay_status.req_context) is LookupResult.HIT
+
+        request.num_tokens = num_prompt_tokens + 64
+        for group_config, group_state in zip(
+            scheduler.config.kv_group_configs, req_status.group_states
+        ):
+            old_num_chunks = len(group_state.offload_keys)
+            new_num_chunks = request.num_tokens // group_config.tokens_per_chunk
+            group_state.offload_keys.extend(
+                self._group_keys(
+                    group_config.group_idx,
+                    list(range(old_num_chunks, new_num_chunks)),
+                )
+            )
+            num_new_chunks = new_num_chunks - old_num_chunks
+            group_state.block_ids.extend(
+                range(next_block_id, next_block_id + num_new_chunks)
+            )
+            next_block_id += num_new_chunks
+
+        decode_output = SimpleNamespace(
+            num_scheduled_tokens={request.request_id: 64},
+            finished_req_ids=None,
+        )
+        decode_jobs = scheduler._build_store_jobs(decode_output)
+        assert len(decode_jobs) == 1
+        decode_job_id = next(iter(decode_jobs))
+        num_c4_chunks = request.num_tokens // 4
+        assert scheduler._jobs[decode_job_id].keys == set(
+            c4_keys[num_c4_chunks - 2 : num_c4_chunks]
+        )
+        scheduler.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs={decode_job_id: 1}
+                )
+            )
+        )
+        assert not req_status.transfer_jobs
+        assert req_status.eagle_replay_boundaries
+        assert req_status.eagle_replay_boundaries[-1] == expected_hit_tokens
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
     def test_full_attn_store_excludes_trailing_decode_block(
