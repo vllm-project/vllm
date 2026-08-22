@@ -29,6 +29,11 @@ struct KdaDecodeStrides {
   int64_t onorm_row;
   int64_t conv_slot;
   int64_t state_slot;
+  // Conv state inner-plane strides in elements. The SD cache layout stores
+  // (state_len, dim) per block, giving (conv_channel, conv_tap) = (1,
+  // 3 * H * 128); the DS layout stores (dim, state_len), giving (3, 1).
+  int64_t conv_channel;
+  int64_t conv_tap;
 };
 
 __device__ __forceinline__ float bf16_load(const __nv_bfloat16* ptr,
@@ -329,12 +334,13 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
   }
 
   constexpr int kLocalDim = kFixedHeads * kDimK;
-  constexpr int kPackedDim = 3 * kLocalDim;
   const int hk_off = i_h * kDimK;
   const int hv_off = i_hv * kDimV;
   constexpr int hv_count = kFixedValueHeads;
   float* const state_for_slot = state + slot * strides.state_slot;
   const int64_t conv_slot_offset = slot * strides.conv_slot;
+  const int64_t conv_channel_stride = strides.conv_channel;
+  const int64_t conv_tap_stride = strides.conv_tap;
   __nv_bfloat16* const cs_q_for_slot = cs_q + conv_slot_offset;
   __nv_bfloat16* const cs_k_for_slot = cs_k + conv_slot_offset;
   __nv_bfloat16* const cs_v_for_slot = cs_v + conv_slot_offset;
@@ -368,8 +374,10 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
       __nv_bfloat16 k_shift1 = __float2bfloat16(0.0f);
 #pragma unroll
       for (int w = 0; w < kConvStateWidth; ++w) {
-        const __nv_bfloat16 q_state = cs_q_for_slot[hk + w * kPackedDim];
-        const __nv_bfloat16 k_state = cs_k_for_slot[hk + w * kPackedDim];
+        const __nv_bfloat16 q_state =
+            cs_q_for_slot[hk * conv_channel_stride + w * conv_tap_stride];
+        const __nv_bfloat16 k_state =
+            cs_k_for_slot[hk * conv_channel_stride + w * conv_tap_stride];
         q_acc += __bfloat162float(q_state) *
                  conv_weight_load<kLocalDim>(w_q_t, hk, w);
         k_acc += __bfloat162float(k_state) *
@@ -389,12 +397,12 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
       k_acc += __bfloat162float(k_new) *
                conv_weight_load<kLocalDim>(w_k_t, hk, kKernelWidth - 1);
 
-      cs_q_for_slot[hk] = q_shift0;
-      cs_q_for_slot[hk + kPackedDim] = q_shift1;
-      cs_q_for_slot[hk + 2 * kPackedDim] = q_new;
-      cs_k_for_slot[hk] = k_shift0;
-      cs_k_for_slot[hk + kPackedDim] = k_shift1;
-      cs_k_for_slot[hk + 2 * kPackedDim] = k_new;
+      cs_q_for_slot[hk * conv_channel_stride] = q_shift0;
+      cs_q_for_slot[hk * conv_channel_stride + conv_tap_stride] = q_shift1;
+      cs_q_for_slot[hk * conv_channel_stride + 2 * conv_tap_stride] = q_new;
+      cs_k_for_slot[hk * conv_channel_stride] = k_shift0;
+      cs_k_for_slot[hk * conv_channel_stride + conv_tap_stride] = k_shift1;
+      cs_k_for_slot[hk * conv_channel_stride + 2 * conv_tap_stride] = k_new;
 
       s_q[k] = silu_fast(q_acc);
       s_k[k] = silu_fast(k_acc);
@@ -418,7 +426,7 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
       float k_acc = bias_k == nullptr ? 0.0f : bf16_load(bias_k, hk);
 #pragma unroll
       for (int w = 0; w < kConvStateWidth; ++w) {
-        const int cs_idx = hk + w * kPackedDim;
+        const int64_t cs_idx = hk * conv_channel_stride + w * conv_tap_stride;
         q_acc += bf16_load(cs_q_for_slot, cs_idx) *
                  conv_weight_load<kLocalDim>(w_q_t, hk, w);
         k_acc += bf16_load(cs_k_for_slot, cs_idx) *
@@ -453,7 +461,8 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
       __nv_bfloat16 v_shift1 = __float2bfloat16(0.0f);
 #pragma unroll
       for (int w = 0; w < kConvStateWidth; ++w) {
-        const __nv_bfloat16 v_state = cs_v_for_slot[hvv + w * kPackedDim];
+        const __nv_bfloat16 v_state =
+            cs_v_for_slot[hvv * conv_channel_stride + w * conv_tap_stride];
         v_acc += __bfloat162float(v_state) *
                  conv_weight_load<kLocalDim>(w_v_t, hvv, w);
         if (w == 1) {
@@ -465,9 +474,9 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
       const __nv_bfloat16 v_new = x_v[xv_idx];
       v_acc += __bfloat162float(v_new) *
                conv_weight_load<kLocalDim>(w_v_t, hvv, kKernelWidth - 1);
-      cs_v_for_slot[hvv] = v_shift0;
-      cs_v_for_slot[hvv + kPackedDim] = v_shift1;
-      cs_v_for_slot[hvv + 2 * kPackedDim] = v_new;
+      cs_v_for_slot[hvv * conv_channel_stride] = v_shift0;
+      cs_v_for_slot[hvv * conv_channel_stride + conv_tap_stride] = v_shift1;
+      cs_v_for_slot[hvv * conv_channel_stride + 2 * conv_tap_stride] = v_new;
       s_v[v] = silu_fast(v_acc);
 
       if constexpr (kApplyOnorm && kPreloadOnormParams) {
@@ -484,7 +493,7 @@ __launch_bounds__(kThreads, 2) void kda_decode_fusion_many_heads_kernel(
       float v_acc = bias_v == nullptr ? 0.0f : bf16_load(bias_v, hvv);
 #pragma unroll
       for (int w = 0; w < kConvStateWidth; ++w) {
-        const int cs_idx = hvv + w * kPackedDim;
+        const int64_t cs_idx = hvv * conv_channel_stride + w * conv_tap_stride;
         v_acc += bf16_load(cs_v_for_slot, cs_idx) *
                  conv_weight_load<kLocalDim>(w_v_t, hvv, w);
       }
@@ -907,7 +916,8 @@ extern "C" void launch_kda_decode_many_heads_cuda(
     float scale, float onorm_eps, const int64_t* raw_strides,
     cudaStream_t stream) {
   const KdaDecodeStrides strides{raw_strides[0], raw_strides[1], raw_strides[2],
-                                 raw_strides[3], raw_strides[4]};
+                                 raw_strides[3], raw_strides[4], raw_strides[5],
+                                 raw_strides[6]};
   const KdaDecodeLaunchParams params{x_q,
                                      x_k,
                                      x_v,
@@ -1027,10 +1037,15 @@ void fused_kda_decode(
                   "out must have shape [1, B, H, 128]");
   STD_TORCH_CHECK(x.stride(1) == 1,
                   "x must be contiguous in its channel dimension");
-  STD_TORCH_CHECK(conv_state.stride(0) >= 3 * dim * (kConvWidth - 1) &&
-                      conv_state.stride(1) == 1 &&
-                      conv_state.stride(2) == 3 * dim,
-                  "conv_state must use the SD cache layout");
+  // Both conv-state cache layouts are supported: SD stores (state_len, dim)
+  // per block while DS stores (dim, state_len). The kernel only needs the
+  // per-plane strides.
+  STD_TORCH_CHECK(
+      conv_state.stride(0) >= 3 * dim * (kConvWidth - 1) &&
+          ((conv_state.stride(1) == 1 && conv_state.stride(2) == 3 * dim) ||
+           (conv_state.stride(1) == kConvWidth - 1 &&
+            conv_state.stride(2) == 1)),
+      "conv_state must use the SD or DS cache layout");
   STD_TORCH_CHECK(state.stride(0) >= num_heads * kHeadDim * kHeadDim &&
                       state.stride(1) == kHeadDim * kHeadDim &&
                       state.stride(2) == kHeadDim && state.stride(3) == 1,
@@ -1096,9 +1111,10 @@ void fused_kda_decode(
   int64_t const conv_segment_bytes =
       dim * conv_state.stride(1) * sizeof(__nv_bfloat16);
   int64_t const bias_segment_bytes = dim * sizeof(float);
-  std::array<int64_t, 5> const strides{
+  std::array<int64_t, 7> const strides{
       x.stride(0),          raw_beta.stride(1), output_gate_row_stride,
-      conv_state.stride(0), state.stride(0),
+      conv_state.stride(0), state.stride(0),    conv_state.stride(1),
+      conv_state.stride(2),
   };
   bool const use_lower_bound = lower_bound.has_value();
   float const lower_bound_value =
