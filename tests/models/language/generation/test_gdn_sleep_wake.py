@@ -12,13 +12,19 @@ it contains NaN/inf the output becomes NaN and ``argmax`` collapses every token
 to id 0 (which decodes to ``"!"``), giving ``reward=0`` / NaN log-probs in RL
 training.
 
-This test sleeps and wakes a small hybrid GDN model and asserts that
-post-wake generation is neither degenerate (single repeated token) nor NaN.
+This test repeatedly exercises both public wake paths on a real hybrid GDN
+model. It verifies the bound recurrent state is zero immediately after every
+wake, then checks that deterministic generation matches the pre-sleep result.
 """
+
+import math
 
 import pytest
 
 from vllm import LLM, SamplingParams
+
+from ....utils import create_new_process_for_each_test
+from ...utils import check_outputs_equal
 
 # Small Qwen3-Next (GDN) model already used by the hybrid model test-suite.
 MODEL = "tiny-random/qwen3-next-moe"
@@ -31,9 +37,68 @@ PROMPTS = [
 ]
 
 
+def _qwen_gdn_state_summary(model):
+    """Return primitive state metadata suitable for ``LLM.apply_model``."""
+    import torch
+
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        QwenGatedDeltaNetAttention,
+    )
+
+    layers = [
+        module
+        for module in model.modules()
+        if isinstance(module, QwenGatedDeltaNetAttention)
+    ]
+    states = [state for layer in layers for state in layer.kv_cache]
+    unique_states = {}
+    for state in states:
+        key = (
+            state.data_ptr(),
+            state.dtype,
+            tuple(state.shape),
+            tuple(state.stride()),
+        )
+        unique_states.setdefault(key, state)
+    # These views can span most of the reserved KV allocation and are strided
+    # by the packed page size. Reducing the full view may materialize hundreds
+    # of GiB on ROCm. The next requests consume the first ``max_num_seqs``
+    # slots, so inspect exactly those slots without a giant temporary.
+    has_nonzero = any(
+        bool(torch.count_nonzero(state[: len(PROMPTS)]).item())
+        for state in unique_states.values()
+    )
+    return len(layers), len(states), len(unique_states), has_nonzero
+
+
+def _normalize_and_check(outputs):
+    normalized = []
+    for output in outputs:
+        completion = output.outputs[0]
+        token_ids = list(completion.token_ids)
+        assert token_ids, "empty generation after wake_up"
+        assert completion.logprobs is not None
+        assert len(completion.logprobs) == len(token_ids)
+        for token_id, step_logprobs in zip(token_ids, completion.logprobs):
+            assert step_logprobs
+            assert token_id in step_logprobs
+            assert all(
+                math.isfinite(logprob.logprob) for logprob in step_logprobs.values()
+            ), "non-finite log-prob after wake_up (stale GDN state)"
+        normalized.append((token_ids, completion.text))
+    return normalized
+
+
 @pytest.mark.hybrid_model
-def test_gdn_sleep_wake_no_stale_state():
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=32, logprobs=1)
+@create_new_process_for_each_test()
+def test_gdn_sleep_wake_no_stale_state(enable_pickle):
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        seed=0,
+        ignore_eos=True,
+        max_tokens=16,
+        logprobs=1,
+    )
 
     # Keep the reserved fraction low. On some (notably ROCm/amdgpu) drivers the
     # VRAM discarded by ``sleep()`` is not returned to the free pool before
@@ -47,31 +112,50 @@ def test_gdn_sleep_wake_no_stale_state():
         enable_sleep_mode=True,
         enforce_eager=True,
         max_model_len=1024,
+        max_num_seqs=len(PROMPTS),
         gpu_memory_utilization=0.4,
         trust_remote_code=True,
     )
 
-    # Warm generation before sleeping.
-    llm.generate(PROMPTS, sampling_params)
+    baseline = _normalize_and_check(
+        llm.generate(PROMPTS, sampling_params, use_tqdm=False)
+    )
+    baseline_state = llm.apply_model(_qwen_gdn_state_summary)
+    for num_layers, num_states, num_unique_states, has_nonzero in baseline_state:
+        assert num_layers > 0, "test model has no bound Qwen GDN layers"
+        assert num_states == 2 * num_layers
+        assert num_unique_states > 0
+        assert has_nonzero, "warm generation did not populate Qwen GDN state"
 
-    # Default sleep offloads weights and DISCARDS the kv / GDN state cache;
-    # wake_up re-creates that memory (fresh, not guaranteed zeroed).
-    llm.sleep()
-    llm.wake_up()
+    # Exercise each public path twice without recreating the engine. Default
+    # sleep offloads weights and discards the KV/GDN state allocation.
+    for cycle, wake_mode in enumerate(("full", "split", "full", "split"), 1):
+        llm.sleep(level=1)
+        if wake_mode == "full":
+            llm.wake_up()
+        else:
+            llm.wake_up(tags=["weights"])
+            llm.wake_up(tags=["kv_cache"])
 
-    after = llm.generate(PROMPTS, sampling_params)
+        for num_layers, num_states, num_unique_states, has_nonzero in llm.apply_model(
+            _qwen_gdn_state_summary
+        ):
+            assert num_layers > 0
+            assert num_states == 2 * num_layers
+            assert num_unique_states > 0
+            assert not has_nonzero, (
+                f"Qwen GDN state was not zero after {wake_mode} wake, cycle {cycle}"
+            )
 
-    for output in after:
-        completion = output.outputs[0]
-        token_ids = list(completion.token_ids)
-        assert token_ids, "empty generation after wake_up"
-        # The bug collapses every token to a single id (e.g. 0 -> "!").
-        assert len(set(token_ids)) > 1, (
-            f"degenerate single-token output after wake_up: {token_ids[:16]}"
+        after = _normalize_and_check(
+            llm.generate(PROMPTS, sampling_params, use_tqdm=False)
         )
-        # NaN logits surface as NaN log-probs.
-        for step_logprobs in completion.logprobs or []:
-            for logprob in step_logprobs.values():
-                assert logprob.logprob == logprob.logprob, (
-                    "NaN log-prob after wake_up (stale GDN state)"
-                )
+        check_outputs_equal(
+            outputs_0_lst=baseline,
+            outputs_1_lst=after,
+            name_0="before sleep",
+            name_1=f"after {wake_mode} wake cycle {cycle}",
+        )
+
+        for _, _, _, has_nonzero in llm.apply_model(_qwen_gdn_state_summary):
+            assert has_nonzero, "post-wake generation did not populate Qwen GDN state"
