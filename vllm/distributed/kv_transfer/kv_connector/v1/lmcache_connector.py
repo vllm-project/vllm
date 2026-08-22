@@ -274,6 +274,12 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+        # Short-circuit in the wrapper so both LMCache adapter paths skip
+        # the remote lookup when the remaining span fits in one local block.
+        block_size = self._vllm_config.cache_config.block_size
+        if num_computed_tokens + block_size >= request.num_tokens:
+            return 0, False
+
         return self._lmcache_engine.get_num_new_matched_tokens(
             request, num_computed_tokens
         ), False
