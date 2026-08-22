@@ -219,6 +219,7 @@ class StreamingParserEngine:
         self._recovery_hold_name = ""
         self._recovery_prior_state = self.state
         self._recovery_prior_tool_index = -1
+        self._recovery_outer_closer_pending = False
 
     def feed(
         self,
@@ -375,6 +376,14 @@ class StreamingParserEngine:
     def _on_terminal(
         self, terminal: str, value: str, token_count: int = 0
     ) -> list[SemanticEvent]:
+        if (
+            self._recovery_outer_closer_pending
+            and self.state == ParserState.CONTENT
+            and terminal in self._tool_exit_terminals
+        ):
+            self._recovery_outer_closer_pending = False
+            return []
+
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
 
@@ -521,6 +530,12 @@ class StreamingParserEngine:
             if self.recovery_tool_name_validator is None:
                 return self._emit_for_state(value, token_count)
             return self._begin_recovery_hold(transition, value, token_count)
+        if (
+            self._recovery_outer_closer_pending
+            and self.state == ParserState.CONTENT
+            and transition.next_state in self._TOOL_STATES
+        ):
+            self._recovery_outer_closer_pending = False
         return self._run_transition(transition, value, token_count)
 
     def _begin_recovery_hold(
@@ -566,6 +581,11 @@ class StreamingParserEngine:
             self._recovery_hold_events.extend(transition_events)
             events = self._recovery_hold_events
             self._clear_recovery_hold()
+            # A recovered invoke started outside a valid outer tool wrapper.
+            # Do not leave it in TOOL_BETWEEN: subsequent text is content, and
+            # a following bare invoke must enter the provisional path again.
+            self.state = ParserState.CONTENT
+            self._recovery_outer_closer_pending = True
             return events
 
         return self._abort_recovery_hold()

@@ -705,6 +705,56 @@ class TestMalformedWrapperRecovery:
         assert result.tool_calls == []
         assert result.content == text
 
+    def test_recovered_invoke_preserves_trailing_content_without_tool_end(
+        self, mock_tokenizer, mock_request
+    ):
+        tool = _recovery_tool()
+        mock_request.tools = [tool]
+        parser = _content_recovery_parser(mock_tokenizer, tool)
+
+        result = parser.extract_tool_calls(_recovery_invoke() + " Done.", mock_request)
+
+        assert result.tools_called is True
+        assert [call.function.name for call in result.tool_calls] == ["get_weather"]
+        assert result.content == " Done."
+
+    def test_recovered_parallel_invokes_validate_each_declared_tool(
+        self, mock_tokenizer, mock_request
+    ):
+        weather = _recovery_tool()
+        forecast = _make_tool("get_forecast", {"city": {"type": "string"}})
+        tools = [weather, forecast]
+        mock_request.tools = tools
+        parser = _content_recovery_parser(mock_tokenizer, *tools)
+        text = (
+            _recovery_invoke()
+            + _recovery_invoke(name="get_forecast")
+            + DSML_TOOL_END
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert [call.function.name for call in result.tool_calls] == [
+            "get_weather",
+            "get_forecast",
+        ]
+
+    def test_recovered_parallel_invoke_rejects_undeclared_second_tool(
+        self, mock_tokenizer, mock_request
+    ):
+        tool = _recovery_tool()
+        mock_request.tools = [tool]
+        parser = _content_recovery_parser(mock_tokenizer, tool)
+        rejected = _recovery_invoke(name="not_declared")
+        text = _recovery_invoke() + rejected + DSML_TOOL_END
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert [call.function.name for call in result.tool_calls] == ["get_weather"]
+        assert result.content == rejected
+
     def test_streaming_orphan_invoke_recovers_after_split_marker(
         self, mock_tokenizer, mock_request
     ):
