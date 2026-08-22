@@ -96,6 +96,15 @@ for output in outputs:
     print(f"Generated: {generated_text!r}\n")
 ```
 
+### Eager-mode Warmup
+
+On devices and weight shapes with tuned persistent matmul configurations,
+run one representative workload as a warmup before measuring eager-mode
+steady-state performance. For Qwen3-1.7B, the tuned path increases the number of
+Triton specializations for this kernel from 3 to 43 and adds approximately 15
+seconds of one-time engine initialization. Compiled mode already absorbs this
+work during graph capture.
+
 ## Tested Models
 
 Batch invariance has been tested and verified on the following models:
