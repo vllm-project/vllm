@@ -237,7 +237,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert self.cudagraph_manager is not None
-            self.cudagraph_manager.run_fullgraph(batch_desc)
+            self.cudagraph_manager.run_fullgraph(batch_desc, attn_metadata)
         else:
             self._generate_drafts(
                 num_reqs,

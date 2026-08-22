@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, fields, is_dataclass
 from itertools import product
 from typing import Any, NamedTuple, Protocol
 
@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from vllm import envs
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
@@ -43,6 +44,30 @@ logger = init_logger(__name__)
 class AttentionState(NamedTuple):
     attn_metadata: dict[str, Any] | None
     slot_mappings: dict[str, torch.Tensor]
+
+
+def _collect_attn_metadata_ptrs(value: Any) -> dict[str, int]:
+    addresses: dict[str, int] = {}
+
+    def visit(value: Any, path: str) -> None:
+        if isinstance(value, torch.Tensor):
+            if value.is_cuda:
+                addresses[path] = value.data_ptr()
+            return
+
+        if is_dataclass(value):
+            for field in fields(value):
+                field_path = f"{path}.{field.name}" if path else field.name
+                visit(getattr(value, field.name), field_path)
+        elif isinstance(value, Mapping):
+            for key, child in value.items():
+                visit(child, f"{path}[{key}]")
+        elif isinstance(value, (list, tuple)):
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]")
+
+    visit(value, "")
+    return addresses
 
 
 @dataclass(frozen=True)
@@ -128,6 +153,9 @@ class CudaGraphManager:
         self._lora_dispatch_map, self._max_lora_case = self._build_lora_dispatch_map()
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
+        self._captured_attn_metadata_ptrs: (
+            dict[BatchExecutionDescriptor, dict[str, int]] | None
+        ) = {} if envs.VLLM_LOGGING_LEVEL == "DEBUG" else None
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
 
         self._graphs_captured = False
@@ -303,6 +331,20 @@ class CudaGraphManager:
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
 
+    def _record_attn_metadata_ptrs(
+        self,
+        desc: BatchExecutionDescriptor,
+        attn_metadata: dict[str, Any] | None,
+    ) -> None:
+        if (
+            self._captured_attn_metadata_ptrs is None
+            or desc.cg_mode != CUDAGraphMode.FULL
+        ):
+            return
+        self._captured_attn_metadata_ptrs[desc] = _collect_attn_metadata_ptrs(
+            attn_metadata
+        )
+
     @torch.inference_mode()
     def capture(
         self,
@@ -409,12 +451,35 @@ class CudaGraphManager:
             num_active_loras=effective_loras,
         )
 
-    def run_fullgraph(self, desc: BatchExecutionDescriptor):
+    def run_fullgraph(
+        self,
+        desc: BatchExecutionDescriptor,
+        attn_metadata: dict[str, Any] | None,
+    ) -> Any:
         """Replay a captured FULL cudagraph."""
         assert desc.cg_mode == CUDAGraphMode.FULL, (
             f"Expected FULL mode, got {desc.cg_mode}"
         )
         assert desc in self.graphs, f"No cudagraph for {desc}"
+        if self._captured_attn_metadata_ptrs is not None:
+            assert desc in self._captured_attn_metadata_ptrs, (
+                f"No attention metadata addresses recorded for CUDA graph {desc}"
+            )
+            captured_ptrs = self._captured_attn_metadata_ptrs[desc]
+            runtime_ptrs = _collect_attn_metadata_ptrs(attn_metadata)
+            mismatched_paths = (
+                None
+                if runtime_ptrs == captured_ptrs
+                else sorted(
+                    path
+                    for path in captured_ptrs.keys() | runtime_ptrs.keys()
+                    if captured_ptrs.get(path) != runtime_ptrs.get(path)
+                )
+            )
+            assert mismatched_paths is None, (
+                "Attention metadata tensor addresses changed for CUDA graph "
+                f"{desc}: {mismatched_paths}"
+            )
         # Sync offloader before replay - needed when transitioning from
         # eager/piecewise to full cudagraph (e.g., prefill → decode).
         # The previous eager iteration's start_prefetch may have queued
@@ -523,6 +588,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                 max_query_len=desc.max_query_len,
             )
 
+            if not warmup:
+                self._record_attn_metadata_ptrs(desc, attn_metadata)
+
             # Capture with dummy rows marked as padding.
             input_buffers.is_padding.fill_(True)
 
@@ -588,10 +656,12 @@ class ModelCudaGraphManager(CudaGraphManager):
         super().capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(
-        self, desc: BatchExecutionDescriptor
+        self,
+        desc: BatchExecutionDescriptor,
+        attn_metadata: dict[str, Any] | None,
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a captured FULL cudagraph and return hidden states."""
-        super().run_fullgraph(desc)
+        super().run_fullgraph(desc, attn_metadata)
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
             return self.intermediate_tensors[: desc.num_tokens]
