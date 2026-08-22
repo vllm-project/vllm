@@ -196,6 +196,24 @@ class OpenAIServingChat(GenerateBaseServing):
             .chat_template_kwargs
         )
 
+    def _engine_chat_template_kwargs(
+        self, chat_template_kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Subclass hook to narrow ``chat_template_kwargs`` for the engine.
+
+        The same dict is used twice: to build the API-server-side parser
+        instance, and to populate
+        ``EngineCoreRequest.reasoning_parser_kwargs`` for the engine-core
+        side. The latter crosses ZMQ as msgpack, so a handler that stashes
+        request-scoped state only the API-server-side parser needs (values
+        msgpack can't encode, or payloads not worth shipping) can drop
+        those entries here without affecting the in-process parser.
+
+        Must not mutate the argument -- the caller still needs the full
+        dict. The default forwards it unchanged.
+        """
+        return chat_template_kwargs
+
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
@@ -360,7 +378,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                     reasoning_ended=reasoning_ended,
                     reasoning_parser_kwargs={
-                        "chat_template_kwargs": chat_template_kwargs,
+                        "chat_template_kwargs": self._engine_chat_template_kwargs(
+                            chat_template_kwargs
+                        ),
                     }
                     if parser is not None and parser.reasoning_parser is not None
                     else None,

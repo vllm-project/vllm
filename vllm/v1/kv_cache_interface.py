@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
+from fractions import Fraction
 from math import prod
 from typing import TYPE_CHECKING, TypeVar
 
@@ -18,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_layout import _DIM_B, _DIM_L, KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
@@ -148,6 +150,18 @@ class KVCacheSpec:
     block_size: int
 
     @property
+    def num_heads(self) -> int:
+        raise NotImplementedError
+
+    @property
+    def tokens_per_state(self) -> int | Fraction:
+        raise NotImplementedError
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        raise NotImplementedError
+
+    @property
     def page_size_bytes(self) -> int:
         """
         The size of a page with `block_size` tokens in bytes.
@@ -158,8 +172,13 @@ class KVCacheSpec:
         raise NotImplementedError
 
     @property
-    def storage_block_size(self) -> int:
-        return self.block_size
+    def num_states(self) -> int:
+        return self.get_num_kernel_states(self.block_size)
+
+    def get_num_kernel_states(self, kernel_block_size: int) -> int:
+        if self.tokens_per_state > 0:
+            return kernel_block_size // self.tokens_per_state
+        return 1
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
@@ -214,6 +233,143 @@ class KVCacheSpec:
         )
 
 
+def group_kernel_blocks(cache: torch.Tensor, num_blocks: int) -> torch.Tensor:
+    """View a kernel-block-granular layer cache with manager blocks as dim 0.
+
+    Kernel block splitting subdivides each manager block into uniformly strided
+    kernel blocks, so grouping is a pure view: ``(num_blocks * ratio, ...)``
+    """
+    if cache.shape[0] == num_blocks:
+        return cache
+    assert cache.shape[0] % num_blocks == 0
+    return cache.unflatten(0, (num_blocks, -1))
+
+
+def compute_layer_kv_cache_shape_bytes(
+    spec: KVCacheSpec,
+    num_blocks: int,
+    kernel_block_size: int | None = None,
+) -> tuple[int, ...]:
+    """Return the 4D logical shape ``(B, H, N, C)`` where C is in bytes."""
+    bs = kernel_block_size if kernel_block_size is not None else spec.block_size
+    assert spec.block_size % bs == 0, (
+        f"Kernel block size {bs} must divide KV cache block size {spec.block_size}."
+    )
+    blocks_per_page = spec.block_size // bs
+    return (
+        num_blocks * blocks_per_page,
+        spec.num_heads,
+        spec.get_num_kernel_states(bs),
+        spec.state_content_size_bytes,
+    )
+
+
+def compute_layout_strides(
+    spec: KVCacheSpec,
+    num_blocks: int,
+    num_layers: int,
+    layout: KVCacheLayout,
+    kernel_block_size: int | None = None,
+    fixed_strides: tuple[int | None, ...] = (None,) * 5,
+) -> tuple[int, ...]:
+    """Byte strides in logical ``[L, B, H, N, C]`` axis order."""
+    assert len(fixed_strides) == 5
+    assert all(stride is None or stride > 0 for stride in fixed_strides)
+    shape = (
+        num_layers,
+        *compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size),
+    )
+    order = layout.stride_order
+    padded_page_size = getattr(spec, "page_size_padded", None)
+    if padded_page_size is not None:
+        assert kernel_block_size is None or kernel_block_size == spec.block_size, (
+            "Padded KV pages do not support kernel block splitting."
+        )
+        page_grid_end = max(order.index(_DIM_L), order.index(_DIM_B)) + 1
+        page_grid_shape = tuple(shape[dim] for dim in order[:page_grid_end])
+        assert prod(page_grid_shape) == num_layers * num_blocks, (
+            "Page padding requires dimensions outside the page tail to be L, B, "
+            f"or singleton; got {layout.name} with shape {shape}."
+        )
+
+    strides = [0] * 5
+    current_stride = 1
+    for physical_idx, dim in reversed(tuple(enumerate(order))):
+        if padded_page_size is not None and physical_idx == page_grid_end - 1:
+            current_stride = max(current_stride, padded_page_size)
+            assert current_stride % padded_page_size == 0
+        strides[dim] = fixed_strides[dim] or current_stride
+        current_stride = strides[dim] * shape[dim]
+    return tuple(strides)
+
+
+def create_kv_cache_views(
+    raw: torch.Tensor,
+    spec: KVCacheSpec,
+    num_blocks: int,
+    layout: KVCacheLayout,
+    kv_cache_tensor: KVCacheTensor,
+    kernel_block_size: int | None = None,
+) -> list[torch.Tensor]:
+    """View a flat int8 buffer as one 4D ``[B, H, N, C]`` view per layer.
+
+    Block ``b`` of layer ``l`` starts at the tensor offset plus its layer and
+    block stride contributions.
+    """
+    num_layers = len(kv_cache_tensor.layers)
+    layer_stride = kv_cache_tensor.layer_stride
+    block_stride = kv_cache_tensor.block_stride
+    shape_bytes = compute_layer_kv_cache_shape_bytes(
+        spec, num_blocks, kernel_block_size
+    )
+    ratio = shape_bytes[0] // num_blocks
+    if ratio > 1:
+        # Kernel blocks subdivide a manager block into `ratio` equal pieces, so
+        # they sit a constant stride apart only if a block is one dense page: no
+        # padding at its end, and no other layer's page before the next block.
+        dense_page_size = prod(compute_layer_kv_cache_shape_bytes(spec, 1)[1:])
+        if block_stride != dense_page_size:
+            raise ValueError(
+                f"The resolved KV cache layout ({layout.name}) does not store "
+                "blocks as dense, unpadded pages (block stride "
+                f"{block_stride} != page {dense_page_size}), so a manager "
+                f"block cannot be split into {ratio} kernel blocks of "
+                f"{kernel_block_size} tokens. Reduce --block-size to "
+                f"{kernel_block_size} or set VLLM_KV_CACHE_LAYOUT to a "
+                "layer-compact layout (e.g. LBNHC)."
+            )
+        assert block_stride % ratio == 0, (
+            f"Block stride {block_stride} must divide into {ratio} equal kernel blocks."
+        )
+        block_stride //= ratio
+
+    logical_shape = (num_layers, *shape_bytes)
+    strides = compute_layout_strides(
+        spec,
+        num_blocks,
+        num_layers,
+        layout,
+        kernel_block_size,
+        fixed_strides=(layer_stride, block_stride, None, None, None),
+    )
+    dtype = getattr(spec, "dtype", None)
+
+    view_5d = torch.as_strided(
+        raw,
+        size=logical_shape,
+        stride=strides,
+        storage_offset=raw.storage_offset() + kv_cache_tensor.offset,
+    )
+
+    views = []
+    for layer_idx in range(num_layers):
+        cache_logical = view_5d[layer_idx]
+        if dtype is not None:
+            cache_logical = cache_logical.view(dtype)
+        views.append(cache_logical)
+    return views
+
+
 @dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
@@ -222,13 +378,16 @@ class AttentionSpec(KVCacheSpec):
     head_size_v: int = None  # type: ignore[assignment]
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
-    indexes_kv_by_block_stride: bool = False
     num_head_slots: int | None = None
     """H of the logical ``[B, H, N, C]`` page when packing diverges from one
     slot per KV head. None means one slot per KV head. Published by the backend.
     """
     state_content_bytes: int | None = None
     """C in bytes when packed; None means dense K/V content."""
+    tokens_per_state: int | Fraction = 1
+    """Tokens covered by one stored state. Ints > 1 compress multiple tokens
+    into one state (DSv4 sparse MLA); fractions < 1 store multiple states per
+    token (Whisper block pooling: ``Fraction(1, block_pool_size)``)."""
 
     def __post_init__(self):
         if self.head_size_v is None:
@@ -249,7 +408,7 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def unpadded_page_size_bytes(self) -> int:
-        return self.num_heads * self.storage_block_size * self.state_content_size_bytes
+        return self.num_heads * self.num_states * self.state_content_size_bytes
 
     @property
     def page_size_bytes(self) -> int:
@@ -345,9 +504,9 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
-            indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            tokens_per_state=specs[0].tokens_per_state,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             # If any layer in the group is non-causal, treat the group as
@@ -384,7 +543,6 @@ class MLAAttentionSpec(FullAttentionSpec):
     cache_dtype_str: str | None = None
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
-    compress_ratio: int = 1  # Default to 1 for no compression.
     model_version: str | None = None
     # Marks draft groups that flatten a non-causal query block into decode rows.
     non_causal_multi_token_decode: bool = False
@@ -395,28 +553,21 @@ class MLAAttentionSpec(FullAttentionSpec):
         super().__post_init__()
         _apply_alignment_padding(self)
 
-    @property
-    def storage_block_size(self) -> int:
-        return self.block_size // self.compress_ratio
-
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        compress_ratio_set = set(spec.compress_ratio for spec in specs)
+        tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
-        block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
-            and len(compress_ratio_set) == 1
+            and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
-            and len(block_stride_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version, and KV block "
-            "stride indexing."
+            "quantization method, tokens per state, and model version."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -427,9 +578,8 @@ class MLAAttentionSpec(FullAttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
-            indexes_kv_by_block_stride=block_stride_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
-            compress_ratio=compress_ratio_set.pop(),
+            tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
@@ -483,9 +633,9 @@ class RSWASpec(FullAttentionSpec):
             dtype=base.dtype,
             kv_quant_mode=base.kv_quant_mode,
             page_size_padded=base.page_size_padded,
-            indexes_kv_by_block_stride=base.indexes_kv_by_block_stride,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
+            tokens_per_state=base.tokens_per_state,
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
             non_causal=base.non_causal,
@@ -598,8 +748,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     cache_dtype_str: str | None = None
     # DeepseekV4-only: see MLAAttentionSpec.model_version.
     alignment: int | None = None  # Default to None for no padding.
-    compress_ratio: int = 1
     model_version: str | None = None
+
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
 
@@ -610,10 +760,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         super().__post_init__()
         _apply_alignment_padding(self)
 
-    @property
-    def storage_block_size(self) -> int:
-        return self.block_size // self.compress_ratio
-
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, SlidingWindowMLASpec) for spec in specs), (
@@ -621,22 +767,20 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             "SlidingWindowMLASpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        compress_ratio_set = set(spec.compress_ratio for spec in specs)
+        tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
-        block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
-            and len(compress_ratio_set) == 1
+            and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
-            and len(block_stride_set) == 1
             and len(extra_retained_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version, sliding "
-            "window size, KV block stride indexing, and retained token count."
+            "quantization method, tokens per state, model version, sliding "
+            "window size, and retained token count."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -646,11 +790,10 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
-            indexes_kv_by_block_stride=block_stride_set.pop(),
             sliding_window=sliding_window_set.pop(),
             extra_retained_tokens=extra_retained_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
-            compress_ratio=compress_ratio_set.pop(),
+            tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
         )
 
@@ -672,6 +815,15 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+    num_heads: int = 1
+    tokens_per_state: int = -1
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        return sum(
+            prod(shape) * get_dtype_size(dtype)
+            for (shape, dtype) in zip(self.shapes, self.dtypes)
+        )
 
     @property
     def page_size_bytes(self) -> int:
@@ -771,7 +923,6 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
-            indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             sliding_window=cls.merge_window_sizes(sliding_window),
@@ -857,9 +1008,6 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             return None
 
     # NOTE: below util functions are only used by DeepseekV4 for now.
-    def get_page_sizes(self) -> list[int]:
-        return list(set(spec.page_size_bytes for spec in self.kv_cache_specs.values()))
-
     def get_num_layer_tuples(self) -> int:
         return Counter(
             spec.page_size_bytes for spec in self.kv_cache_specs.values()
@@ -870,6 +1018,35 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
             for spec in self.kv_cache_specs.values()
         )
+
+
+def iter_layer_specs(kv_cache_spec: KVCacheSpec) -> Collection[KVCacheSpec]:
+    """The per-layer specs a KV cache group spec covers.
+
+    ``UniformTypeKVCacheSpecs`` groups keep one spec per layer; every other
+    spec describes its group on its own. Returns the layer specs either way so
+    callers do not have to special-case the wrapper.
+    """
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        return kv_cache_spec.kv_cache_specs.values()
+    return (kv_cache_spec,)
+
+
+def is_full_attention_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    """Whether a KV cache group spec is (or wraps) full attention.
+
+    ``UniformTypeKVCacheSpecs`` is not itself a ``FullAttentionSpec``, so a bare
+    isinstance check misses groups that carry the wrapper -- DeepSeek-V4's MLA
+    layers, or any model taking the ``UniformTypeKVCacheSpecs.from_specs`` path.
+
+    Every layer must be full attention: a group holding a recycling
+    (sliding-window) layer has no stable slot layout, so callers that key data
+    by slot cannot use it.
+    """
+    layer_specs = iter_layer_specs(kv_cache_spec)
+    return len(layer_specs) > 0 and all(
+        isinstance(spec, FullAttentionSpec) for spec in layer_specs
+    )
 
 
 def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
@@ -929,12 +1106,24 @@ def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
 class KVCacheTensor:
     """
     A class for specifying how the workers should initialize the KV cache.
+
+    Placement of a set of same-shaped layers in the KV cache allocation.
+    Layer ``layers[l]``'s page for block ``b`` starts at
+    ``offset + l * layer_stride + b * block_stride`` bytes into the backing
+    allocation of ``size`` bytes. Layer-outermost layouts give each layer a
+    contiguous region (``layer_stride = page * num_blocks``,
+    ``block_stride = page``); block-outermost layouts make each block a
+    block of all layers' pages (``layer_stride = page``, ``block_stride`` =
+    the packed block). Tensors whose address ranges overlap
+    alias the same bytes: cache groups overlay each other, which is sound
+    because a block ID is owned by one group at a time.
     """
 
-    size: int  # size of the KV cache tensor in bytes
-    shared_by: list[str]  # layer names that share the same KV cache tensor
-    offset: int = 0  # byte offset of this layer within a contiguous block
-    block_stride: int = 0  # total bytes per block in a packed layout (0 = not packed)
+    size: int  # total size of the backing allocation in bytes
+    layers: list[str]  # layer names in L order
+    layer_stride: int
+    block_stride: int
+    offset: int = 0  # byte offset of layers[0]'s block 0
 
 
 @dataclass
@@ -972,6 +1161,8 @@ class KVCacheConfig:
     """
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
+    kv_cache_layout: str | None = None
+    """The KV cache layout resolved by the engine core, adopted by all workers."""
 
     @property
     def has_mamba_layers(self) -> bool:
@@ -982,15 +1173,9 @@ class KVCacheConfig:
         """Whether attention groups store their KV cache at more than one precision."""
         kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
         for group in self.kv_cache_groups:
-            group_spec = group.kv_cache_spec
-            group_specs = (
-                list(group_spec.kv_cache_specs.values())
-                if isinstance(group_spec, UniformTypeKVCacheSpecs)
-                else [group_spec]
-            )
             kv_cache_precisions.update(
                 (spec.dtype, spec.kv_quant_mode)
-                for spec in group_specs
+                for spec in iter_layer_specs(group.kv_cache_spec)
                 if isinstance(spec, AttentionSpec)
             )
         return len(kv_cache_precisions) > 1
