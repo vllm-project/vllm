@@ -117,6 +117,21 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
     return True
 
 
+def is_non_overlapping_and_dense(t: torch.Tensor) -> bool:
+    """Check if the tensor's elements cover one gapless, non-overlapping byte
+    range, in any dimension order (i.e. a permuted view of a contiguous
+    tensor); ``is_contiguous()`` additionally requires row-major order.
+    """
+    expected_stride = 1
+    for size, stride in sorted(zip(t.shape, t.stride()), key=lambda p: p[1]):
+        if size == 1:
+            continue
+        if stride != expected_stride:
+            return False
+        expected_stride *= size
+    return True
+
+
 def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
     """Fix degenerate strides on size=1 dimensions for CUDA TMA compatibility.
 

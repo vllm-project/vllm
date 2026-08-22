@@ -320,6 +320,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo(
         "ibm-research/moe-7b-1b-active-shared-experts"
     ),
+    "GraniteMoeSWAForCausalLM": _HfExamplesInfo(
+        "ibm-granite/granite-swash-3b-a600m", min_transformers_version="5.15.1"
+    ),
+    "GraniteSWAForCausalLM": _HfExamplesInfo(
+        "ibm-granite/granite-swash-2b", min_transformers_version="5.15.1"
+    ),
     "HrmTextForCausalLM": _HfExamplesInfo(
         "sapientinc/HRM-Text-1B",
         min_transformers_version="5.9.0",
@@ -587,6 +593,11 @@ _EMBEDDING_EXAMPLE_MODELS = {
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
     ),
     "BgeM3EmbeddingModel": _HfExamplesInfo("BAAI/bge-m3"),
+    "DeepseekV3BidirectionalModel": _HfExamplesInfo(
+        "ai-sage/Giga-Embeddings-instruct-10B-A1.8B-0826",
+        trust_remote_code=True,
+        hf_overrides={"model_type": "deepseek_v3", "auto_map": None},
+    ),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
@@ -1244,6 +1255,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
         "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
+    # TODO: Change repo id once pertinent archs are public.
+    "NemotronH_Omni_Reasoning_V3": _HfExamplesInfo(
+        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
+    ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
         trust_remote_code=True,
@@ -1486,6 +1501,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    "DFlash2DraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3.8-27B",
+        speculative_model="z-lab/Qwen3.8-27B-DFlash2",
+        is_available_online=False,
+        use_original_num_layers=True,
+        max_model_len=8192,
+        max_num_seqs=32,
+    ),
     "DFlashLagunaForCausalLM": _HfExamplesInfo(
         "poolside/Laguna-XS-2.1-NVFP4",
         speculative_model="poolside/Laguna-XS-2.1-DFlash-NVFP4",
@@ -1672,6 +1695,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
         trust_remote_code=True,
+    ),
+    "DeepseekV32MTPModel": _HfExamplesInfo(
+        "nvidia/DeepSeek-V3.2-NVFP4",
+        speculative_model="nvidia/DeepSeek-V3.2-NVFP4",
+        is_available_online=False,
     ),
     "DeepSeekV4MTPModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash",

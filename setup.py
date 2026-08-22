@@ -1493,6 +1493,11 @@ if (
 ):
     cmdclass["build_rust"] = precompiled_build_rust
 
+# Resolve the Python version first because get_vllm_version() may set
+# SETUPTOOLS_SCM_PRETEND_VERSION, which the Rust version should inherit.
+vllm_version = get_vllm_version()
+rust_build.prepare_build_environment()
+
 # Rust artifacts, built via setuptools-rust and installed into the package
 # directory alongside the Python modules.
 rust_extensions = rust_build.rust_extensions(
@@ -1501,7 +1506,7 @@ rust_extensions = rust_build.rust_extensions(
 
 setup(
     # static metadata should rather go in pyproject.toml
-    version=get_vllm_version(),
+    version=vllm_version,
     ext_modules=ext_modules,
     rust_extensions=rust_extensions,
     install_requires=get_requirements(),
@@ -1525,7 +1530,7 @@ setup(
         # only; also needs system GStreamer + libv4l (see docs).
         "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
         "flashinfer": [],  # Kept for backwards compatibility
-        "b12x": ["b12x==1.2.4"],
+        "b12x": ["b12x==1.2.6"],
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
