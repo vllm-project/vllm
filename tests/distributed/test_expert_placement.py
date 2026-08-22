@@ -3,9 +3,55 @@
 
 import pytest
 
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+    ExpertMapManager,
     determine_expert_map,
 )
+
+
+def make_moe_parallel_config(
+    *,
+    use_ep: bool,
+    all2all_backend: str = "deepep_low_latency",
+    enable_eplb: bool = False,
+) -> FusedMoEParallelConfig:
+    ep_size = 2 if use_ep else 1
+    dp_size = 2 if use_ep else 1
+    return FusedMoEParallelConfig(
+        tp_size=1,
+        pcp_size=1,
+        dp_size=dp_size,
+        ep_size=ep_size,
+        tp_rank=0,
+        pcp_rank=0,
+        dp_rank=0,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=use_ep,
+        all2all_backend=all2all_backend,
+        enable_eplb=enable_eplb,
+    )
+
+
+def make_expert_map_manager(
+    moe_parallel_config: FusedMoEParallelConfig,
+    *,
+    placement_strategy: str = "round_robin",
+    num_expert_group: int | None = 2,
+    num_redundant_experts: int = 0,
+    enable_eplb: bool = False,
+) -> ExpertMapManager:
+    return ExpertMapManager(
+        max_num_batched_tokens=16,
+        top_k=2,
+        global_num_experts=8,
+        num_redundant_experts=num_redundant_experts,
+        num_expert_group=num_expert_group,
+        moe_parallel_config=moe_parallel_config,
+        placement_strategy=placement_strategy,
+        enable_eplb=enable_eplb,
+    )
 
 
 def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts):
@@ -43,6 +89,62 @@ def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts)
     assert local_expert_ids == expected_local_ids, (
         f"Expected local expert IDs {expected_local_ids}, got {local_expert_ids}"
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "requested_strategy",
+        "use_ep",
+        "num_expert_group",
+        "num_redundant_experts",
+        "enable_eplb",
+        "all2all_backend",
+        "expected_strategy",
+    ),
+    [
+        ("linear", True, 2, 0, False, "deepep_low_latency", "linear"),
+        ("round_robin", False, 2, 0, False, "deepep_low_latency", "linear"),
+        ("round_robin", True, 1, 0, False, "deepep_low_latency", "linear"),
+        ("round_robin", True, 2, 1, False, "deepep_low_latency", "linear"),
+        ("round_robin", True, 2, 0, True, "deepep_low_latency", "linear"),
+        ("round_robin", True, 2, 0, False, "allgather_reducescatter", "linear"),
+        ("round_robin", True, 2, 0, False, "deepep_low_latency", "round_robin"),
+        ("round_robin", True, 2, 0, False, "nixl_ep", "round_robin"),
+    ],
+    ids=[
+        "linear-request",
+        "ep-disabled",
+        "single-expert-group",
+        "redundant-experts",
+        "eplb-enabled",
+        "unsupported-backend",
+        "deepep-low-latency",
+        "nixl-ep",
+    ],
+)
+def test_expert_map_manager_resolves_placement_strategy(
+    requested_strategy,
+    use_ep,
+    num_expert_group,
+    num_redundant_experts,
+    enable_eplb,
+    all2all_backend,
+    expected_strategy,
+):
+    moe_parallel_config = make_moe_parallel_config(
+        use_ep=use_ep,
+        all2all_backend=all2all_backend,
+        enable_eplb=enable_eplb,
+    )
+    manager = make_expert_map_manager(
+        moe_parallel_config,
+        placement_strategy=requested_strategy,
+        num_expert_group=num_expert_group,
+        num_redundant_experts=num_redundant_experts,
+        enable_eplb=enable_eplb,
+    )
+
+    assert manager.placement_strategy == expected_strategy
 
 
 @pytest.mark.parametrize("expert_placement_strategy", ["round_robin"])
