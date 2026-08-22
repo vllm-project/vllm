@@ -12,6 +12,12 @@ from vllm.utils.torch_utils import is_quantized_kv_cache
 # has_indexer=False path so the indexer args don't allocate every call.
 _DUMMY_CACHE: dict[tuple, torch.Tensor] = {}
 
+# Tile shape of the indexer-K cache's shuffled layout, used when the cache reports
+# uses_shuffled_layout. The block tile is a token count; the head tile is a byte
+# count, which the kernel converts to cache elements.
+_INDEXER_CACHE_BLOCK_TILE = 16
+_INDEXER_CACHE_HEAD_TILE_BYTES = 16
+
 
 def _dummy(shape: tuple, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     key = (shape, dtype, device)
@@ -71,6 +77,9 @@ def _fp8_quant_and_cache_write(
     cache_stride,
     offsets,
     HEAD_DIM: tl.constexpr,
+    SHUFFLE: tl.constexpr,
+    BLOCK_TILE: tl.constexpr,
+    HEAD_TILE: tl.constexpr,
 ):
     k_fp8, scale = _fp8_ue8m0_quantize(vals)
 
@@ -78,11 +87,20 @@ def _fp8_quant_and_cache_write(
     block_offset = slot_idx % cache_block_size
     block_start = block_idx * cache_block_size * cache_stride
 
-    tl.store(
-        kv_cache_ptr + block_start + block_offset * HEAD_DIM + offsets,
-        k_fp8,
-        mask=mask,
-    )
+    # Shuffled layout: [blk/BLOCK_TILE, HEAD_DIM/HEAD_TILE, BLOCK_TILE, HEAD_TILE],
+    # so one contiguous run holds BLOCK_TILE tokens x HEAD_TILE bytes and the
+    # reader's coalesced loads land on the bytes we wrote.
+    if SHUFFLE:
+        value_off = (
+            block_offset // BLOCK_TILE * BLOCK_TILE * HEAD_DIM
+            + block_offset % BLOCK_TILE * HEAD_TILE
+            + offsets // HEAD_TILE * BLOCK_TILE * HEAD_TILE
+            + offsets % HEAD_TILE
+        )
+    else:
+        value_off = block_offset * HEAD_DIM + offsets
+
+    tl.store(kv_cache_ptr + block_start + value_off, k_fp8, mask=mask)
     scale_byte_off = block_start + cache_block_size * HEAD_DIM + block_offset * 4
     tl.store(kv_cache_scale_ptr + scale_byte_off // 4, scale)
 
@@ -136,6 +154,9 @@ def _fused_norm_rope_kernel(
     indexer_cache_scale_ptr,
     indexer_cache_block_size,
     indexer_cache_stride,
+    INDEXER_CACHE_SHUFFLE: tl.constexpr,
+    INDEXER_CACHE_BLOCK_TILE: tl.constexpr,
+    INDEXER_CACHE_HEAD_TILE: tl.constexpr,
     # MLA KV cache (concat kv_c_normed + k_pe_roped, uses slot_mapping_ptr)
     mla_cache_ptr,
     mla_cache_block_stride,
@@ -398,6 +419,9 @@ def _fused_norm_rope_kernel(
                 indexer_cache_stride,
                 index_k_block,
                 INDEX_K_DIM,
+                INDEXER_CACHE_SHUFFLE,
+                INDEXER_CACHE_BLOCK_TILE,
+                INDEXER_CACHE_HEAD_TILE,
             )
 
 
@@ -420,6 +444,7 @@ def fused_norm_rope(
     # Cache params for fused writes (single slot_mapping for both caches)
     slot_mapping: torch.Tensor | None = None,
     indexer_k_cache: torch.Tensor | None = None,
+    indexer_cache_shuffled: bool = False,
     mla_kv_cache: torch.Tensor | None = None,
     mla_kv_cache_dtype: str = "auto",
     mla_k_scale: torch.Tensor | None = None,
@@ -465,12 +490,26 @@ def fused_norm_rope(
         idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
         idx_cache_block_size = indexer_k_cache.shape[1]
         idx_cache_stride = indexer_k_cache.shape[2]
+        # The caller's cache reports whether its reader expects the shuffled
+        # layout; see DeepseekV32IndexerCache.uses_shuffled_layout.
+        idx_cache_shuffle = indexer_cache_shuffled
+        if idx_cache_shuffle:
+            assert idx_cache_block_size % _INDEXER_CACHE_BLOCK_TILE == 0, (
+                f"indexer K cache block size {idx_cache_block_size} must be a "
+                f"multiple of {_INDEXER_CACHE_BLOCK_TILE} for the shuffled layout"
+            )
         if indexer_k_cache.dtype == torch.uint8:
             indexer_k_cache = indexer_k_cache.view(torch.float8_e4m3fn)
+        # The head tile is a byte count; the kernel indexes the cache in elements.
+        idx_cache_head_tile = (
+            _INDEXER_CACHE_HEAD_TILE_BYTES // indexer_k_cache.element_size()
+        )
     else:
         idx_cache_scale_view = None
         idx_cache_block_size = 1
         idx_cache_stride = 0
+        idx_cache_shuffle = False
+        idx_cache_head_tile = _INDEXER_CACHE_HEAD_TILE_BYTES
 
     # --- MLA KV cache setup ---
     mla_cache_ds_mla = mla_kv_cache_dtype == "fp8_ds_mla"
@@ -520,6 +559,9 @@ def fused_norm_rope(
         assert index_k_out.shape == index_k.shape
         index_k_out_stride = index_k_out.stride(0)
     use_pdl = current_platform.is_arch_support_pdl()
+    # `launch_pdl` is a CUDA-only Triton runtime kwarg; ROCm's Triton rejects it
+    # even when False, so only pass it when PDL is actually supported.
+    pdl_kwargs = {"launch_pdl": True} if use_pdl else {}
     _fused_norm_rope_kernel[(num_tokens, 4)](
         positions,
         # Q RMS norm
@@ -566,6 +608,9 @@ def fused_norm_rope(
         idx_cache_scale_view,
         idx_cache_block_size,
         idx_cache_stride,
+        idx_cache_shuffle,
+        _INDEXER_CACHE_BLOCK_TILE,
+        idx_cache_head_tile,
         # MLA KV cache (uses same slot_mapping)
         mla_kv_cache,
         mla_block_stride,
@@ -585,7 +630,7 @@ def fused_norm_rope(
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         USE_PDL=use_pdl,
-        launch_pdl=use_pdl,
+        **pdl_kwargs,
     )
     return q_c_out
 
@@ -915,6 +960,7 @@ def fused_q(
         return index_q_fp8, index_weights_out, mqa_q
 
     use_pdl = current_platform.is_arch_support_pdl()
+    pdl_kwargs = {"launch_pdl": True} if use_pdl else {}
     _fused_q_kernel[(num_tokens, 3, grid_heads)](
         positions,
         q_pe,
@@ -957,7 +1003,7 @@ def fused_q(
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         QUANTIZE_MQA=quantize_mqa,
         USE_PDL=use_pdl,
-        launch_pdl=use_pdl,
+        **pdl_kwargs,
         # num_warps=1 is optimal here: each program is a single 128-element
         # rope+quant, so the kernel is program-count/occupancy bound, not
         # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).

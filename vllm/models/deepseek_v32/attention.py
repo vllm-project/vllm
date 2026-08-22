@@ -322,6 +322,7 @@ class DeepseekV32Attention(MLAAttention):
             indexer_k_norm_bias = self.indexer.k_norm.bias
             indexer_k_norm_eps = self.indexer.k_norm.eps
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
+            indexer_cache_shuffled = self.indexer.k_cache.uses_shuffled_layout
             indexer_k_cache = None if self.use_pcp else self.indexer.k_cache.kv_cache
             index_k_out = torch.empty_like(index_k) if self.use_pcp else None
             indexer_softmax_scale = self.indexer.softmax_scale
@@ -333,6 +334,7 @@ class DeepseekV32Attention(MLAAttention):
             indexer_k_norm_eps = 1e-6
             indexer_k_rope_cos_sin_cache = None
             indexer_k_cache = None
+            indexer_cache_shuffled = False
             index_k_out = None
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
@@ -366,6 +368,7 @@ class DeepseekV32Attention(MLAAttention):
             self.topk_indices_buffer,
             slot_mapping=mla_slot,
             indexer_k_cache=indexer_k_cache,
+            indexer_cache_shuffled=indexer_cache_shuffled,
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
