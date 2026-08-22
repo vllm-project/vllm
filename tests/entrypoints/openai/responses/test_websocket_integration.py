@@ -97,6 +97,10 @@ class _FakeValidateJsonRequest:
 _STUB_MODULES: dict[str, dict[str, object]] = {
     "vllm.entrypoints.openai.engine.protocol": {
         "ErrorResponse": _FakeErrorResponse,
+        # Pulled in transitively by vllm.entrypoints.serve.__init__ when
+        # websocket.py imports sanitize_message.
+        "ErrorInfo": type("ErrorInfo", (BaseModel,), {}),
+        "GenerationError": type("GenerationError", (Exception,), {}),
     },
     "vllm.entrypoints.openai.responses.protocol": {
         "ResponsesRequest": _FakeResponsesRequest,

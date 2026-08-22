@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel
 
+from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -125,7 +126,7 @@ class WebSocketResponsesConnection:
             await self._process_response_create(event)
         except Exception as e:
             logger.exception("Error processing response.create: %s", e)
-            await self.send_error("processing_error", str(e), 500)
+            await self.send_error("processing_error", sanitize_message(str(e)), 500)
             self.ctx.evict_cache()
         finally:
             self.ctx.inflight = False
@@ -245,7 +246,9 @@ class WebSocketResponsesConnection:
                     await self.send_error("invalid_json", "Invalid JSON")
                 except Exception as e:
                     logger.exception("Error handling event: %s", e)
-                    await self.send_error("processing_error", str(e), 500)
+                    await self.send_error(
+                        "processing_error", sanitize_message(str(e)), 500
+                    )
         except WebSocketDisconnect:
             logger.debug("WebSocket disconnected: %s", self.ctx.connection_id)
         except Exception as e:
