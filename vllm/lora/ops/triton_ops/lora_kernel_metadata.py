@@ -108,13 +108,11 @@ class LoRAKernelMeta:
         self.no_lora_flag_cpu.fill_(False)
         self.num_active_loras_cpu.fill_(0)
 
-    def prepare_tensors_cpu(self, token_lora_mapping: torch.Tensor) -> None:
+    def prepare_tensors_cpu(self, token_lora_mapping: list[int]) -> None:
         """Prepare metadata on the CPU and asynchronously copy it to device."""
-        assert token_lora_mapping.is_cpu
-
         self._reset()
-        num_tokens = token_lora_mapping.size(0)
-        mapping_cpu = token_lora_mapping.to(dtype=torch.int32)
+        mapping_cpu = torch.tensor(token_lora_mapping, dtype=torch.int32)
+        num_tokens = mapping_cpu.size(0)
 
         no_lora = bool(torch.all(mapping_cpu == -1))
         self.no_lora_flag_cpu[0] = no_lora

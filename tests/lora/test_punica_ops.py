@@ -41,7 +41,7 @@ def test_prepare_lora_metadata_on_cpu(
         captured_lora_counts=[1, 2, 4],
     )
 
-    meta.prepare_tensors_cpu(torch.tensor(mapping, dtype=torch.long))
+    meta.prepare_tensors_cpu(mapping)
 
     num_active = len(expected_ids)
     torch.testing.assert_close(
@@ -74,7 +74,7 @@ def test_prepare_lora_metadata_on_cpu_no_lora():
         device=DEVICE_TYPE,
     )
 
-    meta.prepare_tensors_cpu(torch.full((3,), -1, dtype=torch.long))
+    meta.prepare_tensors_cpu([-1, -1, -1])
 
     assert meta.no_lora_flag_cpu.item()
 
