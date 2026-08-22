@@ -52,7 +52,15 @@ prune_if_disk_pressure
 
 # building the docker image
 echo "--- :docker: Building Docker image"
-docker build --progress plain --tag "$IMAGE_NAME" --target vllm-test -f docker/Dockerfile.cpu .
+# RELEASE-ONLY (torch 2.14.0): the CPU test shards build their own image here
+# rather than pulling the one produced by image_build_cpu.sh, so they need their
+# own cache bypass. torch is installed in the `base-common` stage, upstream of
+# the source COPY, and its layer key depends only on the base image and
+# requirements/cpu.txt -- neither changes when the RC is respun under the same
+# version string. Without --no-cache the agent's local BuildKit cache restores
+# the torch layer (build 84719: steps #16/#6/#9/#42 all CACHED, no torch
+# download). Revert once 2.14.0 is final and published to PyPI.
+docker build --progress plain --no-cache --tag "$IMAGE_NAME" --target vllm-test -f docker/Dockerfile.cpu .
 
 # Run the image, setting --shm-size=4g for tensor parallel.
 docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 --shm-size=4g "$IMAGE_NAME" \
