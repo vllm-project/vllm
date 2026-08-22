@@ -108,6 +108,7 @@ class CudaGraphManager:
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        use_dynamic_decode_query_len: bool = True,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -117,6 +118,9 @@ class CudaGraphManager:
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
         self.varlen_decode = varlen_decode
+        # Some graph managers have a fixed query shape even when DSD changes
+        # the target verification length.
+        self.use_dynamic_decode_query_len = use_dynamic_decode_query_len
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -195,7 +199,8 @@ class CudaGraphManager:
         # to capture graphs for all possible values during decode.
         speculative_config = self.vllm_config.speculative_config
         if (
-            speculative_config
+            self.use_dynamic_decode_query_len
+            and speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
         ):
             num_spec_per_batch_size = (
