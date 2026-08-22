@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from vllm.utils.collection_utils import common_prefix, swap_dict_values
+from vllm.utils.collection_utils import LazyDict, common_prefix, swap_dict_values
 
 
 @pytest.mark.parametrize(
@@ -45,3 +45,41 @@ def test_swap_dict_values(obj, key1, key2):
         assert obj[key1] == original_obj[key2]
     else:
         assert key1 not in obj
+
+
+def test_lazy_dict_is_lazy_and_caches():
+    calls = []
+
+    def factory():
+        calls.append(1)
+        return "value"
+
+    d = LazyDict({"k": factory})
+    assert calls == []  # not evaluated until accessed
+    assert d["k"] == "value"
+    assert d["k"] == "value"
+    assert len(calls) == 1  # evaluated once, then cached
+
+
+def test_lazy_dict_setitem_replaces_cached_value():
+    """Overwriting a key must drop the value the old factory produced."""
+    d = LazyDict({"k": lambda: "first"})
+    assert d["k"] == "first"
+    d["k"] = lambda: "second"
+    assert d["k"] == "second"
+
+
+def test_lazy_dict_setitem_before_access():
+    d = LazyDict({"k": lambda: "first"})
+    d["k"] = lambda: "second"
+    assert d["k"] == "second"
+
+
+def test_lazy_dict_new_key_and_missing_key():
+    d = LazyDict({})
+    d["new"] = lambda: "x"
+    assert d["new"] == "x"
+    assert len(d) == 1
+    assert list(d) == ["new"]
+    with pytest.raises(KeyError):
+        d["missing"]
