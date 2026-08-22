@@ -150,8 +150,9 @@ def main():
         try:
             ray.init(address="auto", runtime_env=runtime_env, namespace=RAY_NAMESPACE)
         except (ConnectionError, RuntimeError):
-            # No cluster to join (a bare CI runner): start one on this node. The
-            # `vllm serve` child then finds it through the usual address=auto.
+            # No cluster to join (a bare CI runner): start one on this node.
+            # `launch_vllm_serve` hands the child this cluster's address, which
+            # it needs -- vLLM's ray DP backend would otherwise start its own.
             ray.init(runtime_env=runtime_env, namespace=RAY_NAMESPACE)
 
     print(

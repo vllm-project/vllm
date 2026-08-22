@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 
+import ray
 import requests
 
 
@@ -35,8 +36,8 @@ def launch_vllm_serve(
 
     ``VLLM_SERVER_DEV_MODE`` exposes the RLHF weight-sync routes; the Ray v2
     executor makes the workers tensor-transport actors (RDT's data plane). The
-    child inherits our env, so it joins the same Ray cluster and picks up the
-    editable vLLM install via the venv interpreter.
+    child inherits our env, so it joins the same Ray cluster (RAY_ADDRESS below)
+    and picks up the editable vLLM install via the venv interpreter.
     """
     vllm_bin = os.path.join(os.path.dirname(sys.executable), "vllm")
     if not os.path.exists(vllm_bin):
@@ -77,6 +78,14 @@ def launch_vllm_serve(
         VLLM_SERVER_DEV_MODE="1",
         VLLM_USE_RAY_V2_EXECUTOR_BACKEND="1",
     )
+    # Pin the child to THIS Ray cluster. vLLM's ray DP backend reaches Ray
+    # through a bare ``ray.init()``, which STARTS a cluster rather than
+    # attaching, so wherever we started Ray ourselves (a bare CI runner) the
+    # workers would come up in a second cluster and never see the producer
+    # actors -- the failure is an actor lookup that cannot succeed. A bare
+    # ``ray.init()`` does honour RAY_ADDRESS, so hand it over explicitly.
+    if ray.is_initialized():
+        env["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
     # Let the server's Ray workers use the ambient interpreter/install rather
     # than a workspace snapshot working_dir. On an Anyscale dev workspace the
     # RAY_RUNTIME_ENV_HOOK injects a git snapshot as the workers' working_dir,
