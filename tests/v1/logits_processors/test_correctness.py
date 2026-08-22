@@ -1785,3 +1785,57 @@ class TestThinkingBudgetNaturalEndReentry:
         )
 
     # --- Forced-end re-entry tests ---
+
+
+def test_marker_search_is_incremental_no_quadratic_rescan():
+    """Verify that marker search cursors advance, preventing O(L^2) scanning.
+
+    When no markers are generated, start_search_pos must advance to the
+    output length on each step so previously-scanned tokens are never
+    re-examined. This is the regression introduced by ed908cf0a and
+    reported in GHSA-497v-rww5-557q.
+    """
+
+    class FakeReasoningConfig:
+        reasoning_start_token_ids = [100]
+        reasoning_end_token_ids = [200]
+        enabled = True
+
+    holder = ThinkingBudgetStateHolder(
+        reasoning_config=FakeReasoningConfig(),
+        max_num_seqs=8,
+        num_spec_tokens=0,
+        device=torch.device("cpu"),
+        is_pin_memory=False,
+    )
+    holder.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, SamplingParams(thinking_token_budget=1), None, [])],
+            moved=(),
+        )
+    )
+
+    output: list[int] = []
+    non_marker_token = 13
+    num_steps = 1024
+
+    for step in range(1, num_steps + 1):
+        output.append(non_marker_token)
+        holder.update_state([output], None, None)
+
+        state = holder._state[0]
+        assert state["start_thinking"] == -1, (
+            f"Step {step}: start_thinking should remain -1 when no markers generated"
+        )
+        assert state["start_search_pos"] == step, (
+            f"Step {step}: start_search_pos must advance to current output length "
+            f"({step}), got {state['start_search_pos']}. "
+            "Failure here means the search cursor is not advancing, "
+            "causing quadratic re-scanning."
+        )
+        assert state["end_search_pos"] == step, (
+            f"Step {step}: end_search_pos must advance to current output length "
+            f"({step}), got {state['end_search_pos']}."
+        )
