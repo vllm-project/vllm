@@ -162,9 +162,9 @@ pub(crate) struct DerenderChatRequest {
     pub prompt_tokens: Option<usize>,
     /// The original (post-adjust_request) ChatCompletionRequest from /render.
     ///
-    /// Phase 1 honours its `skip_special_tokens` option; phase 2 additionally
-    /// feeds it to the reasoning/tool parsers so they receive the full
-    /// request context they expect.
+    /// Required by the parsing so that tool/reasoning parsers can receive the
+    /// full request context they expect. Without a configured parser, only
+    /// its `skip_special_tokens` option is honoured.
     pub chat_request: Option<ChatCompletionRequest>,
 }
 

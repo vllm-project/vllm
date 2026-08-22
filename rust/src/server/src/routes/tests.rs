@@ -6794,8 +6794,8 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
 // /v1/{chat/completions,completions}/derender tests
 //
 // Port of tests/entrypoints/scale_out/derender/test_derender.py against the
-// render-only router fixture. Reasoning/tool parsing (phase 2) and streaming
-// (test_derender_stream.py, phase 3) tests land in later phases.
+// render-only router fixture. Streaming (test_derender_stream.py, phase 3)
+// tests land in a later phase.
 // ---------------------------------------------------------------------------
 
 /// Build a chat `GenerateResponse` body mirroring `_make_generate_response`.
@@ -7140,6 +7140,64 @@ async fn derender_chat_oversized_top_logprobs_rejected() {
 }
 
 #[tokio::test]
+async fn derender_chat_parsed_reasoning() {
+    let mut app = test_derender_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("deepseek_r1".to_string()),
+    );
+    // The deepseek_r1 parser starts inside a reasoning span (the model's chat
+    // template prefills `<think>` into the prompt), so the generated output
+    // carries only the closing delimiter.
+    let token_ids = derender_token_ids("the user says hi</think>hello there");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!(token_ids)),
+            "chat_request": {
+                "model": "render-model",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let message = &json["choices"][0]["message"];
+    assert_eq!(message["reasoning"], "the user says hi");
+    assert_eq!(message["content"], "hello there");
+}
+
+#[tokio::test]
+async fn derender_chat_include_reasoning_false_hides_reasoning() {
+    let mut app = test_derender_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("deepseek_r1".to_string()),
+    );
+    let token_ids = derender_token_ids("hidden</think>visible");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!(token_ids)),
+            "chat_request": {
+                "model": "render-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "include_reasoning": false,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let message = &json["choices"][0]["message"];
+    assert_eq!(message["reasoning"], serde_json::Value::Null);
+    assert_eq!(message["content"], "visible");
+}
+
+#[tokio::test]
 async fn derender_chat_no_chat_request_falls_back_to_plain_detok() {
     // Parser configured, but without chat_request the endpoint must plain
     // detokenize; the fake think markers are regular tokens, so they survive
@@ -7393,6 +7451,78 @@ async fn derender_stream_invalid_body_rejected() {
     // A non-object JSON body.
     let (status, _) = derender_completion(&mut app, json!([1, 2, 3])).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn derender_chat_parser_sees_rendered_prompt() {
+    // The replayed parse starts from the real rendered prompt: a prompt whose
+    // last reasoning boundary is `</think>` leaves the parser in content
+    // mode, so the same tokens that parse as reasoning under an empty prompt
+    // here come out as plain content.
+    let mut app = test_derender_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("deepseek_r1".to_string()),
+    );
+    let token_ids = derender_token_ids("plain answer");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!(token_ids)),
+            "chat_request": {
+                "model": "render-model",
+                "messages": [{"role": "user", "content": "hi </think>"}],
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let message = &json["choices"][0]["message"];
+    assert_eq!(message["content"], "plain answer");
+    assert_eq!(message["reasoning"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn derender_chat_hidden_reasoning_drops_logprobs() {
+    // Like the normal chat path, per-token output metadata is suppressed when
+    // reasoning is parsed out but hidden, so hidden reasoning tokens cannot
+    // leak through logprobs.
+    let mut app = test_derender_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("deepseek_r1".to_string()),
+    );
+    let token_ids = derender_token_ids("hidden</think>visible");
+    let mut response = derender_generate_response(json!(token_ids));
+    response["choices"][0]["logprobs"] = json!({
+        "content": [{"token": "token_id:104", "logprob": -1.0, "top_logprobs": []}],
+    });
+
+    for (include_reasoning, expect_logprobs) in [(false, false), (true, true)] {
+        let (status, json) = derender_chat(
+            &mut app,
+            json!({
+                "model": "render-model",
+                "generate_response": response,
+                "chat_request": {
+                    "model": "render-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "include_reasoning": include_reasoning,
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let choice = &json["choices"][0];
+        assert_eq!(choice["message"]["content"], "visible");
+        if expect_logprobs {
+            assert!(choice["logprobs"].is_object(), "{json}");
+        } else {
+            assert_eq!(choice["logprobs"], serde_json::Value::Null, "{json}");
+        }
+    }
 }
 
 #[tokio::test]

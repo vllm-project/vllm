@@ -9,10 +9,10 @@
 //! `vllm/entrypoints/scale_out/derender/` (api_router.py, serving.py) and
 //! `vllm/renderers/online_derenderer.py`.
 //!
-//! This is phase 1 of the derender port: shared detokenization/state plus the
-//! plain non-streaming endpoints.
-//! TODO: phase 2 adds reasoning/tool-call parsing of the detokenized output;
-//! phase 3 adds the streaming endpoints (a `stream: true` body fails
+//! This is phase 2 of the derender port: shared detokenization/state, the
+//! non-streaming endpoints, and reasoning/tool-call parsing of the
+//! detokenized output.
+//! TODO: phase 3 adds the streaming endpoints (a `stream: true` body fails
 //! deserialization with 400 until then).
 //!
 //! Deliberate deviations from the Python implementation:
@@ -29,25 +29,31 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use futures::StreamExt as _;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, warn};
-use vllm_chat::ChatRequestProcessor;
+use vllm_chat::{AssistantContentBlock, AssistantMessageExt as _, ChatRequestProcessor};
+use vllm_chat::{ChatEventStream, FinishReason};
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextRequestProcessor};
+use vllm_text::{DecodedTextEvent, Finished, Prompt, TextRequestProcessor};
 
 use self::types::{
     DerenderChatCompletionResponse, DerenderChatRequest, DerenderChatRequestUnion,
     DerenderCompletionRequest, DerenderCompletionRequestUnion,
 };
-use crate::error::{ApiError, bail_invalid_request, server_error};
+use crate::error::{
+    ApiError, bail_invalid_request, chat_submit_error, server_error, text_submit_error,
+};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::inference::generate::GenerateResponse;
 use crate::routes::openai::chat_completions::{
-    AssistantRole, ChatCompletionChoice, ChatCompletionMessage,
+    AssistantRole, ChatCompletionChoice, ChatCompletionMessage, lower_chat_request,
 };
 use crate::routes::openai::utils::logprobs::{append_openai_logprobs, text_len};
-use crate::routes::openai::utils::types::Usage;
+use crate::routes::openai::utils::types::{
+    FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage,
+};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{CompletionChoice, CompletionResponse, completion_echo_text};
 use crate::state::AppState;
@@ -65,18 +71,21 @@ pub(crate) struct DerenderContext<'a> {
     /// Primary public model name, echoed when the request omits `model`.
     primary_model_name: &'a str,
     /// Backend model id used for parser resolution.
-    // TODO: phase 2 (parsing) and phase 3 (streaming) read this again.
-    #[allow(dead_code)]
     model_id: &'a str,
     tokenizer: DynTokenizer,
     max_model_len: u32,
     max_logprobs: i32,
-    /// TODO: phase 2 (parser replay) reads this again.
-    #[allow(dead_code)]
     text: &'a TextRequestProcessor,
-    /// TODO: phase 2 (parsing) and phase 3 (streaming) read this again.
-    #[allow(dead_code)]
     chat: &'a ChatRequestProcessor,
+}
+
+impl DerenderContext<'_> {
+    /// Whether a reasoning or tool parser is effectively configured for this
+    /// model (Python: `self.parser is not None`).
+    fn has_parser(&self) -> bool {
+        self.chat.reasoning_parser_name(self.model_id).is_some()
+            || self.chat.tool_call_parser_name(self.model_id).is_some()
+    }
 }
 
 fn render_context(state: &RenderState) -> DerenderContext<'_> {
@@ -200,19 +209,149 @@ fn validate_derender_bounds(
     Ok(())
 }
 
+/// Map a wire `finish_reason` string to the internal enum for the replayed
+/// parse pipeline. The response echoes the wire string verbatim; this mapping
+/// only feeds the structured assembly.
+fn wire_finish_reason(finish_reason: Option<&str>) -> FinishReason {
+    match finish_reason {
+        Some("length") => FinishReason::Length,
+        Some("abort") => FinishReason::Abort,
+        Some("repetition") => FinishReason::Repetition(None),
+        _ => FinishReason::stop_eos(),
+    }
+}
+
+/// Replay already-generated tokens through the chat output pipeline so the
+/// configured reasoning/tool parser splits them into reasoning, content and
+/// tool calls, mirroring Python's `parser.parse()` one-shot extraction.
+///
+/// Returns the assembled message plus whether output metadata (logprobs, token
+/// IDs) may be attached: like the normal chat path, per-token data is
+/// suppressed when it would leak hidden reasoning tokens.
+async fn parse_chat_choice(
+    ctx: &DerenderContext<'_>,
+    chat_request: crate::routes::openai::chat_completions::ChatCompletionRequest,
+    token_ids: &[u32],
+    finish_reason: Option<&str>,
+    ctx_request: ResolvedRequestContext,
+) -> Result<(ChatCompletionMessage, bool), ApiError> {
+    let include_reasoning = chat_request.include_reasoning;
+    let is_named_tool_choice =
+        matches!(&chat_request.tool_choice, Some(ToolChoice::Function { .. }));
+    let is_required_tool_choice = matches!(
+        &chat_request.tool_choice,
+        Some(ToolChoice::Value(ToolChoiceValue::Required))
+    );
+
+    let lowered = lower_chat_request(chat_request, &ctx.lora_resolution, ctx_request)?;
+    // Render and tokenize the supplied chat request so the replayed stream
+    // starts from the real prompt: several parsers derive their starting mode
+    // from the prompt tail (e.g. a prefilled think/response channel opener).
+    let (text_request, processor) = ctx
+        .chat
+        .prepare(lowered)
+        .await
+        .map_err(|error| chat_submit_error("failed to prepare derender chat request", error))?;
+    let prepared = ctx
+        .text
+        .prepare(text_request)
+        .map_err(|error| text_submit_error("failed to prepare derender chat request", error))?;
+    let request_id = prepared.text_request.request_id.clone();
+    let prompt_token_ids = prepared.generate_request.prompt_token_ids;
+    let prompt_token_count = prompt_token_ids.len();
+
+    // Parser path: decode with special tokens preserved so the parser can see
+    // markers like </think>, <tool_call>, or Harmony channel tokens.
+    let decoded_text = ctx
+        .tokenizer
+        .decode(token_ids, false)
+        .map_err(|error| server_error!("derender decode failed: {}", error.as_report()))?;
+
+    let events = vec![
+        Ok(DecodedTextEvent::Start {
+            prompt_token_ids: Arc::from(prompt_token_ids),
+            prompt_logprobs: None,
+        }),
+        Ok(DecodedTextEvent::TextDelta {
+            delta: decoded_text,
+            token_ids: token_ids.to_vec(),
+            logprobs: None,
+            finished: Some(Finished {
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count,
+                    output_token_count: token_ids.len(),
+                    cached_token_count: 0,
+                },
+                finish_reason: wire_finish_reason(finish_reason),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        }),
+    ];
+    let decoded_stream = futures::stream::iter(events).boxed();
+    let chat_stream = processor
+        .process(decoded_stream)
+        .map_err(|error| chat_submit_error("failed to derender chat response", error))?;
+    let collected =
+        ChatEventStream::from_stream(request_id, chat_stream)
+            .collect_message()
+            .await
+            .map_err(|error| chat_submit_error("failed to derender chat response", error))?;
+
+    let has_content = collected
+        .message
+        .content
+        .iter()
+        .any(|block| matches!(block, AssistantContentBlock::Text { .. }));
+    // A named or required tool choice forces a (possibly empty) content
+    // string, matching Python's `content = content or ""`.
+    let content = if has_content {
+        Some(collected.message.text())
+    } else if is_named_tool_choice || is_required_tool_choice {
+        Some(String::new())
+    } else {
+        None
+    };
+    let tool_calls = collected
+        .message
+        .tool_calls()
+        .map(|call| ToolCall {
+            id: call.id.clone(),
+            tool_type: "function".to_string(),
+            function: FunctionCallResponse {
+                name: call.name.clone(),
+                arguments: Some(call.arguments.clone()),
+            },
+        })
+        .collect();
+
+    // Mirror collect_chat_completion: when reasoning is parsed out but the
+    // request hides it, per-token output metadata is suppressed as well so
+    // hidden reasoning tokens cannot leak through logprobs.
+    let reasoning = collected.message.reasoning();
+    let include_output_metadata = include_reasoning || reasoning.is_none();
+
+    Ok((
+        ChatCompletionMessage {
+            role: AssistantRole,
+            content,
+            tool_calls,
+            reasoning: if include_reasoning { reasoning } else { None },
+        },
+        include_output_metadata,
+    ))
+}
+
 /// Postprocess a GenerateResponse into a chat completion response.
 ///
 /// Non-streaming only: expects the complete GenerateResponse with all token
-/// IDs present. Phase 1 always plain-detokenizes, honouring the request's
-/// `skip_special_tokens` (default true when no request was given).
-/// TODO: phase 2 replays the output through the configured reasoning/tool
-/// parser (splitting reasoning, content and tool_calls) when `chat_request`
-/// is supplied, mirroring Python's `parser.parse()` one-shot extraction.
+/// IDs present. When `request.chat_request` is provided and a parser is
+/// configured, the parser splits the output into (reasoning, content,
+/// tool_calls). Otherwise falls back to plain detokenization.
 async fn derender_chat(
     ctx: &DerenderContext<'_>,
     request: DerenderChatRequest,
-    // Used by the phase-2 parser replay.
-    _request_context: ResolvedRequestContext,
+    request_context: ResolvedRequestContext,
 ) -> Result<DerenderChatCompletionResponse, ApiError> {
     check_model(ctx, request.model.as_deref())?;
     validate_derender_bounds(
@@ -236,25 +375,48 @@ async fn derender_chat(
             .map(|logprobs| logprobs::resolve_logprobs(logprobs, &ctx.tokenizer))
             .transpose()?;
 
-        let skip_special = request
-            .chat_request
-            .as_ref()
-            .map(|request| request.skip_special_tokens)
-            .unwrap_or(true);
-        let decoded_text = ctx
-            .tokenizer
-            .decode(&choice.token_ids, skip_special)
-            .map_err(|error| server_error!("derender decode failed: {}", error.as_report()))?;
+        let (message, include_output_metadata) = if ctx.has_parser()
+            && let Some(chat_request) = request.chat_request.clone()
+        {
+            parse_chat_choice(
+                ctx,
+                chat_request,
+                &choice.token_ids,
+                choice.finish_reason.as_deref(),
+                request_context.clone(),
+            )
+            .await?
+        } else {
+            // No parser: plain detokenization honouring the request's
+            // skip_special_tokens (default true when no request was given).
+            let skip_special = request
+                .chat_request
+                .as_ref()
+                .map(|request| request.skip_special_tokens)
+                .unwrap_or(true);
+            let decoded_text = ctx
+                .tokenizer
+                .decode(&choice.token_ids, skip_special)
+                .map_err(|error| server_error!("derender decode failed: {}", error.as_report()))?;
+            (
+                ChatCompletionMessage {
+                    role: AssistantRole,
+                    content: Some(decoded_text),
+                    tool_calls: Vec::new(),
+                    reasoning: None,
+                },
+                true,
+            )
+        };
 
         choices.push(ChatCompletionChoice {
             index: choice.index,
-            message: ChatCompletionMessage {
-                role: AssistantRole,
-                content: Some(decoded_text),
-                tool_calls: Vec::new(),
-                reasoning: None,
+            message,
+            logprobs: if include_output_metadata {
+                resolved_logprobs
+            } else {
+                None
             },
-            logprobs: resolved_logprobs,
             finish_reason: choice.finish_reason.clone(),
             stop_reason: None,
             token_ids: None,
