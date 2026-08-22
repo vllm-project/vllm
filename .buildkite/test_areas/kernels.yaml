@@ -164,19 +164,22 @@ steps:
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
-  timeout_in_minutes: 60
+  timeout_in_minutes: 30
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  parallelism: 6
   mirror:
     amd:
       label: ":amd: (MI300) Quantization Kernels Shard %N"
       dind: false
       device: mi300_1
+      # Pin the AMD mirror at its current 2 shards so raising NVIDIA
+      # parallelism does not multiply AMD copies (needs ci-infra #473).
+      parallelism: 2
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
