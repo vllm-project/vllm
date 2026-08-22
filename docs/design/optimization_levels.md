@@ -73,7 +73,8 @@ Settings (on top of `-O1`):
 - `-cc.pass_config.fuse_allreduce_rms=True`
 - `-cc.pass_config.fuse_rope_kvcache=True`†
 
-† These fusions are ROCm-only and require AITER.
+† `fuse_rope_kvcache` is enabled at this optimization level only on ROCm with
+AITER. CUDA support is opt-in through `PassConfig`.
 
 ### `-O3`: Aggressive Optimization
 

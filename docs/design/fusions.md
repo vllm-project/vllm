@@ -23,7 +23,7 @@ or just on the low or high end.
 | [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                  | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No        | Low          |
 | [Attention + Quant](#attention--quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
 | [MLA Attention + Quant](#attention--quantization-fuse_attn_quant)              | `fuse_attn_quant`            | MLA Attention output → FP8/NVFP4 quant         | Off by default                 | TBD                | Yes       | Always       |
-| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER only)           | 2-4%               | No        | Low          |
+| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER); CUDA opt-in   | 2-4% (ROCm)        | No        | Low          |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [Sequence Parallelism](#sequence-parallelism-enable_sp)                        | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes       | High         |
 | [AsyncTP GEMM + collective](#asynctp-gemm--collective-overlap-fuse_gemm_comms) | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes       | High         |
@@ -43,7 +43,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
 | `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
 | `fuse_attn_quant` (MLA)\*    | FP8 static\*, FP8 per-group\*, NVFP4\*   | FP8 static\*, FP8 per-group\*            | FP8 static\*, FP8 per-group\*            | —             | FP8 static\* (untested)                  |
-| `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+| `fuse_rope_kvcache`          | FP16/BF16, FP8 static                    | FP16/BF16, FP8 static                    | FP16/BF16                                | FP16/BF16     | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
 | `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
 | `fuse_gemm_comms`            | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
@@ -170,21 +170,36 @@ Other attention backends do not support fused output quantization yet.
 ### RoPE + KV-Cache Update (`fuse_rope_kvcache`)
 
 !!! info
-    ROCm/AITER-only. Not available on NVIDIA CUDA or CPU. The fusion is only enabled for
-    `num_tokens ≤ 256` by default due to AITER fused kernel performance issues.
-    This threshold is configurable via `PassConfig.rope_kvcache_fusion_max_token_num`.
+    The fusion is enabled automatically at O2 on ROCm with AITER. NVIDIA CUDA with
+    FlashAttention is available when `PassConfig.fuse_rope_kvcache=True` is set
+    explicitly. CPU is not supported.
+
+    By default, the fusion is limited to `num_tokens ≤ 256`, targeting small decode
+    batches where avoiding the extra launch and memory traffic is useful. This
+    threshold is configurable via `PassConfig.rope_kvcache_fusion_max_token_num`.
 
 **What it fuses.** Fuses the rotary positional embedding kernel with the KV-cache scatter/write into
 a single kernel, avoiding separate reads and writes of the key and value tensors.
 
-Requires: AMD ROCm with AITER enabled, the `rotary_embedding` custom op active (automatic),
-and the `kv_cache` update op visible in the graph: either by using Inductor graph partition
-or removed from `splitting_ops`.
-If these conditions are set, the fusion is enabled automatically for optimization level O1 and above.
+The Llama model definition uses a manual call site on supported NVIDIA
+FlashAttention decoder layers. It writes rotated Q to graph-owned storage and writes
+K/V directly to the paged cache before attention. Unsupported layouts, quantization,
+parallelism, long token ranges, and missing cache mappings retain the ordinary RoPE
+and cache-update path. CUDA does not register the legacy graph pass for this flag.
+
+ROCm model definitions continue to use the compiler pass and require the
+`rotary_embedding` and `kv_cache` update ops to be visible in the same graph,
+either through Inductor graph partition or by removing the cache update from
+`splitting_ops`. They additionally require AITER. Other CUDA model definitions
+retain the unfused path until they gain a manual call site.
 
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/rope_kvcache_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rope_kvcache_fusion.py)
+- CUDA manual call site: [`vllm/model_executor/models/llama.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py)
+- Attention integration: [`vllm/model_executor/layers/attention/attention.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/attention/attention.py)
+- CUDA kernel: [`csrc/libtorch_stable/rope_kvcache_fusion_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/libtorch_stable/rope_kvcache_fusion_kernels.cu)
+- Benchmark: [`benchmarks/kernels/benchmark_fused_rope_kvcache.py`](https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/benchmark_fused_rope_kvcache.py)
 
 ### Sequence Parallelism (`enable_sp`)
 

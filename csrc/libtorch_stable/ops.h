@@ -624,6 +624,21 @@ void concat_and_cache_mla_rope_fused(
     const std::string& kv_cache_dtype,
     torch::stable::Tensor& kv_cache_quant_scale);
 
+#ifndef USE_ROCM
+// Write rotated Q to a caller-owned contiguous output and write rotated K/V
+// to the flash KV cache without modifying or materializing K.
+void fused_rope_and_reshape_cache_flash_q_out(
+    const torch::stable::Tensor& query, const torch::stable::Tensor& key,
+    const torch::stable::Tensor& value, torch::stable::Tensor& query_out,
+    const torch::stable::Tensor& positions,
+    const torch::stable::Tensor& cos_sin_cache, bool is_neox,
+    torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
+    const torch::stable::Tensor& slot_mapping,
+    const torch::stable::Tensor& k_scale, const torch::stable::Tensor& v_scale,
+    const std::string& kv_cache_dtype);
+
+#endif
+
 // Just for unittest
 void convert_fp8(torch::stable::Tensor& dst_cache,
                  torch::stable::Tensor& src_cache, const double scale,

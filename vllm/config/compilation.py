@@ -139,13 +139,13 @@ class PassConfig:
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
-    # ROCm/AITER specific fusions
+    # Backend-specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
     fuse_mla_dual_rms_norm: bool = None  # type: ignore[assignment]
     """Fuse paired q/kv RMS norms in MLA attention."""
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
-    """Fuse the QK rope + KV cache ops."""
+    """Fuse the Q/K RoPE and KV-cache update ops."""
     fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
     """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER HIP
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
@@ -153,9 +153,9 @@ class PassConfig:
     with QK-norm (e.g. Qwen3-MoE)."""
 
     rope_kvcache_fusion_max_token_num: int = 256
-    """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
-    Larger batch sizes e.g. during prefill will use the unfused kernels.
-    Also applies to the fused QK-Norm+RoPE+KVCache pass.
+    """Maximum token count for RoPE+KV-cache fusion, targeting small decode
+    batches. Larger batches use the unfused kernels. Also applies to the fused
+    QK-Norm+RoPE+KV-cache pass.
     """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
@@ -290,9 +290,9 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_mla_dual_rms_norm = False
-        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+        if self.fuse_rope_kvcache and not current_platform.is_cuda_alike():
             logger.warning_once(
-                "KV cache fusion currently only enabled on ROCm. "
+                "KV cache fusion is currently only supported on CUDA and ROCm. "
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
@@ -962,6 +962,7 @@ class CompilationConfig:
 
         if (
             self.pass_config.fuse_rope_kvcache
+            and current_platform.is_rocm()
             and "+rotary_embedding" not in self.custom_ops
         ):
             # TODO(Rohan138): support rope native forward match and remove this.

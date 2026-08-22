@@ -951,6 +951,25 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     str kv_cache_dtype,"
       "                     Tensor kv_cache_scale) -> ()");
 
+#ifndef USE_ROCM
+  ops.def(
+      "fused_rope_and_reshape_cache_flash_q_out("
+      "                     Tensor query,"
+      "                     Tensor key,"
+      "                     Tensor value,"
+      "                     Tensor! query_out,"
+      "                     Tensor positions,"
+      "                     Tensor cos_sin_cache,"
+      "                     bool is_neox,"
+      "                     Tensor! key_cache,"
+      "                     Tensor! value_cache,"
+      "                     Tensor slot_mapping,"
+      "                     Tensor k_scale,"
+      "                     Tensor v_scale,"
+      "                     str kv_cache_dtype) -> ()");
+
+#endif
+
   // Convert the key and value cache to fp8 data type.
   ops.def(
       "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "
@@ -1039,6 +1058,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
            TORCH_BOX(&concat_and_cache_mla_grouped));
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));
+#ifndef USE_ROCM
+  ops.impl("fused_rope_and_reshape_cache_flash_q_out",
+           TORCH_BOX(&fused_rope_and_reshape_cache_flash_q_out));
+#endif
   ops.impl("convert_fp8", TORCH_BOX(&convert_fp8));
   ops.impl("gather_and_maybe_dequant_cache",
            TORCH_BOX(&gather_and_maybe_dequant_cache));

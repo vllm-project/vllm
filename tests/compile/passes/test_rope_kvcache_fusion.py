@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch._higher_order_ops import auto_functionalized
@@ -55,7 +57,12 @@ FP8_DTYPE = current_platform.fp8_dtype()
 def test_kv_cache_update_ops_fake_tensor_metadata(monkeypatch: pytest.MonkeyPatch):
     query = torch.empty(1, dtype=torch.bfloat16)
     kv_cache = torch.empty(1, dtype=torch.uint8)
-    context = (None, None, kv_cache, None)
+    attn_layer = SimpleNamespace(
+        _rope_and_kv_cache_update_q_out=lambda query, _key, _value, query_out, *_args: (
+            query_out.copy_(query)
+        )
+    )
+    context = (None, attn_layer, kv_cache, None)
     monkeypatch.setattr(attention_module, "get_attention_context", lambda _: context)
     monkeypatch.setattr(rope_kvcache_fusion, "get_attention_context", lambda _: context)
 
@@ -64,6 +71,26 @@ def test_kv_cache_update_ops_fake_tensor_metadata(monkeypatch: pytest.MonkeyPatc
     assert runtime_output.shape == fake_output.shape
     assert runtime_output.dtype == fake_output.dtype
     assert runtime_output.device == fake_output.device
+
+    query_out = torch.empty_like(query, memory_format=torch.contiguous_format)
+    q_out_args = (
+        query,
+        query,
+        query,
+        query_out,
+        torch.empty(1, dtype=torch.int64),
+        torch.empty(1),
+        True,
+        "layer",
+    )
+    runtime_output = attention_module.fused_rope_and_unified_kv_cache_update_q_out(
+        *q_out_args
+    )
+    fake_output = attention_module.fused_rope_and_unified_kv_cache_update_q_out_fake(
+        *q_out_args
+    )
+    assert runtime_output is None
+    assert fake_output is None
 
     args = (
         query,
@@ -81,6 +108,46 @@ def test_kv_cache_update_ops_fake_tensor_metadata(monkeypatch: pytest.MonkeyPatc
     assert runtime_output.shape == fake_output.shape
     assert runtime_output.dtype == fake_output.dtype
     assert runtime_output.device == fake_output.device
+
+
+def test_fused_rope_kvcache_without_slot_mapping_still_rotates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm import _custom_ops
+
+    head_sizes = []
+    monkeypatch.setattr(
+        _custom_ops,
+        "rotary_embedding",
+        lambda _positions, _query, _key, head_size, *_args, **_kwargs: (
+            head_sizes.append(head_size)
+        ),
+    )
+
+    query = torch.empty(1, 4 * 64)
+    key = torch.empty(1, 2 * 64)
+    value = torch.empty_like(key)
+    layer = SimpleNamespace(
+        impl=SimpleNamespace(fused_rope_kvcache_q_out_supported=lambda: False),
+        rope_kvcache_fusion_max_token_num=256,
+        head_size=64,
+    )
+    query_out = torch.empty_like(query, memory_format=torch.contiguous_format)
+    Attention._rope_and_kv_cache_update_q_out(
+        layer,
+        query,
+        key,
+        value,
+        query_out,
+        torch.empty(1, dtype=torch.int64),
+        torch.empty(1, 1),
+        True,
+        torch.empty(1),
+        None,
+    )
+
+    assert query_out.data_ptr() != query.data_ptr()
+    assert head_sizes == [64]
 
 
 def test_rope_kvcache_fusion_default_keeps_large_ranges_unfused():
