@@ -6,16 +6,22 @@
 
 from typing import Any
 
+import functools
+
 import torch
 
+from vllm import envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.logger import init_logger
 
 # Static kernels parameters
 BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
 NUM_WARPS = 4 if current_platform.is_rocm() else 8
 
 # To check compatibility
+logger = init_logger(__name__)
+
 IS_TURING = current_platform.get_device_capability() == (7, 5)
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -773,6 +779,399 @@ def _fwd_kernel_alibi(
     return
 
 
+# ---------------------------------------------------------------------------
+# Flash-decoding partitioning for the SPECULATIVE-DECODE VERIFY shape.
+#
+# With spec decode on, every step has query_len = num_speculative_tokens + 1
+# (9 for DFlash2 n=8), so chunked_prefill_paged_decode routes to
+# context_attention_fwd and the paged-DECODE kernels -- both the Triton one and
+# the ROCm HIP one -- are never reached. _fwd_kernel's grid is
+# (batch, head, cdiv(max_input_len, BLOCK_M)); for a 9-token query with
+# BLOCK_M = 32 that third dim is 1, so a handful of programs each scan the whole
+# context serially. Same starvation the decode path had.
+#
+# This adds a specialised route for exactly that shape -- short query, long
+# cached context -- leaving _fwd_kernel untouched so ordinary prefill is
+# unaffected. The context is split across programs which accumulate
+# unnormalised partials; a reducer combines them and then does the (single-tile)
+# current-chunk attention, because query_len <= VERIFY_MAX_Q <= BLOCK_M means
+# the new tokens always fit in one tile.
+#
+# Env:
+#   VLLM_TRITON_VERIFY_CTX_PARTITION=0   disable (default: enabled)
+#   VLLM_TRITON_PA_TARGET_PROGRAMS        occupancy target (default 4 * #CUs)
+#   VLLM_TRITON_PA_SCRATCH_BUDGET_MB      scratch cap (default 128)
+# ---------------------------------------------------------------------------
+
+VERIFY_MAX_Q = 32
+_VERIFY_CTX_TILE = 32
+_VERIFY_PART_MIN = 1024
+_VERIFY_MAX_PARTS = 512
+def _verify_scratch_budget() -> int:
+    return envs.VLLM_TRITON_PA_SCRATCH_BUDGET_MB * 1024 * 1024
+
+
+@functools.lru_cache(maxsize=1)
+def _verify_partition_enabled() -> bool:
+    return envs.VLLM_TRITON_VERIFY_CTX_PARTITION
+
+
+@functools.lru_cache(maxsize=1)
+def _verify_target_programs() -> int:
+    if envs.VLLM_TRITON_PA_TARGET_PROGRAMS:
+        return max(1, envs.VLLM_TRITON_PA_TARGET_PROGRAMS)
+    try:
+        cus = torch.cuda.get_device_properties(0).multi_processor_count
+    except Exception:
+        cus = 64
+    return 4 * cus
+
+
+def _choose_verify_partition(batch: int, num_q_heads: int, ctx_len_bound: int,
+                             block_m: int = 16, head_dim: int = 256) -> int:
+    """Context-partition size in tokens, or 0 to stay on _fwd_kernel.
+
+    `ctx_len_bound` must be fixed for the life of a captured cudagraph -- see
+    the same argument in chunked_prefill_paged_decode._choose_partition_size.
+    Callers pass the block table's width times the physical block size.
+
+    Sizing note, learned the hard way: do NOT pick the partition count by
+    targeting occupancy AT THE BOUND. The bound is max_model_len (262,640 here)
+    while real requests are much shorter, so "enough partitions to fill the
+    device at 256K" leaves only a handful of them non-empty at 41K and most of
+    the win evaporates. Instead take the FINEST partition the scratch budget
+    affords: surplus partitions cost one early-exiting program each, while
+    extra partitions at the actual length are real parallelism. The budget is
+    what keeps this bounded for large batches, and every input here is fixed
+    per captured graph, so the choice stays cudagraph-stable.
+    """
+    if not _verify_partition_enabled():
+        return 0
+    if ctx_len_bound < 2 * _VERIFY_PART_MIN:
+        return 0
+    base = max(1, batch * num_q_heads)
+    if base >= _verify_target_programs():
+        return 0  # the (batch, head) grid already saturates the device
+    bytes_per_part = max(1, base * block_m * head_dim * 4)
+    max_parts = max(1, _verify_scratch_budget() // bytes_per_part)
+    max_parts = min(max_parts, _VERIFY_MAX_PARTS)
+    part = max(_VERIFY_PART_MIN, -(-ctx_len_bound // max_parts))
+    part = triton.next_power_of_2(part)
+    if part % _VERIFY_CTX_TILE != 0:
+        part = -(-part // _VERIFY_CTX_TILE) * _VERIFY_CTX_TILE
+    parts = -(-ctx_len_bound // part)
+    if parts <= 1:
+        return 0
+    return part
+
+
+@triton.jit
+def _kernel_verify_ctx_partition(
+    Q,
+    K_cache,
+    V_cache,
+    B_Loc,
+    B_Start_Loc,
+    B_Seqlen,
+    sm_scale,
+    k_scale,
+    v_scale,
+    x,
+    tmp_acc,  # [batch, num_q_heads, parts, BLOCK_M, D_PAD] f32
+    tmp_m,  # [batch, num_q_heads, parts, BLOCK_M]          f32
+    tmp_l,  # [batch, num_q_heads, parts, BLOCK_M]          f32
+    stride_b_loc_b: tl.int64,
+    stride_b_loc_s: tl.int64,
+    stride_qbs: tl.int64,
+    stride_qh: tl.int64,
+    stride_qd: tl.int64,
+    stride_k_cache_bs: tl.int64,
+    stride_k_cache_h: tl.int64,
+    stride_k_cache_d: tl.int64,
+    stride_k_cache_bl: tl.int64,
+    stride_k_cache_x: tl.int64,
+    stride_v_cache_bs: tl.int64,
+    stride_v_cache_h: tl.int64,
+    stride_v_cache_d: tl.int64,
+    stride_v_cache_bl: tl.int64,
+    stride_ta_b: tl.int64,
+    stride_ta_h: tl.int64,
+    stride_ta_p: tl.int64,
+    stride_ta_m: tl.int64,
+    stride_tm_b: tl.int64,
+    stride_tm_h: tl.int64,
+    stride_tm_p: tl.int64,
+    num_queries_per_kv: tl.constexpr,
+    IN_PRECISION: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_DMODEL_PADDED: tl.constexpr,
+    CTX_TILE: tl.constexpr,
+    PHYSICAL_BLOCK_SIZE: tl.constexpr,
+    CTX_PARTITION: tl.constexpr,
+    SKIP_DECODE: tl.constexpr,
+):
+    cur_batch = tl.program_id(0)
+    cur_head = tl.program_id(1)
+    part_idx = tl.program_id(2)
+    cur_kv_head = cur_head // num_queries_per_kv
+
+    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
+    start_index = tl.load(B_Start_Loc + cur_batch)
+    stop_index = tl.load(B_Start_Loc + cur_batch + 1)
+    cur_batch_query_len = stop_index - start_index
+    cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
+
+    # Mixed batches can still carry query_len == 1 rows; _fwd_kernel skips them
+    # and the paged-decode kernel handles them. Match that exactly.
+    if SKIP_DECODE and cur_batch_query_len == 1:
+        return
+
+    part_start = part_idx * CTX_PARTITION
+    # Surplus partitions are never read: the reducer recomputes the partition
+    # count from the true ctx_len and masks. Exit without storing.
+    if part_start >= cur_batch_ctx_len:
+        return
+
+    part_end = tl.minimum(cur_batch_ctx_len, part_start + CTX_PARTITION)
+
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_DMODEL_PADDED)
+    offs_n = tl.arange(0, CTX_TILE)
+    dim_mask = tl.where(offs_d < BLOCK_DMODEL, 1, 0).to(tl.int1)
+
+    off_q = (
+        (start_index + offs_m[:, None]) * stride_qbs
+        + cur_head * stride_qh
+        + offs_d[None, :] * stride_qd
+    )
+    q = tl.load(
+        Q + off_q,
+        mask=dim_mask[None, :] & (offs_m[:, None] < cur_batch_query_len),
+        other=0.0,
+    )
+
+    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)
+
+    for start_n in range(part_start, part_end, CTX_TILE):
+        token_indices = start_n + offs_n
+        token_valid = token_indices < cur_batch_ctx_len
+        off_k, off_v = _paged_kv_cache_offsets(
+            B_Loc, cur_batch, token_indices, token_valid, offs_d, cur_kv_head, x,
+            stride_b_loc_b, stride_b_loc_s,
+            stride_k_cache_bs, stride_k_cache_h, stride_k_cache_d,
+            stride_k_cache_bl, stride_k_cache_x,
+            stride_v_cache_bs, stride_v_cache_h, stride_v_cache_d,
+            stride_v_cache_bl,
+            PHYSICAL_BLOCK_SIZE,
+            MASK_BLOCK_TABLE=True,
+        )
+        k_load = tl.load(
+            K_cache + off_k,
+            mask=dim_mask[:, None] & token_valid[None, :],
+            other=0.0,
+        )
+        if k_load.dtype.is_fp8():
+            k = (k_load.to(tl.float32) * tl.load(k_scale)).to(q.dtype)
+        else:
+            k = k_load
+
+        qk = sm_scale * tl.dot(q, k, input_precision=IN_PRECISION)
+        # Context tokens all precede every query token, so no causal mask here.
+        qk = tl.where(token_valid[None, :], qk, float("-inf"))
+
+        m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+        p = tl.exp(qk - m_ij[:, None])
+        p = tl.where(m_ij[:, None] == float("-inf"), 0.0, p)
+        l_ij = tl.sum(p, axis=1)
+        alpha = tl.exp(m_i - m_ij)
+        alpha = tl.where(m_i == float("-inf"), 0.0, alpha)
+        acc = acc * alpha[:, None]
+
+        v_load = tl.load(
+            V_cache + off_v,
+            mask=dim_mask[None, :] & token_valid[:, None],
+            other=0.0,
+        )
+        if v_load.dtype.is_fp8():
+            v = (v_load.to(tl.float32) * tl.load(v_scale)).to(q.dtype)
+        else:
+            v = v_load
+
+        acc = tl.dot(p.to(v.dtype), v, acc=acc, input_precision=IN_PRECISION)
+        l_i = l_i * alpha + l_ij
+        m_i = m_ij
+
+    ml_off = (cur_batch * stride_tm_b + cur_head * stride_tm_h
+              + part_idx * stride_tm_p + offs_m)
+    tl.store(tmp_m + ml_off, m_i)
+    tl.store(tmp_l + ml_off, l_i)
+    acc_off = (cur_batch * stride_ta_b + cur_head * stride_ta_h
+               + part_idx * stride_ta_p + offs_m[:, None] * stride_ta_m
+               + offs_d[None, :])
+    tl.store(tmp_acc + acc_off, acc, mask=dim_mask[None, :])
+
+
+@triton.jit
+def _kernel_verify_reduce(
+    Q,
+    K,
+    V,
+    Out,
+    B_Start_Loc,
+    B_Seqlen,
+    sm_scale,
+    out_scale_inv,
+    tmp_acc,
+    tmp_m,
+    tmp_l,
+    stride_qbs: tl.int64,
+    stride_qh: tl.int64,
+    stride_qd: tl.int64,
+    stride_kbs: tl.int64,
+    stride_kh: tl.int64,
+    stride_kd: tl.int64,
+    stride_vbs: tl.int64,
+    stride_vh: tl.int64,
+    stride_vd: tl.int64,
+    stride_obs: tl.int64,
+    stride_oh: tl.int64,
+    stride_od: tl.int64,
+    stride_ta_b: tl.int64,
+    stride_ta_h: tl.int64,
+    stride_ta_p: tl.int64,
+    stride_ta_m: tl.int64,
+    stride_tm_b: tl.int64,
+    stride_tm_h: tl.int64,
+    stride_tm_p: tl.int64,
+    num_queries_per_kv: tl.constexpr,
+    IN_PRECISION: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_DMODEL_PADDED: tl.constexpr,
+    CTX_PARTITION: tl.constexpr,
+    MAX_PARTS_PADDED: tl.constexpr,
+    CAUSAL: tl.constexpr,
+    SKIP_DECODE: tl.constexpr,
+    USE_FP8: tl.constexpr,
+    FP8_MIN: tl.constexpr = float8_info.min,
+    FP8_MAX: tl.constexpr = float8_info.max,
+):
+    cur_batch = tl.program_id(0)
+    cur_head = tl.program_id(1)
+    cur_kv_head = cur_head // num_queries_per_kv
+
+    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
+    start_index = tl.load(B_Start_Loc + cur_batch)
+    stop_index = tl.load(B_Start_Loc + cur_batch + 1)
+    cur_batch_query_len = stop_index - start_index
+    cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
+
+    if SKIP_DECODE and cur_batch_query_len == 1:
+        return
+
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_DMODEL_PADDED)
+    offs_p = tl.arange(0, MAX_PARTS_PADDED)
+    dim_mask = tl.where(offs_d < BLOCK_DMODEL, 1, 0).to(tl.int1)
+    q_mask = offs_m < cur_batch_query_len
+
+    num_parts = (cur_batch_ctx_len + CTX_PARTITION - 1) // CTX_PARTITION
+    part_mask = offs_p < num_parts
+
+    # ---- combine the context partials --------------------------------------
+    ml_base = cur_batch * stride_tm_b + cur_head * stride_tm_h
+    # [P, M]
+    m_p = tl.load(
+        tmp_m + ml_base + offs_p[:, None] * stride_tm_p + offs_m[None, :],
+        mask=part_mask[:, None],
+        other=float("-inf"),
+    )
+    l_p = tl.load(
+        tmp_l + ml_base + offs_p[:, None] * stride_tm_p + offs_m[None, :],
+        mask=part_mask[:, None],
+        other=0.0,
+    )
+    m_i = tl.max(m_p, axis=0)  # [M]
+    # exp(-inf - -inf) is NaN; mask empty partitions explicitly.
+    scale_p = tl.exp(m_p - m_i[None, :])
+    scale_p = tl.where(part_mask[:, None] & (m_p > float("-inf")), scale_p, 0.0)
+    l_i = tl.sum(l_p * scale_p, axis=0)  # [M]
+
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)
+    acc_base = cur_batch * stride_ta_b + cur_head * stride_ta_h
+    for p_idx in range(0, num_parts):
+        partial = tl.load(
+            tmp_acc + acc_base + p_idx * stride_ta_p
+            + offs_m[:, None] * stride_ta_m + offs_d[None, :],
+            mask=dim_mask[None, :],
+            other=0.0,
+        )
+        w = tl.load(tmp_m + ml_base + p_idx * stride_tm_p + offs_m)
+        wa = tl.exp(w - m_i)
+        wa = tl.where(w > float("-inf"), wa, 0.0)
+        acc += partial * wa[:, None]
+
+    # ---- current chunk: query vs the new tokens, one tile ------------------
+    # Gated on cur_batch_query_len <= BLOCK_M by the caller, so a single tile
+    # covers the whole chunk and no loop is needed.
+    off_k = (
+        offs_m[None, :] * stride_kbs + cur_kv_head * stride_kh
+        + offs_d[:, None] * stride_kd
+    )
+    off_v = (
+        offs_m[:, None] * stride_vbs + cur_kv_head * stride_vh
+        + offs_d[None, :] * stride_vd
+    )
+    k_cur = tl.load(
+        K + start_index * stride_kbs + off_k,
+        mask=dim_mask[:, None] & q_mask[None, :],
+        other=0.0,
+    )
+    v_cur = tl.load(
+        V + start_index * stride_vbs + off_v,
+        mask=dim_mask[None, :] & q_mask[:, None],
+        other=0.0,
+    )
+
+    qoff = (
+        (start_index + offs_m[:, None]) * stride_qbs
+        + cur_head * stride_qh
+        + offs_d[None, :] * stride_qd
+    )
+    q = tl.load(Q + qoff, mask=dim_mask[None, :] & q_mask[:, None], other=0.0)
+
+    qk = sm_scale * tl.dot(q, k_cur, input_precision=IN_PRECISION)
+    valid = q_mask[None, :]
+    if CAUSAL:
+        valid = valid & (offs_m[None, :] <= offs_m[:, None])
+    qk = tl.where(valid, qk, float("-inf"))
+
+    m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+    p = tl.exp(qk - m_ij[:, None])
+    p = tl.where(m_ij[:, None] == float("-inf"), 0.0, p)
+    l_ij = tl.sum(p, axis=1)
+    alpha = tl.exp(m_i - m_ij)
+    alpha = tl.where(m_i == float("-inf"), 0.0, alpha)
+    acc = acc * alpha[:, None]
+    acc = tl.dot(p.to(v_cur.dtype), v_cur, acc=acc, input_precision=IN_PRECISION)
+    l_i = l_i * alpha + l_ij
+
+    acc = acc / (l_i[:, None] + 1e-10)
+    if USE_FP8:
+        acc = acc * tl.load(out_scale_inv)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
+
+    off_o = (
+        (start_index + offs_m[:, None]) * stride_obs
+        + cur_head * stride_oh
+        + offs_d[None, :] * stride_od
+    )
+    tl.store(Out + off_o, acc, mask=dim_mask[None, :] & q_mask[:, None])
+
+
 @torch.inference_mode()
 def context_attention_fwd(
     q,
@@ -963,6 +1362,95 @@ def context_attention_fwd(
     # correct alignment logic when the kernel handles
     # non-standard sizes (such as 544).
     TRITON_BLOCK_SIZE = 32
+
+    # ---- specialised route: short query over a long cached context ----------
+    # This is the speculative-decode verify shape. _fwd_kernel would give it a
+    # grid of (batch, head, cdiv(max_input_len, BLOCK_M)) == (batch, head, 1)
+    # and scan the whole context in one program per head. See
+    # _choose_verify_partition for the cudagraph-safety argument behind the
+    # bound.
+    sw_norm = 0 if sliding_window is None or sliding_window <= 0 else sliding_window
+    if (
+        1 < max_input_len <= VERIFY_MAX_Q
+        and alibi_slopes is None
+        and sinks is None
+        and fp8_out_scale is None
+        and sw_norm == 0
+        and not kv_from_cache
+        and not q_dtype_is_f32
+        and k is not None
+        and v is not None
+    ):
+        ctx_len_bound = processed_b_loc.shape[1] * real_block_size
+        ctx_part = _choose_verify_partition(
+                batch, head, ctx_len_bound,
+                block_m=max(16, triton.next_power_of_2(max_input_len)),
+                head_dim=Lk_padded)
+        if ctx_part:
+            parts = (ctx_len_bound + ctx_part - 1) // ctx_part
+            BLOCK_M_V = max(16, triton.next_power_of_2(max_input_len))
+            tmp_acc = torch.empty(
+                (batch, head, parts, BLOCK_M_V, Lk_padded),
+                dtype=torch.float32, device=q.device)
+            tmp_m = torch.empty((batch, head, parts, BLOCK_M_V),
+                                dtype=torch.float32, device=q.device)
+            tmp_l = torch.empty_like(tmp_m)
+            logger.warning_once(
+                "Triton spec-verify: context partitioning ON "
+                "(%d batch x %d heads x %d partitions of %d tokens, "
+                "max_input_len=%d).",
+                batch, head, parts, ctx_part, max_input_len,
+            )
+            _kernel_verify_ctx_partition[(batch, head, parts)](
+                q, k_cache, v_cache, processed_b_loc, b_start_loc, b_seq_len,
+                sm_scale, k_scale, v_scale, k_cache.shape[4],
+                tmp_acc, tmp_m, tmp_l,
+                processed_b_loc.stride(0), processed_b_loc.stride(1),
+                q.stride(0), q.stride(1), q.stride(2),
+                k_cache.stride(0), k_cache.stride(1), k_cache.stride(2),
+                k_cache.stride(3), k_cache.stride(4),
+                v_cache.stride(0), v_cache.stride(1), v_cache.stride(2),
+                v_cache.stride(3),
+                tmp_acc.stride(0), tmp_acc.stride(1), tmp_acc.stride(2),
+                tmp_acc.stride(3),
+                tmp_m.stride(0), tmp_m.stride(1), tmp_m.stride(2),
+                num_queries_per_kv=num_queries_per_kv,
+                IN_PRECISION=IN_PRECISION,
+                BLOCK_M=BLOCK_M_V,
+                BLOCK_DMODEL=Lk,
+                BLOCK_DMODEL_PADDED=Lk_padded,
+                CTX_TILE=_VERIFY_CTX_TILE,
+                PHYSICAL_BLOCK_SIZE=real_block_size,
+                CTX_PARTITION=ctx_part,
+                SKIP_DECODE=skip_decode,
+                num_warps=NUM_WARPS,
+                num_stages=1,
+            )
+            _kernel_verify_reduce[(batch, head)](
+                q, k, v, o, b_start_loc, b_seq_len, sm_scale,
+                1.0 / fp8_out_scale if fp8_out_scale is not None else 1.0,
+                tmp_acc, tmp_m, tmp_l,
+                q.stride(0), q.stride(1), q.stride(2),
+                k.stride(0), k.stride(1), k.stride(2),
+                v.stride(0), v.stride(1), v.stride(2),
+                o.stride(0), o.stride(1), o.stride(2),
+                tmp_acc.stride(0), tmp_acc.stride(1), tmp_acc.stride(2),
+                tmp_acc.stride(3),
+                tmp_m.stride(0), tmp_m.stride(1), tmp_m.stride(2),
+                num_queries_per_kv=num_queries_per_kv,
+                IN_PRECISION=IN_PRECISION,
+                BLOCK_M=BLOCK_M_V,
+                BLOCK_DMODEL=Lk,
+                BLOCK_DMODEL_PADDED=Lk_padded,
+                CTX_PARTITION=ctx_part,
+                MAX_PARTS_PADDED=triton.next_power_of_2(parts),
+                CAUSAL=causal,
+                SKIP_DECODE=skip_decode,
+                USE_FP8=False,
+                num_warps=NUM_WARPS,
+                num_stages=1,
+            )
+            return
 
     grid_fn = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
     _fwd_kernel[grid_fn](
