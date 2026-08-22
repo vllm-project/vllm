@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Unit tests for MultiModalRegistry.supports_multimodal_inputs and
-Qwen2.5-VL visual component loading behavior.
+Unit tests for MultiModalRegistry multimodal capability checks and Qwen2.5-VL
+visual component loading behavior.
 """
 
 from types import SimpleNamespace
 
 import pytest
 
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ..models.utils import build_model_context
@@ -34,6 +35,72 @@ def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
     assert MULTIMODAL_REGISTRY.supports_multimodal_inputs(ctx.model_config) is expected
+
+
+@pytest.mark.parametrize(
+    "limit_mm_per_prompt,enable_mm_embeds,expected",
+    [
+        ({"image": 0, "video": 0}, False, False),
+        ({"image": 0, "video": 0}, True, False),
+        ({"image": 0}, True, True),
+        ({}, True, True),
+    ],
+)
+@pytest.mark.core_model
+def test_uses_multimodal_encoder(limit_mm_per_prompt, enable_mm_embeds, expected):
+    """Only modalities with positive limits should run the encoder tower."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        limit_mm_per_prompt=limit_mm_per_prompt,
+    )
+    ctx.model_config.multimodal_config.enable_mm_embeds = enable_mm_embeds
+    assert MULTIMODAL_REGISTRY.uses_multimodal_encoder(ctx.model_config) is expected
+
+
+@pytest.mark.core_model
+def test_embedding_only_rejects_encoder_cudagraph():
+    """Embedding-only mode has no encoder to capture."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        limit_mm_per_prompt={"image": 0, "video": 0},
+    )
+    ctx.model_config.multimodal_config.enable_mm_embeds = True
+
+    with pytest.raises(ValueError, match="incompatible with embedding-only mode"):
+        VllmConfig(
+            model_config=ctx.model_config,
+            compilation_config=CompilationConfig(cudagraph_mm_encoder=True),
+        )
+
+
+@pytest.mark.core_model
+def test_active_encoder_allows_encoder_cudagraph():
+    """A positive raw modality limit leaves encoder capture available."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    ctx.model_config.multimodal_config.enable_mm_embeds = True
+
+    VllmConfig(
+        model_config=ctx.model_config,
+        compilation_config=CompilationConfig(cudagraph_mm_encoder=True),
+    )
+
+
+@pytest.mark.core_model
+def test_language_model_only_rejects_encoder_cudagraph():
+    """Keep the language-model-only validation introduced by #53127."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        model_config_kwargs={"language_model_only": True},
+    )
+
+    with pytest.raises(ValueError, match="--language-model-only is incompatible"):
+        VllmConfig(
+            model_config=ctx.model_config,
+            compilation_config=CompilationConfig(cudagraph_mm_encoder=True),
+        )
 
 
 def test_create_processor_error_uses_served_model_name():
