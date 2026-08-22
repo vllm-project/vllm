@@ -9,15 +9,17 @@
 //! `vllm/entrypoints/scale_out/derender/` (api_router.py, serving.py) and
 //! `vllm/renderers/online_derenderer.py`.
 //!
-//! This is phase 2 of the derender port: shared detokenization/state, the
-//! non-streaming endpoints, and reasoning/tool-call parsing of the
-//! detokenized output.
-//! TODO: phase 3 adds the streaming endpoints (a `stream: true` body fails
-//! deserialization with 400 until then).
-//!
 //! Deliberate deviations from the Python implementation:
+//! - Streaming chunks are bounds-checked like non-streaming payloads
+//!   (`validate_stream_bounds`); Python only bounds the non-streaming path.
+//! - Streaming chat derender is rejected for reasoning-parser models (Python
+//!   parity), but tool-parser models are rejected only when the request
+//!   actually engages tool parsing, matching the normal chat pipeline.
 //! - Non-streaming completion derender honours `completion_request.echo`
 //!   (including the `max_tokens=0` prompt-only case); Python ignores `echo`.
+//! - The streaming detok state additionally carries `prev_token_ids` so
+//!   window reconstruction decodes from token IDs instead of round-tripping
+//!   lossy `id_to_token` pieces through `token_to_id`.
 
 mod detok;
 mod logprobs;
@@ -39,7 +41,9 @@ use vllm_text::{DecodedTextEvent, Finished, Prompt, TextRequestProcessor};
 
 use self::types::{
     DerenderChatCompletionResponse, DerenderChatRequest, DerenderChatRequestUnion,
-    DerenderCompletionRequest, DerenderCompletionRequestUnion,
+    DerenderChatStreamRequest, DerenderChatStreamResponse, DerenderCompletionRequest,
+    DerenderCompletionRequestUnion, DerenderCompletionStreamRequest,
+    DerenderCompletionStreamResponse,
 };
 use crate::error::{
     ApiError, bail_invalid_request, chat_submit_error, server_error, text_submit_error,
@@ -48,14 +52,18 @@ use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::inference::generate::GenerateResponse;
 use crate::routes::openai::chat_completions::{
-    AssistantRole, ChatCompletionChoice, ChatCompletionMessage, lower_chat_request,
+    AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionStreamChoice,
+    ChatCompletionStreamResponse, ChatMessageDelta, lower_chat_request,
 };
 use crate::routes::openai::utils::logprobs::{append_openai_logprobs, text_len};
 use crate::routes::openai::utils::types::{
-    FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage,
+    FunctionCallResponse, StreamResponseEnvelope, ToolCall, ToolChoice, ToolChoiceValue, Usage,
 };
 use crate::routes::openai::utils::validated_json::ValidatedJson;
-use crate::routes::openai::{CompletionChoice, CompletionResponse, completion_echo_text};
+use crate::routes::openai::{
+    CompletionChoice, CompletionResponse, CompletionStreamChoice, CompletionStreamResponse,
+    completion_echo_text,
+};
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, unix_timestamp};
 
@@ -206,6 +214,49 @@ fn validate_derender_bounds(
         }
     }
 
+    Ok(())
+}
+
+/// Bound one streaming chunk before decoding, matching the non-streaming
+/// `validate_derender_bounds` token/logprob limits. Python skips this check on
+/// the streaming path; we deliberately harden it so a single caller-supplied
+/// chunk cannot force token-by-token detokenization past `max_model_len`.
+fn validate_stream_bounds(
+    generate_chunk: &crate::routes::inference::generate::GenerateStreamResponse,
+    max_model_len: u32,
+    max_logprobs: i32,
+) -> Result<(), ApiError> {
+    let max_model_len = max_model_len as usize;
+    for choice in &generate_chunk.choices {
+        if choice.token_ids.len() > max_model_len {
+            bail_invalid_request!(
+                "token_ids length ({}) in choice {} exceeds max_model_len ({}).",
+                choice.token_ids.len(),
+                choice.index,
+                max_model_len
+            );
+        }
+        if let Some(content) = choice.logprobs.as_ref().and_then(|l| l.content.as_ref()) {
+            if content.len() > max_model_len {
+                bail_invalid_request!(
+                    "logprobs.content length ({}) in choice {} exceeds max_model_len ({}).",
+                    content.len(),
+                    choice.index,
+                    max_model_len
+                );
+            }
+            for entry in content {
+                if max_logprobs >= 0 && entry.top_logprobs.len() > max_logprobs as usize {
+                    bail_invalid_request!(
+                        "top_logprobs count ({}) in choice {} exceeds max_logprobs ({}).",
+                        entry.top_logprobs.len(),
+                        choice.index,
+                        max_logprobs
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -669,14 +720,228 @@ fn checked_total_tokens(prompt_tokens: usize, completion_tokens: usize) -> Resul
     })
 }
 
+/// Aggregate chunk usage, forwarding the caller-supplied prompt token count.
+fn stream_usage(
+    prompt_tokens: Option<usize>,
+    usage: Option<&Usage>,
+) -> Result<Option<Usage>, ApiError> {
+    let Some(usage) = usage else {
+        return Ok(None);
+    };
+    let prompt_tokens = prompt_tokens.unwrap_or(usage.prompt_tokens);
+    let completion_tokens = usage.completion_tokens.unwrap_or(0);
+    Ok(Some(Usage {
+        prompt_tokens,
+        total_tokens: checked_total_tokens(prompt_tokens, completion_tokens)?,
+        completion_tokens: Some(completion_tokens),
+        prompt_tokens_details: None,
+    }))
+}
+
+/// Whether the supplied chat request would engage the tool parser in the
+/// normal chat pipeline (`ResolvedToolContext::parsing_enabled`): tools are
+/// declared and tool_choice is not explicitly "none". Function/Required/
+/// AllowedTools choices fail closed and count as engaged even without a
+/// tools list.
+fn tool_parsing_would_engage(
+    request: &crate::routes::openai::chat_completions::ChatCompletionRequest,
+) -> bool {
+    match &request.tool_choice {
+        Some(ToolChoice::Value(ToolChoiceValue::None)) => false,
+        Some(_) => true,
+        None => request.tools.as_ref().is_some_and(|tools| !tools.is_empty()),
+    }
+}
+
+/// Streaming counterpart to [`derender_chat`].
+///
+/// Processes one `GenerateStreamResponse` chunk and returns the derendered
+/// chunk together with the updated client carried state.
+///
+/// TODO: parse path for reasoning and tool calls is implemented in a future
+/// PR (Python raises NotImplementedError in the same situation).
+fn derender_chat_stream(
+    ctx: &DerenderContext<'_>,
+    request: DerenderChatStreamRequest,
+) -> Result<DerenderChatStreamResponse, ApiError> {
+    check_model(ctx, request.model.as_deref())?;
+    validate_stream_bounds(&request.generate_chunk, ctx.max_model_len, ctx.max_logprobs)?;
+
+    // Fail closed for reasoning parsers: the streaming parse path is not yet
+    // implemented (Python raises NotImplementedError in the same situation),
+    // so hidden reasoning markup must never leak through plain detok.
+    if ctx.chat.reasoning_parser_name(ctx.model_id).is_some() {
+        bail_invalid_request!(
+            "Streaming chat derender is not yet supported for models with a reasoning or \
+             tool parser configured. Use the non-streaming derender endpoint (stream=false) \
+             for parsed output."
+        );
+    }
+
+    // Deviation from Python (which rejects on any configured parser): the
+    // normal chat pipeline only engages the tool parser when the request
+    // itself enables tool parsing, so a tool-capable model serving a
+    // tool-free request streams plain text there. Mirror that here instead of
+    // rejecting on the mere presence of a tool parser.
+    if ctx.chat.tool_call_parser_name(ctx.model_id).is_some()
+        && let Some(chat_request) = &request.chat_request
+        && tool_parsing_would_engage(chat_request)
+    {
+        bail_invalid_request!(
+            "Streaming chat derender is not yet supported for models with a reasoning or \
+             tool parser configured. Use the non-streaming derender endpoint (stream=false) \
+             for parsed output."
+        );
+    }
+
+    // A single DerenderStreamState is threaded through every choice in this
+    // chunk. Correct only when there is at most one choice per SSE event
+    // (n=1, one call per index), as the streaming derender protocol assumes.
+    // Multiple choices sharing one chunk would corrupt each other's detok
+    // window.
+    if request.generate_chunk.choices.len() > 1 {
+        bail_invalid_request!("derender_chat_stream expects at most one choice per chunk");
+    }
+
+    let mut state = request.stream_state.map(|state| *state).unwrap_or_default();
+    state.validate()?;
+
+    let skip_special = request
+        .chat_request
+        .as_ref()
+        .map(|request| request.skip_special_tokens)
+        .unwrap_or(true);
+    let mut stream_choices = Vec::with_capacity(request.generate_chunk.choices.len());
+
+    for choice in &request.generate_chunk.choices {
+        let (new_text, updated_state) =
+            detok::detokenize_delta(&ctx.tokenizer, &choice.token_ids, &state, skip_special)?;
+        state = updated_state;
+
+        // Unlike OpenAI's API, which always emits `role: "assistant"` on the
+        // very first chunk, this emits it on the first chunk with a non empty
+        // `choices` list. A leading usage only chunk therefore defers the role
+        // to the following content chunk instead of sending an empty role only
+        // delta.
+        let include_role = !state.role_sent;
+        if include_role {
+            state.role_sent = true;
+        }
+
+        stream_choices.push(ChatCompletionStreamChoice {
+            index: choice.index,
+            delta: ChatMessageDelta {
+                role: include_role.then_some(AssistantRole),
+                content: (!new_text.is_empty()).then_some(new_text),
+                tool_calls: None,
+                reasoning: None,
+            },
+            logprobs: None,
+            finish_reason: choice.finish_reason.clone(),
+            stop_reason: None,
+            token_ids: None,
+        });
+    }
+
+    let model_name = response_model_name(ctx, request.model.clone());
+    debug!(
+        request_id = %request.generate_chunk.request_id,
+        model = %model_name,
+        "derender_chat_stream"
+    );
+    let envelope = Arc::new(StreamResponseEnvelope::new(
+        request.generate_chunk.request_id.clone(),
+        "chat.completion.chunk",
+        unix_timestamp(),
+        model_name,
+    ));
+    let mut chunk = ChatCompletionStreamResponse::new(&envelope);
+    chunk.choices = stream_choices;
+    chunk.usage = stream_usage(request.prompt_tokens, request.generate_chunk.usage.as_ref())?;
+
+    Ok(DerenderChatStreamResponse {
+        chunk,
+        stream_state: state,
+    })
+}
+
+/// Streaming counterpart to [`derender_completion`].
+///
+/// Processes one `GenerateStreamResponse` chunk (one output sequence's delta)
+/// and returns the derendered chunk and updated state.
+fn derender_completion_stream(
+    ctx: &DerenderContext<'_>,
+    request: DerenderCompletionStreamRequest,
+) -> Result<DerenderCompletionStreamResponse, ApiError> {
+    check_model(ctx, request.model.as_deref())?;
+    validate_stream_bounds(&request.generate_chunk, ctx.max_model_len, ctx.max_logprobs)?;
+
+    // See the equivalent check in derender_chat_stream: a single
+    // DerenderStreamState is threaded through every choice in this chunk, so
+    // more than one choice per chunk would corrupt the detok window across
+    // choices.
+    if request.generate_chunk.choices.len() > 1 {
+        bail_invalid_request!("derender_completion_stream expects at most one choice per chunk");
+    }
+
+    let mut state = request.stream_state.map(|state| *state).unwrap_or_default();
+    state.validate()?;
+
+    let skip_special = request
+        .completion_request
+        .as_ref()
+        .map(|request| request.skip_special_tokens)
+        .unwrap_or(true);
+    let mut stream_choices = Vec::with_capacity(request.generate_chunk.choices.len());
+
+    for choice in &request.generate_chunk.choices {
+        let (new_text, updated_state) =
+            detok::detokenize_delta(&ctx.tokenizer, &choice.token_ids, &state, skip_special)?;
+        state = updated_state;
+
+        stream_choices.push(CompletionStreamChoice {
+            index: choice.index,
+            text: new_text,
+            logprobs: None,
+            finish_reason: choice.finish_reason.clone(),
+            stop_reason: None,
+            token_ids: None,
+            prompt_token_ids: None,
+        });
+    }
+
+    let model_name = response_model_name(ctx, request.model.clone());
+    debug!(
+        request_id = %request.generate_chunk.request_id,
+        model = %model_name,
+        "derender_completion_stream"
+    );
+    let envelope = Arc::new(StreamResponseEnvelope::new(
+        request.generate_chunk.request_id.clone(),
+        "text_completion",
+        unix_timestamp(),
+        model_name,
+    ));
+    let mut chunk = CompletionStreamResponse::new(&envelope);
+    chunk.choices = stream_choices;
+    chunk.usage = stream_usage(request.prompt_tokens, request.generate_chunk.usage.as_ref())?;
+
+    Ok(DerenderCompletionStreamResponse {
+        chunk,
+        stream_state: state,
+    })
+}
+
 fn chat_request_model(request: &DerenderChatRequestUnion) -> Option<&str> {
     match request {
+        DerenderChatRequestUnion::Streaming(request) => request.model.as_deref(),
         DerenderChatRequestUnion::NonStreaming(request) => request.model.as_deref(),
     }
 }
 
 fn completion_request_model(request: &DerenderCompletionRequestUnion) -> Option<&str> {
     match request {
+        DerenderCompletionRequestUnion::Streaming(request) => request.model.as_deref(),
         DerenderCompletionRequestUnion::NonStreaming(request) => request.model.as_deref(),
     }
 }
@@ -684,8 +949,9 @@ fn completion_request_model(request: &DerenderCompletionRequestUnion) -> Option<
 /// Derender a generate response into a chat completion response (render-only
 /// server variant).
 ///
-/// TODO: phase 3 accepts streaming (`stream=true`) request bodies on the same
-/// path; until then they fail deserialization with a 400.
+/// Accepts both non-streaming (`stream=false`, default) and streaming
+/// (`stream=true`) request bodies on the same path; the `stream`
+/// discriminator selects the shape.
 pub async fn derender_chat_render(
     State(state): State<Arc<RenderState>>,
     headers: HeaderMap,
@@ -694,6 +960,9 @@ pub async fn derender_chat_render(
     let ctx = render_context(&state);
     let request_context = resolve_request_context(&headers, None);
     match body {
+        DerenderChatRequestUnion::Streaming(request) => {
+            derender_chat_stream(&ctx, request).map(|response| Json(response).into_response())
+        }
         DerenderChatRequestUnion::NonStreaming(request) => {
             derender_chat(&ctx, request, request_context)
                 .await
@@ -710,6 +979,9 @@ pub async fn derender_completion_render(
 ) -> Result<Response, ApiError> {
     let ctx = render_context(&state);
     match body {
+        DerenderCompletionRequestUnion::Streaming(request) => {
+            derender_completion_stream(&ctx, request).map(|response| Json(response).into_response())
+        }
         DerenderCompletionRequestUnion::NonStreaming(request) => {
             derender_completion(&ctx, request).map(|response| Json(response).into_response())
         }
@@ -726,6 +998,9 @@ pub async fn derender_chat_completions(
     let ctx = app_context(&state, chat_request_model(&body)).await;
     let request_context = resolve_request_context(&headers, None);
     match body {
+        DerenderChatRequestUnion::Streaming(request) => {
+            derender_chat_stream(&ctx, request).map(|response| Json(response).into_response())
+        }
         DerenderChatRequestUnion::NonStreaming(request) => {
             derender_chat(&ctx, request, request_context)
                 .await
@@ -742,6 +1017,9 @@ pub async fn derender_completions(
 ) -> Result<Response, ApiError> {
     let ctx = app_context(&state, completion_request_model(&body)).await;
     match body {
+        DerenderCompletionRequestUnion::Streaming(request) => {
+            derender_completion_stream(&ctx, request).map(|response| Json(response).into_response())
+        }
         DerenderCompletionRequestUnion::NonStreaming(request) => {
             derender_completion(&ctx, request).map(|response| Json(response).into_response())
         }

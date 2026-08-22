@@ -178,8 +178,6 @@ fn detokenize_incrementally(
 ///
 /// Returns `(new_text, updated_state)` — the delta text for this chunk and
 /// the state to pass to the next call.
-// TODO: called by the phase-3 streaming endpoints.
-#[allow(dead_code)]
 pub(super) fn detokenize_delta(
     tokenizer: &DynTokenizer,
     delta_token_ids: &[u32],

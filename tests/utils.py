@@ -247,7 +247,7 @@ class RemoteVLLMServer:
         vllm_serve_args: list[str],
         *,
         env_dict: dict[str, str] | None = None,
-        seed: int = 0,
+        seed: int | None = 0,
         auto_port: bool = True,
         max_wait_seconds: float | None = None,
         override_hf_configs: dict[str, Any] | None = None,
@@ -839,6 +839,56 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
         self, timeout: float = 30.0, log_interval: float = 10.0
     ):
         pass  # No GPU used
+
+
+def _resolve_vllm_rs_binary() -> str:
+    """Locate the ``vllm-rs`` binary for Rust frontend tests."""
+    env_path = os.environ.get("VLLM_RUST_FRONTEND_PATH")
+    if env_path and env_path.lower() not in ("auto", "1", "true"):
+        candidates = [Path(env_path)]
+    else:
+        repo_root = Path(__file__).resolve().parent.parent
+        candidates = [
+            Path(envs.__file__).resolve().parent / "vllm-rs",  # packaged wheel
+            repo_root / "rust" / "target" / "release" / "vllm-rs",
+            repo_root / "rust" / "target" / "debug" / "vllm-rs",
+        ]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    pytest.skip(
+        "vllm-rs binary not found; build it with `cargo build --release "
+        "--manifest-path rust/Cargo.toml -p vllm-cmd` or set "
+        "VLLM_RUST_FRONTEND_PATH"
+    )
+    raise AssertionError("unreachable: pytest.skip raises")
+
+
+class RemoteRustRenderServer(RemoteLaunchRenderServer):
+    """Launches ``vllm-rs render`` (Rust GPU-less render/derender server).
+
+    Only pass args accepted by both the Rust ``render`` subcommand and the
+    ``vllm serve`` parser (e.g. ``--max-model-len``, ``--tool-call-parser``,
+    ``--reasoning-parser``), since the base class validates args against the
+    serve parser. Pass ``seed=None``: the Rust CLI has no ``--seed`` flag.
+    """
+
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
+    ) -> None:
+        env = os.environ.copy()
+        if env_dict is not None:
+            env.update(env_dict)
+        _sanitize_pythonpath_env(env)
+        serve_cmd = [_resolve_vllm_rs_binary(), "render", model, *vllm_serve_args]
+        print(f"Launching RemoteRustRenderServer with: {' '.join(serve_cmd)}")
+        self.proc: subprocess.Popen = subprocess.Popen(
+            serve_cmd,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            start_new_session=True,
+        )
 
 
 class RemoteOpenAIServerCustom(RemoteOpenAIServer):

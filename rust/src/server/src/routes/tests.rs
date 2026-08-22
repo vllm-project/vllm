@@ -6793,9 +6793,8 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
 // ---------------------------------------------------------------------------
 // /v1/{chat/completions,completions}/derender tests
 //
-// Port of tests/entrypoints/scale_out/derender/test_derender.py against the
-// render-only router fixture. Streaming (test_derender_stream.py, phase 3)
-// tests land in a later phase.
+// Port of tests/entrypoints/scale_out/derender/test_derender.py and
+// test_derender_stream.py against the render-only router fixture.
 // ---------------------------------------------------------------------------
 
 /// Build a chat `GenerateResponse` body mirroring `_make_generate_response`.
@@ -7438,12 +7437,342 @@ async fn derender_completion_oversized_token_ids_rejected() {
     assert!(json["error"]["message"].as_str().unwrap().contains("max_model_len"));
 }
 
+// ---------------------------------------------------------------------------
+// Streaming derender tests
+// ---------------------------------------------------------------------------
+
+/// One streaming derender call, returning the response JSON.
+async fn derender_chat_stream_call(
+    app: &mut axum::Router,
+    token_ids: &[u32],
+    finish_reason: Option<&str>,
+    stream_state: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    derender_chat(
+        app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{
+                    "index": 0,
+                    "token_ids": token_ids,
+                    "finish_reason": finish_reason,
+                }],
+            },
+            "stream_state": stream_state,
+        }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn derender_chat_stream_chunked_equals_one_shot() {
+    let mut app = test_derender_app();
+    // Multibyte characters straddling chunk boundaries must reproduce the
+    // one-shot decode (one token per chunk, the most granular streaming).
+    let text = "Hello ✅ 日本語";
+    let token_ids = derender_token_ids(text);
+
+    let mut stream_state = serde_json::Value::Null;
+    let mut streamed = String::new();
+    let mut last_state = serde_json::Value::Null;
+    for (position, &token_id) in token_ids.iter().enumerate() {
+        let finish_reason = (position == token_ids.len() - 1).then_some("stop");
+        let (status, json) =
+            derender_chat_stream_call(&mut app, &[token_id], finish_reason, stream_state).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let delta = &json["chunk"]["choices"][0]["delta"];
+        // role is emitted on the first processed chunk only.
+        if position == 0 {
+            assert_eq!(delta["role"], "assistant");
+        } else {
+            assert_eq!(delta["role"], serde_json::Value::Null);
+        }
+        streamed.push_str(delta["content"].as_str().unwrap_or_default());
+        stream_state = json["stream_state"].clone();
+        last_state = stream_state.clone();
+    }
+
+    assert_eq!(streamed, text);
+    // The carried window is trimmed and rebased each chunk.
+    assert_eq!(last_state["prefix_offset"], 0);
+    assert_eq!(last_state["role_sent"], true);
+    // Python model_dump emits the reserved fields as explicit nulls.
+    assert_eq!(last_state["last_content"], serde_json::Value::Null);
+    assert_eq!(last_state["last_reasoning"], serde_json::Value::Null);
+    assert_eq!(last_state["last_tool_call_ids"], json!([]));
+}
+
+#[tokio::test]
+async fn derender_chat_stream_finish_reason_and_id_forwarded() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("done");
+
+    let (status, json) = derender_chat_stream_call(
+        &mut app,
+        &token_ids,
+        Some("length"),
+        serde_json::Value::Null,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["chunk"]["id"], "test-stream");
+    assert_eq!(json["chunk"]["object"], "chat.completion.chunk");
+    assert_eq!(json["chunk"]["choices"][0]["finish_reason"], "length");
+    assert_eq!(json["chunk"]["usage"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn derender_chat_stream_with_parser_rejected() {
+    let mut app = test_derender_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("deepseek_r1".to_string()),
+    );
+    let token_ids = derender_token_ids("hello");
+
+    // Fail closed on the parser alone, even when chat_request is omitted.
+    for with_chat_request in [false, true] {
+        let mut body = json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{"index": 0, "token_ids": token_ids, "finish_reason": null}],
+            },
+        });
+        if with_chat_request {
+            body["chat_request"] = json!({
+                "model": "render-model",
+                "messages": [{"role": "user", "content": "hi"}],
+            });
+        }
+        let (status, json) = derender_chat(&mut app, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(json["error"]["message"].as_str().unwrap().contains(
+            "Streaming chat derender is not yet supported for models with a reasoning or \
+                 tool parser configured"
+        ));
+    }
+}
+
+#[tokio::test]
+async fn derender_chat_stream_multiple_choices_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [
+                    {"index": 0, "token_ids": [104], "finish_reason": null},
+                    {"index": 1, "token_ids": [105], "finish_reason": null},
+                ],
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("at most one choice per chunk")
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_prev_tokens_over_cap_rejected() {
+    let mut app = test_derender_app();
+    let prev_tokens: Vec<String> = std::iter::repeat_n("a".to_string(), 1025).collect();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{"index": 0, "token_ids": [104], "finish_reason": null}],
+            },
+            "stream_state": {"prev_tokens": prev_tokens},
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("prev_tokens length (1025) exceeds maximum (1024)")
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_negative_offset_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, _) = derender_chat(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{"index": 0, "token_ids": [104], "finish_reason": null}],
+            },
+            "stream_state": {"prev_tokens": ["a"], "prefix_offset": -1},
+        }),
+    )
+    .await;
+
+    // Negative offsets fail JSON deserialization, mirroring Pydantic's ge=0.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn derender_stream_offset_out_of_range_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{"index": 0, "token_ids": [104], "finish_reason": null}],
+            },
+            "stream_state": {"prev_tokens": ["a"], "prefix_offset": 0, "read_offset": 5},
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("invalid stream_state"));
+}
+
+#[tokio::test]
+async fn derender_completion_stream_roundtrip() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("streaming completion");
+    let mid = token_ids.len() / 2;
+
+    // Non-streaming baseline.
+    let (status, baseline) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [{
+                "request_id": "test-ns",
+                "choices": [{
+                    "index": 0,
+                    "token_ids": token_ids,
+                    "finish_reason": "stop",
+                }],
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{baseline}");
+    let expected_text = baseline["choices"][0]["text"].as_str().unwrap().to_string();
+
+    let mut stream_state = serde_json::Value::Null;
+    let mut streamed = String::new();
+    for (chunk_ids, finish_reason) in [(&token_ids[..mid], None), (&token_ids[mid..], Some("stop"))]
+    {
+        let (status, json) = derender_completion(
+            &mut app,
+            json!({
+                "stream": true,
+                "model": "render-model",
+                "generate_chunk": {
+                    "request_id": "test-s",
+                    "choices": [{
+                        "index": 0,
+                        "token_ids": chunk_ids,
+                        "finish_reason": finish_reason,
+                    }],
+                },
+                "stream_state": stream_state,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        // Completion deltas always carry a string, even when empty.
+        streamed.push_str(json["chunk"]["choices"][0]["text"].as_str().unwrap());
+        stream_state = json["stream_state"].clone();
+    }
+
+    assert_eq!(streamed, expected_text);
+}
+
+#[tokio::test]
+async fn derender_completion_stream_usage_chunk() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("usage");
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "usage-test",
+                "choices": [{
+                    "index": 0,
+                    "token_ids": token_ids,
+                    "finish_reason": "stop",
+                }],
+            },
+            "stream_state": null,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let stream_state = json["stream_state"].clone();
+
+    // Usage-only final chunk: choices pass through empty and usage honors the
+    // caller-supplied prompt_tokens over the chunk's own value.
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "usage-test",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 5,
+                    "total_tokens": 8,
+                },
+            },
+            "stream_state": stream_state,
+            "prompt_tokens": 10,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["chunk"]["choices"], json!([]));
+    assert_eq!(json["chunk"]["usage"]["prompt_tokens"], 10);
+    assert_eq!(json["chunk"]["usage"]["completion_tokens"], 5);
+    assert_eq!(json["chunk"]["usage"]["total_tokens"], 15);
+}
+
 #[tokio::test]
 async fn derender_stream_invalid_body_rejected() {
     let mut app = test_derender_app();
 
-    // stream=true is not supported until phase 3: the non-streaming request
-    // body's `stream` deserializer rejects it outright.
+    // stream=true without the required generate_chunk.
     let (status, _) =
         derender_completion(&mut app, json!({ "stream": true, "model": "render-model" })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -7548,6 +7877,269 @@ async fn derender_chat_usage_overflow_rejected() {
             .contains("overflows the token counter"),
         "{json}"
     );
+}
+
+#[tokio::test]
+async fn derender_chat_stream_usage_overflow_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "usage-overflow",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 5,
+                    "total_tokens": 8,
+                },
+            },
+            "prompt_tokens": u64::MAX,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("overflows the token counter"),
+        "{json}"
+    );
+}
+
+#[tokio::test]
+async fn derender_chat_stream_oversized_chunk_rejected() {
+    let mut app = test_derender_app();
+    // One token past the fixture's max_model_len of 128.
+    let oversized_ids: Vec<u32> = (0..129u32).collect();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{"index": 0, "token_ids": oversized_ids, "finish_reason": null}],
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"].as_str().unwrap().contains("exceeds max_model_len"),
+        "{json}"
+    );
+}
+
+#[tokio::test]
+async fn derender_completion_stream_oversized_chunk_rejected() {
+    let mut app = test_derender_app();
+    let oversized_ids: Vec<u32> = (0..129u32).collect();
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{"index": 0, "token_ids": oversized_ids, "finish_reason": null}],
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"].as_str().unwrap().contains("exceeds max_model_len"),
+        "{json}"
+    );
+}
+
+#[tokio::test]
+async fn derender_stream_state_carries_token_ids() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("h");
+
+    let (status, json) =
+        derender_chat_stream_call(&mut app, &token_ids, None, serde_json::Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["stream_state"]["prev_tokens"], json!(["h"]));
+    assert_eq!(json["stream_state"]["prev_token_ids"], json!(token_ids));
+}
+
+#[tokio::test]
+async fn derender_stream_lossy_pieces_recover_via_token_ids() {
+    // The carried token IDs reconstruct the decode window even when the wire
+    // pieces no longer map back through token_to_id (e.g. a backend whose
+    // id_to_token is lossy UTF-8): corrupting prev_tokens must not change the
+    // output as long as prev_token_ids is intact.
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("日");
+    assert!(token_ids.len() > 1, "test needs a multi-byte character");
+
+    let (status, json) =
+        derender_chat_stream_call(&mut app, &token_ids[..1], None, serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    // The unfinished multi-byte sequence is held back.
+    assert_eq!(
+        json["chunk"]["choices"][0]["delta"]["content"],
+        serde_json::Value::Null
+    );
+
+    let mut state = json["stream_state"].clone();
+    state["prev_tokens"] = json!([""]); // lossy placeholder, unmappable
+    let (status, json) =
+        derender_chat_stream_call(&mut app, &token_ids[1..], Some("stop"), state).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["chunk"]["choices"][0]["delta"]["content"], "日");
+}
+
+#[tokio::test]
+async fn derender_stream_foreign_state_without_token_ids() {
+    // States produced by the Python implementation carry only prev_tokens
+    // pieces; those map back through token_to_id as a fallback.
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("日本");
+
+    let (status, json) =
+        derender_chat_stream_call(&mut app, &token_ids[..1], None, serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let mut state = json["stream_state"].clone();
+    state["prev_token_ids"] = serde_json::Value::Null;
+    let (status, json) =
+        derender_chat_stream_call(&mut app, &token_ids[1..], Some("stop"), state).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["chunk"]["choices"][0]["delta"]["content"], "日本");
+}
+
+#[tokio::test]
+async fn derender_stream_mismatched_prev_token_ids_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "stream": true,
+            "model": "render-model",
+            "generate_chunk": {
+                "request_id": "test-stream",
+                "choices": [{"index": 0, "token_ids": [104], "finish_reason": null}],
+            },
+            "stream_state": {
+                "prev_tokens": ["a"],
+                "prev_token_ids": [97, 98],
+                "read_offset": 1,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"].as_str().unwrap().contains("prev_token_ids length"),
+        "{json}"
+    );
+}
+
+/// Tool-capable model (hermes tool parser, no reasoning parser) for the
+/// streaming tool-gating tests.
+fn test_derender_tool_parser_app() -> axum::Router {
+    test_derender_app_with_parser_selections(
+        ParserSelection::Explicit("hermes".to_string()),
+        ParserSelection::Auto,
+    )
+}
+
+fn derender_tool_stream_body(chat_request: serde_json::Value) -> serde_json::Value {
+    let mut body = json!({
+        "stream": true,
+        "model": "render-model",
+        "generate_chunk": {
+            "request_id": "test-stream",
+            "choices": [{"index": 0, "token_ids": derender_token_ids("hello"), "finish_reason": null}],
+        },
+    });
+    if !chat_request.is_null() {
+        body["chat_request"] = chat_request;
+    }
+    body
+}
+
+#[tokio::test]
+async fn derender_chat_stream_tool_parser_allows_plain_requests() {
+    let mut app = test_derender_tool_parser_app();
+
+    // No chat_request at all.
+    let (status, json) =
+        derender_chat(&mut app, derender_tool_stream_body(serde_json::Value::Null)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["chunk"]["choices"][0]["delta"]["content"], "hello");
+
+    // chat_request without tools: the normal pipeline would not engage the
+    // tool parser either.
+    let (status, json) = derender_chat(
+        &mut app,
+        derender_tool_stream_body(json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hi"}],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    // Tools declared but tool_choice "none" disables tool parsing.
+    let (status, json) = derender_chat(
+        &mut app,
+        derender_tool_stream_body(json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": "none",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+}
+
+#[tokio::test]
+async fn derender_chat_stream_tool_parser_rejects_tool_requests() {
+    let mut app = test_derender_tool_parser_app();
+
+    for chat_request in [
+        // Tools present with the default (auto) tool choice.
+        json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+        }),
+        // An explicit required tool choice.
+        json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": "required",
+        }),
+    ] {
+        let (status, json) = derender_chat(&mut app, derender_tool_stream_body(chat_request)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(
+            json["error"]["message"].as_str().unwrap().contains(
+                "Streaming chat derender is not yet supported for models with a reasoning or \
+                 tool parser configured"
+            ),
+            "{json}"
+        );
+    }
 }
 
 #[tokio::test]
