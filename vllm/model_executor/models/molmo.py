@@ -1263,7 +1263,9 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         return [
             PromptInsertion(
                 modality="image",
-                target=PromptIndexTargets.prefix("<|endoftext|>"),
+                target=PromptIndexTargets.prefix(
+                    tokenizer.encode("<|endoftext|>", add_special_tokens=False),
+                ),
                 insertion=get_insertion_molmo,
             )
         ]

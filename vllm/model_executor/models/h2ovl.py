@@ -90,6 +90,8 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
         hf_processor: H2OVLProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
+        tokenizer = self.info.get_tokenizer()
+
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -127,7 +129,7 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
 
         return PromptReplacement(
             modality="image",
-            target="<image>",
+            target=tokenizer.encode("<image>", add_special_tokens=False),
             replacement=get_replacement_internvl,
         )
 

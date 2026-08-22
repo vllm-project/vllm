@@ -436,7 +436,11 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
+        image_token_ids = [
+            tokenizer.encode(tok, add_special_tokens=False) for tok in image_tokens
+        ]
 
         def get_replacement_phi3v(item_idx: int):
             images = mm_items.get_items(
@@ -458,7 +462,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=image_tokens.__getitem__,
+                target=image_token_ids.__getitem__,
                 replacement=get_replacement_phi3v,
             )
         ]
@@ -475,8 +479,11 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
         if cached_update.modality == "image":
             hf_processor = self.info.get_hf_processor()
+            tokenizer = self.info.get_tokenizer()
             image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
-            new_update = new_update.with_target(image_tokens[new_item_idx])
+            new_update = new_update.with_target(
+                tokenizer.encode(image_tokens[new_item_idx], add_special_tokens=False)
+            )
 
         return new_update
 

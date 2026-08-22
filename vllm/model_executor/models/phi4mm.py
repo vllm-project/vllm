@@ -934,8 +934,15 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        tokenizer = self.info.get_tokenizer()
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
+        image_token_ids = [
+            tokenizer.encode(tok, add_special_tokens=False) for tok in image_tokens
+        ]
+        audio_token_ids = [
+            tokenizer.encode(tok, add_special_tokens=False) for tok in audio_tokens
+        ]
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -970,12 +977,12 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=image_tokens.__getitem__,
+                target=image_token_ids.__getitem__,
                 replacement=get_image_replacement_phi4mm,
             ),
             PromptReplacement(
                 modality="audio",
-                target=audio_tokens.__getitem__,
+                target=audio_token_ids.__getitem__,
                 replacement=get_audio_replacement_phi4mm,
             ),
         ]
@@ -990,12 +997,18 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             new_item_idx,
         )
 
+        tokenizer = self.info.get_tokenizer()
+
         if cached_update.modality == "image":
             image_tokens: list[str] = self.info.image_tokens  # type: ignore
-            new_update = new_update.with_target(image_tokens[new_item_idx])
+            new_update = new_update.with_target(
+                tokenizer.encode(image_tokens[new_item_idx], add_special_tokens=False)
+            )
         elif cached_update.modality == "audio":
             audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
-            new_update = new_update.with_target(audio_tokens[new_item_idx])
+            new_update = new_update.with_target(
+                tokenizer.encode(audio_tokens[new_item_idx], add_special_tokens=False)
+            )
 
         return new_update
 

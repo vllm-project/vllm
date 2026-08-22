@@ -383,6 +383,8 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
+        tokenizer = self.info.get_tokenizer()
+
         def get_replacement_ovis(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
             grid = out_item["grids"].data
@@ -393,7 +395,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=IMAGE_TOKEN,
+                target=tokenizer.encode(IMAGE_TOKEN, add_special_tokens=False),
                 replacement=get_replacement_ovis,
             ),
         ]

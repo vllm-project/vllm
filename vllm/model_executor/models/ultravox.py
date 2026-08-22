@@ -322,7 +322,9 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         return [
             PromptReplacement(
                 modality="audio",
-                target="<|audio|>",
+                # `replacement_id` is paired with `<|audio|>` in
+                # `UltravoxProcessingInfo.get_hf_processor`
+                target=[replacement_id],
                 replacement=get_replacement_ultravox,
             )
         ]

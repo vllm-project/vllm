@@ -666,8 +666,12 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
 
         num_patches_per_chunk = self.info.get_patch_per_chunk(vision_config)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token = hf_processor.image_token
         img_patch_token = hf_processor.img_patch_token
+
+        tokenizer = self.info.get_tokenizer()
+        img_patch_token_ids = tokenizer.encode(
+            img_patch_token, add_special_tokens=False
+        )
 
         def get_replacement(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
@@ -678,12 +682,13 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                 num_patches_per_chunk=num_patches_per_chunk,
             )
 
-            return PromptUpdateDetails.select_text(repl, img_patch_token)
+            repl_ids = tokenizer.encode(repl, add_special_tokens=False)
+            return PromptUpdateDetails.select_token_ids(repl_ids, img_patch_token_ids)
 
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[hf_processor.image_token_id],
                 replacement=get_replacement,
             )
         ]

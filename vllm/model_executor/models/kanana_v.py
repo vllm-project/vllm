@@ -541,6 +541,8 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        tokenizer = self.info.get_tokenizer()
+
         def get_replacement(idx: int) -> Sequence[int]:
             out_item = out_mm_kwargs["image"][idx]
             image_token_thw = out_item["image_token_thw"].data
@@ -552,7 +554,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         return [
             PromptReplacement(
                 modality="image",
-                target="<image>",
+                target=tokenizer.encode("<image>", add_special_tokens=False),
                 replacement=get_replacement,
             ),
         ]

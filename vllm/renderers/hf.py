@@ -157,7 +157,7 @@ def _expand_prompt_embeds_placeholders(
     `token_ids` is replaced with a consecutive span of
     `tensor.shape[0]` copies, following tensors in order.
     """
-    expanded, _ = apply_token_matches(token_ids, mm_prompt_updates, tokenizer=None)
+    expanded, _ = apply_token_matches(token_ids, mm_prompt_updates)
     return expanded
 
 
@@ -174,7 +174,6 @@ def _build_prompt_embeds_positions(
     placeholders = find_mm_placeholders(
         prompt=token_ids,
         mm_prompt_updates=mm_prompt_updates,
-        tokenizer=None,
     )
     features = placeholders.get("prompt_embeds", [])
 

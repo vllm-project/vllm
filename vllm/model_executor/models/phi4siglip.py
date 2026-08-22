@@ -193,6 +193,8 @@ class Phi4SiglipMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        tokenizer = self.info.get_tokenizer()
+
         def get_replacement(item_idx: int):
             # Read the actual patch grid from the NaFlex processor's
             # spatial_shapes output (same pattern as LFM2-VL).  This avoids
@@ -207,7 +209,7 @@ class Phi4SiglipMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="image",
-                target=DEFAULT_IMAGE_TOKEN,
+                target=tokenizer.encode(DEFAULT_IMAGE_TOKEN, add_special_tokens=False),
                 replacement=get_replacement,
             ),
         ]

@@ -1694,6 +1694,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
 
         merge_length = image_processor.merge_size**2
 
@@ -1722,12 +1724,18 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=hf_processor.image_token,
+                target=tokenizer.encode(
+                    hf_processor.image_token, add_special_tokens=False
+                ),
                 replacement=get_image_replacement,
             ),
             PromptReplacement(
                 modality="video",
-                target="<|begin_of_video|><|video|><|end_of_video|>",
+                target=[
+                    vocab["<|begin_of_video|>"],
+                    vocab["<|video|>"],
+                    vocab["<|end_of_video|>"],
+                ],
                 replacement=get_video_replacement,
             ),
         ]
