@@ -129,6 +129,15 @@ class SiluAndMul(CustomOp):
             or current_platform.is_xpu()
         ):
             self.op = torch.ops._C.silu_and_mul
+        # Fused SiluAndMul + per-token FP8 quantization (CUDA only).
+        # Available when the silu_and_mul_dynamic_per_token_quant custom
+        # kernel has been compiled into the _C extension.
+        if current_platform.is_cuda_alike() and hasattr(
+            torch.ops._C, "silu_and_mul_dynamic_per_token_quant"
+        ):
+            self.fused_fp8_op = torch.ops._C.silu_and_mul_dynamic_per_token_quant
+        else:
+            self.fused_fp8_op = None
 
     @staticmethod
     def forward_native(x: torch.Tensor) -> torch.Tensor:
@@ -136,12 +145,86 @@ class SiluAndMul(CustomOp):
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
+    @staticmethod
+    def forward_native_fp8(
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """PyTorch-native equivalent of forward_cuda_fp8.
+
+        Computes silu(x[:d]) * x[d:] and dynamically quantizes the result
+        to FP8-E4M3 with per-token scales, matching the semantics of
+        ``torch.ops._C.silu_and_mul_dynamic_per_token_quant``.
+
+        Args:
+            x: Gate-up projection output of shape ``(num_tokens, 2 * d)``
+               or ``(batch, seq, 2 * d)``.
+
+        Returns:
+            out_fp8: FP8-E4M3 tensor with the same leading dims and last
+                     dim ``d``.
+            scale:   Per-token scale factors (float32), shape
+                     ``(..., 1)``.
+        """
+        d = x.shape[-1] // 2
+        act = F.silu(x[..., :d]) * x[..., d:]
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max
+        scale = act.abs().amax(dim=-1, keepdim=True).float() / fp8_max
+        scale = scale.clamp(min=torch.finfo(torch.float32).tiny)
+        out_fp8 = (act.float() / scale).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
+        return out_fp8, scale
+
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         self.op(out, x)
         return out
+
+    def forward_cuda_fp8(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused SiluAndMul + dynamic per-token FP8 quantization.
+
+        Replaces the common two-kernel sequence used in W8A8-FP8 MLP
+        layers::
+
+            act = silu_and_mul(gate_up)
+            act_fp8, sc = dynamic_scaled_fp8_quant(act)
+
+        with a single CUDA kernel that reads the gate-up tensor once and
+        writes FP8-E4M3 activations plus per-token scales in one pass,
+        saving one global-memory round-trip and halving the activation
+        traffic into the down-projection step.
+
+        Falls back to :meth:`forward_native_fp8` when the fused kernel is
+        not available (CPU/XPU paths, ROCm builds without the extension).
+
+        Args:
+            x: Gate-up projection output, shape ``(num_tokens, 2 * d)``
+               or ``(batch, seq, 2 * d)``, dtype float16 or bfloat16.
+
+        Returns:
+            out_fp8: FP8-E4M3 activations, shape ``(num_tokens, d)``
+                     or ``(batch, seq, d)``.
+            scale:   Per-token scale factors (float32), shape
+                     ``(num_tokens, 1)`` or ``(batch, seq, 1)``.  Pass
+                     directly to the quantized down-projection kernel.
+        """
+        if self.fused_fp8_op is None:
+            return self.forward_native_fp8(x)
+        # The CUDA kernel expects a 2-D input; flatten batch dims if present.
+        orig_shape = x.shape
+        if x.ndim != 2:
+            x = x.view(-1, orig_shape[-1])
+        num_tokens, hidden2 = x.shape
+        d = hidden2 // 2
+        out_fp8 = torch.empty(
+            (num_tokens, d), dtype=torch.float8_e4m3fn, device=x.device
+        )
+        scale = torch.empty((num_tokens, 1), dtype=torch.float32, device=x.device)
+        self.fused_fp8_op(out_fp8, scale, x)
+        if len(orig_shape) != 2:
+            out_fp8 = out_fp8.view(orig_shape[:-1] + (d,))
+            scale = scale.view(orig_shape[:-1] + (1,))
+        return out_fp8, scale
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_cuda(x)

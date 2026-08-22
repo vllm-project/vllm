@@ -436,6 +436,42 @@ def rms_norm_per_block_quant(
     return output, scales
 
 
+# fused silu_and_mul + dynamic per-token FP8 quantization
+def silu_and_mul_dynamic_per_token_quant(
+    input: torch.Tensor,
+    quant_dtype: torch.dtype = torch.float8_e4m3fn,
+    scale_ub: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused SiLU+gating with dynamic per-token FP8 quantization.
+
+    Computes silu(gate) * up for each token and simultaneously derives
+    a per-token FP8 scale from the activation's own absmax.  Unlike
+    silu_and_mul_quant, no pre-calibrated global scale is required, and
+    each token is quantized independently — matching the accuracy of
+    dynamic_per_token_scaled_fp8_quant but fused with the SiLU gate.
+
+    Args:
+        input:      [..., 2*d] BF16 or FP16 tensor in gate || up layout.
+        quant_dtype: FP8 output dtype (float8_e4m3fn or float8_e4m3fnuz).
+        scale_ub:   Optional scalar float32 tensor; per-token scales are
+                    clamped to at most this value (prevents very large
+                    scales from causing underflow in subsequent GEMMs).
+
+    Returns:
+        out:    [..., d] quantized to quant_dtype.
+        scales: [num_tokens] float32, one scale per token.
+    """
+    assert input.shape[-1] % 2 == 0, (
+        f"Last dim must be even (gate||up layout), got {input.shape[-1]}"
+    )
+    num_tokens = input.numel() // input.shape[-1]
+    d = input.shape[-1] // 2
+    out = torch.empty((num_tokens, d), device=input.device, dtype=quant_dtype)
+    scales = torch.empty((num_tokens,), device=input.device, dtype=torch.float32)
+    torch.ops._C.silu_and_mul_dynamic_per_token_quant(out, scales, input, scale_ub)
+    return out, scales
+
+
 # fused silu_and_mul + block quant
 def silu_and_mul_per_block_quant(
     input: torch.Tensor,
