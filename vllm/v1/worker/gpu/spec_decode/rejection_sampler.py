@@ -23,11 +23,10 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
 
-# Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
-# TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
-# per vocab block on load and apply ops like temperature and gumbel, so folding
-# sampling-param application into those kernels would remove this buffer and
-# its traffic entirely.
+# Cap on the FP32 target-logits buffer materialized by non-temperature sampling
+# parameters. Temperature-only requests apply it inside the rejection kernels.
+# TODO(mgoin): Fold the remaining sampling parameters into the rejection kernels
+# to remove this buffer and its traffic entirely.
 MAX_CHUNK_BYTES = 2**30  # 1GB
 _FP32_BYTES = 4
 
@@ -96,6 +95,22 @@ class RejectionSampler:
         elif rejection_sample_method == "block":
             self.use_block_verification = True
 
+    def _should_apply_target_temperature(
+        self, idx_mapping_np: np.ndarray, max_num_logprobs: int
+    ) -> bool:
+        needs_processed_logprobs = (
+            max_num_logprobs != NO_LOGPROBS
+            and self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
+        )
+        temperature = self.sampler.sampling_states.temperature.np[idx_mapping_np]
+        return bool(
+            not needs_processed_logprobs
+            and not np.any(
+                self.sampler.needs_non_temperature_logits_processing[idx_mapping_np]
+            )
+            and np.any((temperature != 0.0) & (temperature != 1.0))
+        )
+
     def _get_logprobs_tensors(
         self,
         sampled: torch.Tensor,
@@ -142,16 +157,20 @@ class RejectionSampler:
         idx_mapping_np: np.ndarray,
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        apply_target_temperature: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        processed_logits = self.sampler.apply_sampling_params(
-            logits,
-            expanded_idx_mapping,
-            idx_mapping,
-            idx_mapping_np,
-            pos,
-            draft_sampled,
-            expanded_local_pos,
-        )
+        if apply_target_temperature:
+            processed_logits = logits
+        else:
+            processed_logits = self.sampler.apply_sampling_params(
+                logits,
+                expanded_idx_mapping,
+                idx_mapping,
+                idx_mapping_np,
+                pos,
+                draft_sampled,
+                expanded_local_pos,
+            )
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
@@ -167,6 +186,7 @@ class RejectionSampler:
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
+            apply_target_temperature=apply_target_temperature,
         )
         return processed_logits, sampled, num_sampled
 
@@ -179,6 +199,7 @@ class RejectionSampler:
         pos: torch.Tensor,
         max_chunk_logits: int,
         max_num_logprobs: int,
+        apply_target_temperature: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, LogprobsTensors | None]:
         cu_num_logits_np = input_batch.cu_num_logits_np
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
@@ -213,6 +234,7 @@ class RejectionSampler:
                 input_batch.idx_mapping_np[start:end],
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
+                apply_target_temperature,
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
@@ -262,7 +284,14 @@ class RejectionSampler:
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
             input_batch.idx_mapping_np
         )
-        chunk_logit_limit = get_max_chunk_logits(logits.shape[1])
+        apply_target_temperature = self._should_apply_target_temperature(
+            input_batch.idx_mapping_np, max_num_logprobs
+        )
+        chunk_logit_limit = (
+            logits.shape[0]
+            if apply_target_temperature
+            else get_max_chunk_logits(logits.shape[1])
+        )
         sampled, num_sampled, logprobs_tensors = self._verify_in_chunks(
             logits,
             input_batch,
@@ -271,6 +300,7 @@ class RejectionSampler:
             pos,
             chunk_logit_limit,
             max_num_logprobs,
+            apply_target_temperature,
         )
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(
