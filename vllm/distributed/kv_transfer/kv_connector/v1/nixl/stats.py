@@ -23,7 +23,17 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """
+    Container for transfer performance metrics.
+    
+    Note: In multi-rank (TP > 1) deployments, these stats are aggregated 
+    across all TP ranks. Consequently:
+    - Counts (e.g., 'Num successful transfers') represent the total sum 
+      across all ranks.
+    - Averages and throughputs represent per-rank averages computed over 
+      the combined pool of observations from all ranks.
+    - Percentiles are computed over the combined distribution of all ranks.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -84,7 +94,10 @@ class NixlKVConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        # Compute compact representative stats suitable for CLI logging
+        # Compute compact representative stats suitable for CLI logging.
+        # Note: In multi-rank deployments, the metrics here are computed over 
+        # the combined observation pool from all TP ranks. Therefore, throughput 
+        # and averages reflect per-rank metrics rather than aggregate system totals.
         if self.num_successful_transfers == 0:
             # CLI logging only reports successful transfers stats. If all requests in
             # the interval were unsuccessful, Prom will report failures stats instead.
