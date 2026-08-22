@@ -237,7 +237,16 @@ def test_snapshot_environment_contract(
             served_model_name=None,
             tokenizer_revision=None,
         ),
-        ("Qwen/Qwen3-0.6B", "--hf-token", secret, f"--hf-token={secret}"),
+        (
+            "Qwen/Qwen3-0.6B",
+            "--api-key",
+            secret,
+            f"{secret}-alternate",
+            f"--api-key={secret}",
+            "--hf-token",
+            secret,
+            f"--hf-token={secret}",
+        ),
         ProcessInventory(100, (100, 101), (101,), "GPU-abc"),
         _oracle(),
         tmp_path,
@@ -245,6 +254,10 @@ def test_snapshot_environment_contract(
 
     assert manifest.engine_argv == (
         "Qwen/Qwen3-0.6B",
+        "--api-key",
+        "***",
+        "***",
+        "--api-key=***",
         "--hf-token",
         "***",
         "--hf-token=***",
