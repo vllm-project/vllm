@@ -56,19 +56,22 @@ def _wrap_media_fetch_error(
 ) -> VLLMUnprocessableEntityError | Exception:
     """Convert media fetch exceptions to VLLMUnprocessableEntityError.
 
-    This handles HTTP errors that indicate the media resource is invalid
-    (4xx responses except 408/429, malformed URLs) and converts them to a
-    422 Unprocessable Entity error instead of 500.
+    This handles errors that indicate the media URL is unreachable or the
+    resource cannot be processed (4xx responses except 408/429, client-side
+    connection failures including DNS and connection timeouts, malformed URLs)
+    and converts them to a 422 Unprocessable Entity error instead of 500.
 
-    Transient errors (5xx, 408, 429, DNS failures, connection errors,
-    timeouts) are returned as-is to allow retry logic to handle them
-    appropriately.
+    Server-side errors (5xx), server-side disconnects, read/operation timeouts,
+    and certain HTTP codes that are typically retryable (408, 429) are
+    returned as-is to allow retry logic or upstream handling to treat them as
+    server errors.
 
     Returns:
-        VLLMUnprocessableEntityError for permanent client errors (4xx except
-            408/429, invalid URL)
-        Original exception for transient errors (5xx, 408, 429, network blips)
-            or other exceptions
+        VLLMUnprocessableEntityError for client-side/unreachable URL errors
+            (4xx except 408/429, client-side connection/DNS failures, invalid
+            URL)
+        Original exception for server-side errors (5xx, 408, 429), server
+            disconnects, read/operation timeouts, or other exceptions
     """
     if isinstance(exc, aiohttp.ClientResponseError):
         if exc.status in (408, 429):
@@ -97,6 +100,24 @@ def _wrap_media_fetch_error(
     if isinstance(exc, requests.exceptions.InvalidURL):
         return VLLMUnprocessableEntityError(
             "Failed to fetch media from URL: Invalid URL format",
+            parameter="image_url",
+            value=url,
+        )
+
+    # Client-side connection failures from aiohttp (DNS, connection refused,
+    # connection timeout, SSL errors, etc.).
+    if isinstance(exc, aiohttp.ClientConnectorError):
+        return VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: {exc}",
+            parameter="image_url",
+            value=url,
+        )
+
+    # Connection-level failures from requests (DNS, connection refused,
+    # connection timeout, etc.).
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: {exc}",
             parameter="image_url",
             value=url,
         )
