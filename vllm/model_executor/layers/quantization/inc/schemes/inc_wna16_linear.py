@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported,
+    get_marlin_input_dtype,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -62,7 +63,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
                 AutoGPTQLinearMethod,
             )
 
-            return AutoGPTQLinearMethod(
+            method = AutoGPTQLinearMethod(
                 AutoGPTQConfig(
                     weight_bits=self.layer_config.bits,
                     group_size=self.layer_config.group_size,
@@ -73,6 +74,8 @@ class INCWNA16LinearScheme(INCLinearScheme):
                     full_config={},
                 )
             )
+            method.input_dtype = get_marlin_input_dtype()
+            return method
 
         raise NotImplementedError(
             f"INC quantization with bits={self.layer_config.bits}, "
