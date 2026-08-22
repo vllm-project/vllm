@@ -59,7 +59,7 @@ pub struct MultimodalModelInfo {
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
 ///
-/// Modalities absent from the map are unlimited.
+/// Modalities absent from the map default to 999 items.
 pub type MmLimitPerPrompt = HashMap<MmLimitModality, MmLimitSpec>;
 
 /// Modalities that `--limit-mm-per-prompt` can be keyed by.
@@ -661,11 +661,15 @@ fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmLimitModality>
     }
 }
 
+/// Default per-modality item limit applied when `--limit-mm-per-prompt` does
+/// not specify a count for a modality. Matches the Python frontend's default.
+const DEFAULT_MM_ITEMS_PER_PROMPT: usize = 999;
+
 impl MultimodalModelInfo {
     /// Reject requests exceeding `--limit-mm-per-prompt`'s configured
     /// per-modality item count, before any fetch/decode work is spent on them.
     ///
-    /// Modalities without a configured count are unlimited.
+    /// Modalities without a configured count default to 999 items.
     fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
         let mut counts: HashMap<MmLimitModality, usize> = HashMap::new();
         for part in media_parts {
@@ -675,10 +679,11 @@ impl MultimodalModelInfo {
         }
 
         for (modality, count) in counts {
-            let Some(limit) = self.limit_mm_per_prompt.get(&modality).and_then(MmLimitSpec::count)
-            else {
-                continue;
-            };
+            let limit = self
+                .limit_mm_per_prompt
+                .get(&modality)
+                .and_then(MmLimitSpec::count)
+                .unwrap_or(DEFAULT_MM_ITEMS_PER_PROMPT);
             if count > limit {
                 return Err(Error::MmLimitExceeded {
                     modality: modality.as_str().to_string(),
@@ -1020,11 +1025,28 @@ mod tests {
     }
 
     #[test]
-    fn validate_mm_limits_leaves_unconfigured_modalities_unlimited() {
+    fn validate_mm_limits_enforces_default_limit_for_unconfigured_modalities() {
         let info = qwen3_vl_info();
-        let parts: Vec<_> = std::iter::repeat_with(image_url_part).take(1_000).collect();
 
+        let at_limit: Vec<_> = std::iter::repeat_with(image_url_part).take(999).collect();
+        assert!(info.validate_mm_limits(&at_limit).is_ok());
+
+        let over_limit: Vec<_> = std::iter::repeat_with(image_url_part).take(1_000).collect();
+        assert!(info.validate_mm_limits(&over_limit).is_err());
+    }
+
+    #[test]
+    fn validate_mm_limits_explicit_limit_overrides_default() {
+        let info = qwen3_vl_info_with_limits(HashMap::from([(
+            MmLimitModality::Image,
+            MmLimitSpec::Count(2000),
+        )]));
+        let parts: Vec<_> = std::iter::repeat_with(image_url_part).take(2000).collect();
         assert!(info.validate_mm_limits(&parts).is_ok());
+
+        let over: Vec<_> = std::iter::repeat_with(image_url_part).take(2001).collect();
+        assert!(over.len() > super::DEFAULT_MM_ITEMS_PER_PROMPT);
+        assert!(info.validate_mm_limits(&over).is_err());
     }
 
     #[test]
@@ -1063,10 +1085,10 @@ mod tests {
         );
     }
 
-    /// An options object without a `count` carries only profiling keys, which
-    /// say nothing about how many items are allowed.
+    /// An options object without a `count` falls back to the default limit
+    /// (999), so small counts still pass.
     #[test]
-    fn validate_mm_limits_treats_a_count_less_options_object_as_unlimited() {
+    fn validate_mm_limits_count_less_options_object_uses_default_limit() {
         let info = qwen3_vl_info_with_limits(HashMap::from([(
             MmLimitModality::Image,
             MmLimitSpec::Options {
@@ -1076,6 +1098,9 @@ mod tests {
         )]));
 
         assert!(info.validate_mm_limits(&[image_url_part(), image_url_part()]).is_ok());
+
+        let over_default: Vec<_> = std::iter::repeat_with(image_url_part).take(1_000).collect();
+        assert!(info.validate_mm_limits(&over_default).is_err());
     }
 
     fn parse_limits(json: &str) -> MmLimitPerPrompt {
