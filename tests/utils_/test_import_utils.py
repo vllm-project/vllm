@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.utils.import_utils import PlaceholderModule, _has_module
+from vllm.utils.import_utils import PlaceholderModule, _has_module, import_plugin
 
 
 def _raises_module_not_found():
@@ -101,3 +102,36 @@ class TestHasModule:
             result = _has_module("json")  # should hit cache
             mock_spec.assert_not_called()
             assert result is True
+
+
+class TestImportPlugin:
+    def test_importing_from_site_packages(self):
+        import json
+
+        result = import_plugin("json")
+        assert result is json
+
+    def test_importing_from_file(self, tmp_path):
+        plugin_file = tmp_path / "my_test_plugin.py"
+        plugin_file.write_text("VALUE = 42\n")
+
+        try:
+            result = import_plugin(str(plugin_file))
+            assert result is not None
+            assert result.VALUE == 42
+        finally:
+            sys.modules.pop("my_test_plugin", None)
+
+    def test_returns_none_when_both_attempts_fail(self):
+        with (
+            patch(
+                "vllm.utils.import_utils.import_from_path",
+                side_effect=FileNotFoundError("no such file"),
+            ),
+            patch(
+                "vllm.utils.import_utils.importlib.import_module",
+                side_effect=ModuleNotFoundError("no such module"),
+            ),
+        ):
+            result = import_plugin("nonexistent_plugin_xyz")
+            assert result is None
