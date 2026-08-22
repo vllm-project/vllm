@@ -1752,11 +1752,15 @@ steps:
   - vllm/models/kimi_k3/nvidia/kda_metadata.py
   - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
   - vllm/models/kimi_k3/amd/
+  - CMakeLists.txt
   - csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu
+  - csrc/libtorch_stable/ops.h
+  - csrc/libtorch_stable/torch_bindings.cpp
   - tests/models/kimi_k3/test_amd_attn_res.py
   - tests/models/kimi_k3/test_amd_kda_decode.py
   - tests/models/kimi_k3/test_kda.py
   - tests/models/kimi_k3/test_kda_metadata.py
+  - vllm/_custom_ops.py
   - vllm/platforms/rocm.py
   commands:
   # Run the ROCm AttnRes/KDA decode counterparts plus existing KDA coverage.
@@ -3329,7 +3333,7 @@ steps:
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
   - pytest -v -s tests/v1/distributed/test_dbo.py
 
-- label: ":amd: (MI355) Fusion E2E TP2 Quick" # TBD
+- label: ":amd: (MI355) Fusion E2E TP2 Quick (AITER subset)" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
@@ -3563,15 +3567,17 @@ steps:
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
+  - vllm/distributed/
+  - vllm/model_executor/layers/fused_moe/
   - vllm/third_party/flash_linear_attention/ops/
-  - tests/evals/gsm8k/configs/models-qwen35-mi355.txt
-  - tests/evals/gsm8k/configs/Qwen3.5-35B-A3B-FP8-DEP2.yaml
+  - tests/evals/gsm8k/
+  - tests/utils.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-mi355.txt
 
-- label: ":amd: (MI355) LM Eval Spec Decode" # TBD
+- label: ":amd: (MI355) LM Eval Spec Decode (Fixed-length FP8)" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
@@ -3580,11 +3586,12 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - tests/evals/gsm8k/test_gsm8k_correctness.py
-  - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-FP8-TP4-ROCm.yaml
-  - tests/evals/gsm8k/configs/models-spec-decode-rocm.txt
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - vllm/distributed/
   - vllm/models/deepseek_v4/
   - vllm/model_executor/models/qwen3_dspark.py
+  - vllm/model_executor/layers/fused_moe/
   - vllm/v1/spec_decode/metrics.py
   - vllm/v1/worker/gpu/spec_decode/dspark/
   - vllm/v1/worker/gpu/spec_decode/rejection_sampler.py
@@ -3626,9 +3633,9 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/
-  - tests/evals/gsm8k/test_gsm8k_correctness.py
-  - tests/evals/gsm8k/configs/models-small-tp.txt
-  - tests/evals/gsm8k/configs/DiffusionGemma-26B-A4B-it-FP8-dynamic.yaml
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - vllm/distributed/
   - vllm/model_executor/models/config.py
   - vllm/model_executor/models/diffusion_gemma.py
   - vllm/model_executor/layers/quantization/
@@ -4320,7 +4327,8 @@ steps:
   - vllm/model_executor/models/medusa.py
   - vllm/model_executor/models/registry.py
   - tests/evals/gsm8k/
-  - tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/
+  - tests/utils.py
+  - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/
