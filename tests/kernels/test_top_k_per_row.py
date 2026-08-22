@@ -271,6 +271,215 @@ def test_top_k_per_row(
     ), "CUDA top_k_per_row_prefill results don't match torch.topk"
 
 
+def _check_nan_hardened_topk(
+    logits: torch.Tensor,
+    indices: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    top_k: int,
+    kernel_name: str,
+    check_rows: range | None = None,
+) -> None:
+    """Validate the NaN-input contract of the top-k kernels (issue #49896).
+
+    For rows longer than top_k (histogram path) the kernel must never emit
+    garbage: every output slot is either a valid in-range index of a non-NaN
+    logit or -1, the -1 padding forms a suffix, and the selected values match
+    a NaN-excluded torch.topk reference. Rows with row_len <= top_k keep the
+    documented short-row behavior (all candidate positions, then -1 padding).
+    """
+    out = indices.cpu()
+    logits_cpu = logits.cpu()
+    row_starts_cpu = row_starts.cpu()
+    row_ends_cpu = row_ends.cpu()
+    rows = check_rows if check_rows is not None else range(indices.shape[0])
+    for i in rows:
+        row_start = int(row_starts_cpu[i])
+        row_end = int(row_ends_cpu[i])
+        row_len = row_end - row_start
+        row = out[i]
+        # 1. No garbage: every slot is -1 padding or a valid in-range index.
+        assert ((row >= -1) & (row < row_len)).all(), (
+            f"{kernel_name} row {i}: out-of-range index "
+            f"(min={int(row.min())}, max={int(row.max())}, row_len={row_len})"
+        )
+        # 2. -1 padding is a suffix.
+        num_valid = int((row >= 0).sum())
+        assert (row[num_valid:] == -1).all(), (
+            f"{kernel_name} row {i}: -1 padding is not a suffix"
+        )
+        valid = row[:num_valid].long()
+        # 3. No duplicate indices.
+        assert valid.unique().numel() == num_valid, (
+            f"{kernel_name} row {i}: duplicate indices emitted"
+        )
+        if row_len <= top_k:
+            # Short-row path: all candidate positions are selected.
+            assert num_valid == row_len, (
+                f"{kernel_name} row {i}: short row expected {row_len} valid "
+                f"indices, got {num_valid}"
+            )
+            continue
+        window = logits_cpu[i, row_start:row_end]
+        # 4. Histogram path: NaN logits are never selected.
+        selected_vals = window[valid]
+        assert not torch.isnan(selected_vals).any(), (
+            f"{kernel_name} row {i}: NaN logit selected"
+        )
+        # 5. Exactly min(top_k, #non-NaN) candidates are returned.
+        finite_count = int((~torch.isnan(window)).sum())
+        expected_valid = min(top_k, finite_count)
+        assert num_valid == expected_valid, (
+            f"{kernel_name} row {i}: expected {expected_valid} valid indices, "
+            f"got {num_valid}"
+        )
+        # 6. The selected values match a NaN-excluded torch.topk reference.
+        if num_valid > 0:
+            ref_vals = window.nan_to_num(float("-inf")).topk(num_valid)[0]
+            got_vals = selected_vals.sort(descending=True)[0]
+            assert torch.equal(got_vals, ref_vals), (
+                f"{kernel_name} row {i}: selected values do not match "
+                f"torch.topk reference"
+            )
+
+
+@pytest.mark.parametrize("top_k,vocab_size", [(512, 1243), (2048, 4507)])
+@pytest.mark.parametrize("nan_fraction", [0.5, 0.83, 1.0])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_top_k_per_row_prefill_nan_logits(
+    top_k: int,
+    vocab_size: int,
+    nan_fraction: float,
+) -> None:
+    """Regression test for issue #49896: NaN-dominated logits must not make
+    top_k_per_row_prefill emit uninitialized shared memory or NaN bit
+    patterns as indices (histogram path)."""
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+
+    num_rows = 4869
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
+    # Clamp to the number of columns (mirrors the issue #49896 repro).
+    row_ends = torch.clamp(
+        torch.arange(1, num_rows + 1, dtype=torch.int32, device="cuda"),
+        max=vocab_size,
+    )
+    logits = torch.randn(num_rows, vocab_size, dtype=torch.float32, device="cuda")
+    if nan_fraction >= 1.0:
+        logits[:] = float("nan")
+    else:
+        nan_mask = torch.rand(num_rows, vocab_size, device="cuda") < nan_fraction
+        logits[nan_mask] = float("nan")
+
+    # -7 canary: pre-fix, under-filled rows leaked uninitialized shared memory.
+    indices = torch.full((num_rows, top_k), -7, dtype=torch.int32, device="cuda")
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+    torch.accelerator.synchronize()
+
+    _check_nan_hardened_topk(
+        logits, indices, row_starts, row_ends, top_k, "top_k_per_row_prefill"
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_top_k_per_row_prefill_nan_logits_radix_rows() -> None:
+    """NaN hardening for the radix-sort variant of top_k_per_row_prefill
+    (rows beyond the first 12288 use the radix-sort final pass)."""
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+
+    num_rows, vocab_size, top_k = 12544, 1243, 512
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
+    row_ends = torch.full((num_rows,), vocab_size, dtype=torch.int32, device="cuda")
+    logits = torch.randn(num_rows, vocab_size, dtype=torch.float32, device="cuda")
+    nan_mask = torch.rand(num_rows, vocab_size, device="cuda") < 0.83
+    logits[nan_mask] = float("nan")
+
+    indices = torch.full((num_rows, top_k), -7, dtype=torch.int32, device="cuda")
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+    torch.accelerator.synchronize()
+
+    # Check a slice of insertion-sort rows and all radix-sort rows.
+    _check_nan_hardened_topk(
+        logits,
+        indices,
+        row_starts,
+        row_ends,
+        top_k,
+        "top_k_per_row_prefill (radix rows)",
+        check_rows=range(12160, num_rows),
+    )
+
+
+@pytest.mark.parametrize(
+    "vocab_size", [8192, 16384, 250000]
+)  # insertion sort / radix sort / split+merge
+@pytest.mark.parametrize("nan_fraction", [0.5, 0.83, 1.0])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_top_k_per_row_decode_nan_logits(
+    vocab_size: int,
+    nan_fraction: float,
+) -> None:
+    """NaN hardening for all three top_k_per_row_decode code paths."""
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+
+    top_k = 2048
+    batch_size = 4
+    seq_lens = torch.randint(
+        low=top_k + 1,
+        high=vocab_size,
+        size=(batch_size,),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    row_starts = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+    logits = torch.randn(batch_size, vocab_size, dtype=torch.float32, device="cuda")
+    if nan_fraction >= 1.0:
+        logits[:] = float("nan")
+    else:
+        nan_mask = torch.rand(batch_size, vocab_size, device="cuda") < nan_fraction
+        logits[nan_mask] = float("nan")
+
+    indices = torch.full((batch_size, top_k), -7, dtype=torch.int32, device="cuda")
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        1,
+        seq_lens,
+        indices,
+        batch_size,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+    torch.accelerator.synchronize()
+
+    _check_nan_hardened_topk(
+        logits, indices, row_starts, seq_lens, top_k, "top_k_per_row_decode"
+    )
+
+
 def _run_top_k_per_row_decode_test(
     top_k: int,
     batch_size: int,
