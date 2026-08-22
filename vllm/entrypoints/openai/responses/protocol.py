@@ -39,6 +39,9 @@ from openai.types.responses import (
 )
 from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
 from openai.types.responses import (
+    ResponseIncompleteEvent as OpenAIResponseIncompleteEvent,
+)
+from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
@@ -834,6 +837,10 @@ class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
     response: ResponsesResponse  # type: ignore[override]
 
 
+class ResponseIncompleteEvent(OpenAIResponseIncompleteEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
 class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
     response: ResponsesResponse  # type: ignore[override]
 
@@ -846,6 +853,7 @@ StreamingResponsesResponse: TypeAlias = (
     ResponseCreatedEvent
     | ResponseInProgressEvent
     | ResponseCompletedEvent
+    | ResponseIncompleteEvent
     | ResponseOutputItemAddedEvent
     | ResponseOutputItemDoneEvent
     | ResponseContentPartAddedEvent
