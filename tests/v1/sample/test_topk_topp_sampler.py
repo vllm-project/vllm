@@ -1047,3 +1047,34 @@ class TestFlashInferDistributionMatch:
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
         )
+
+
+@pytest.mark.skip_global_cleanup
+def test_cpu_sampler_mixed_seeding():
+    device = "cpu"
+    from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+    
+    # Batch size 2, Vocab size 100
+    # Keep logits relatively small to allow sampling variety for the unseeded request
+    logits = torch.randn((2, 100), device=device)
+    sampler = TopKTopPSampler()
+    
+    sampled_0 = []
+    sampled_1 = []
+    for _ in range(50):
+        # Seed only request 0, request 1 has no custom generator/seed
+        generators = {0: torch.Generator(device=device).manual_seed(42)}
+        tokens, _ = sampler(logits.clone(), generators, None, None)
+        sampled_0.append(tokens[0].item())
+        sampled_1.append(tokens[1].item())
+        
+    # Check that request 0 (seeded) is fully deterministic
+    assert len(set(sampled_0)) == 1, (
+        f"Seeded request produced non-deterministic tokens: {sampled_0}"
+    )
+    
+    # Check that request 1 (unseeded) is not deterministic (varies across runs)
+    assert len(set(sampled_1)) > 1, (
+        f"Unseeded request was deterministic: {sampled_1}"
+    )
+
