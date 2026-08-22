@@ -478,7 +478,7 @@ def convert_to_fp8_moe_kernel_format(
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
         w13.is_shuffled = True
         w2.is_shuffled = True
-    elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
+    elif fp8_backend == Fp8MoeBackend.AITER_MXFP8 and current_platform.supports_mx():
         w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
             w13, w2, w13_scale, w2_scale
         )
@@ -558,6 +558,7 @@ def convert_to_fp8_moe_kernel_format(
             # the MXFP8 weights as-is — neither needs a load-time layout change.
             Fp8MoeBackend.EMULATION,
             Fp8MoeBackend.TRITON_MXFP8,
+            Fp8MoeBackend.AITER_MXFP8,
         ]:
             raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
 
