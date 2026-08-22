@@ -235,6 +235,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
+            is_padding=self.input_buffers.is_padding[:num_tokens],
         ):
             last_hidden_states = self.model(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
@@ -312,6 +313,11 @@ class DFlashSpeculator(DraftModelSpeculator):
             query_start_loc_np=query_start_loc_np,
             dcp_local_seq_lens=dcp_local_seq_lens,
         )
+
+    def _get_graph_dispatch_shape(
+        self, num_reqs: int, num_query_tokens: int
+    ) -> tuple[int, int]:
+        return num_reqs, num_query_tokens
 
     @torch.inference_mode()
     def materialize_context_kv(
@@ -462,10 +468,13 @@ class DFlashSpeculator(DraftModelSpeculator):
             return self.draft_tokens[:num_reqs]
 
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
+        dispatch_num_reqs, dispatch_num_tokens = self._get_graph_dispatch_shape(
+            num_reqs, num_query_tokens
+        )
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             self.query_cudagraph_manager,
-            num_reqs,
-            num_query_tokens,
+            dispatch_num_reqs,
+            dispatch_num_tokens,
             uniform_token_count=self.num_query_per_req,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
@@ -518,6 +527,7 @@ def _prepare_dflash_inputs_kernel(
     # Outputs
     out_input_ids_ptr,
     out_query_positions_ptr,
+    out_is_padding_ptr,
     out_query_start_loc_ptr,
     out_seq_lens_ptr,
     out_query_slot_mapping_ptr,
@@ -646,10 +656,10 @@ def _prepare_dflash_inputs_kernel(
         local_q_slot,
         PAD_SLOT_ID,
     )
-
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
     clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
     tl.store(out_query_positions_ptr + query_idx, clamped_query_pos, mask=is_query)
+    tl.store(out_is_padding_ptr + query_idx, False, mask=is_query)
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
 
     # --- Sample indices / positions / idx_mapping ---
@@ -704,12 +714,15 @@ def _prepare_dflash_inputs_kernel(
                 tl.store(out_sample_pos_ptr + block, 0, mask=mask)
                 tl.store(out_sample_idx_mapping_ptr + block, -1, mask=mask)
             # Pad query slot mappings past num_query_tokens with PAD so the
-            # captured CG sees PAD slots (no K/V write) for replay sizes
+            # captured CG sees deterministic, inert rows for replay sizes
             # larger than the current request count.
             q_pad_start = num_reqs * num_query_per_req
             for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
                 block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < max_num_tokens
+                tl.store(out_input_ids_ptr + block, 0, mask=mask)
+                tl.store(out_query_positions_ptr + block, 0, mask=mask)
+                tl.store(out_is_padding_ptr + block, True, mask=mask)
                 tl.store(out_query_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
 
 
@@ -761,6 +774,7 @@ def prepare_dflash_inputs(
     _prepare_dflash_inputs_kernel[(num_reqs, num_blocks)](
         input_buffers.input_ids,
         input_buffers.positions,
+        input_buffers.is_padding,
         input_buffers.query_start_loc,
         input_buffers.seq_lens,
         query_slot_mapping,

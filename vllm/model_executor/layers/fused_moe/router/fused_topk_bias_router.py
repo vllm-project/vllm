@@ -149,6 +149,7 @@ def fused_topk_bias(
                 e_score_correction_bias,
                 output_indices_dtype,
                 routed_scaling_factor,
+                is_padding=_get_padding_mask(gating_output.shape[0]),
             )
 
         M, _ = hidden_states.size()
