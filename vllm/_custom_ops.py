@@ -804,6 +804,45 @@ def cutlass_scaled_mm(
     return out.view(*target_shape)
 
 
+def cutlass_scaled_mm_gemma4_gated(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    assert out_dtype is torch.bfloat16
+    assert a.ndim >= 2 and b.ndim == 2
+    assert b.shape[1] % 2 == 0
+
+    target_shape = (*a.shape[:-1], b.shape[1])
+    a = a.view(-1, a.shape[-1])
+    out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
+    torch.ops._C.cutlass_scaled_mm_gemma4_gated(out, a, b, scale_a, scale_b)
+    return out.view(*target_shape)
+
+
+def cutlass_scaled_mm_gemma4_gated_amax(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert out_dtype is torch.bfloat16
+    assert a.ndim >= 2 and b.ndim == 2
+    assert b.shape[1] % 2 == 0
+
+    target_shape = (*a.shape[:-1], b.shape[1])
+    row_amax_shape = a.shape[:-1]
+    a = a.view(-1, a.shape[-1])
+    out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
+    row_amax = torch.empty((a.shape[0],), dtype=torch.float32, device=a.device)
+    torch.ops._C.cutlass_scaled_mm_gemma4_gated_amax(
+        out, row_amax, a, b, scale_a, scale_b)
+    return out.view(*target_shape), row_amax.view(*row_amax_shape)
+
+
 def cutlass_scaled_mm_azp(
     a: torch.Tensor,
     b: torch.Tensor,

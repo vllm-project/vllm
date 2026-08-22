@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -173,10 +174,12 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
-        """Only static per-tensor activation quantization is supported for external
-        quantization."""
-        if self.config.activation_quant_key == kFp8StaticTensorSym:
-            return kFp8StaticTensorSym
+        """Activation quantization formats this kernel can consume directly."""
+        if self.config.activation_quant_key in (
+            kFp8StaticTensorSym,
+            kFp8DynamicTokenSym,
+        ):
+            return self.config.activation_quant_key
         return None
 
     @staticmethod
@@ -239,6 +242,57 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                     "weight_loader": self.padded_weight_loader,
                 },
             )
+
+    def apply_gemma4_gated_amax(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ):
+        from vllm.model_executor.layers.fusion.quant_activation import (
+            QuantizedActivation,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            get_fp8_min_max,
+        )
+
+        assert self.config.activation_quant_key == kFp8DynamicTokenSym
+        assert x.dtype == torch.bfloat16
+        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
+        orig_shape = x.shape
+        x_2d = x.view(-1, x.shape[-1])
+        x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub)
+
+        output_size = self.logical_output_size
+        assert output_size is not None
+        padded_k, padded_n = w.shape
+        pad_k = padded_k - x_2d_q.shape[1]
+        pad_n = padded_n - output_size
+        if pad_k > 0:
+            x_2d_q = self._pad_to_alignment(x_2d_q, dim=1, alignment=16)
+
+        gate_up, row_amax = ops.cutlass_scaled_mm_gemma4_gated_amax(
+            x_2d_q, w, scale_a=x_s, scale_b=w_s, out_dtype=torch.bfloat16
+        )
+        if pad_n > 0:
+            gate_up = gate_up[:, :output_size].contiguous()
+
+        # The epilogue writes duplicate [activated, activated] pairs to retain
+        # a regular CUTLASS store layout. The down projection consumes one lane.
+        activated = gate_up[:, 0::2].contiguous()
+        _, fp8_max = get_fp8_min_max()
+        scale = (row_amax / fp8_max).clamp_min(torch.finfo(torch.float32).tiny)
+        scale = scale.view(-1, 1).contiguous()
+        activated_q, scale = ops.scaled_fp8_quant(
+            activated, scale=scale, group_shape=(1, -1)
+        )
+        compact_shape = torch.Size([*orig_shape[:-1], activated.shape[-1]])
+        return QuantizedActivation(
+            data=activated_q,
+            scale=scale,
+            orig_dtype=x.dtype,
+            orig_shape=compact_shape,
+            quant_key=kFp8DynamicTokenSym,
+        )
 
     def apply_scaled_mm(
         self,

@@ -115,6 +115,71 @@ struct sm100_fp8_config_default {
 };
 
 template <typename InType, typename OutType, bool EnableBias>
+struct sm100_fp8_config_M2048_gemma4 {
+  // Tuned for the M=2048 Gemma 4 FP8 shapes selected by the serving
+  // scheduler. The two-SM schedule expands the CTA tile to 256x256x128.
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecialized2SmSm100;
+  using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecialized2Sm;
+  using TileShape = Shape<_256, _256, _128>;
+  using ClusterShape = Shape<_2, _1, _1>;
+  using Cutlass3xGemm =
+      conditional_t<EnableBias,
+                    cutlass_3x_gemm_sm100_fp8<
+                        InType, OutType, c3x::ScaledEpilogueBias, TileShape,
+                        ClusterShape, KernelSchedule, EpilogueSchedule>,
+                    cutlass_3x_gemm_sm100_fp8<
+                        InType, OutType, c3x::ScaledEpilogue, TileShape,
+                        ClusterShape, KernelSchedule, EpilogueSchedule>>;
+};
+
+template <typename InType, typename OutType>
+struct sm100_fp8_config_M2048_gemma4_gated {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecialized2SmSm100;
+  using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecialized2Sm;
+  using TileShape = Shape<_256, _256, _128>;
+  using ClusterShape = Shape<_2, _1, _1>;
+  using Cutlass3xGemm = cutlass_3x_gemm_sm100_fp8<
+      InType, OutType, c3x::ScaledGeluPairDuplicateEpilogue, TileShape,
+      ClusterShape, KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType>
+struct sm100_fp8_config_default_gemma4_gated {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
+  using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileShape = Shape<_256, _128, _128>;
+  using ClusterShape = Shape<_2, _2, _1>;
+  using Cutlass3xGemm = cutlass_3x_gemm_sm100_fp8<
+      InType, OutType, c3x::ScaledGeluPairDuplicateEpilogue, TileShape,
+      ClusterShape, KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType>
+struct sm100_fp8_config_M256_gemma4_gated {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
+  using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileShape = Shape<_128, _128, _128>;
+  using ClusterShape = Shape<_2, _1, _1>;
+  using Cutlass3xGemm = cutlass_3x_gemm_sm100_fp8<
+      InType, OutType, c3x::ScaledGeluPairDuplicateEpilogue, TileShape,
+      ClusterShape, KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType, typename TileShape,
+          typename ClusterShape, typename KernelSchedule,
+          typename EpilogueSchedule>
+struct sm100_fp8_config_gemma4_gated_amax {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using Cutlass3xGemm = cutlass_3x_gemm_sm100_fp8<
+      InType, OutType, c3x::ScaledGeluPairDuplicateAmaxEpilogue, TileShape,
+      ClusterShape, KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType, bool EnableBias>
 struct sm100_fp8_config_M256 {
   // M in (64, 256]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
@@ -265,9 +330,25 @@ inline void cutlass_gemm_sm100_fp8_dispatch(
   using Cutlass3xGemmM256 =
       typename sm100_fp8_config_M256<InType, OutType,
                                      EnableBias>::Cutlass3xGemm;
-
   uint32_t const m = a.size(0);
+  uint32_t const n = b.size(1);
   uint32_t const k = a.size(1);
+
+  if constexpr (!EnableBias &&
+                std::is_same_v<OutType, cutlass::bfloat16_t>) {
+    using Cutlass3xGemmM2048Gemma4 =
+        typename sm100_fp8_config_M2048_gemma4<InType, OutType,
+                                               EnableBias>::Cutlass3xGemm;
+    bool const is_gemma4_target_shape =
+        (k == 5376 &&
+         (n == 43008 || n == 16384 || n == 20480)) ||
+        (k == 21504 && n == 5376);
+    if (m == 2048 && is_gemma4_target_shape) {
+      return cutlass_gemm_caller_sm100_fp8<Cutlass3xGemmM2048Gemma4>(
+          out, a, b, a_scales, b_scales,
+          std::forward<EpilogueArgs>(args)...);
+    }
+  }
 
   if (m <= 16) {
     // m in [1, 16]
@@ -292,6 +373,86 @@ inline void cutlass_gemm_sm100_fp8_dispatch(
     return cutlass_gemm_caller_sm100_fp8<Cutlass3xGemmDefault>(
         out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
   }
+}
+
+template <typename InType, typename OutType, typename... EpilogueArgs>
+inline void cutlass_gemm_sm100_fp8_gemma4_gated_dispatch(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales, EpilogueArgs&&... args) {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  static_assert(std::is_same<OutType, cutlass::bfloat16_t>());
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+
+  using Cutlass3xGemmM256 =
+      typename sm100_fp8_config_M256_gemma4_gated<InType,
+                                                  OutType>::Cutlass3xGemm;
+  using Cutlass3xGemmM2048 =
+      typename sm100_fp8_config_M2048_gemma4_gated<InType,
+                                                   OutType>::Cutlass3xGemm;
+  using Cutlass3xGemmDefault =
+      typename sm100_fp8_config_default_gemma4_gated<InType,
+                                                     OutType>::Cutlass3xGemm;
+
+  uint32_t const m = a.size(0);
+  if (m <= 256) {
+    return cutlass_gemm_caller_sm100_fp8<Cutlass3xGemmM256>(
+        out, a, b, a_scales, b_scales,
+        std::forward<EpilogueArgs>(args)...);
+  }
+  if (m == 2048) {
+    return cutlass_gemm_caller_sm100_fp8<Cutlass3xGemmM2048>(
+        out, a, b, a_scales, b_scales,
+        std::forward<EpilogueArgs>(args)...);
+  }
+  return cutlass_gemm_caller_sm100_fp8<Cutlass3xGemmDefault>(
+      out, a, b, a_scales, b_scales,
+      std::forward<EpilogueArgs>(args)...);
+}
+
+template <typename InType, typename OutType>
+inline void cutlass_gemm_sm100_fp8_gemma4_gated_amax_dispatch(
+    torch::stable::Tensor& out, torch::stable::Tensor& row_amax,
+    torch::stable::Tensor const& a, torch::stable::Tensor const& b,
+    torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales) {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  static_assert(std::is_same<OutType, cutlass::bfloat16_t>());
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+
+  using AutoKernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
+  using AutoEpilogueSchedule =
+      cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using M2048KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecialized2SmSm100;
+  using M2048EpilogueSchedule = cutlass::epilogue::TmaWarpSpecialized2Sm;
+  using M256Config = sm100_fp8_config_gemma4_gated_amax<
+      InType, OutType, Shape<_128, _128, _128>, Shape<_2, _1, _1>,
+      AutoKernelSchedule, AutoEpilogueSchedule>;
+  using M2048Config = sm100_fp8_config_gemma4_gated_amax<
+      InType, OutType, Shape<_256, _256, _128>, Shape<_2, _1, _1>,
+      M2048KernelSchedule, M2048EpilogueSchedule>;
+  using DefaultConfig = sm100_fp8_config_gemma4_gated_amax<
+      InType, OutType, Shape<_256, _128, _128>, Shape<_2, _2, _1>,
+      AutoKernelSchedule, AutoEpilogueSchedule>;
+
+  uint32_t const m = a.size(0);
+  if (m <= 256) {
+    return cutlass_gemm_caller_sm100_fp8<typename M256Config::Cutlass3xGemm>(
+        out, a, b, a_scales, b_scales, row_amax);
+  }
+  if (m == 2048) {
+    return cutlass_gemm_caller_sm100_fp8<typename M2048Config::Cutlass3xGemm>(
+        out, a, b, a_scales, b_scales, row_amax);
+  }
+  return cutlass_gemm_caller_sm100_fp8<typename DefaultConfig::Cutlass3xGemm>(
+      out, a, b, a_scales, b_scales, row_amax);
 }
 
 template <typename InType, typename OutType, bool EnableBias,
@@ -346,6 +507,29 @@ void cutlass_scaled_mm_sm100_fp8_epilogue(torch::stable::Tensor& out,
         out, a, b, a_scales, b_scales,
         std::forward<EpilogueArgs>(epilogue_args)...);
   }
+}
+
+inline void cutlass_scaled_mm_sm100_fp8_gemma4_gated_epilogue(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales) {
+  STD_TORCH_CHECK(out.scalar_type() ==
+                  torch::headeronly::ScalarType::BFloat16);
+  return cutlass_gemm_sm100_fp8_gemma4_gated_dispatch<
+      cutlass::float_e4m3_t, cutlass::bfloat16_t>(out, a, b, a_scales,
+                                                  b_scales);
+}
+
+inline void cutlass_scaled_mm_sm100_fp8_gemma4_gated_amax_epilogue(
+    torch::stable::Tensor& out, torch::stable::Tensor& row_amax,
+    torch::stable::Tensor const& a, torch::stable::Tensor const& b,
+    torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales) {
+  STD_TORCH_CHECK(out.scalar_type() ==
+                  torch::headeronly::ScalarType::BFloat16);
+  return cutlass_gemm_sm100_fp8_gemma4_gated_amax_dispatch<
+      cutlass::float_e4m3_t, cutlass::bfloat16_t>(
+      out, row_amax, a, b, a_scales, b_scales);
 }
 
 template <bool EnableBias, typename... EpilogueArgs>
