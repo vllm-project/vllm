@@ -6,13 +6,14 @@ import inspect
 import json
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext, suppress
+from glob import glob
 from typing import Literal
 from uuid import uuid4
 
 import torch
-from packaging.version import InvalidVersion, Version
+from packaging.version import Version
 from typing_extensions import override
 
 import vllm.version
@@ -379,29 +380,28 @@ class ProtonProfilerWrapper(WorkerProfiler):
         self._mode = profiler_config.proton_mode
         self._hook = profiler_config.proton_hook
         self._output_format = profiler_config.proton_output_format
-        self._triton_version_string = getattr(triton, "__version__", "unknown")
-        try:
-            self._triton_version = Version(self._triton_version_string)
-        except InvalidVersion:
-            self._triton_version = None
+        self._triton_version = Version(triton.__version__)
+        assert self._triton_version >= _TRITON_PROTON_3_7_VERSION, (
+            "Proton profiling requires Triton >= 3.7"
+        )
         self._validate_capabilities()
         self._session_id: int | None = None
         # Qualify output names by process and wrapper instance so a new
         # worker cannot overwrite profiles left by an earlier server process.
         self._instance_id = f"pid{os.getpid()}_{uuid4().hex}"
         self._run_id = 0
+        self._graph_session = False
+        self._phase = 0
+        self._active_output_path: str | None = None
+        self._session_storage_path = os.path.join(
+            self._output_dir,
+            f".proton_cuda_graph_session_{worker_name}_{self._instance_id}",
+        )
 
         logger.info_once(
             "Proton profiling enabled. Output will be saved under: %s",
             self._output_dir,
         )
-
-    def _require_triton_version(self, feature: str, minimum: Version) -> None:
-        if self._triton_version is None or self._triton_version < minimum:
-            raise RuntimeError(
-                f"Proton {feature} requires Triton >= {minimum}; found "
-                f"{self._triton_version_string}."
-            )
 
     def _validate_capabilities(self) -> None:
         if self._output_format is not None:
@@ -415,15 +415,6 @@ class ProtonProfilerWrapper(WorkerProfiler):
                     "The installed Triton Proton does not support selecting "
                     "an output format during finalize."
                 )
-
-        if self._output_format == "hatchet_msgpack":
-            self._require_triton_version(
-                "hatchet_msgpack output", _TRITON_PROTON_3_7_VERSION
-            )
-        if self._mode and self._mode.split(":", 1)[0] == "periodic_flushing":
-            self._require_triton_version(
-                "periodic flushing", _TRITON_PROTON_3_7_VERSION
-            )
 
     def _create_session(self, output_path: str) -> int:
         os.makedirs(self._output_dir, exist_ok=True)
@@ -439,28 +430,112 @@ class ProtonProfilerWrapper(WorkerProfiler):
             raise RuntimeError("Proton did not create a profiling session")
         return session_id
 
+    @property
+    def has_cuda_graph_session(self) -> bool:
+        return self._graph_session
+
+    def set_output_name(self, worker_name: str) -> None:
+        """Set the next run's output name after startup graph capture."""
+        if self._running:
+            raise RuntimeError("Cannot change Proton output while profiling")
+        self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
+
+    @contextmanager
+    def capture_cuda_graphs(self) -> Iterator[None]:
+        """Keep a Proton session active while vLLM captures CUDA graphs."""
+        assert self._data == "tree"
+        if self._mode and self._mode.split(":", 1)[0] == "pcsampling":
+            raise ValueError(
+                "Proton PC sampling is incompatible with CUDA graph capture; "
+                "enable eager execution or disable CUDA graphs."
+            )
+        if self._session_id is None:
+            self._session_id = self._create_session(self._session_storage_path)
+        else:
+            self._proton.activate(session=self._session_id)
+        self._graph_session = True
+
+        try:
+            yield
+        finally:
+            captured_phase = self._phase
+            try:
+                self._phase = self._proton.data.advance_phase(self._session_id)
+            finally:
+                self._proton.deactivate(session=self._session_id, flushing=True)
+            self._proton.data.clear(self._session_id, captured_phase)
+
     @override
     def _start(self) -> None:
-        output_path = f"{self._output_path}_{self._instance_id}_run{self._run_id}"
-        self._session_id = self._create_session(output_path)
+        self._active_output_path = (
+            f"{self._output_path}_{self._instance_id}_run{self._run_id}"
+        )
         self._run_id += 1
+        if self._graph_session:
+            assert self._session_id is not None
+            self._proton.activate(session=self._session_id)
+        else:
+            self._session_id = self._create_session(self._active_output_path)
+
+    def _write_graph_phase(self, phase: int) -> None:
+        assert self._active_output_path is not None
+        output_format = self._output_format or "hatchet"
+        output_path = f"{self._active_output_path}.{output_format}"
+        if output_format == "hatchet_msgpack":
+            with open(output_path, "wb") as output_file:
+                output_file.write(
+                    self._proton.data.get_msgpack(self._session_id, phase)
+                )
+        else:
+            with open(output_path, "w", encoding="utf-8") as output_file:
+                json.dump(self._proton.data.get(self._session_id, phase), output_file)
+
+    def _finalize_session(self, session_id: int) -> None:
+        if self._output_format is None:
+            self._proton.finalize(session=session_id)
+        else:
+            self._proton.finalize(session=session_id, output_format=self._output_format)
 
     @override
     def _stop(self) -> None:
         assert self._session_id is not None
         session_id = self._session_id
+        if self._graph_session:
+            completed_phase = self._phase
+            try:
+                self._phase = self._proton.data.advance_phase(session_id)
+            finally:
+                self._proton.deactivate(session=session_id, flushing=True)
+            self._write_graph_phase(completed_phase)
+            self._proton.data.clear(session_id, completed_phase)
+            self._active_output_path = None
+            return
+
         try:
             self._proton.deactivate(session=session_id)
         finally:
             try:
-                if self._output_format is None:
-                    self._proton.finalize(session=session_id)
-                else:
-                    self._proton.finalize(
-                        session=session_id, output_format=self._output_format
-                    )
+                self._finalize_session(session_id)
             finally:
                 self._session_id = None
+                self._active_output_path = None
+
+    @override
+    def shutdown(self) -> None:
+        super().shutdown()
+        if self._graph_session and self._session_id is not None:
+            session_id = self._session_id
+            self._session_id = None
+            try:
+                self._finalize_session(session_id)
+            except Exception:
+                logger.exception(
+                    "Failed to finalize Proton CUDA graph session during shutdown."
+                )
+            finally:
+                for output_path in glob(f"{self._session_storage_path}.*"):
+                    with suppress(FileNotFoundError):
+                        os.remove(output_path)
 
     @override
     def annotate_context_manager(self, name: str):

@@ -76,6 +76,10 @@ class ProfilerConfig:
     """Optional format passed to Proton when finalizing a profile. ``None``
     uses the default format for ``proton_data``."""
 
+    proton_graph_attribution: bool = False
+    """Observe CUDA graph capture so replayed kernels can be attributed.
+    Requires ``proton_data='tree'``."""
+
     torch_profiler_with_stack: bool = True
     """If `True`, enables stack tracing in the torch profiler. Enabled by default
     as it is useful for debugging. Can be disabled via 
@@ -199,6 +203,7 @@ class ProfilerConfig:
                 ("proton_mode", self.proton_mode, None),
                 ("proton_hook", self.proton_hook, None),
                 ("proton_output_format", self.proton_output_format, None),
+                ("proton_graph_attribution", self.proton_graph_attribution, False),
             )
             if value != default
         ]
@@ -220,6 +225,8 @@ class ProfilerConfig:
 
         if self.profiler == "proton":
             output_format = self.proton_output_format
+            if self.proton_graph_attribution and self.proton_data != "tree":
+                raise ValueError("proton_graph_attribution requires proton_data='tree'")
             if output_format == "chrome_trace" and self.proton_data != "trace":
                 raise ValueError("chrome_trace output requires proton_data='trace'")
             if (

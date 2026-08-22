@@ -322,17 +322,24 @@ def test_profiler_entered_during_capture():
 
 
 def make_proton(session_id: int | None = 7):
+    data = SimpleNamespace(
+        advance_phase=Mock(side_effect=range(1, 100)),
+        clear=Mock(),
+        get=Mock(return_value={"traceEvents": []}),
+        get_msgpack=Mock(return_value=b"profile"),
+    )
     return SimpleNamespace(
         start=Mock(return_value=session_id),
         activate=Mock(),
         deactivate=Mock(),
         finalize=Mock(),
         scope=Mock(return_value=nullcontext()),
+        data=data,
     )
 
 
 def make_proton_wrapper(
-    tmp_path, proton=None, triton_version="3.6.0", **config_overrides
+    tmp_path, proton=None, triton_version="3.7.0", **config_overrides
 ):
     proton = proton or make_proton()
     config = ProfilerConfig(
@@ -387,6 +394,13 @@ class TestProtonConfig:
                 },
                 "requires proton_data",
             ),
+            (
+                {
+                    "proton_data": "trace",
+                    "proton_graph_attribution": True,
+                },
+                "requires proton_data='tree'",
+            ),
         ],
     )
     def test_rejects_invalid_option_combinations(self, tmp_path, options, message):
@@ -422,6 +436,7 @@ class TestProtonConfig:
             ("proton_mode", "pcsampling"),
             ("proton_hook", "triton"),
             ("proton_output_format", "chrome_trace"),
+            ("proton_graph_attribution", True),
         ],
     )
     def test_rejects_proton_options_for_other_profilers(self, field, value):
@@ -450,16 +465,17 @@ class TestProtonConfig:
                 compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE),
             )
 
-    def test_rejects_proton_when_cuda_graphs_are_enabled(self, tmp_path):
-        with pytest.raises(ValueError, match="requires CUDA graphs to be disabled"):
-            VllmConfig(
-                profiler_config=ProfilerConfig(
-                    profiler="proton", proton_profiler_dir=str(tmp_path)
-                ),
-                compilation_config=CompilationConfig(
-                    cudagraph_mode=CUDAGraphMode.PIECEWISE
-                ),
-            )
+    def test_allows_proton_when_cuda_graphs_are_enabled(self, tmp_path):
+        config = VllmConfig(
+            profiler_config=ProfilerConfig(
+                profiler="proton", proton_profiler_dir=str(tmp_path)
+            ),
+            compilation_config=CompilationConfig(
+                cudagraph_mode=CUDAGraphMode.PIECEWISE
+            ),
+        )
+
+        assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
 @_requires_cuda_for_proton
@@ -527,16 +543,9 @@ class TestProtonProfilerWrapper:
         assert first_name.endswith(f"_{UUID(int=1).hex}_run0")
         assert second_name.endswith(f"_{UUID(int=2).hex}_run0")
 
-    @pytest.mark.parametrize(
-        ("option", "value", "feature"),
-        [
-            ("proton_output_format", "hatchet_msgpack", "hatchet_msgpack"),
-            ("proton_mode", "periodic_flushing", "periodic flushing"),
-        ],
-    )
-    def test_newer_features_reject_triton_3_6(self, tmp_path, option, value, feature):
-        with pytest.raises(RuntimeError, match=feature):
-            make_proton_wrapper(tmp_path, **{option: value})
+    def test_rejects_triton_3_6(self, tmp_path):
+        with pytest.raises(AssertionError, match="requires Triton >= 3.7"):
+            make_proton_wrapper(tmp_path, triton_version="3.6.0")
 
     @pytest.mark.parametrize(
         ("option", "value"),
@@ -554,6 +563,94 @@ class TestProtonProfilerWrapper:
 
         with pytest.raises(RuntimeError, match="does not support selecting"):
             make_proton_wrapper(tmp_path, proton, proton_output_format="hatchet")
+
+    def test_cuda_graph_tree_phase_is_written_at_stop(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(
+            tmp_path,
+            proton_context="python",
+            proton_graph_attribution=True,
+        )
+        with wrapper.capture_cuda_graphs():
+            proton.start.assert_called_once()
+            proton.deactivate.assert_not_called()
+
+        capture_args = proton.start.call_args.kwargs
+        assert capture_args["context"] == "python"
+        assert capture_args["data"] == "tree"
+        proton.data.advance_phase.assert_called_once_with(7)
+        proton.deactivate.assert_called_once_with(session=7, flushing=True)
+        proton.data.clear.assert_called_once_with(7, 0)
+
+        wrapper.start()
+        wrapper.stop()
+        wrapper.start()
+        wrapper.stop()
+
+        assert proton.data.get.call_args_list == [call(7, 1), call(7, 2)]
+        proton.data.clear.assert_has_calls([call(7, 0), call(7, 1), call(7, 2)])
+        output_names = sorted(tmp_path.glob("proton_rank_3_*.hatchet"))
+        assert len(output_names) == 2
+        assert output_names[0].name.endswith("_run0.hatchet")
+        assert output_names[1].name.endswith("_run1.hatchet")
+
+    def test_pcsampling_rejects_cuda_graph_capture(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path, proton_mode="pcsampling")
+
+        with (
+            pytest.raises(ValueError, match="disable CUDA graphs"),
+            wrapper.capture_cuda_graphs(),
+        ):
+            pass
+
+        proton.start.assert_not_called()
+
+    def test_cuda_graph_context_deactivates_after_capture_error(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path, triton_version="3.7.0")
+
+        with (
+            pytest.raises(RuntimeError, match="capture failed"),
+            wrapper.capture_cuda_graphs(),
+        ):
+            raise RuntimeError("capture failed")
+
+        proton.deactivate.assert_called_once_with(session=7, flushing=True)
+
+    def test_cuda_graph_capture_deactivates_when_phase_advance_fails(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path)
+        proton.data.advance_phase.side_effect = RuntimeError("advance failed")
+
+        with (
+            pytest.raises(RuntimeError, match="advance failed"),
+            wrapper.capture_cuda_graphs(),
+        ):
+            pass
+
+        proton.deactivate.assert_called_once_with(session=7, flushing=True)
+        proton.data.clear.assert_not_called()
+
+    def test_cuda_graph_stop_deactivates_when_phase_advance_fails(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path, proton_graph_attribution=True)
+        with wrapper.capture_cuda_graphs():
+            pass
+        proton.data.clear.reset_mock()
+        proton.data.advance_phase.side_effect = RuntimeError("advance failed")
+
+        wrapper._start()
+        with pytest.raises(RuntimeError, match="advance failed"):
+            wrapper._stop()
+
+        proton.deactivate.assert_called_with(session=7, flushing=True)
+        proton.data.clear.assert_not_called()
+
+    def test_shutdown_finalizes_cuda_graph_capture_session(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path, triton_version="3.7.0")
+        with wrapper.capture_cuda_graphs():
+            pass
+
+        wrapper.shutdown()
+        wrapper.shutdown()
+
+        proton.finalize.assert_called_once_with(session=7)
 
     def test_missing_proton_has_actionable_error(self, tmp_path):
         config = ProfilerConfig(profiler="proton", proton_profiler_dir=str(tmp_path))
@@ -610,6 +707,7 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
         ),
         patch("vllm.v1.worker.gpu_worker.ProtonProfilerWrapper") as wrapper,
     ):
+        wrapper.return_value.has_cuda_graph_session = False
         Worker.profile(worker, profile_prefix="first")
         Worker.profile(worker, is_start=False)
         Worker.profile(worker, profile_prefix="second")
@@ -619,3 +717,84 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
         call(worker.profiler_config, worker_name="second_rank1"),
     ]
     assert wrapper.return_value.start.call_count == 2
+
+
+@_requires_cuda_for_proton
+def test_gpu_worker_reuses_cuda_graph_proton_session():
+    worker = MagicMock()
+    worker.rank = 1
+    worker.profiler = MagicMock(spec=ProtonProfilerWrapper)
+    worker.profiler.has_cuda_graph_session = True
+    worker.profiler_config.profiler = "proton"
+
+    with patch(
+        "vllm.distributed.utils.get_worker_rank_suffix",
+        return_value="rank1",
+    ):
+        Worker.profile(worker, profile_prefix="first")
+        Worker.profile(worker, is_start=False)
+
+    worker.profiler.set_output_name.assert_called_once_with("first_rank1")
+    worker.profiler.start.assert_called_once_with()
+    worker.profiler.stop.assert_called_once_with()
+
+
+@_requires_cuda_for_proton
+@pytest.mark.parametrize("runner", ["disabled", "opt_out", "v1", "no_capture"])
+def test_proton_is_not_initialized_without_cuda_graph_capture(runner):
+    worker = MagicMock()
+    worker.profiler = None
+    worker.profiler_config.profiler = "proton"
+    worker.profiler_config.proton_graph_attribution = runner not in (
+        "disabled",
+        "opt_out",
+    )
+    worker.vllm_config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.NONE if runner == "disabled" else CUDAGraphMode.FULL
+    )
+    worker.use_v2_model_runner = runner != "v1"
+    if runner == "no_capture":
+        worker.model_runner.cudagraph_manager.needs_capture.return_value = False
+
+    context = Worker._get_cudagraph_capture_context(worker)
+
+    assert worker.profiler is None
+    with context:
+        pass
+
+
+@_requires_cuda_for_proton
+def test_proton_initializes_before_cuda_graph_capture():
+    class FakeProtonProfiler:
+        def __init__(self, config, worker_name):
+            self.config = config
+            self.worker_name = worker_name
+            self.capture_context = nullcontext()
+
+        def capture_cuda_graphs(self):
+            return self.capture_context
+
+    worker = MagicMock()
+    worker.rank = 2
+    worker.profiler = None
+    worker.profiler_config.profiler = "proton"
+    worker.profiler_config.proton_graph_attribution = True
+    worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+    worker.use_v2_model_runner = True
+    worker.model_runner.cudagraph_manager.needs_capture.return_value = True
+
+    with (
+        patch(
+            "vllm.distributed.utils.get_worker_rank_suffix",
+            return_value="rank2",
+        ),
+        patch(
+            "vllm.v1.worker.gpu_worker.ProtonProfilerWrapper",
+            FakeProtonProfiler,
+        ),
+    ):
+        context = Worker._get_cudagraph_capture_context(worker)
+
+    assert worker.profiler.config is worker.profiler_config
+    assert worker.profiler.worker_name == "rank2"
+    assert context is worker.profiler.capture_context
