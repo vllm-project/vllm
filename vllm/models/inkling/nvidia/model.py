@@ -108,7 +108,7 @@ def _sconv_add_norm(
             m.slot_mapping,
             off_s,
             ws,
-            sconv.owner.block_size,
+            sconv.owner.cache_block_size,
             shared_tensor=shared_delta,
         )
 
