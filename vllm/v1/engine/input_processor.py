@@ -94,23 +94,34 @@ class InputProcessor:
             if not supported_generation_tasks:
                 raise VLLMValidationError("This model does not support generation")
 
-            params.verify(
-                self.model_config,
-                self.speculative_config,
-                self.structured_outputs_config,
-                self.tokenizer,
-            )
+            try:
+                params.verify(
+                    self.model_config,
+                    self.speculative_config,
+                    self.structured_outputs_config,
+                    self.tokenizer,
+                )
+            except ValueError as e:
+                # `SamplingParams.verify` still raises plain `ValueError` for
+                # some request-caused failures. Those must surface as client
+                # errors (HTTP 400); otherwise `AsyncLLM.generate` wraps them
+                # in `EngineGenerateError` and the API returns an empty 500.
+                raise VLLMValidationError(str(e)) from e
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires temperature > 0"
+                    raise VLLMValidationError(
+                        "sampling distribution replay requires temperature > 0",
+                        parameter="temperature",
+                        value=params.temperature,
                     )
                 if params.top_k <= 0:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         "sampling distribution replay requires top_k > 0 to "
                         "bound sampling mask size, reduce transfer overhead, "
-                        "and avoid potential OOMs"
+                        "and avoid potential OOMs",
+                        parameter="top_k",
+                        value=params.top_k,
                     )
             if params.thinking_token_budget is not None and (
                 self.vllm_config.reasoning_config is None
@@ -151,7 +162,10 @@ class InputProcessor:
                     f"Supported tasks: {supported_pooling_tasks}"
                 )
 
-            params.verify(self.model_config)
+            try:
+                params.verify(self.model_config)
+            except ValueError as e:
+                raise VLLMValidationError(str(e)) from e
         else:
             raise TypeError(
                 f"params must be either SamplingParams or PoolingParams, "
