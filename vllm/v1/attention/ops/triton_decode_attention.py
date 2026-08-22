@@ -312,6 +312,13 @@ def _fwd_grouped_kernel_stage1(
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
 ):
+    # Reuse the existing mode constexpr to keep the fallback launch signature:
+    # 0 is grouped attention, 1 is two-stage MLA, and 2 is direct-output MLA.
+    WRITE_DIRECT: tl.constexpr = IS_MLA == 2
+    USE_MLA: tl.constexpr = IS_MLA != 0
+    if WRITE_DIRECT:
+        tl.static_assert(USE_MLA)
+        tl.static_assert(NUM_KV_SPLITS == 1)
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
     cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
@@ -412,7 +419,7 @@ def _fwd_grouped_kernel_stage1(
                 mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
             )
 
-            if not IS_MLA:
+            if not USE_MLA:
                 kv_off_v = (
                     kv_page_number * stride_buf_vpbs
                     + (offs_n % PAGE_SIZE) * stride_buf_vbs
@@ -440,29 +447,65 @@ def _fwd_grouped_kernel_stage1(
             e_sum = e_sum * re_scale + tl.sum(p, 1)
             e_max = n_e_max
 
-        offs_mid_o = (
+        result = acc / e_sum[:, None]
+        lse_val = e_max + tl.log(e_sum)
+        if WRITE_DIRECT:
+            # The caller aliases Att_Out to O and V_Buffer to LSE in this
+            # specialization so fallback launches retain their original ABI.
+            offs_o = (
+                cur_batch * stride_mid_ob
+                + cur_head[:, None] * stride_mid_oh
+                + offs_dv[None, :]
+            )
+            tl.store(
+                Att_Out + offs_o,
+                result,
+                mask=(mask_h[:, None]) & (mask_dv[None, :]),
+            )
+            tl.store(
+                V_Buffer + cur_batch * stride_buf_vpbs + cur_head * stride_buf_vbs,
+                lse_val,
+                mask=mask_h,
+            )
+        else:
+            offs_mid_o = (
+                cur_batch * stride_mid_ob
+                + cur_head[:, None] * stride_mid_oh
+                + split_kv_id * stride_mid_os
+                + offs_dv[None, :]
+            )
+            tl.store(
+                Att_Out + offs_mid_o,
+                result,
+                mask=(mask_h[:, None]) & (mask_dv[None, :]),
+            )
+            offs_mid_o_1 = (
+                cur_batch * stride_mid_ob
+                + cur_head * stride_mid_oh
+                + split_kv_id * stride_mid_os
+                + Lv
+            )
+            tl.store(
+                Att_Out + offs_mid_o_1,
+                lse_val,
+                mask=mask_h,
+            )
+    elif WRITE_DIRECT:
+        # Empty/padded rows contribute zero weight to a later DCP merge.
+        # Keep their output neutral instead of reproducing stage2's 0 / 0 NaN.
+        offs_o = (
             cur_batch * stride_mid_ob
             + cur_head[:, None] * stride_mid_oh
-            + split_kv_id * stride_mid_os
             + offs_dv[None, :]
         )
-
         tl.store(
-            Att_Out + offs_mid_o,
-            acc / e_sum[:, None],
+            Att_Out + offs_o,
+            0.0,
             mask=(mask_h[:, None]) & (mask_dv[None, :]),
         )
-
-        offs_mid_o_1 = (
-            cur_batch * stride_mid_ob
-            + cur_head * stride_mid_oh
-            + split_kv_id * stride_mid_os
-            + Lv
-        )
-
         tl.store(
-            Att_Out + offs_mid_o_1,
-            e_max + tl.log(e_sum),
+            V_Buffer + cur_batch * stride_buf_vpbs + cur_head * stride_buf_vbs,
+            -float("inf"),
             mask=mask_h,
         )
 
@@ -481,7 +524,14 @@ def _decode_grouped_att_m_fwd(
     k_scale,
     v_scale,
     is_mla=False,
+    o=None,
+    lse=None,
+    write_direct=False,
 ):
+    if write_direct:
+        assert is_mla
+        assert o is not None and lse is not None
+        assert num_kv_splits == 1
     # with is_mla there is only a single c_kv in smem.
     # could increase BLOCK or num_stages.
     Lk = k_buffer.shape[-1]
@@ -531,26 +581,48 @@ def _decode_grouped_att_m_fwd(
         # exceeds 101376 bytes limit
         num_stages = 1
 
+    if write_direct:
+        # MLA never reads V_Buffer, so its pointer and strides can carry LSE.
+        # Att_Out and its strides similarly carry the direct output. Reusing
+        # these legacy arguments keeps the fallback launch ABI unchanged.
+        kernel_v_buffer = lse
+        kernel_att_out = o
+        stride_buf_vpbs = lse.stride(0)
+        stride_buf_vbs = lse.stride(1)
+        stride_buf_vh = 0
+        stride_mid_ob = o.stride(0)
+        stride_mid_oh = o.stride(1)
+        stride_mid_os = 0
+    else:
+        kernel_v_buffer = v_buffer
+        kernel_att_out = att_out
+        stride_buf_vpbs = _page_stride(v_buffer, page_size)
+        stride_buf_vbs = v_buffer.stride(-3)
+        stride_buf_vh = v_buffer.stride(-2)
+        stride_mid_ob = att_out.stride(0)
+        stride_mid_oh = att_out.stride(1)
+        stride_mid_os = att_out.stride(2)
+
     _fwd_grouped_kernel_stage1[grid](
         q,
         k_buffer,
-        v_buffer,
+        kernel_v_buffer,
         sm_scale,
         Req_to_tokens,
         B_Seqlen,
-        att_out,
+        kernel_att_out,
         Req_to_tokens.stride(0),
         q.stride(0),
         q.stride(1),
         _page_stride(k_buffer, page_size),
         k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
         k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        _page_stride(v_buffer, page_size),
-        v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        att_out.stride(0),
-        att_out.stride(1),
-        att_out.stride(2),
+        stride_buf_vpbs,
+        stride_buf_vbs,  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        stride_buf_vh,  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        stride_mid_ob,
+        stride_mid_oh,
+        stride_mid_os,
         k_scale,
         v_scale,
         kv_group_num=kv_group_num,
@@ -567,7 +639,7 @@ def _decode_grouped_att_m_fwd(
         num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
-        IS_MLA=is_mla,
+        IS_MLA=2 if write_direct else is_mla,
         **extra_kargs,
     )
 
@@ -732,25 +804,48 @@ def decode_attention_fwd_grouped(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    write_direct=False,
 ):
-    _decode_grouped_att_m_fwd(
-        q,
-        k_buffer,
-        v_buffer,
-        attn_logits,
-        req_to_token,
-        b_seq_len,
-        num_kv_splits,
-        sm_scale,
-        page_size,
-        logit_cap,
-        k_scale,
-        v_scale,
-        is_mla=is_mla,
-    )
-    _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
-    )
+    write_direct = write_direct and is_mla and num_kv_splits == 1
+    if write_direct:
+        _decode_grouped_att_m_fwd(
+            q,
+            k_buffer,
+            v_buffer,
+            attn_logits,
+            req_to_token,
+            b_seq_len,
+            num_kv_splits,
+            sm_scale,
+            page_size,
+            logit_cap,
+            k_scale,
+            v_scale,
+            is_mla=True,
+            o=o,
+            lse=lse,
+            write_direct=True,
+        )
+    else:
+        # Keep the legacy helper call shape unchanged on fallback launches.
+        _decode_grouped_att_m_fwd(
+            q,
+            k_buffer,
+            v_buffer,
+            attn_logits,
+            req_to_token,
+            b_seq_len,
+            num_kv_splits,
+            sm_scale,
+            page_size,
+            logit_cap,
+            k_scale,
+            v_scale,
+            is_mla=is_mla,
+        )
+        _decode_softmax_reducev_fwd(
+            attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
+        )
 
 
 def decode_attention_fwd(
@@ -769,6 +864,7 @@ def decode_attention_fwd(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    write_direct=False,
 ):
     assert num_kv_splits == attn_logits.shape[2]
 
@@ -778,7 +874,6 @@ def decode_attention_fwd(
         v_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
 
     kv_group_num = q.shape[1] // v_buffer.shape[-2]
-
     if kv_group_num == 1:
         # MHA
         decode_attention_fwd_normal(
@@ -815,4 +910,5 @@ def decode_attention_fwd(
             k_scale,
             v_scale,
             is_mla=is_mla,
+            write_direct=write_direct,
         )
