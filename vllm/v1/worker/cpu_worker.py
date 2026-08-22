@@ -197,6 +197,9 @@ class CPUWorker(Worker):
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
+    def discard(self, tags: tuple[str, ...]) -> None:
+        raise RuntimeError("Selective discard is not supported on CPU.")
+
     def determine_available_memory(self) -> int:
         self.model_runner.warming_up_model()
 

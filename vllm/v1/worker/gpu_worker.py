@@ -259,6 +259,9 @@ class Worker(WorkerBase):
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
 
+    def discard(self, tags: tuple[str, ...]) -> None:
+        self._get_sleep_mode_backend().discard(tags)
+
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
 
