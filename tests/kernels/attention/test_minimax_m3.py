@@ -19,7 +19,10 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
-from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseTritonImpl
+from vllm.models.minimax_m3.common.sparse_attention import (
+    MiniMaxM3SparseTritonImpl,
+    minimax_m3_use_aiter_sparse_pa,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
@@ -951,6 +954,11 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
         "is_shuffle_kv_cache_enabled",
         lambda: True,
     )
+    monkeypatch.setattr(
+        sparse_attn_mod, "get_current_vllm_config_or_none", lambda: None
+    )
+
+    assert minimax_m3_use_aiter_sparse_pa(1) is True
 
     backend = sparse_attn_mod.MiniMaxM3SparseBackend
     assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
