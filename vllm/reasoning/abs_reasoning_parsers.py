@@ -363,7 +363,11 @@ class ReasoningParserManager:
         Import a user-defined reasoning parser by the path
         of the reasoning parser define file.
         """
-        module_name = os.path.splitext(os.path.basename(plugin_path))[0]
+        # See ToolParserManager.import_tool_parser: the vllm.* prefix keeps
+        # the plugin's own logger inside the configured logging namespace.
+        module_name = "vllm.reasoning.plugins." + os.path.splitext(
+            os.path.basename(plugin_path)
+        )[0]
 
         try:
             import_from_path(module_name, plugin_path)
