@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 import ray
 import zmq
+from torch.distributed import TCPStore
 
 from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
 from vllm.v1.engine.core import EngineCoreActorMixin
@@ -130,6 +131,44 @@ def _make_addresses() -> EngineZmqAddresses:
         inputs=["tcp://127.0.0.1:12345"],
         outputs=["tcp://127.0.0.1:12346"],
     )
+
+
+def test_non_moe_dp_launches_coordination_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-MoE DP still initializes the DP world group and needs a held port."""
+
+    class FakeManager:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    vllm_config = _make_vllm_config_ray_dp_multinode()
+    parallel_config = vllm_config.parallel_config
+    parallel_config.data_parallel_backend = "mp"
+    parallel_config._coord_store_port = 0
+    monkeypatch.setattr("vllm.v1.engine.utils.CoreEngineProcManager", FakeManager)
+    monkeypatch.setattr(
+        "vllm.v1.engine.utils.wait_for_engine_startup", lambda *args: None
+    )
+
+    with launch_core_engines(
+        vllm_config,
+        executor_class=_DummyExecutor,
+        log_stats=False,
+        addresses=_make_addresses(),
+    ) as engine_launch:
+        assert parallel_config._coord_store_port
+        assert engine_launch.engine_manager is not None
+        # The store lives on the launch_core_engines frame; prove it is
+        # reachable while engines would be starting up.
+        client = TCPStore(
+            parallel_config.data_parallel_master_ip,
+            parallel_config._coord_store_port,
+            is_master=False,
+            wait_for_workers=False,
+        )
+        client.set("probe", b"1")
+        assert client.get("probe") == b"1"
 
 
 def _make_cpu_placement_group():

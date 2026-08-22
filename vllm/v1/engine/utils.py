@@ -1152,6 +1152,32 @@ def launch_core_engines(
     else:
         coordinator = None
 
+    # For coordinated online DP, bind-and-hold a coordination TCPStore so
+    # that engines pick DP master ports at bind time instead of using the
+    # pre-allocated _data_parallel_master_port_list, whose ports can be
+    # taken by other processes before they are bound. Only created when
+    # engine rank 0 is local, i.e. this process runs on the DP master node.
+    # This frame keeps the store alive until engines are ready (rendezvous
+    # done). See ParallelConfig._pick_stateless_dp_port().
+    coord_store = None
+    if (
+        dp_size > 1
+        and not offline_mode
+        and dp_rank == 0
+        and local_engine_count > 0
+        and not parallel_config.enable_elastic_ep
+    ):
+        from vllm.distributed.utils import create_tcp_store
+
+        coord_store = create_tcp_store(
+            host,
+            0,
+            is_master=True,
+            world_size=-1,
+            wait_for_workers=False,
+        )
+        parallel_config._coord_store_port = coord_store.port
+
     if parallel_config.data_parallel_backend == "ray":
         logger.info("Starting ray-based data parallel backend")
 
@@ -1372,6 +1398,7 @@ def wait_for_engine_startup(
                             "data_parallel_master_ip",
                             "data_parallel_master_port",
                             "_data_parallel_master_port_list",
+                            "_coord_store_port",
                             "data_parallel_size",
                         )
                     }
