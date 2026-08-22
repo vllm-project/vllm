@@ -765,7 +765,14 @@ class SpeculativeConfig:
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
                 # use the draft model from the same model:
-                self.model = self.target_model_config.model
+                # Use model_weights if set (e.g. runai_streamer replaces
+                # model with a local cache dir but keeps the original path
+                # in model_weights), so the draft model can load weights
+                # from the same source as the target model.
+                self.model = (
+                    self.target_model_config.model_weights
+                    or self.target_model_config.model
+                )
                 # Align the quantization of draft model for cases such as
                 # --quantization fp8 with a bf16 checkpoint.
                 if not self.quantization:
