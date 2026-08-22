@@ -3,20 +3,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compile-guard tests for the ROCm RDNA3 W4A16 kernels (dense + MoE).
 
-Verifies that the gfx1100 compilation and dispatch guards are hermetic:
-  - On gfx1100: all ops exist, dispatch selects RDNA3 kernels.
-  - On CDNA (gfx942/gfx950) or other non-gfx1100: ops must NOT exist,
+Verifies that the RDNA3 compilation and dispatch guards are hermetic:
+  - On gfx1100/gfx1151: scalar dense + MoE ops exist and dispatch selects
+    RDNA3 kernels.
+  - On gfx1100: the WMMA prefill op also exists.
+  - On CDNA (gfx942/gfx950) or other non-RDNA3: ops must NOT exist,
     dispatch must fall through to Triton/Marlin, and no RDNA3 code
     path is reachable.
 
-The negative (non-gfx1100) tests verify at three layers:
-  1. Compile-level: on non-gfx1100 hardware, the RDNA3 ops are absent
+The negative (non-RDNA3) tests verify at three layers:
+  1. Compile-level: on non-RDNA3 hardware, the RDNA3 ops are absent
      from the compiled _rocm_C extension — real binary verification.
   2. Static source analysis: parses CMakeLists.txt and torch_bindings.cpp
      to verify that all RDNA3 .cu files and op registrations are inside
-     gfx1100-only guards.
-  3. Runtime mock: patches on_gfx1100() to False and verifies that the
-     Python dispatch chain rejects the RDNA3 path.
+     RDNA3-only guards.
+  3. Runtime mock: patches on_gfx1100()/on_gfx1151() to False and verifies
+     that the Python dispatch chain rejects the RDNA3 path.
 
 Run `pytest tests/kernels/quantization/test_rdna3_compile_guards.py`.
 """
@@ -34,24 +36,36 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("RDNA3 compile-guard tests are ROCm-only", allow_module_level=True)
 
-from vllm.platforms.rocm import on_gfx1100  # noqa: E402
+from vllm.platforms.rocm import on_gfx1100, on_gfx1151  # noqa: E402
+
+rdna3_only = pytest.mark.skipif(
+    not (on_gfx1100() or on_gfx1151()),
+    reason="Requires gfx1100 or gfx1151 hardware",
+)
 
 gfx1100_only = pytest.mark.skipif(
     not on_gfx1100(),
     reason="Requires gfx1100 hardware",
 )
 
-not_gfx1100 = pytest.mark.skipif(
-    on_gfx1100(),
-    reason="This test verifies non-gfx1100 builds — skip on gfx1100",
+not_rdna3 = pytest.mark.skipif(
+    on_gfx1100() or on_gfx1151(),
+    reason="This test verifies non-RDNA3 builds — skip on RDNA3",
 )
 
-RDNA3_OPS = ["gptq_gemm_rdna3", "gptq_gemm_rdna3_wmma", "moe_gptq_gemm_rdna3"]
-RDNA3_CU_FILES = [
-    "q_gemm_rdna3.cu",
-    "q_gemm_rdna3_wmma.cu",
-    "moe_q_gemm_rdna3.cu",
-]
+RDNA3_SCALAR_OPS = ["gptq_gemm_rdna3", "moe_gptq_gemm_rdna3"]
+RDNA3_WMMA_OPS = ["gptq_gemm_rdna3_wmma"]
+RDNA3_OPS = RDNA3_SCALAR_OPS + RDNA3_WMMA_OPS
+RDNA3_SCALAR_CU_FILES = ["q_gemm_rdna3.cu", "moe_q_gemm_rdna3.cu"]
+RDNA3_WMMA_CU_FILES = ["q_gemm_rdna3_wmma.cu"]
+RDNA3_CU_FILES = RDNA3_SCALAR_CU_FILES + RDNA3_WMMA_CU_FILES
+
+
+def _line_mentions_symbol(line: str, symbol: str) -> bool:
+    return re.search(
+        rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])",
+        line,
+    ) is not None
 
 
 def _find_repo_root() -> Path | None:
@@ -112,33 +126,41 @@ def _read_pkg_source_or_skip(*relparts: str) -> str:
 # ============================================================================
 
 
-@gfx1100_only
-@pytest.mark.parametrize("op_name", RDNA3_OPS)
-def test_op_registered_on_gfx1100(op_name):
-    """On gfx1100, all RDNA3 ops must be registered in _rocm_C."""
+@rdna3_only
+@pytest.mark.parametrize("op_name", RDNA3_SCALAR_OPS)
+def test_scalar_op_registered_on_rdna3(op_name):
+    """On gfx1100/gfx1151, scalar RDNA3 ops must be registered."""
     assert hasattr(torch.ops, "_rocm_C"), "_rocm_C module not loaded"
     assert hasattr(torch.ops._rocm_C, op_name), (
         f"_rocm_C.{op_name} not registered — "
-        "check CMakeLists.txt VLLM_ROCM_HAS_GFX1100 "
-        "and torch_bindings.cpp #ifdef VLLM_ROCM_GFX1100"
+        "check CMakeLists.txt VLLM_ROCM_HAS_RDNA3_GEMM "
+        "and torch_bindings.cpp #ifdef VLLM_ROCM_RDNA3_GEMM"
     )
 
 
 @gfx1100_only
-def test_all_ops_present_or_all_absent():
-    """The 3 RDNA3 ops are behind the same #ifdef — all present or all absent.
+@pytest.mark.parametrize("op_name", RDNA3_WMMA_OPS)
+def test_wmma_op_registered_on_gfx1100(op_name):
+    """The WMMA prefill op is gfx1100-only."""
+    assert hasattr(torch.ops, "_rocm_C"), "_rocm_C module not loaded"
+    assert hasattr(torch.ops._rocm_C, op_name), (
+        f"_rocm_C.{op_name} not registered — "
+        "check CMakeLists.txt VLLM_ROCM_HAS_RDNA3_WMMA "
+        "and torch_bindings.cpp #ifdef VLLM_ROCM_RDNA3_WMMA"
+    )
 
-    Catches someone accidentally moving an op outside the guard.
-    """
-    has_rocm_c = hasattr(torch.ops, "_rocm_C")
-    if not has_rocm_c:
+
+@rdna3_only
+def test_scalar_ops_present_or_absent_together():
+    """The scalar dense and MoE ops are behind the same #ifdef."""
+    if not hasattr(torch.ops, "_rocm_C"):
         pytest.skip("_rocm_C not loaded")
 
-    present = {op: hasattr(torch.ops._rocm_C, op) for op in RDNA3_OPS}
+    present = {op: hasattr(torch.ops._rocm_C, op) for op in RDNA3_SCALAR_OPS}
     values = set(present.values())
     assert len(values) == 1, (
-        f"Guard inconsistency — some RDNA3 ops registered, others not: "
-        f"{present}. Check torch_bindings.cpp #ifdef VLLM_ROCM_GFX1100 block."
+        f"Guard inconsistency — some scalar RDNA3 ops registered, others not: "
+        f"{present}. Check torch_bindings.cpp #ifdef VLLM_ROCM_RDNA3_GEMM block."
     )
 
 
@@ -147,40 +169,40 @@ def test_all_ops_present_or_all_absent():
 # ============================================================================
 
 
-@not_gfx1100
+@not_rdna3
 @pytest.mark.parametrize("op_name", RDNA3_OPS)
-def test_op_absent_on_non_gfx1100(op_name):
-    """On non-gfx1100 (CDNA), RDNA3 ops must NOT exist in _rocm_C.
+def test_op_absent_on_non_rdna3(op_name):
+    """On non-RDNA3 (CDNA), RDNA3 ops must NOT exist in _rocm_C.
 
     This is the real compile-level check: the binary was built without
-    gfx1100 support, so the ops should not have been compiled or registered.
+    RDNA3 support, so the ops should not have been compiled or registered.
     """
     if not hasattr(torch.ops, "_rocm_C"):
         return
     assert not hasattr(torch.ops._rocm_C, op_name), (
-        f"_rocm_C.{op_name} is registered on non-gfx1100 hardware — "
+        f"_rocm_C.{op_name} is registered on non-RDNA3 hardware — "
         "compile guard is broken: check CMakeLists.txt "
-        "VLLM_ROCM_HAS_GFX1100 and torch_bindings.cpp #ifdef"
+        "VLLM_ROCM_HAS_RDNA3_GEMM and torch_bindings.cpp #ifdef"
     )
 
 
-@not_gfx1100
-def test_rocm_moe_not_supported_on_non_gfx1100():
-    """rocm_moe_rdna.is_supported() must return False on non-gfx1100 hardware."""
+@not_rdna3
+def test_rocm_moe_not_supported_on_non_rdna3():
+    """rocm_moe_rdna.is_supported() must return False on non-RDNA3 hardware."""
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
         rocm_moe_rdna,
     )
 
     wq = type("WQ", (), {"num_bits": 4})()
     assert rocm_moe_rdna.is_supported(wq) is False, (
-        "rocm_moe_rdna.is_supported() returned True on non-gfx1100 — "
+        "rocm_moe_rdna.is_supported() returned True on non-RDNA3 — "
         "dispatch guard is broken"
     )
 
 
-@not_gfx1100
-def test_dense_kernel_rejects_on_non_gfx1100():
-    """RDNA3W4A16LinearKernel.can_implement must reject on non-gfx1100."""
+@not_rdna3
+def test_dense_kernel_rejects_on_non_rdna3():
+    """RDNA3W4A16LinearKernel.can_implement must reject on non-RDNA3."""
     from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (  # noqa: E501
         MPLinearLayerConfig,
     )
@@ -199,7 +221,7 @@ def test_dense_kernel_rejects_on_non_gfx1100():
         has_g_idx=False,
     )
     ok, reason = RDNA3W4A16LinearKernel.can_implement(config)
-    assert ok is False, f"RDNA3 dense kernel accepted on non-gfx1100: {reason}"
+    assert ok is False, f"RDNA3 dense kernel accepted on non-RDNA3: {reason}"
 
 
 # ============================================================================
@@ -209,18 +231,36 @@ def test_dense_kernel_rejects_on_non_gfx1100():
 
 @needs_source
 class TestCMakeGuards:
-    """Verify CMakeLists.txt only compiles RDNA3 .cu files for gfx1100."""
+    """Verify CMakeLists.txt gates RDNA3 scalar and WMMA sources."""
 
     @staticmethod
     def _read_cmake():
         return _read_source_or_skip("CMakeLists.txt")
 
-    def test_rdna3_cu_files_inside_gfx1100_conditional(self):
-        """All RDNA3 .cu files must be listed inside the
-        ``if(VLLM_GPU_ARCHES MATCHES "gfx1100")`` block, not unconditionally.
-        """
+    def test_scalar_rdna3_cu_files_inside_rdna3_conditional(self):
+        """Scalar RDNA3 .cu files are inside the gfx1100/gfx1151 block."""
         cmake = self._read_cmake()
-        for cu_file in RDNA3_CU_FILES:
+        for cu_file in RDNA3_SCALAR_CU_FILES:
+            assert cu_file in cmake, f"{cu_file} not found in CMakeLists.txt"
+
+            lines = cmake.splitlines()
+            in_rdna3_block = False
+            for line in lines:
+                if 'VLLM_GPU_ARCHES MATCHES "gfx1100|gfx1151"' in line:
+                    in_rdna3_block = True
+                if in_rdna3_block and "endif()" in line:
+                    in_rdna3_block = False
+                if cu_file in line:
+                    assert in_rdna3_block, (
+                        f"{cu_file} is listed OUTSIDE the RDNA3 "
+                        f"conditional in CMakeLists.txt — CDNA builds "
+                        f"would compile RDNA3 code. Line: {line.strip()}"
+                    )
+
+    def test_wmma_cu_file_inside_gfx1100_conditional(self):
+        """The WMMA .cu file is inside the gfx1100-only block."""
+        cmake = self._read_cmake()
+        for cu_file in RDNA3_WMMA_CU_FILES:
             assert cu_file in cmake, f"{cu_file} not found in CMakeLists.txt"
 
             lines = cmake.splitlines()
@@ -232,65 +272,78 @@ class TestCMakeGuards:
                     in_gfx1100_block = False
                 if cu_file in line:
                     assert in_gfx1100_block, (
-                        f"{cu_file} is listed OUTSIDE the gfx1100 "
-                        f"conditional in CMakeLists.txt — CDNA builds "
-                        f"would compile RDNA3 code. Line: {line.strip()}"
+                        f"{cu_file} is listed OUTSIDE the gfx1100-only "
+                        f"conditional in CMakeLists.txt. Line: {line.strip()}"
                     )
 
-    def test_compile_definition_only_for_gfx1100(self):
-        """VLLM_ROCM_GFX1100 compile definition must be conditional."""
+    @pytest.mark.parametrize(
+        ("has_var", "definition"),
+        [
+            ("VLLM_ROCM_HAS_RDNA3_GEMM", "VLLM_ROCM_RDNA3_GEMM"),
+            ("VLLM_ROCM_HAS_RDNA3_WMMA", "VLLM_ROCM_RDNA3_WMMA"),
+        ],
+    )
+    def test_compile_definition_only_inside_matching_conditional(
+        self,
+        has_var,
+        definition,
+    ):
+        """RDNA3 compile definitions must be conditional."""
         cmake = self._read_cmake()
         lines = cmake.splitlines()
-        in_gfx1100_block = False
+        inside_block = False
         for line in lines:
-            if "VLLM_ROCM_HAS_GFX1100)" in line:
-                in_gfx1100_block = True
-            if in_gfx1100_block and "endif()" in line:
-                in_gfx1100_block = False
-            if "VLLM_ROCM_GFX1100" in line and "target_compile_definitions" in line:
-                assert in_gfx1100_block, (
-                    "VLLM_ROCM_GFX1100 compile definition is set outside "
-                    "the VLLM_ROCM_HAS_GFX1100 conditional — CDNA builds "
-                    f"would define it. Line: {line.strip()}"
+            if f"{has_var})" in line:
+                inside_block = True
+            if inside_block and "endif()" in line:
+                inside_block = False
+            if definition in line and "target_compile_definitions" in line:
+                assert inside_block, (
+                    f"{definition} compile definition is set outside "
+                    f"the {has_var} conditional. Line: {line.strip()}"
                 )
 
 
 @needs_source
 class TestTorchBindingsGuards:
-    """Verify torch_bindings.cpp gates all RDNA3 ops behind #ifdef."""
+    """Verify torch_bindings.cpp gates RDNA3 ops behind #ifdefs."""
 
     @staticmethod
     def _read_bindings():
         return _read_source_or_skip("csrc", "rocm", "torch_bindings.cpp")
 
-    def test_all_rdna3_ops_inside_ifdef(self):
-        """Every rdna3 op def/impl must be between #ifdef VLLM_ROCM_GFX1100
-        and #endif. If any is outside, a CDNA build would try to register
-        the op and link a symbol that doesn't exist.
-        """
+    @pytest.mark.parametrize(
+        ("ops", "guard"),
+        [
+            (RDNA3_SCALAR_OPS, "VLLM_ROCM_RDNA3_GEMM"),
+            (RDNA3_WMMA_OPS, "VLLM_ROCM_RDNA3_WMMA"),
+        ],
+    )
+    def test_rdna3_ops_inside_matching_ifdef(self, ops, guard):
+        """Every RDNA3 op def/impl must be inside its matching guard."""
         src = self._read_bindings()
         lines = src.splitlines()
 
         inside_guard = False
-        rdna3_lines_outside = []
+        lines_outside = []
 
         for i, line in enumerate(lines, 1):
-            if "#ifdef VLLM_ROCM_GFX1100" in line:
+            if f"#ifdef {guard}" in line:
                 inside_guard = True
             elif line.strip() == "#endif" and inside_guard:
                 inside_guard = False
 
             if (
-                "rdna3" in line.lower()
+                any(_line_mentions_symbol(line, op) for op in ops)
                 and not line.strip().startswith("//")
                 and not inside_guard
             ):
-                rdna3_lines_outside.append((i, line.strip()))
+                lines_outside.append((i, line.strip()))
 
-        assert not rdna3_lines_outside, (
-            "RDNA3 op references found OUTSIDE #ifdef VLLM_ROCM_GFX1100 "
-            "in torch_bindings.cpp — these would break CDNA builds:\n"
-            + "\n".join(f"  L{n}: {s}" for n, s in rdna3_lines_outside)
+        assert not lines_outside, (
+            f"RDNA3 op references found OUTSIDE #ifdef {guard} "
+            "in torch_bindings.cpp:\n"
+            + "\n".join(f"  L{n}: {s}" for n, s in lines_outside)
         )
 
     def test_no_unconditional_rdna3_includes(self):
@@ -300,15 +353,37 @@ class TestTorchBindingsGuards:
 
         inside_guard = False
         for i, line in enumerate(lines, 1):
-            if "#ifdef VLLM_ROCM_GFX1100" in line:
+            if "#ifdef VLLM_ROCM_RDNA3_GEMM" in line:
                 inside_guard = True
             elif line.strip() == "#endif" and inside_guard:
                 inside_guard = False
 
             if "#include" in line and "rdna3" in line.lower():
                 assert inside_guard, (
-                    f"L{i}: RDNA3 include outside gfx1100 guard: {line.strip()}"
+                    f"L{i}: RDNA3 include outside RDNA3 guard: {line.strip()}"
                 )
+
+
+@needs_source
+class TestQGemmRdna3DispatchGuards:
+    """Verify dense RDNA3 dispatch keeps WMMA gfx1100-only at runtime."""
+
+    @staticmethod
+    def _read_q_gemm_rdna3():
+        return _read_source_or_skip("csrc", "rocm", "q_gemm_rdna3.cu")
+
+    def test_wmma_dispatch_checks_runtime_arch(self):
+        """Fat binaries may contain both gfx1100 and gfx1151 code objects.
+
+        In that case VLLM_ROCM_RDNA3_WMMA is defined, but gfx1151 must still
+        use the scalar path because q_gemm_rdna3_wmma.cu is gfx1100-only.
+        """
+        src = self._read_q_gemm_rdna3()
+        assert "current_device_supports_rdna3_wmma" in src
+        assert "gcnArchName" in src
+        assert 'device_arch.rfind("gfx1100", 0) == 0' in src
+        assert "current_device_supports_rdna3_wmma() &&" in src
+        assert "return gptq_gemm_rdna3_wmma" in src
 
 
 class TestCustomOpsGuards:
@@ -368,15 +443,18 @@ class _FakeWeightQuant:
 
 
 class TestMoEDispatchMocked:
-    """Mock on_gfx1100() to False and verify RDNA3 MoE is unreachable."""
+    """Mock on_gfx1100()/on_gfx1151() to False and verify RDNA3 MoE is unreachable."""
 
     def test_is_supported_false_when_mocked_cdna(self):
-        """rocm_moe_rdna.is_supported() must return False when not on gfx1100."""
+        """rocm_moe_rdna.is_supported() must return False when not on RDNA3."""
         from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
             rocm_moe_rdna,
         )
 
-        with patch("vllm.platforms.rocm.on_gfx1100", return_value=False):
+        with (
+            patch("vllm.platforms.rocm.on_gfx1100", return_value=False),
+            patch("vllm.platforms.rocm.on_gfx1151", return_value=False),
+        ):
             assert rocm_moe_rdna.is_supported(_FakeWeightQuant(num_bits=4)) is False
 
     @pytest.mark.parametrize("num_bits", [2, 3, 8, 16])
@@ -411,9 +489,9 @@ class TestMoEDispatchMocked:
 
 
 class TestDenseKernelSelectionMocked:
-    """Mock on_gfx1100() and verify dense RDNA3 kernel is not selected."""
+    """Mock on_gfx1100()/on_gfx1151() and verify dense RDNA3 kernel is not selected."""
 
-    @gfx1100_only
+    @rdna3_only
     def test_can_implement_rejects_when_mocked_cdna(self):
         """RDNA3W4A16LinearKernel.can_implement must reject on mocked CDNA."""
         from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (  # noqa: E501
@@ -439,11 +517,13 @@ class TestDenseKernelSelectionMocked:
         with (
             patch("vllm.platforms.rocm.on_gfx1100", return_value=False),
             patch("vllm.platforms.rocm._ON_GFX1100", False),
+            patch("vllm.platforms.rocm.on_gfx1151", return_value=False),
+            patch("vllm.platforms.rocm._ON_GFX1151", False),
         ):
             ok, reason = RDNA3W4A16LinearKernel.can_implement(config)
             assert ok is False, f"RDNA3 kernel accepted on simulated CDNA: {reason}"
 
-    @gfx1100_only
+    @rdna3_only
     def test_chooser_skips_rdna3_when_mocked_cdna(self):
         """choose_mp_linear_kernel must NOT return RDNA3 on mocked CDNA."""
         from vllm.model_executor.kernels.linear import (
@@ -466,6 +546,8 @@ class TestDenseKernelSelectionMocked:
         with (
             patch("vllm.platforms.rocm.on_gfx1100", return_value=False),
             patch("vllm.platforms.rocm._ON_GFX1100", False),
+            patch("vllm.platforms.rocm.on_gfx1151", return_value=False),
+            patch("vllm.platforms.rocm._ON_GFX1151", False),
         ):
             chosen = choose_mp_linear_kernel(config)
             assert chosen.__name__ != "RDNA3W4A16LinearKernel", (
