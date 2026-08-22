@@ -48,6 +48,12 @@ def internvl_chat_template(content: str) -> str:
     return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
 
 
+def hunyuan_vl_chat_template(content: str) -> str:
+    # Matches examples/generate/multimodal/vision_language_offline.py's
+    # run_hunyuan_vl().
+    return f"<｜hy_begin▁of▁sentence｜>{content}<｜hy_User｜>"
+
+
 def kimi_vl_chat_template(content: str) -> str:
     return (
         f"<|im_user|>user<|im_middle|>{content}<|im_end|>"
@@ -191,6 +197,35 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         ),
         needs_video_metadata=False,
         vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
+    ),
+    "hunyuan_vl": VitCudagraphTestConfig(
+        model="tencent/HunyuanOCR",
+        modalities=["image"],  # video is not yet supported by this model
+        image_prompt=hunyuan_vl_chat_template(
+            "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜>"
+            "<｜hy_place▁holder▁no▁101｜>What is in this image?"
+        ),
+        needs_video_metadata=False,
+        # Single bucket sized to comfortably cover the test images' raw
+        # patch count. Unlike Qwen2-VL/Qwen3-VL, the encoder CUDA graph
+        # here only captures the transformer layers (pre-merge token
+        # count == raw patch count, not the smaller merged token count),
+        # so this needs to be generous. TODO: tighten once run on GPU.
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [4096],
+        },
+        # Shrink to 1 text + 1 vision layer with random weights so the
+        # test runs on any CI GPU and skips the multi-GiB weight download.
+        # The test only validates encoder CG capture/replay functions
+        # correctly, not output quality.
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="HunYuanVLForConditionalGeneration",
+            ),
+        },
         marks=[pytest.mark.core_model],
     ),
     "step3_vl": VitCudagraphTestConfig(
@@ -413,3 +448,43 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
 
         # Ensure the output is a string
         assert isinstance(output_text, str)
+
+
+@pytest.mark.parametrize("model_id", ["hunyuan_vl"])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_vit_cudagraph_matches_eager_greedy_decode(model_id, vllm_runner, image_assets):
+    """Greedy-decode parity: cudagraph_mm_encoder on vs off must produce
+    identical output token ids, not just similar text. Greedy decoding is
+    deterministic, so any divergence means the graph replay path computed
+    something different from eager.
+    """
+    config = MODEL_CONFIGS[model_id]
+
+    image_prompts = IMAGE_ASSETS.prompts(
+        {
+            "stop_sign": config.image_prompt,  # type: ignore[typeddict-item]
+            "cherry_blossom": config.image_prompt,  # type: ignore[typeddict-item]
+        }
+    )
+    images = [[asset.pil_image] for asset in image_assets]
+
+    outputs_by_cudagraph: dict[bool, list] = {}
+    for use_cudagraph in (False, True):
+        compilation_config = {**get_compilation_config(config)}
+        compilation_config["cudagraph_mm_encoder"] = use_cudagraph
+        with vllm_runner(
+            config.model,
+            dtype=config.dtype,
+            max_model_len=config.max_model_len,
+            max_num_seqs=config.max_num_seqs,
+            limit_mm_per_prompt={"image": 1},
+            compilation_config=compilation_config,
+            **config.vllm_runner_kwargs,
+        ) as vllm_model:
+            outputs_by_cudagraph[use_cudagraph] = vllm_model.generate_greedy(
+                image_prompts, config.max_tokens, images=images
+            )
+
+    eager_ids = [output_ids for output_ids, _ in outputs_by_cudagraph[False]]
+    cudagraph_ids = [output_ids for output_ids, _ in outputs_by_cudagraph[True]]
+    assert eager_ids == cudagraph_ids
