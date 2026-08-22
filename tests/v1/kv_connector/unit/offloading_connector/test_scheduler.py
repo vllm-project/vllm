@@ -38,10 +38,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     ChunkedLocalAttentionSpec,
+    CrossAttentionSpec,
+    EncoderOnlyAttentionSpec,
     FullAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheGroupSpec,
+    KVCacheSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    RSWASpec,
+    SinkFullAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
@@ -1207,12 +1218,21 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
 
 def _make_scheduler_with_lookup(
     lookup_results: dict[int, LookupResult],
+    default: LookupResult = LookupResult.MISS,
 ) -> OffloadingConnectorScheduler:
-    """Create an OffloadingConnectorScheduler with a mocked manager.lookup."""
+    """Create an OffloadingConnectorScheduler with a mocked manager.lookup.
+
+    Keys are addressed by their integer hash; `default` answers anything else.
+    """
     manager = MagicMock(spec=OffloadingManager)
-    manager.lookup.side_effect = lambda key, req_context: lookup_results.get(
-        int(get_offload_block_hash(key).decode()), LookupResult.MISS
-    )
+
+    def lookup(key, req_context):
+        block_hash = get_offload_block_hash(key)
+        if not block_hash.isdigit():
+            return default
+        return lookup_results.get(int(block_hash.decode()), default)
+
+    manager.lookup.side_effect = lookup
 
     scheduler = object.__new__(OffloadingConnectorScheduler)
     scheduler.manager = manager
@@ -1234,6 +1254,32 @@ def _maximal_lookup(sched, keys, start_chunk_idx: int = 0):
         _LOOKUP_GROUP_CONFIG,
         start_chunk_idx,
     )
+
+
+# Lookups issued, and end index returned, by a window-1 scan over 3 keys all
+# resolving to the same result. A result that keeps the streak alive ends the
+# scan at the first key; one that resets it makes the scan walk every key,
+# which is what widens the demanded set. A new member has to be added here.
+_SCAN_BEHAVIOR = {
+    LookupResult.HIT: (1, 3),
+    LookupResult.HIT_PENDING: (1, None),
+    LookupResult.RETRY: (3, None),
+    LookupResult.MISS: (3, 0),
+}
+
+
+@pytest.mark.parametrize("result", list(LookupResult))
+def test_scan_behavior_declared_for_every_lookup_result(result: LookupResult):
+    """Whether a result keeps a sliding-window streak alive decides how wide
+    the demanded chunk set gets, so every member needs deliberate behavior."""
+    assert result in _SCAN_BEHAVIOR, f"{result} has no declared scan behavior"
+    expected_lookups, expected_end = _SCAN_BEHAVIOR[result]
+
+    keys = to_keys([1, 2, 3])
+    sched = _make_scheduler_with_lookup(dict.fromkeys([1, 2, 3], result))
+
+    assert sched._sliding_window_lookup(keys, 1, _EMPTY_REQ_CTX) == expected_end
+    assert len(sched.manager.lookup.call_args_list) == expected_lookups
 
 
 class TestMaximalPrefixLookup:
@@ -1468,6 +1514,62 @@ class TestSlidingWindowLookup:
         assert (
             sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _EMPTY_REQ_CTX) is None
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests for SWA store pruning vs. load demand
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("alignment_chunk_count", [4, 8, 64])
+@pytest.mark.parametrize("sliding_window_chunks", [1, 2, 3])
+@pytest.mark.parametrize("is_eagle_group", [False, True])
+@pytest.mark.parametrize("tail_chunks", [0, 1, 5])
+def test_sliding_window_demand_is_store_reachable(
+    alignment_chunk_count: int,
+    sliding_window_chunks: int,
+    is_eagle_group: bool,
+    tail_chunks: int,
+):
+    """Every chunk the load path looks up must be one the store path keeps.
+
+    `is_store_reachable_swa_chunk` prunes chunks `_sliding_window_lookup` can
+    never query, but the two mirror each other by hand: this pins the relation,
+    where `test_is_store_reachable_swa_chunk` pins only the predicate's values.
+    A looked-up key is a demanded key, since a secondary-tier hit queues a
+    promotion immediately.
+    """
+    storable_chunk_count = alignment_chunk_count + tail_chunks
+    # Both sides widen by one for an unverified EAGLE group.
+    required_window = sliding_window_chunks + int(is_eagle_group)
+
+    sched = _make_scheduler_with_lookup(
+        {i: LookupResult.HIT_PENDING for i in range(storable_chunk_count)}
+    )
+    sched._sliding_window_lookup(
+        to_keys(range(storable_chunk_count)), required_window, _EMPTY_REQ_CTX
+    )
+
+    demanded = {
+        int(get_offload_block_hash(lookup_call.args[0]).decode())
+        for lookup_call in sched.manager.lookup.call_args_list
+    }
+    assert demanded, "the scan must query something"
+    unsuppliable = sorted(
+        chunk_idx
+        for chunk_idx in demanded
+        if not is_store_reachable_swa_chunk(
+            chunk_idx,
+            storable_chunk_count,
+            alignment_chunk_count,
+            sliding_window_chunks,
+            is_eagle_group,
+        )
+    )
+    assert not unsuppliable, (
+        f"chunks {unsuppliable} are demanded by the load path but pruned by the "
+        f"store path, so a warm producer can never supply them"
+    )
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -2220,6 +2322,329 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
             (1, 7),
         ),
     )
+
+
+def _full_and_swa_groups(
+    full_attn_block_size: int, swa_block_size: int, sliding_window: int
+) -> list[KVCacheGroupSpec]:
+    """Group 0 full attention (MLA-like), group 1 sliding window."""
+    return [
+        KVCacheGroupSpec(
+            ["layer0"],
+            FullAttentionSpec(
+                block_size=full_attn_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["layer1"],
+            SlidingWindowSpec(
+                block_size=swa_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=sliding_window,
+            ),
+        ),
+    ]
+
+
+def _demanded_keys(runner, offload_keys_per_group: list[list], num_tokens: int) -> set:
+    """Keys a cold consumer's lookup scan would demand for `num_tokens`.
+
+    Drives the real scan functions with every key resolving as a promoting
+    secondary tier resolves it.
+    """
+    scan = _make_scheduler_with_lookup({}, default=LookupResult.HIT_PENDING)
+    for group_config, offload_keys in zip(
+        runner.connector_scheduler.config.kv_group_configs, offload_keys_per_group
+    ):
+        num_chunks = num_tokens // group_config.tokens_per_chunk
+        keys = offload_keys[:num_chunks]
+        window = group_config.sliding_window_size_in_chunks
+        if window is None:
+            _maximal_lookup(scan, keys)
+        else:
+            scan._sliding_window_lookup(keys, window, _EMPTY_REQ_CTX)
+    return {lookup_call.args[0] for lookup_call in scan.manager.lookup.call_args_list}
+
+
+@pytest.mark.parametrize("warmth", ["cold", "gpu_warm", "primary_warm"])
+@pytest.mark.parametrize("with_swa_group", [False, True])
+def test_request_level_supply_covers_consumer_demand(
+    request_runner, warmth: str, with_swa_group: bool
+):
+    """A REQUEST_LEVEL producer must offer every key a consumer will demand.
+
+    Same relation as `test_sliding_window_demand_is_store_reachable`, but at
+    the level where the key set is really built: `_build_store_jobs` prunes
+    chunks with a null GPU block and unreachable SWA chunks, while the demand
+    comes from an independent scan.
+    """
+    full_attn_block_size = 16
+    swa_block_size = 4
+    num_tokens = 32
+
+    kv_cache_groups = (
+        _full_and_swa_groups(full_attn_block_size, swa_block_size, sliding_window=8)
+        if with_swa_group
+        else None
+    )
+    runner = request_runner(
+        block_size=swa_block_size if with_swa_group else full_attn_block_size,
+        num_gpu_blocks=200,
+        async_scheduling=False,
+        kv_cache_groups=kv_cache_groups,
+    )
+
+    def store_everything_offered():
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+
+    # `_run` rather than `run`, which asserts on an expected GPU-block set this
+    # test deliberately does not hard-code.
+    if warmth != "cold":
+        runner.new_request(token_ids=[0] * num_tokens)
+        store_everything_offered()
+        runner._run(decoded_tokens=[0], complete_transfers=True)
+        runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+        if warmth == "primary_warm":
+            # Warm only in the primary tier, so the producer must load first.
+            runner.scheduler.reset_prefix_cache()
+
+    # The producer leg: same prompt, REQUEST_LEVEL, so prefix hits stay in the
+    # store path instead of being skipped.
+    runner.manager.reset_mock()
+    store_everything_offered()
+    runner.manager.on_new_request.return_value = RequestOffloadingContext(
+        policy=OffloadPolicy.REQUEST_LEVEL
+    )
+    if warmth == "primary_warm":
+        # HIT is final; HIT_PENDING would defer the request on every step.
+        runner.manager.lookup.return_value = LookupResult.HIT
+    runner.new_request(token_ids=[0] * num_tokens)
+
+    offload_keys_per_group: list[list] = []
+
+    def capture_offload_keys() -> None:
+        for req_status in runner.connector_scheduler._req_status.values():
+            offload_keys_per_group.clear()
+            offload_keys_per_group.extend(
+                list(group_state.offload_keys)
+                for group_state in req_status.group_states
+            )
+
+    runner._run(
+        decoded_tokens=[0],
+        complete_transfers=True,
+        post_step_fn=capture_offload_keys,
+    )
+    runner._run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=True,
+        post_step_fn=capture_offload_keys,
+    )
+
+    assert offload_keys_per_group, "no request state was captured"
+    supplied = {
+        key
+        for store_call in runner.manager.prepare_store.call_args_list
+        for key in store_call.args[0]
+    }
+    demanded = _demanded_keys(runner, offload_keys_per_group, num_tokens)
+
+    assert demanded, "the scan must demand something"
+    missing = demanded - supplied
+    assert not missing, (
+        f"{len(missing)} of {len(demanded)} demanded keys are never offered to "
+        f"prepare_store, so a peer fetching them would wait out the load timeout"
+    )
+
+
+# Whether a policy keeps prefix-hit chunks in the store path. BLOCK_LEVEL skips
+# them, which is what left a warm PD producer with nothing to supply in #52808,
+# so a producer leg must never run a policy declared False here. A new policy
+# has to declare.
+_POLICY_KEEPS_PREFIX_HITS = {
+    OffloadPolicy.BLOCK_LEVEL: False,
+    OffloadPolicy.REQUEST_LEVEL: True,
+}
+
+
+@pytest.mark.parametrize("policy", list(OffloadPolicy))
+def test_prefix_hit_store_behavior_declared_for_every_policy(request_runner, policy):
+    """Whether prefix hits stay in the store path is what a warm producer has
+    left to supply, so every policy needs deliberate behavior."""
+    assert policy in _POLICY_KEEPS_PREFIX_HITS, f"{policy} has no declared behavior"
+    num_tokens = 32
+    runner = request_runner(block_size=16, num_gpu_blocks=200, async_scheduling=False)
+
+    def store_everything_offered():
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+
+    # Warm the prefix, so the next request computes no new block.
+    store_everything_offered()
+    runner.new_request(token_ids=[0] * num_tokens)
+    runner._run(decoded_tokens=[0], complete_transfers=True)
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+
+    runner.manager.reset_mock()
+    store_everything_offered()
+    runner.manager.on_new_request.return_value = RequestOffloadingContext(policy=policy)
+    runner.manager.lookup.return_value = LookupResult.HIT
+    runner.new_request(token_ids=[0] * num_tokens)
+    runner._run(decoded_tokens=[0], complete_transfers=True)
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+
+    offered = bool(runner.manager.prepare_store.call_args_list)
+    assert offered is _POLICY_KEEPS_PREFIX_HITS[policy]
+
+
+# The branch of get_sliding_window_size_in_chunks each KV cache spec resolves
+# to. The store path prunes exactly the groups reporting a window and the load
+# path scans those with _sliding_window_lookup, so the two only agree while
+# every spec lands where it is declared to. None means the spec is not handled
+# and trips the function's closing assert, which otherwise only surfaces at
+# runtime on a model that uses it. A new spec has to declare.
+#
+# UniformTypeKVCacheSpecs is declared None because it never reaches this
+# function: generate_scheduler_kv_cache_config replaces the wrapper with a
+# representative per-layer spec before the scheduler sees a group. Only the
+# worker side keeps the wrapper, which is why worker.py and canonical_mapping.py
+# branch on it and this file does not.
+_GROUP_STORE_PRUNING: dict[type[KVCacheSpec], type[KVCacheSpec] | None] = {
+    AttentionSpec: None,
+    ChunkedLocalAttentionSpec: ChunkedLocalAttentionSpec,
+    CrossAttentionSpec: None,
+    EncoderOnlyAttentionSpec: None,
+    FullAttentionSpec: FullAttentionSpec,
+    HiddenStateCacheSpec: FullAttentionSpec,
+    MambaSpec: MambaSpec,
+    MLAAttentionSpec: FullAttentionSpec,
+    RSWASpec: FullAttentionSpec,
+    SinkFullAttentionSpec: FullAttentionSpec,
+    SlidingWindowMLASpec: SlidingWindowSpec,
+    SlidingWindowSpec: SlidingWindowSpec,
+    UniformTypeKVCacheSpecs: None,
+}
+
+# What each declared branch reports for a spec built by _make_kv_cache_spec
+# below, at tokens_per_chunk=16.
+_BRANCH_WINDOW_IN_CHUNKS = {
+    FullAttentionSpec: None,
+    SlidingWindowSpec: 2,
+    ChunkedLocalAttentionSpec: 4,
+    MambaSpec: 1,
+}
+
+_SPEC_TOKENS_PER_CHUNK = 16
+
+
+def _concrete_kv_cache_specs() -> list[type[KVCacheSpec]]:
+    def walk(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from walk(sub)
+
+    return sorted(set(walk(KVCacheSpec)), key=lambda spec: spec.__name__)
+
+
+def _make_kv_cache_spec(spec_type: type[KVCacheSpec]) -> KVCacheSpec | None:
+    """Smallest instance of `spec_type`, or None if it needs real model shapes."""
+    if spec_type is MambaSpec:
+        return MambaSpec(block_size=16, shapes=((1,),), dtypes=(torch.float32,))
+    if spec_type is UniformTypeKVCacheSpecs:
+        return None
+    kwargs: dict = dict(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    if issubclass(spec_type, SlidingWindowSpec):
+        kwargs["sliding_window"] = 32
+    if issubclass(spec_type, ChunkedLocalAttentionSpec):
+        kwargs["attention_chunk_size"] = 64
+    if issubclass(spec_type, RSWASpec):
+        kwargs["rswa_window"] = 32
+    return spec_type(**kwargs)
+
+
+@pytest.mark.parametrize("spec_type", _concrete_kv_cache_specs())
+def test_store_pruning_declared_for_every_kv_cache_spec(spec_type):
+    """A spec that starts pruning without the load path agreeing strands blocks
+    silently, and an unhandled one only fails on a model that uses it."""
+    assert spec_type in _GROUP_STORE_PRUNING, f"{spec_type.__name__} is not declared"
+    branch = _GROUP_STORE_PRUNING[spec_type]
+
+    spec = _make_kv_cache_spec(spec_type)
+    if spec is None:
+        return
+    if branch is None:
+        with pytest.raises(AssertionError):
+            get_sliding_window_size_in_chunks(spec, _SPEC_TOKENS_PER_CHUNK)
+        return
+    assert (
+        get_sliding_window_size_in_chunks(spec, _SPEC_TOKENS_PER_CHUNK)
+        == (_BRANCH_WINDOW_IN_CHUNKS[branch])
+    )
+
+
+@pytest.mark.parametrize("with_swa_group", [False, True])
+def test_demand_oracle_matches_a_real_lookup_scan(request_runner, with_swa_group: bool):
+    """`_demanded_keys` reimplements the scan it stands in for, so it can drift
+    along with production instead of pinning it. Pin it against the real one."""
+    full_attn_block_size = 16
+    swa_block_size = 4
+    num_tokens = 32
+
+    kv_cache_groups = (
+        _full_and_swa_groups(full_attn_block_size, swa_block_size, sliding_window=8)
+        if with_swa_group
+        else None
+    )
+    runner = request_runner(
+        block_size=swa_block_size if with_swa_group else full_attn_block_size,
+        num_gpu_blocks=200,
+        async_scheduling=False,
+        kv_cache_groups=kv_cache_groups,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.manager.lookup.return_value = LookupResult.HIT_PENDING
+
+    scanned: list = []
+    offload_keys_per_group: list[list] = []
+
+    def capture_first_scan() -> None:
+        if scanned:
+            return
+        scanned.extend(c.args[0] for c in runner.manager.lookup.call_args_list)
+        for req_status in runner.connector_scheduler._req_status.values():
+            offload_keys_per_group.extend(
+                list(group_state.offload_keys)
+                for group_state in req_status.group_states
+            )
+        # HIT_PENDING defers admission forever; let the request through now
+        # that its scan is recorded.
+        runner.manager.lookup.return_value = LookupResult.MISS
+
+    runner.new_request(token_ids=[0] * num_tokens)
+    runner._run(
+        decoded_tokens=[0, EOS_TOKEN_ID],
+        complete_transfers=True,
+        post_step_fn=capture_first_scan,
+    )
+
+    assert scanned, "the real scheduler scanned nothing"
+    assert set(scanned) == _demanded_keys(runner, offload_keys_per_group, num_tokens)
+
+    # The oracle must bound itself to num_tokens rather than lean on the
+    # captured key lists happening to end there, so padding them changes
+    # nothing.
+    padded = [keys + to_keys(range(9000, 9000 + 4)) for keys in offload_keys_per_group]
+    assert set(scanned) == _demanded_keys(runner, padded, num_tokens)
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
