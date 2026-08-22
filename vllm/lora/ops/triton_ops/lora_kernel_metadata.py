@@ -105,6 +105,11 @@ class LoRAKernelMeta:
         self.lora_token_start_loc.fill_(0)
         self.no_lora_flag_cpu.fill_(False)
         self.num_active_loras_cpu.fill_(0)
+        # Fill token_lora_mapping with -1 so padded positions (beyond
+        # actual token count) are treated as "no LoRA" instead of
+        # defaulting to LoRA index 0 (from torch.zeros init).
+        self.token_lora_mapping.fill_(-1)
+        self.token_indices_sorted_by_lora_ids.fill_(-1)
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """
