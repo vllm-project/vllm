@@ -154,6 +154,28 @@ class TestArgConverter:
         assert result["city"] == "Tokyo"
         assert result["expr"] == "x<5"
 
+    def test_partial_closing_tag_not_leaked(self):
+        # Streaming can stop mid-closing-tag (missing final ">"); the
+        # fragment must not leak into the argument value.
+        raw = (
+            f"<{_PARAM_OPEN.format(name='location', is_str='true')}"
+            "Paris</｜DSML｜parameter"
+        )
+        result = json.loads(_dsml_arg_converter(raw, partial=True))
+        assert result == {"location": "Paris"}
+
+    def test_partial_closing_tag_truncated_midway(self):
+        # Truncation may land anywhere inside the closing tag.
+        raw = f"<{_PARAM_OPEN.format(name='b', is_str='true')}y</｜DSM"
+        result = json.loads(_dsml_arg_converter(raw, partial=True))
+        assert result == {"b": "y"}
+
+    def test_partial_json_param_with_close_remnant(self):
+        raw = f'<{_PARAM_OPEN.format(name="n", is_str="false")}{{"lo"}}x</｜DSM'
+        result = json.loads(_dsml_arg_converter(raw, partial=True))
+        # Invalid in-progress JSON stays omitted, remnant must not corrupt it.
+        assert result == {}
+
     def test_null_string_false(self):
         raw = self._raw(("val", "false", "null"))
         result = json.loads(_dsml_arg_converter(raw, partial=False))

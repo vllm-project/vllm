@@ -49,6 +49,14 @@ DSML_INVOKE_NAME_END = '">'
 DSML_INVOKE_END = f"</{_DSML}invoke>"
 DSML_PARAM_CLOSE = f"</{_DSML}parameter>"
 
+# Any non-empty prefix of a DSML tag: while streaming, a partially
+# delivered ``</｜DSML｜parameter>`` (or the next ``<｜DSML｜...) tag can
+# follow an in-progress parameter value; capturing that fragment would
+# leak DSML markup into the streamed tool arguments.
+_TAG_PREFIXES = frozenset(
+    DSML_PARAM_CLOSE[:j] for j in range(1, len(DSML_PARAM_CLOSE) + 1)
+) | frozenset(f"<{_DSML}"[:j] for j in range(1, len(f"<{_DSML}") + 1))
+
 _ESCAPED_DSML = re.escape(_DSML)
 _PARAM_RE = re.compile(
     rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
@@ -60,6 +68,21 @@ _PARTIAL_PARAM_RE = re.compile(
     rf"(.*)$",
     re.DOTALL,
 )
+
+
+def _strip_partial_dsml_tag(value: str) -> str:
+    """Cut a trailing fragment that may be a partially delivered DSML tag.
+
+    During streaming a parameter value can be followed by the beginning of
+    ``</｜DSML｜parameter>`` (or of the next ``<｜DSML｜...) tag. Truncation
+    may happen at any point inside that tag, so instead of matching the
+    full marker we trim at the earliest offset where the remainder is a
+    prefix of one of those tags.
+    """
+    for i in range(len(value)):
+        if value[i:] in _TAG_PREFIXES:
+            return value[:i]
+    return value
 
 
 def _dsml_arg_converter(raw_args: str, partial: bool) -> str:
@@ -81,6 +104,7 @@ def _dsml_arg_converter(raw_args: str, partial: bool) -> str:
         pm = _PARTIAL_PARAM_RE.search(raw_args, last_end)
         if pm:
             name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
+            value = _strip_partial_dsml_tag(value)
             if is_str == "true":
                 params[name] = value
             else:
