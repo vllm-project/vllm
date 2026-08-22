@@ -124,6 +124,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
         return self.connector_worker.get_finished(finished_req_ids)
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        if self.connector_worker is None:
+            return set()
+        return self.connector_worker.get_block_ids_with_load_errors()
+
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         if self.connector_worker is not None:
             return self.connector_worker.build_connector_worker_meta()

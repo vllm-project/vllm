@@ -1731,6 +1731,86 @@ def test_complete_store_waits_for_all_worker_acks(
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_failed_store_is_not_published_as_cache(request_runner, async_scheduling: bool):
+    """A store that failed on any worker must not become loadable.
+
+    Its destination blocks were never written, so publishing them would serve
+    whatever the recycled blocks last held -- potentially another request's KV.
+    The failure is reported in an earlier step than the one that completes the
+    job, which is the case a per-step failure lookup would miss.
+    """
+    tokens_per_block = 4
+    blocks_per_chunk = 3
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=tokens_per_block,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        worker_count=3,
+    )
+    runner.new_request(token_ids=[0] * (tokens_per_block * blocks_per_chunk))
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0, 0], complete_transfers=False)
+    job_id = next(iter(runner.connector_scheduler._jobs))
+    runner.manager.complete_store.reset_mock()
+
+    # Step 1: one worker fails. The job is not complete yet.
+    runner.connector_scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 1}, failed_jobs={job_id}
+            )
+        )
+    )
+    assert runner.manager.complete_store.call_count == 0
+
+    # Step 2: the other two succeed and the job completes. This batch carries
+    # no failure flag, so the verdict must come from the job's sticky state.
+    runner.connector_scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 2}
+            )
+        )
+    )
+    assert runner.manager.complete_store.call_count == 1
+    assert runner.manager.complete_store.call_args.kwargs["success"] is False
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_successful_store_is_published(request_runner, async_scheduling: bool):
+    """The success path still publishes, so the guard cannot pass vacuously."""
+    tokens_per_block = 4
+    blocks_per_chunk = 3
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=tokens_per_block,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        worker_count=3,
+    )
+    runner.new_request(token_ids=[0] * (tokens_per_block * blocks_per_chunk))
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0, 0], complete_transfers=False)
+    job_id = next(iter(runner.connector_scheduler._jobs))
+    runner.manager.complete_store.reset_mock()
+
+    runner.connector_scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={job_id: 3}
+            )
+        )
+    )
+    assert runner.manager.complete_store.call_count == 1
+    assert runner.manager.complete_store.call_args.kwargs["success"] is True
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
     """Validates max_offload_tokens: type coercion, boundary values, and capping.
 
