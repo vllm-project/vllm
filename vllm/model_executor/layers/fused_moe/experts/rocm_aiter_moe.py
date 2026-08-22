@@ -539,7 +539,16 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # with the interface once all quant integrations are complete.
 
         if expert_tokens_meta is not None:
-            num_local_tokens = expert_tokens_meta.expert_num_tokens
+            # AITER dereferences num_local_tokens[0] as the number of
+            # hidden_states rows this rank holds, while ExpertTokensMetadata
+            # carries one count per local expert. Forwarding the vector makes
+            # AITER stop at local expert 0's share and leave the remaining fp8
+            # activation and scale rows uninitialised, which the GEMM turns
+            # into NaNs. Reduce on device so the cudagraph path stays free of
+            # host synchronisation.
+            num_local_tokens = expert_tokens_meta.expert_num_tokens.sum(
+                dim=0, keepdim=True
+            ).to(torch.int32)
         else:
             num_local_tokens = None
 
