@@ -224,7 +224,7 @@ class LLMEngine:
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
+        priority: float = 0.0,
         session_id: str | None = None,
         prompt_text: str | None = None,
     ) -> str:
