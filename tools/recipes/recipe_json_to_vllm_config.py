@@ -64,6 +64,7 @@ SHORT_ALIASES = {
     "-tp": "tensor-parallel-size",
     "-pp": "pipeline-parallel-size",
     "-dp": "data-parallel-size",
+    "-cc": "compilation-config",
 }
 
 
@@ -400,6 +401,8 @@ def discover_recipe_source(
 
 def coerce(value: str) -> Any:
     """Convert CLI string values to useful YAML scalar/object types."""
+    if value in ("True", "False"):
+        return value == "True"
     try:
         return json.loads(value)
     except (json.JSONDecodeError, TypeError):
@@ -410,6 +413,8 @@ def is_option_token(token: str) -> bool:
     if token.startswith("--"):
         return True
     if token in SHORT_ALIASES or token == "-O":
+        return True
+    if any(token.startswith(f"{alias}.") for alias in SHORT_ALIASES):
         return True
     return token.startswith("-O") and len(token) > 2
 
@@ -500,6 +505,19 @@ def argv_to_config(argv: list[Any]) -> dict[str, Any]:
                 coerce(argv[i + 1]),
             )
             i += 2
+            continue
+
+        # -cc.<key>=<value>
+        if token.startswith("-cc."):
+            raw_key, separator, raw_value = token[4:].partition("=")
+            if not separator or not raw_key:
+                raise ValueError(f"{token} must use the form -cc.<key>=<value>")
+            merge_value(
+                config,
+                normalize_key(f"{SHORT_ALIASES['-cc']}.{raw_key}"),
+                coerce(raw_value),
+            )
+            i += 1
             continue
 
         if not token.startswith("--"):
