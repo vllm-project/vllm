@@ -19,6 +19,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm import _custom_ops as ops
+from vllm import ir
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -112,10 +113,17 @@ def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
 
 
 class MiniMAXGemmaRMSNorm(nn.Module):
-    """Gemma-style RMS normalization backed by FlashInfer kernels.
+    """Gemma-style RMS normalization, backed by FlashInfer kernels when available.
 
     When ``residual`` is given, the fused add + norm runs in place and the
     updated ``(x, residual)`` pair is returned.
+
+    FlashInfer is CUDA-only, so on other platforms (XPU, CPU) this falls back to
+    the same ``ir.ops`` primitives that back
+    :class:`~vllm.model_executor.layers.layernorm.GemmaRMSNorm`, which implement
+    identical Gemma semantics (``x * (1 + w)``, weight applied in fp32 and cast
+    back afterwards). The fallback is out-of-place, which is safe because both
+    call sites consume the returned tensors.
     """
 
     def __init__(
@@ -132,7 +140,16 @@ class MiniMAXGemmaRMSNorm(nn.Module):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+        try:
+            from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+        except ImportError:
+            # Gemma applies (1 + w) in fp32; ir.ops casts back to x's dtype.
+            weight = self.weight.float() + 1.0
+            if residual is None:
+                return ir.ops.rms_norm(x, weight, self.variance_epsilon)
+            return ir.ops.fused_add_rms_norm(
+                x, residual, weight, self.variance_epsilon
+            )
 
         if residual is None:
             return gemma_rmsnorm(x, self.weight, self.variance_epsilon)

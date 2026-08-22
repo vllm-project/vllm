@@ -177,6 +177,53 @@ class ApplyMoEActivationConfig:
 _DEFAULT_APPLY_MOE_ACTIVATION_CONFIG = ApplyMoEActivationConfig()
 
 
+# ``vllm._C`` is only built for CUDA/HIP; on XPU and CPU the fused activation
+# kernels are unavailable and we fall back to torch ops.
+_HAS_C_ACTIVATION_KERNELS = hasattr(torch.ops, "_C") and hasattr(
+    torch.ops._C, "silu_and_mul_with_clamp"
+)
+
+
+def _silu_and_mul_with_clamp_native(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    limit: float,
+    alpha: float,
+    beta: float,
+) -> None:
+    """Torch equivalent of ``torch.ops._C.silu_and_mul_with_clamp``.
+
+    Mirrors ``silu_and_mul_clamp`` in ``csrc/.../activation_kernels.cu``
+    (``act_first=true``, ``HAS_CLAMP=true``) and hence
+    ``SiluAndMulWithClamp.forward_native``::
+
+        gate = clamp(input[..., :d], max=limit)
+        up   = clamp(input[..., d:], min=-limit, max=limit)
+        out  = gate * sigmoid(alpha * gate) * (up + beta)
+
+    Unlike ``_swiglu_limit_torch``, this honours ``alpha``/``beta``; MiniMax-M3
+    uses alpha=1.702, beta=1.0, so they cannot be assumed to be 1.0/0.0.
+    """
+    d = input.shape[-1] // 2
+    gate = torch.clamp(input[..., :d], max=limit)
+    up = torch.clamp(input[..., d:], min=-limit, max=limit)
+    output.copy_(gate * torch.sigmoid(alpha * gate) * (up + beta))
+
+
+def _silu_and_mul_with_clamp(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    limit: float,
+    alpha: float,
+    beta: float,
+) -> None:
+    """Dispatch to the fused kernel, or to torch where ``vllm._C`` is absent."""
+    if _HAS_C_ACTIVATION_KERNELS:
+        torch.ops._C.silu_and_mul_with_clamp(output, input, limit, alpha, beta)
+    else:
+        _silu_and_mul_with_clamp_native(output, input, limit, alpha, beta)
+
+
 def silu_and_mul_with_clamp(
     output: torch.Tensor,
     input: torch.Tensor,
@@ -190,7 +237,7 @@ def silu_and_mul_with_clamp(
         swiglu_limit_func(output, input, clamp_limit, topk_ids, expert_map)
     else:
         # Fused silu(clamp(gate)) * clamp(up); equivalent to swiglu_limit_func.
-        torch.ops._C.silu_and_mul_with_clamp(output, input, clamp_limit, 1.0, 0.0)
+        _silu_and_mul_with_clamp(output, input, clamp_limit, 1.0, 0.0)
 
 
 def apply_moe_activation(
@@ -264,7 +311,7 @@ def apply_moe_activation(
         assert config.clamp_limit is not None, (
             "SWIGLUOAI_UNINTERLEAVE requires clamp_limit"
         )
-        torch.ops._C.silu_and_mul_with_clamp(
+        _silu_and_mul_with_clamp(
             output, input, config.clamp_limit, config.alpha, config.beta
         )
     elif activation == MoEActivation.SWIGLUSTEP:
