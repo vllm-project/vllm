@@ -88,7 +88,12 @@ def main():
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         cmds = {}
         for cmd_module in CMD_MODULES:
-            new_cmds = cmd_module.cmd_init()
+            if cmd_module is vllm.entrypoints.cli.snapshot:
+                new_cmds = cmd_module.cmd_init(
+                    create_requested=sys.argv[1:3] == ["snapshot", "create"]
+                )
+            else:
+                new_cmds = cmd_module.cmd_init()
             for cmd in new_cmds:
                 cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
                 cmds[cmd.name] = cmd
