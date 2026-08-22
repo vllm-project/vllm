@@ -171,10 +171,7 @@ def _build_prompt_embeds_positions(
     Expects `token_ids` to already contain expanded N-token spans.
     Returns `[(start_idx, length), ...]` aligned with the tensors.
     """
-    placeholders = find_mm_placeholders(
-        prompt=token_ids,
-        mm_prompt_updates=mm_prompt_updates,
-    )
+    placeholders = find_mm_placeholders(token_ids, mm_prompt_updates)
     features = placeholders.get("prompt_embeds", [])
 
     if len(features) != num_tensors:
