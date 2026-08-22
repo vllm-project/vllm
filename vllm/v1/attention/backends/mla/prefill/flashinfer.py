@@ -15,6 +15,7 @@ from vllm.v1.attention.backends.utils import (
     PerLayerParameters,
     get_per_layer_parameters,
     infer_global_hyperparameters,
+    log2_lse_to_ln,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -150,8 +151,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         if has_context:
             chunked_context = prefill_metadata.chunked_context
             assert chunked_context is not None
-            num_chunks = chunked_context.cu_seq_lens.shape[0]
-            self._ensure_chunks(num_chunks, self._workspace_buffer)
+            self._ensure_chunks(len(chunked_context.chunks), self._workspace_buffer)
 
         num_qo_heads = self.num_heads
         num_kv_heads = num_qo_heads
@@ -179,12 +179,10 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         if has_context:
             chunked_context = prefill_metadata.chunked_context
             assert chunked_context is not None
-            for i in range(num_chunks):
-                kv_indptr_chunk = chunked_context.cu_seq_lens[i]
-
-                self._prefill_chunks[i].plan(
-                    qo_indptr=qo_indptr,
-                    kv_indptr=kv_indptr_chunk,
+            for chunk in chunked_context.chunks:
+                self._prefill_chunks[chunk.index].plan(
+                    qo_indptr=chunk.query_start_loc,
+                    kv_indptr=chunk.cu_seq_lens,
                     num_qo_heads=num_qo_heads,
                     num_kv_heads=num_kv_heads,
                     head_dim_qk=head_dim_qk,
@@ -222,22 +220,24 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
 
         if isinstance(ret, tuple):
             # Convert from (q_len, num_heads) to (num_heads, q_len)
-            return ret[0], ret[1].transpose(0, 1)
+            return ret[0], log2_lse_to_ln(ret[1].transpose(0, 1))
         return ret
 
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        attn_out, lse = self._prefill_chunks[chunk_idx].run(
+        attn_out, lse = self._prefill_chunks[chunk.index].run(
             q=q,
             k=k,
             v=v,
+            out=out,
             return_lse=True,
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
-        return attn_out, lse.transpose(0, 1)
+        return attn_out, log2_lse_to_ln(lse.transpose(0, 1))

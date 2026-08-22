@@ -3,7 +3,7 @@
 
 import copy
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -36,6 +36,7 @@ logger = init_logger(__name__)
 
 MTPModelTypes = Literal[
     "deepseek_mtp",
+    "dots3_note_mtp",
     "mimo_mtp",
     "mimo_v2_mtp",
     "glm4_moe_mtp",
@@ -48,6 +49,7 @@ MTPModelTypes = Literal[
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
+    "bailing_hybrid_v3_mtp",
     "minimax_m3_mtp",
     "bailing_hybrid_mtp",
     "mtp",
@@ -77,6 +79,293 @@ SpeculativeMethod = Literal[
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
+
+_QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
+    {
+        "Qwen3OmniMoeForConditionalGeneration",
+        "Qwen3OmniMoeThinkerForConditionalGeneration",
+    }
+)
+_QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
+
+
+def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
+    hf_config = model_config.hf_config
+    architectures = set(getattr(model_config, "architectures", ()) or ())
+    architectures.update(getattr(hf_config, "architectures", ()) or ())
+    return getattr(hf_config, "model_type", None) == "qwen3_omni_moe" or bool(
+        architectures & _QWEN3_OMNI_TARGET_ARCHITECTURES
+    )
+
+
+def _get_qwen3_omni_text_config(model_config: ModelConfig) -> Any:
+    thinker_config = getattr(model_config.hf_config, "thinker_config", None)
+    text_config = getattr(thinker_config, "text_config", None)
+    if text_config is None:
+        text_config = getattr(model_config, "hf_text_config", None)
+    return text_config
+
+
+def _get_attention_head_dim(config: Any) -> int | None:
+    head_dim = getattr(config, "head_dim", None)
+    if head_dim is not None:
+        return head_dim
+    hidden_size = getattr(config, "hidden_size", None)
+    num_attention_heads = getattr(config, "num_attention_heads", None)
+    if (
+        isinstance(hidden_size, int)
+        and isinstance(num_attention_heads, int)
+        and num_attention_heads > 0
+        and hidden_size % num_attention_heads == 0
+    ):
+        return hidden_size // num_attention_heads
+    return None
+
+
+def _get_nested_config_value(config: Any, section: str, name: str) -> Any:
+    nested_config = getattr(config, section, None)
+    if isinstance(nested_config, Mapping):
+        return nested_config.get(name)
+    return getattr(nested_config, name, None)
+
+
+def _get_qwen3_dspark_value(config: Any, name: str) -> Any:
+    # Match DFlashQwen3Model's precedence: dflash_config overrides
+    # eagle_config, and top-level values are the modern fallback.
+    value = _get_nested_config_value(config, "dflash_config", name)
+    if value is None:
+        value = _get_nested_config_value(config, "eagle_config", name)
+    if value is None:
+        value = getattr(config, name, None)
+    return value
+
+
+def _validate_qwen3_omni_dspark(
+    target_model_config: ModelConfig,
+    draft_model_config: ModelConfig,
+    num_speculative_tokens: int,
+) -> None:
+    """Validate the standalone Qwen3-Omni DSpark checkpoint contract."""
+    if not _is_qwen3_omni_target(target_model_config):
+        return
+
+    draft_hf_config = draft_model_config.hf_config
+    draft_architectures = set(getattr(draft_model_config, "architectures", ()) or ())
+    draft_architectures.update(getattr(draft_hf_config, "architectures", ()) or ())
+    if _QWEN3_OMNI_DSPARK_ARCHITECTURE not in draft_architectures:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a standalone draft checkpoint with "
+            f"architectures=['{_QWEN3_OMNI_DSPARK_ARCHITECTURE}']; generic "
+            "Qwen3DSparkModel checkpoints must be converted first."
+        )
+
+    block_size = _get_qwen3_dspark_value(draft_hf_config, "block_size")
+    if block_size is None:
+        block_size = _get_qwen3_dspark_value(draft_hf_config, "dspark_block_size")
+    if (
+        not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size <= 0
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a positive integer block_size in the "
+            "draft config."
+        )
+    if num_speculative_tokens != block_size:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires num_speculative_tokens to match the "
+            f"trained block_size ({block_size}); got {num_speculative_tokens}."
+        )
+
+    target_text_config = _get_qwen3_omni_text_config(target_model_config)
+    if target_text_config is None:
+        raise ValueError(
+            "Qwen3-Omni DSpark could not resolve the target thinker text_config."
+        )
+    target_hidden_size = getattr(
+        target_text_config,
+        "hidden_size",
+        target_model_config.get_hidden_size(),
+    )
+    draft_target_hidden_size = getattr(draft_hf_config, "target_hidden_size", None)
+    if draft_target_hidden_size != target_hidden_size:
+        raise ValueError(
+            "Qwen3-Omni DSpark draft target_hidden_size must match the target "
+            f"text hidden size ({target_hidden_size}); got {draft_target_hidden_size}."
+        )
+    draft_hidden_size = getattr(draft_hf_config, "hidden_size", None)
+    if draft_hidden_size != target_hidden_size:
+        raise ValueError(
+            "Qwen3-Omni DSpark draft hidden_size must match the target thinker "
+            f"hidden size ({target_hidden_size}); got {draft_hidden_size}."
+        )
+
+    target_attention = {
+        "num_attention_heads": getattr(target_text_config, "num_attention_heads", None),
+        "num_key_value_heads": getattr(
+            target_text_config,
+            "num_key_value_heads",
+            getattr(target_text_config, "num_attention_heads", None),
+        ),
+        "head_dim": _get_attention_head_dim(target_text_config),
+    }
+    draft_attention = {
+        "num_attention_heads": getattr(draft_hf_config, "num_attention_heads", None),
+        "num_key_value_heads": getattr(
+            draft_hf_config,
+            "num_key_value_heads",
+            getattr(draft_hf_config, "num_attention_heads", None),
+        ),
+        "head_dim": _get_attention_head_dim(draft_hf_config),
+    }
+    for name, target_value in target_attention.items():
+        if (
+            not isinstance(target_value, int)
+            or isinstance(target_value, bool)
+            or target_value <= 0
+        ):
+            raise ValueError(
+                "Qwen3-Omni DSpark requires a positive integer "
+                f"{name} in the target thinker text_config; got {target_value}."
+            )
+        draft_value = draft_attention[name]
+        if draft_value != target_value:
+            raise ValueError(
+                f"Qwen3-Omni DSpark draft {name} must match the target thinker "
+                f"value ({target_value}); got {draft_value}."
+            )
+
+    target_layer_ids = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "target_layer_ids"
+    )
+    if target_layer_ids is None:
+        target_layer_ids = getattr(draft_hf_config, "dspark_target_layer_ids", None)
+    if target_layer_ids is None:
+        target_layer_ids = getattr(draft_hf_config, "target_layer_ids", None)
+    if not isinstance(target_layer_ids, (list, tuple)) or not target_layer_ids:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a non-empty target_layer_ids list in "
+            "the draft config."
+        )
+    if any(
+        not isinstance(layer_id, int) or isinstance(layer_id, bool)
+        for layer_id in target_layer_ids
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark target_layer_ids must contain only integers."
+        )
+    if list(target_layer_ids) != sorted(set(target_layer_ids)):
+        raise ValueError(
+            "Qwen3-Omni DSpark target_layer_ids must be unique and strictly increasing."
+        )
+    target_num_layers = getattr(
+        target_text_config,
+        "num_hidden_layers",
+        target_model_config.get_total_num_hidden_layers(),
+    )
+    if target_layer_ids[0] < 0 or target_layer_ids[-1] >= target_num_layers:
+        raise ValueError(
+            "Qwen3-Omni DSpark target_layer_ids must be zero-based text-layer "
+            f"indices in [0, {target_num_layers - 1}]; got {target_layer_ids}."
+        )
+
+    if _get_qwen3_dspark_value(draft_hf_config, "use_aux_hidden_state") is not True:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires use_aux_hidden_state=true because Omni "
+            "conditioning is supplied through thinker hidden states."
+        )
+
+    markov_rank = getattr(draft_hf_config, "markov_rank", None)
+    if (
+        not isinstance(markov_rank, int)
+        or isinstance(markov_rank, bool)
+        or markov_rank <= 0
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a positive integer markov_rank in the "
+            "draft config."
+        )
+    markov_head_type = getattr(draft_hf_config, "markov_head_type", None)
+    if markov_head_type != "vanilla":
+        raise ValueError(
+            "Qwen3-Omni DSpark currently requires markov_head_type='vanilla'; "
+            f"got {markov_head_type!r}."
+        )
+
+    sample_from_anchor = getattr(draft_hf_config, "sample_from_anchor", True)
+    bonus_anchor = getattr(draft_hf_config, "dspark_bonus_anchor", False)
+    if sample_from_anchor is not True or bonus_anchor is not False:
+        raise ValueError(
+            "Qwen3-Omni DSpark requires sample_from_anchor=true and "
+            "dspark_bonus_anchor=false."
+        )
+
+    target_vocab_size = getattr(
+        target_text_config,
+        "vocab_size",
+        target_model_config.get_vocab_size(),
+    )
+    draft_input_vocab_size = getattr(draft_hf_config, "vocab_size", None)
+    if (
+        not isinstance(draft_input_vocab_size, int)
+        or isinstance(draft_input_vocab_size, bool)
+        or draft_input_vocab_size <= 0
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark input vocab_size must be a positive integer; "
+            f"got {draft_input_vocab_size}."
+        )
+    draft_output_vocab_size = getattr(draft_hf_config, "draft_vocab_size", None)
+    if draft_output_vocab_size is None:
+        draft_output_vocab_size = draft_input_vocab_size
+    if (
+        not isinstance(draft_output_vocab_size, int)
+        or isinstance(draft_output_vocab_size, bool)
+        or not 0 < draft_output_vocab_size <= target_vocab_size
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark draft_vocab_size must be a positive integer no "
+            f"larger than target vocab_size ({target_vocab_size}); got "
+            f"{draft_output_vocab_size}."
+        )
+
+    noise_token_id = _get_nested_config_value(
+        draft_hf_config, "dflash_config", "mask_token_id"
+    )
+    for name in (
+        "mask_token_id",
+        "dspark_noise_token_id",
+        "pard_token",
+        "ptd_token_id",
+    ):
+        if noise_token_id is None:
+            noise_token_id = getattr(draft_hf_config, name, None)
+        if noise_token_id is not None:
+            break
+    if (
+        not isinstance(noise_token_id, int)
+        or isinstance(noise_token_id, bool)
+        or not 0 <= noise_token_id < draft_input_vocab_size
+    ):
+        raise ValueError(
+            "Qwen3-Omni DSpark requires a valid mask/noise token id within the "
+            f"draft input vocabulary [0, {draft_input_vocab_size - 1}]."
+        )
+
+    rope_configs = (
+        getattr(draft_hf_config, "rope_parameters", None),
+        getattr(draft_hf_config, "rope_scaling", None),
+    )
+    has_mrope = getattr(draft_hf_config, "mrope_section", None) is not None
+    has_mrope = has_mrope or any(
+        isinstance(rope_config, Mapping) and "mrope_section" in rope_config
+        for rope_config in rope_configs
+    )
+    if has_mrope:
+        raise ValueError(
+            "Qwen3-Omni DSpark draft checkpoints must use logical 1-D RoPE and "
+            "must not define mrope_section."
+        )
 
 
 @config
@@ -120,7 +409,7 @@ class SpeculativeConfig:
     attention_backend: AttentionBackendEnum | None = None
     """Attention backend to use for the draft model. When `None`, the backend is
     automatically selected. Useful when the drafter requires a different attention
-    backend (e.g. DFlash needs a non-causal-capable backend like FLASH_ATTN)."""
+    backend (e.g. DFlash needs a backend that supports non-causal attention)."""
     kv_cache_dtype: CacheDType | None = None
     """KV cache dtype for the draft model. When `None`, the draft inherits the
     target model's `--kv-cache-dtype`."""
@@ -236,6 +525,10 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
+    enable_adaptive_verification: bool = False
+    """Whether to adaptively size the draft-verification budget from per-request
+    confidence. Currently only supported for method="dspark"."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -289,6 +582,10 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    dspark_draft_topk: int | None = Field(default=None, ge=1)
+    """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
+    top-k base-logit candidates. Requires draft tensor parallel size 1."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -331,6 +628,22 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
+        if hf_config.model_type == "dots3_note":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
+            if mtp_layer_types is None:
+                mtp_layer_types = ["sliding_attention"] * n_predict
+            if len(mtp_layer_types) != n_predict:
+                raise ValueError(
+                    "mtp_layer_types must have one entry per MTP layer: "
+                    f"got {len(mtp_layer_types)} for {n_predict} layers"
+                )
+            hf_config.layer_types = [*hf_config.layer_types, *mtp_layer_types]
+            hf_config.model_type = "dots3_note_mtp"
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Dots3NoteMTPModel"]}
+            )
         if hf_config.model_type in (
             "deepseek_v3",
             "deepseek_v32",
@@ -340,7 +653,12 @@ class SpeculativeConfig:
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
-                {"n_predict": n_predict, "architectures": ["DeepSeekMTPModel"]}
+                {
+                    "n_predict": n_predict,
+                    "architectures": [
+                        "DeepseekV32MTPModel" if use_v32_mtp else "DeepSeekMTPModel"
+                    ],
+                }
             )
         if hf_config.model_type == "deepseek_v4":
             hf_config.model_type = "deepseek_mtp"
@@ -459,7 +777,10 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
-        if hf_config.architectures[0] == "NemotronH_Super_Omni_Reasoning_V3":
+        if hf_config.architectures[0] in (
+            "NemotronH_Super_Omni_Reasoning_V3",
+            "NemotronH_Omni_Reasoning_V3",
+        ):
             # Promote VLM's text_config so MTP detection below fires correctly
             hf_config = hf_config.text_config
 
@@ -485,7 +806,9 @@ class SpeculativeConfig:
             )
 
         architectures = getattr(hf_config, "architectures", []) or []
-        if (
+        if initial_architecture == "BailingMoeV3ForCausalLM":
+            hf_config.model_type = "bailing_hybrid_v3_mtp"
+        elif (
             hf_config.model_type == "bailing_hybrid"
             or "BailingMoeV2_5ForCausalLM" in architectures
         ):
@@ -496,6 +819,14 @@ class SpeculativeConfig:
                 {
                     "n_predict": n_predict,
                     "architectures": ["BailingMoeV25MTPModel"],
+                }
+            )
+        if hf_config.model_type == "bailing_hybrid_v3_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["BailingMoeV3MTPModel"],
                 }
             )
 
@@ -513,8 +844,16 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
             )
-        if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
-            is_moe = hf_config.model_type == "qwen3_5_moe"
+        if hf_config.model_type in (
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+        ):
+            # Checkpoints that ship only the text config resolve to the
+            # `qwen3_5_text` / `qwen3_5_moe_text` model types and carry the
+            # same `mtp_num_hidden_layers` field as the multimodal ones.
+            is_moe = hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text")
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
             hf_config.update(
@@ -523,15 +862,28 @@ class SpeculativeConfig:
                     "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
                 }
             )
-        if hf_config.model_type == "intern_s2_preview":
+        if hf_config.model_type in ("intern_s2_preview", "interns2_mobius"):
+            is_mobius = hf_config.model_type == "interns2_mobius"
             text_config = getattr(hf_config, "text_config", None)
-            is_moe = getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            is_moe = is_mobius or (
+                getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            )
+            if is_mobius:
+                assert text_config is not None
+                text_config.model_type = "qwen3_5_moe_text"
+                text_config.num_experts = text_config.mtp_num_experts
+                text_config.num_experts_per_tok = text_config.mtp_num_experts_per_tok
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
+            architecture = (
+                "InternS2MobiusMTP"
+                if is_mobius
+                else ("Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP")
+            )
             hf_config.update(
                 {
                     "n_predict": n_predict,
-                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                    "architectures": [architecture],
                 }
             )
         if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):
@@ -574,8 +926,7 @@ class SpeculativeConfig:
             hf_config.model_type = "inkling_mtp"
             hf_config.update(
                 {
-                    # Inkling currently exposes only the first checkpoint depth.
-                    "n_predict": 1,
+                    "n_predict": checkpoint_depths,
                     "num_nextn_predict_layers": checkpoint_depths,
                     "chain_hidden_post_norm": mtp_config.get(
                         "chain_hidden_post_norm", False
@@ -704,12 +1055,15 @@ class SpeculativeConfig:
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
-                if self.target_model_config.hf_text_config.model_type == "deepseek_v32":
-                    # FIXME(luccafong): cudagraph with v32 MTP is not supported,
-                    # remove this when the issue is fixed.
-                    self.enforce_eager = True
                 # use the draft model from the same model:
-                self.model = self.target_model_config.model
+                # Use model_weights if set (e.g. runai_streamer replaces
+                # model with a local cache dir but keeps the original path
+                # in model_weights), so the draft model can load weights
+                # from the same source as the target model.
+                self.model = (
+                    self.target_model_config.model_weights
+                    or self.target_model_config.model
+                )
                 # Align the quantization of draft model for cases such as
                 # --quantization fp8 with a bf16 checkpoint.
                 if not self.quantization:
@@ -888,12 +1242,22 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
-                elif "dflash" in self.draft_model_config.model.lower():
+                elif (
+                    "dflash" in self.draft_model_config.model.lower()
+                    or "MuseGlimmerAssistantModel"
+                    in self.draft_model_config.architectures
+                ):
                     self.method = "dflash"
                 elif (
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
+                    or _QWEN3_OMNI_DSPARK_ARCHITECTURE
+                    in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
+                    or (
+                        "DSparkDraftModel" in self.draft_model_config.architectures
+                        and self.draft_model_config.hf_config.model_type == "qwen3"
+                    )
                 ):
                     self.method = "dspark"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
@@ -951,8 +1315,19 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
 
-                if self.method == "dspark" and (
+                if (
+                    self.method == "dspark"
+                    and "DSparkDraftModel" in self.draft_model_config.architectures
+                    and self.draft_model_config.hf_config.model_type == "qwen3"
+                ):
+                    self.draft_model_config.hf_config.architectures = [
+                        "Qwen3DSparkModel"
+                    ]
+                    self.update_arch_()
+                elif self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
+                    and _QWEN3_OMNI_DSPARK_ARCHITECTURE
+                    not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
                 ):
@@ -962,6 +1337,9 @@ class SpeculativeConfig:
                     self.draft_model_config.hf_config.architectures = [
                         "DSparkDraftModel"
                     ]
+                    self.draft_model_config.quantization = (
+                        self.target_model_config.quantization
+                    )
                     self.update_arch_()
                 elif (
                     self.method == "dspark"
@@ -983,16 +1361,6 @@ class SpeculativeConfig:
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
-
-                if (
-                    self.method == "dspark"
-                    and "K3DSparkModel" in self.draft_model_config.architectures
-                    and self.target_parallel_config.decode_context_parallel_size > 1
-                ):
-                    raise ValueError(
-                        "MLA DSpark does not currently support decode context "
-                        "parallelism; set decode_context_parallel_size=1."
-                    )
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
@@ -1024,12 +1392,44 @@ class SpeculativeConfig:
                         "`num_speculative_tokens` was not provided"
                     )
 
-                if (
-                    self.draft_model_config.hf_config.model_type == "inkling_mtp"
-                    and self.num_speculative_tokens != 1
-                ):
-                    raise ValueError(
-                        "Inkling MTP currently supports exactly one speculative token"
+                if self.dspark_draft_topk is not None and self.method != "dspark":
+                    raise ValueError("dspark_draft_topk is only supported by DSpark")
+
+                dspark_draft_topk = None
+                if self.method == "dspark":
+                    hf_config = self.draft_model_config.hf_config
+                    dspark_draft_topk = self.dspark_draft_topk
+                    if dspark_draft_topk is None:
+                        dspark_draft_topk = getattr(
+                            hf_config, "dspark_draft_topk", None
+                        )
+                    if dspark_draft_topk is not None:
+                        draft_vocab_size = (
+                            getattr(hf_config, "draft_vocab_size", None)
+                            or hf_config.vocab_size
+                        )
+                        if not 1 <= dspark_draft_topk <= draft_vocab_size:
+                            raise ValueError(
+                                "dspark_draft_topk must be between 1 and the "
+                                f"draft vocabulary size ({draft_vocab_size})"
+                            )
+                        if (
+                            "Qwen3DSparkModel"
+                            not in self.draft_model_config.architectures
+                            and _QWEN3_OMNI_DSPARK_ARCHITECTURE
+                            not in self.draft_model_config.architectures
+                        ):
+                            raise ValueError(
+                                "dspark_draft_topk is only supported by "
+                                "Qwen3DSparkModel and Qwen3OmniDSparkModel"
+                            )
+                        hf_config.dspark_draft_topk = dspark_draft_topk
+
+                    assert self.target_model_config is not None
+                    _validate_qwen3_omni_dspark(
+                        self.target_model_config,
+                        self.draft_model_config,
+                        self.num_speculative_tokens,
                     )
 
                 self.draft_tensor_parallel_size = (
@@ -1039,7 +1439,6 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config,
                     )
                 )
-
                 self.draft_model_config.max_model_len = (
                     SpeculativeConfig._maybe_override_draft_max_model_len(
                         self.max_model_len,
@@ -1053,6 +1452,10 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        if self.method != "dspark" and self.enable_adaptive_verification:
+            raise ValueError("Adaptive verification only supported with DSpark")
+
         return self
 
     def _validate_suffix_decoding(self):
@@ -1331,19 +1734,44 @@ class SpeculativeConfig:
 
     @property
     def max_num_new_slots_for_drafting(self) -> int:
+        """Return the maximum additional drafting slots per request.
+
+        The scheduler budget already includes one query slot per decoding request.
+        Let K be ``num_speculative_tokens``. Standard configurations require:
+
+        ==================== ============= ======== ================
+        Algorithm            Method        Parallel Additional slots
+        ==================== ============= ======== ================
+        EAGLE3               eagle3        No       0
+        P-EAGLE              eagle3        Yes      K - 1
+        DFlash               dflash        Yes      K
+        DSpark               dspark        Yes      K - 1
+        MTP                  mtp           No       0
+        N-gram               ngram         No       0
+        Draft model          draft_model   No       1
+        PARD                 draft_model   Yes      K
+        ==================== ============= ======== ================
         """
-        Calculate the maximum number of new slots that might be added to the batch
-        when drafting.
-        """
-        slots_per_req = 0  # for serial non-draft-model methods, no change needed
+        num_draft_tokens = self.num_speculative_tokens
+
+        if self.use_dflash():
+            # DFlash uses one bonus query followed by K mask queries.
+            return num_draft_tokens
+
         if self.parallel_drafting:
-            # For parallel drafting, we need one new slot per 'masked' token
-            slots_per_req = self.num_speculative_tokens - 1
+            if self.uses_draft_model():
+                # PARD does not shift the existing input, so all K query
+                # positions require additional slots.
+                return num_draft_tokens
+
+            # The existing query is reused; only masked queries need new slots.
+            return num_draft_tokens - 1
+
         if self.uses_draft_model():
-            # For draft model-based speculation, we need one new slot per request
-            # Since we do not slice the draft tokens
-            slots_per_req += 1
-        return slots_per_req
+            # The autoregressive draft-model input retains one unsliced token.
+            return 1
+
+        return 0
 
     def use_gemma4_mtp(self) -> bool:
         return (

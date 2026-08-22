@@ -2,7 +2,7 @@ group: Ray Compatibility
 depends_on:
   - image-build
 steps:
-- label: Ray Dependency Compatibility Check
+- label: ":nvidia: (H200) Ray Dependency Compatibility Check"
   key: ray-dependency-compatibility-check
   # Informational only — does not block the pipeline.
   # If this fails, it means the PR introduces a dependency that

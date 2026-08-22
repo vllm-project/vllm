@@ -61,16 +61,16 @@ def hpc_rope_norm_forward(
         return
 
     attn_layer = forward_context.no_compile_layers[layer_name]
-    # bind_kv_cache stores the per-layer KV cache as a single 5D tensor
-    # (num_blocks, 2, block_size, num_kv_heads, head_size), so use it directly.
+    # bind_kv_cache stores the per-layer KV cache as a single tensor
+    # (num_blocks, num_kv_heads, block_size, 2 * head_size), so use it directly.
     kv_cache = attn_layer.kv_cache
 
     if kv_cache.numel() == 0:
         output.zero_()
         return
 
-    assert kv_cache.dim() == 5, (
-        f"Expected kv_cache to have 5 dims, got {tuple(kv_cache.shape)}"
+    assert kv_cache.dim() == 4, (
+        f"Expected kv_cache to have 4 dims, got {tuple(kv_cache.shape)}"
     )
 
     rope_norm = _hpc_rope_norm_instances[layer_name]
@@ -205,10 +205,10 @@ class HpcRopeNorm(CustomOp, HpcModule):
         ):
             return False
 
-        if kv_cache_dtype not in ("fp8_e4m3", "auto"):
+        if kv_cache_dtype not in ("fp8_e4m3", "auto", "bfloat16"):
             logger.warning_once(
                 f"hpc rope_norm not support kv_cache_dtype:{kv_cache_dtype}, "
-                "only support fp8_e4m3, bfloat16"
+                "only support fp8_e4m3, auto, bfloat16"
             )
             return False
 
@@ -295,6 +295,9 @@ class HpcRopeNorm(CustomOp, HpcModule):
         """
         import hpc
 
+        # (B, H, N, 2*hs) -> two (B, N, H, hs) K/V views, as in HpcAttentionImpl.
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_dim, dim=-1)
+
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_prefill_reqs = attn_metadata.num_prefills
         num_decode_reqs = attn_metadata.num_decodes
@@ -333,8 +336,8 @@ class HpcRopeNorm(CustomOp, HpcModule):
 
             if self.use_fp8:
                 _, q_scale, split_k_flag = hpc.rope_norm_store_kv_fp8(
-                    key_cache=kv_cache[:, 0],
-                    value_cache=kv_cache[:, 1],
+                    key_cache=key_cache,
+                    value_cache=value_cache,
                     qkv=qkv_prefill,
                     cos_sin=self.cos_sin_cache,
                     num_seqlen_per_req=seq_lens_prefill,
@@ -353,8 +356,8 @@ class HpcRopeNorm(CustomOp, HpcModule):
                 attn_metadata.hpc_prefill_q_scale = q_scale
             else:
                 hpc.rope_norm_store_kv(
-                    kv_cache[:, 0],
-                    kv_cache[:, 1],
+                    key_cache,
+                    value_cache,
                     qkv_prefill,
                     self.cos_sin_cache,
                     seq_lens_prefill,
@@ -379,8 +382,8 @@ class HpcRopeNorm(CustomOp, HpcModule):
 
             if self.use_fp8:
                 _, q_scale, split_k_flag = hpc.rope_norm_store_kv_fp8(
-                    key_cache=kv_cache[:, 0],
-                    value_cache=kv_cache[:, 1],
+                    key_cache=key_cache,
+                    value_cache=value_cache,
                     qkv=qkv_decode,
                     cos_sin=self.cos_sin_cache,
                     num_seqlen_per_req=num_seq_kvcache,
@@ -401,8 +404,8 @@ class HpcRopeNorm(CustomOp, HpcModule):
                     attn_metadata.hpc_split_k_flag = split_k_flag
             else:
                 hpc.rope_norm_store_kv(
-                    kv_cache[:, 0],
-                    kv_cache[:, 1],
+                    key_cache,
+                    value_cache,
                     qkv_decode,
                     self.cos_sin_cache,
                     num_seq_kvcache,
@@ -414,3 +417,11 @@ class HpcRopeNorm(CustomOp, HpcModule):
                     out_q=out_q_decode,
                     qk_norm_policy=self.qk_norm_policy,
                 )
+
+        # Signal HpcAttentionImpl that KV cache has already been written by
+        # rope_norm_store_kv[_fp8] above, so it should skip its own
+        # reshape_and_cache_flash. Set after the fused kernels ran (either
+        # prefill or decode branch); otherwise the standard KV-write path in
+        # the attention impl would kick in (which is what non-HpcRopeNorm
+        # models rely on).
+        attn_metadata.hpc_kv_written = True

@@ -130,6 +130,8 @@ def create_vllm_config(
         cache_dtype=cache_dtype,
         enable_prefix_caching=True,
     )
+    # Connectors are constructed after layout resolution; mirror that here.
+    cache_config.kv_cache_layout = "LBNHC"
     kv_transfer_config = KVTransferConfig(
         kv_connector=kv_connector,
         kv_connector_module_path=kv_connector_module_path,
@@ -363,6 +365,7 @@ class MockKVConfig:
     matched_tokens: int = 0
     is_async: bool = False
     num_defers_before_matching: int = 0
+    supports_divergent_local_hybrid_hits: bool = False
 
 
 class MockKVConnectorMetadata(KVConnectorMetadata):
@@ -388,10 +391,17 @@ class MockKVConnector(KVConnectorBase_V1):
             num_defers_before_matching=extra_config.get(
                 "num_defers_before_matching", 0
             ),
+            supports_divergent_local_hybrid_hits=extra_config.get(
+                "supports_divergent_local_hybrid_hits", False
+            ),
         )
         self._defers_left: defaultdict[str, int] = defaultdict(
             lambda: self.config.num_defers_before_matching
         )
+
+    @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return self.config.supports_divergent_local_hybrid_hits
 
     def get_num_new_matched_tokens(
         self,
