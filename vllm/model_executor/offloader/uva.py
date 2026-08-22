@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """UVA-based CPU offloading using Unified Virtual Addressing."""
 
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
+from threading import RLock
 
 import torch
 import torch.nn as nn
@@ -16,6 +17,23 @@ from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
+
+
+class _ForwardProxy(nn.Module):
+    """Call a module's original forward without replacing its forward method."""
+
+    def __init__(self, module: nn.Module, original_forward):
+        super().__init__()
+        self.module = module
+        self.original_forward = original_forward
+
+    def forward(self, *args, **kwargs):
+        return self.original_forward(*args, **kwargs)
+
+    def __call__(self, *args, **kwargs):
+        # The proxy is an implementation detail, so it must not dispatch module
+        # hooks in addition to those dispatched by the wrapped module.
+        return self.forward(*args, **kwargs)
 
 
 class UVAOffloader(BaseOffloader):
@@ -47,6 +65,40 @@ class UVAOffloader(BaseOffloader):
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
+
+    @staticmethod
+    def _named_state_tensors(module: nn.Module) -> tuple[tuple[str, torch.Tensor], ...]:
+        """Return the module tensors accepted by functional_call.
+
+        This mirrors the tensor set from state_dict() without invoking
+        state_dict() in forward, which is not torch.compile traceable.
+        """
+        state: list[tuple[str, torch.Tensor]] = []
+        state.extend(module.named_parameters(remove_duplicate=False))
+
+        non_persistent_buffers: set[str] = set()
+        for module_name, child_module in module.named_modules():
+            prefix = f"{module_name}." if module_name else ""
+            non_persistent_buffers.update(
+                prefix + name for name in child_module._non_persistent_buffers_set
+            )
+
+        state.extend(
+            (name, buffer)
+            for name, buffer in module.named_buffers(remove_duplicate=False)
+            if name not in non_persistent_buffers
+        )
+        return tuple(state)
+
+    @staticmethod
+    def _move_state_to_device(
+        state: Iterable[tuple[str, torch.Tensor]],
+        device: torch.device,
+        non_blocking: bool,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            name: tensor.to(device, non_blocking=non_blocking) for name, tensor in state
+        }
 
     def wrap_modules(
         self,
@@ -109,28 +161,40 @@ class UVAOffloader(BaseOffloader):
 
         if offloaded_parameters and not self.uva_offloading:
             original_forward = module.forward
+            forward_proxy = _ForwardProxy(module, original_forward)
+            forward_lock = RLock()
+            non_blocking = self.pin_memory
 
-            def forward(*args, **kwargs):
-                module.forward = original_forward
-                device_state = {
-                    # here we blindly call `to(device)`
-                    # if the parameter is already on the device,
-                    # it will be a no-op
-                    k: v.to(device, non_blocking=True)
-                    for k, v in module.state_dict().items()
+            def call_functionally(*args, **kwargs):
+                # Resolve state at call time because post-load hooks may replace
+                # parameters, buffers, or child modules.
+                device_state = self._move_state_to_device(
+                    self._named_state_tensors(module),
+                    device,
+                    non_blocking=non_blocking,
+                )
+                proxy_state = {
+                    f"module.{name}": tensor for name, tensor in device_state.items()
                 }
 
                 # set `tie_weights=False` as tied weights in original model
                 # become untied when calling .to(device) individually
-                output = functional_call(
-                    module,
-                    device_state,
+                return functional_call(
+                    forward_proxy,
+                    proxy_state,
                     args=args,
                     kwargs=kwargs,
                     tie_weights=False,
                 )
-                module.forward = forward
-                return output
+
+            def forward(*args, **kwargs):
+                # Dynamo cannot trace RLock. Compiled graphs inline the
+                # functional call, while eager calls need serialization because
+                # functional_call temporarily replaces module state.
+                if torch.compiler.is_compiling():
+                    return call_functionally(*args, **kwargs)
+                with forward_lock:
+                    return call_functionally(*args, **kwargs)
 
             module.forward = forward
 
