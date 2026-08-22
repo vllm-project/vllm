@@ -283,7 +283,7 @@ class VocabParallelEmbedding(PluggableLayer):
 
         quant_method = None
         if quant_config is not None:
-            quant_method = quant_config.get_quant_method(self, prefix=prefix)
+            quant_method = quant_config.get_effective_quant_method(self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
 

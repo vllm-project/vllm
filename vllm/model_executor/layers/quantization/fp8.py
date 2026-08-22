@@ -216,7 +216,7 @@ class Fp8Config(QuantizationConfig):
                     Fp8PerTensorOnlineMoEMethod,
                 )
 
-                return Fp8PerTensorOnlineMoEMethod(layer=layer)
+                return Fp8PerTensorOnlineMoEMethod(moe=layer.moe_config)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None

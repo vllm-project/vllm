@@ -350,7 +350,7 @@ def test_online_mxfp4_moe_matches_quark(
             input_config={"dtype": "fp4", "is_dynamic": True},
             moe=checkpoint_layer.moe_config,
         )
-        online_method = Mxfp4OnlineMoEMethod(layer=online_layer)
+        online_method = Mxfp4OnlineMoEMethod(moe=online_layer.moe_config)
 
         # `RoutedExperts.__init__` applies this round-up in production; these
         # layers are built without a quant config, so it is applied explicitly.

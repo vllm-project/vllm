@@ -153,3 +153,12 @@ def is_shared_expert_quant_fse_compatible(
         "shared-expert FSE quantization compatibility is not implemented for "
         f"{type(quant_config).__name__}",
     )
+
+
+def get_layer_name_after_index(layer_name: str) -> str:
+    """Return the suffix following the final numeric component of a layer name."""
+    parts = layer_name.split(".")
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index].isdigit():
+            return ".".join(parts[index + 1 :])
+    return layer_name
