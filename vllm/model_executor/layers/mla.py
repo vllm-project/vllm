@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -9,6 +10,11 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
+
+MLAOutputGate = Callable[
+    [torch.Tensor, torch.Tensor, torch.nn.Module],
+    torch.Tensor,
+]
 
 
 @dataclass
@@ -29,6 +35,18 @@ class MLAModules:
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
     g_proj: torch.nn.Module | None = None
+    output_gate: MLAOutputGate | None = None
+
+
+def _apply_mla_output_gate(
+    hidden_states: torch.Tensor,
+    attention_output: torch.Tensor,
+    gate_projection: torch.nn.Module,
+    output_gate: MLAOutputGate | None,
+) -> torch.Tensor:
+    if output_gate is not None:
+        return output_gate(hidden_states, attention_output, gate_projection)
+    return attention_output * gate_projection(hidden_states)[0].sigmoid()
 
 
 # --8<-- [start:multi_head_latent_attention]
@@ -92,6 +110,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
         self.g_proj = mla_modules.g_proj
+        self.output_gate = mla_modules.output_gate
 
         # Whether to skip top-k token selection computation in this layer.
         # When True, the indexer will not be called, and the layer will reuse
@@ -221,6 +240,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         if self.g_proj is not None:
-            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
+            attn_out = _apply_mla_output_gate(
+                hidden_states,
+                attn_out,
+                self.g_proj,
+                self.output_gate,
+            )
 
         return self.o_proj(attn_out)[0]
