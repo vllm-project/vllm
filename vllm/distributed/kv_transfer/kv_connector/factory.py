@@ -135,12 +135,12 @@ class KVConnectorFactory:
         SupportsHMA, but effective support depends on every configured child.
         """
         connector_cls = cls.get_connector_class(kv_transfer_config)
-        if kv_transfer_config.kv_connector != "MultiConnector":
-            return supports_hma(connector_cls)
-
         from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
             MultiConnector,
         )
+
+        if not issubclass(connector_cls, MultiConnector):
+            return supports_hma(connector_cls)
 
         return MultiConnector.all_children_support_hma(kv_transfer_config)
 
