@@ -5,6 +5,7 @@
 import pytest
 import torch
 
+import vllm.model_executor.kernels.linear.scaled_mm.deep_gemm as deep_gemm
 from vllm.model_executor.kernels.linear import (
     _POSSIBLE_FP8_BLOCK_KERNELS,
     _POSSIBLE_FP8_KERNELS,
@@ -19,8 +20,14 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
+    Fp8BlockScaledMMLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+    DeepGemmFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
@@ -36,6 +43,8 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     expose_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -44,6 +53,7 @@ from vllm.platforms import current_platform
 # The only backends that consume a pre-quantized activation.
 SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
+    DeepGemmFp8BlockScaledMMKernel,
     FlashInferFP8ScaledMMLinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
 }
@@ -73,6 +83,14 @@ def _probe(cls: type):
         obj.config = Int8ScaledMMLinearLayerConfig(
             is_static_input_scheme=True, is_channelwise=False, input_symmetric=True
         )
+    elif issubclass(cls, Fp8BlockScaledMMLinearKernel):
+        obj.config = FP8ScaledMMLinearLayerConfig(
+            weight_quant_key=kFp8Static128BlockSym,
+            activation_quant_key=kFp8Dynamic128Sym,
+            weight_shape=(128, 128),
+            input_dtype=torch.bfloat16,
+            out_dtype=torch.bfloat16,
+        )
     else:
         obj.config = FP8ScaledMMLinearLayerConfig(
             weight_quant_key=kFp8StaticTensorSym,
@@ -94,6 +112,33 @@ def _resolved_apply_weights(cls: type):
 def test_only_known_backends_support_prequantized_input():
     declarers = {c for c in _all_kernel_classes() if _probe(c).input_quant_key()}
     assert declarers == SUPPORTING
+
+
+def test_deepgemm_custom_op_hides_compiler_scale_storage_padding(monkeypatch):
+    q_input = torch.empty(3, 128)
+    input_scale = torch.empty_strided((4, 1), (1, 4), dtype=torch.int32)
+    weight = torch.empty(128, 128)
+    weight_scale = torch.empty(1, 1)
+    output = torch.empty(3, 128)
+    received_scale = None
+
+    def fake_fp8_gemm_nt(a, b, out, *, is_deep_gemm_e8m0_used):
+        nonlocal received_scale
+        received_scale = a[1]
+
+    monkeypatch.setattr(deep_gemm, "fp8_gemm_nt", fake_fp8_gemm_nt)
+    deep_gemm._fp8_gemm_nt_op(
+        q_input,
+        input_scale,
+        weight,
+        weight_scale,
+        output,
+        True,
+    )
+
+    assert received_scale is not None
+    assert received_scale.shape == (3, 1)
+    assert received_scale.stride() == input_scale.stride()
 
 
 def test_supporting_backend_declares_consume_via_helper():
