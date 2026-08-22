@@ -774,8 +774,17 @@ def test_take_partial_tail_offloads_returns_cow_target(dcp_world_size: int):
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
 
-    # Step A registered the partial tail but has not CoW'd yet: no offload.
-    assert manager.take_partial_tail_offloads() == {}
+    # Step A registered the partial tail but has not CoW'd yet, so the mamba
+    # group has nothing durable to hand off. Under DCP the full-attention group
+    # does: its boundary block needs no CoW because KV below the boundary is
+    # append-only.
+    step_a_offloads = manager.take_partial_tail_offloads().get("0", [])
+    assert [entry for entry in step_a_offloads if entry[0] == 1] == []
+    if dcp_world_size > 1:
+        assert [entry[0] for entry in step_a_offloads] == [0]
+        assert [entry[2] for entry in step_a_offloads] == [6]
+    else:
+        assert step_a_offloads == []
 
     partial_mamba_hash = req0.block_hashes[6 // hash_block_size - 1]
     source_block = manager.block_pool.get_cached_block(

@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import ClassVar
 
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -31,6 +32,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -126,6 +129,11 @@ class SingleTypeKVCacheManager(ABC):
         self._pending_partial_tail_offloads: list[
             tuple[str, int, KVCacheBlock, int]
         ] = []
+        # DCP full-attention tails do not need CoW, but still need a one-shot
+        # hand-off to an external connector after the prompt boundary is filled.
+        # The queue above is drained every step, so dedup needs its own record
+        # that survives until the request is freed.
+        self._external_partial_tail_boundaries: set[tuple[str, int]] = set()
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -352,11 +360,28 @@ class SingleTypeKVCacheManager(ABC):
             # Replacing in place keeps the length-based allocation below
             # correct; the extra block was reserved by
             # get_num_blocks_to_allocate.
-            block_idx, source_block = self._partial_hit_reqs.pop(request_id)
-            cow_block = self.block_pool.get_new_blocks(1)[0]
-            self._apply_cow(request_id, block_idx, source_block, cow_block)
-            self.new_block_ids.append(cow_block.block_id)
-            cow_blocks.append(cow_block)
+            block_idx, _ = self._partial_hit_reqs.pop(request_id)
+            req_blocks = self.req_to_blocks[request_id]
+            if block_idx < len(req_blocks):
+                # The cached source can be replaced before allocation. Copy
+                # from the block currently owned by this request so a stale
+                # record can never leave a shared block writable in place.
+                source_block = req_blocks[block_idx]
+                cow_block = self.block_pool.get_new_blocks(1)[0]
+                self._apply_cow(request_id, block_idx, source_block, cow_block)
+                self.new_block_ids.append(cow_block.block_id)
+                cow_blocks.append(cow_block)
+            else:
+                # get_num_blocks_to_allocate reserved a block for this CoW, so
+                # a record pointing past the table means the partial hit was
+                # dropped elsewhere. Harmless, but it wastes the reservation.
+                logger.debug(
+                    "Skipping CoW for request %s: partial-hit block %d is past "
+                    "its %d allocated blocks.",
+                    request_id,
+                    block_idx,
+                    len(req_blocks),
+                )
 
         req_blocks = self.req_to_blocks[request_id]
         num_required_blocks = cdiv(num_tokens, self.block_size)
@@ -520,6 +545,16 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
+        self._external_partial_tail_boundaries = {
+            entry
+            for entry in self._external_partial_tail_boundaries
+            if entry[0] != request_id
+        }
+        self._pending_partial_tail_offloads = [
+            entry
+            for entry in self._pending_partial_tail_offloads
+            if entry[0] != request_id
+        ]
         return req_blocks
 
     def free(self, request_id: str) -> None:
@@ -827,13 +862,30 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_idx = boundary_tokens // self.block_size
         if block_idx >= len(blocks):
             return
-        self.block_pool.cache_partial_block(
+        partial_hash = self.block_pool.cache_partial_block(
             request=request,
             block=blocks[block_idx],
             num_tokens=boundary_tokens,
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
+        boundary_key = (request.request_id, boundary_tokens)
+        if (
+            partial_hash is not None
+            and self.dcp_world_size > 1
+            and boundary_key not in self._external_partial_tail_boundaries
+        ):
+            # Unlike Mamba align mode, full-attention KV is append-only inside
+            # the block, so the request block itself is a durable DMA source.
+            self._external_partial_tail_boundaries.add(boundary_key)
+            self._pending_partial_tail_offloads.append(
+                (
+                    request.request_id,
+                    self.kv_cache_group_id,
+                    blocks[block_idx],
+                    boundary_tokens,
+                )
+            )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
@@ -1705,13 +1757,6 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx.pop(request_id, None)
             self._num_checkpoint_blocks.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
-            # A hand-off whose request died in this same scheduling pass must
-            # not reach the connector: its unpin hook (free) has already run.
-            self._pending_partial_tail_offloads = [
-                entry
-                for entry in self._pending_partial_tail_offloads
-                if entry[0] != request_id
-            ]
         return super().pop_blocks_for_free(request_id)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
