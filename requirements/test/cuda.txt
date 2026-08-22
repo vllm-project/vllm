@@ -799,7 +799,7 @@ portalocker==2.10.1
     # via sacrebleu
 pqdm==0.2.0
     # via -r requirements/test/cuda.in
-prometheus-client==0.22.0
+prometheus-client==0.25.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

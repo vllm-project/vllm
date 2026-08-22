@@ -36,6 +36,20 @@ def setup_multiprocess_prometheus():
         )
 
 
+def get_prometheus_instrumentator_registry(
+    scrape_registry: CollectorRegistry,
+) -> CollectorRegistry:
+    """Return the registry used by Instrumentator's HTTP collectors.
+
+    In multiprocess mode, metric values are written to mmap files and collected
+    by ``MultiProcessCollector``. Registering the local collectors in the
+    scrape registry as well would emit duplicate metric families.
+    """
+    if os.getenv("PROMETHEUS_MULTIPROC_DIR") is not None:
+        return CollectorRegistry()
+    return scrape_registry
+
+
 def get_prometheus_registry() -> CollectorRegistry:
     """Get the appropriate prometheus registry based on multiprocessing
     configuration.
@@ -45,7 +59,7 @@ def get_prometheus_registry() -> CollectorRegistry:
     """
     if os.getenv("PROMETHEUS_MULTIPROC_DIR") is not None:
         logger.debug("Using multiprocess registry for prometheus metrics")
-        registry = CollectorRegistry()
+        registry = CollectorRegistry(support_collectors_without_names=True)
         multiprocess.MultiProcessCollector(registry)
         return registry
 
