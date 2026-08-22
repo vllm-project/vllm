@@ -198,7 +198,7 @@ class JambaToolParser(ToolParser):
 
                     if diff:
                         diff = json.dumps(diff, ensure_ascii=False).replace(
-                            self.streamed_args_for_tool[self.current_tool_id], ""
+                            self.streamed_args_for_tool[self.current_tool_id], "", 1
                         )
                         delta = DeltaMessage(
                             tool_calls=[
