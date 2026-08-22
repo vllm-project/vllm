@@ -86,6 +86,12 @@ class Olmo3ReasoningBuffer:
     state: Olmo3ReasoningState = Olmo3ReasoningState.REASONING
 
     def process_buffer(self) -> DeltaMessage | None:
+        if self.state == Olmo3ReasoningState.CONTENT:
+            # Reasoning ended: rest is verbatim content. Re-scanning would let
+            # literal <think>/</think> tags in content restart the state machine.
+            text_buffer, self.buffer = self.buffer, ""
+            return DeltaMessage(content=text_buffer)
+
         start_think_idx = self.buffer.find(self.think_start)
 
         if start_think_idx >= 0:
