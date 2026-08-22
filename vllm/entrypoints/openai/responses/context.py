@@ -330,6 +330,7 @@ class ParsableContext(ConversationContext):
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
         self._accumulated_token_ids: list[int] = []
+        self._current_generation_token_ids: list[int] = []
         self.kv_transfer_params: dict[str, Any] | None = None
         self.ec_transfer_params: dict[str, Any] | None = None
 
@@ -381,7 +382,20 @@ class ParsableContext(ConversationContext):
                 )
             )
 
-        self._accumulated_token_ids.extend(completion.token_ids or [])
+        completion_token_ids = completion.token_ids or []
+        self._accumulated_token_ids.extend(completion_token_ids)
+        self._current_generation_token_ids.extend(completion_token_ids)
+        if output.finished:
+            reasoning_parser = (
+                self.response_parser.reasoning_parser
+                if self.response_parser is not None
+                else None
+            )
+            if reasoning_parser is not None:
+                self.num_reasoning_tokens += reasoning_parser.count_reasoning_tokens(
+                    self._current_generation_token_ids
+                )
+            self._current_generation_token_ids = []
 
         if self.request.enable_response_messages:
             output_prompt = output.prompt or ""
