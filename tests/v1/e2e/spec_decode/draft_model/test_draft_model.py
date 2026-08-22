@@ -83,6 +83,16 @@ cases = [
         expected_acceptance_rate=0.80,  # ref: 0.90
         expected_gsm8k_accuracy=0.5,  # ref: 60%. Note gsm8k always runs greedy sampling
     ),
+    # Same Gemma3 model for draft and target. This exercises multi-group KV
+    # draft model metadata handling.
+    ArgsTest(
+        target_model="google/gemma-3-270m-it",
+        draft_model="google/gemma-3-270m-it",
+        sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=0.98 * (3 + 1),  # epsilon discount of K + 1
+        expected_acceptance_rate=0.98,
+    ),
 ]
 
 
