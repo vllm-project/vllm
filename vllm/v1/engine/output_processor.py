@@ -10,6 +10,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -29,7 +30,10 @@ from vllm.tracing import (
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
-from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.detokenizer import (
+    IncrementalDetokenizer,
+    InvalidTokenIDError,
+)
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
@@ -40,6 +44,8 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import SamplingMaskLists
+
+logger = init_logger(__name__)
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
@@ -674,9 +680,18 @@ class OutputProcessor:
                         engine_core_output.new_sampling_mask
                     )
                 # 2) Detokenize the token ids into text and perform stop checks.
-                stop_string = req_state.detokenizer.update(
-                    new_token_ids, finish_reason == FinishReason.STOP
-                )
+                try:
+                    stop_string = req_state.detokenizer.update(
+                        new_token_ids, finish_reason == FinishReason.STOP
+                    )
+                except InvalidTokenIDError as e:
+                    # The model emitted an out-of-range token id (corrupt
+                    # output). Fail this request cleanly instead of silently
+                    # emitting garbage; keep the server and other requests
+                    # alive by aborting only this request.
+                    logger.error("Aborting request %s: %s", req_id, e)
+                    finish_reason = FinishReason.ABORT
+                    stop_string = None
                 if stop_string:
                     finish_reason = FinishReason.STOP
                     stop_reason = stop_string
