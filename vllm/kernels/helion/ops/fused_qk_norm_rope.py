@@ -53,7 +53,7 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         (32, 8),
         (64, 8),
     ]
-    head_dim = 128
+    head_dim_list = [64, 128, 256]
     in_dtype: torch.dtype = torch.bfloat16
     rotary_ratio = 1.0
     is_neox = True
@@ -61,8 +61,8 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     device = "cuda"
     inputs = {}
 
-    for num_tokens, (num_q_heads, num_kv_heads) in product(
-        num_tokens_list, num_heads_pair
+    for num_tokens, (num_q_heads, num_kv_heads), head_dim in product(
+        num_tokens_list, num_heads_pair, head_dim_list
     ):
         total_dim = (num_q_heads + 2 * num_kv_heads) * head_dim
         qkv = torch.empty(
@@ -84,6 +84,7 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
                 "q_heads": num_q_heads,
                 "kv_heads": num_kv_heads,
                 "num_tokens": num_tokens,
+                "head_dim": head_dim,
             }
         )
         inputs[config_key] = (
@@ -103,18 +104,20 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     return inputs
 
 
-_pick_cache: dict[tuple[int, int, int], CaseKey | None] = {}
+_pick_cache: dict[tuple[int, int, int, int], CaseKey | None] = {}
 
 
 def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | None:
     """Pick the best pre-tuned config for the given input shape.
 
     Selection strategy:
-      1. Find the closest q_heads among available configs
+      1. Prefer configs tuned for the exact head_dim. If none exist, use
+         configs without a head_dim key, then fall back to the closest head_dim.
+      2. Find the closest q_heads among available configs
          (exact match preferred).
-      2. Find the closest kv_heads among available configs
+      3. Find the closest kv_heads among available configs
          (exact match preferred).
-      3. Among the num_tokens values tuned for that q_heads and q_heads, pick
+      4. Among the num_tokens values tuned for that q_heads and kv_heads, pick
          the smallest num_tokens >= the input's num_tokens. If the input is
          larger than all available num_tokens, fall back to the largest.
     """
@@ -122,18 +125,31 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     if not config_keys:
         return None
 
-    qkv, q_heads, kv_heads, *_ = args
+    qkv, q_heads, kv_heads, _, head_dim, *_ = args
     num_tokens = qkv.shape[0]
 
-    cache_key = (num_tokens, q_heads, kv_heads)
+    cache_key = (num_tokens, q_heads, kv_heads, head_dim)
     cached = _pick_cache.get(cache_key)
     if cached is not None:
         return cached
 
+    non_default_keys = [key for key in config_keys if not key.is_default()]
+    candidate_keys = [
+        key for key in non_default_keys if key.get("head_dim") == head_dim
+    ]
+    if not candidate_keys:
+        candidate_keys = [key for key in non_default_keys if "head_dim" not in key]
+    if not candidate_keys and non_default_keys:
+        best_head_dim = min(
+            {key["head_dim"] for key in non_default_keys},
+            key=lambda value: abs(value - head_dim),
+        )
+        candidate_keys = [
+            key for key in non_default_keys if key["head_dim"] == best_head_dim
+        ]
+
     configs: dict[int, dict[int, list[int]]] = {}
-    for key in config_keys:
-        if key.is_default():
-            continue
+    for key in candidate_keys:
         configs.setdefault(key["q_heads"], {}).setdefault(key["kv_heads"], []).append(
             key["num_tokens"]
         )
@@ -148,12 +164,12 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
         (n for n in available_num_tokens if n >= num_tokens), available_num_tokens[-1]
     )
 
-    result = CaseKey(
-        {
-            "q_heads": best_q_heads,
-            "kv_heads": best_kv_heads,
-            "num_tokens": best_num_tokens,
-        }
+    result = next(
+        key
+        for key in candidate_keys
+        if key["q_heads"] == best_q_heads
+        and key["kv_heads"] == best_kv_heads
+        and key["num_tokens"] == best_num_tokens
     )
     _pick_cache[cache_key] = result
     return result
@@ -281,23 +297,7 @@ def fused_qk_norm_rope(
     for tile_m, tile_gn, tile_n in hl.tile(
         [num_tokens, qk_heads, head_dim], block_size=[1, None, head_dim]
     ):
-        x_blk = qkv[tile_m, tile_gn, tile_n].to(dtype=torch.float32)
-
-        rms = x_blk.pow(2).sum(dim=-1)
-        rms = torch.rsqrt(rms * (1.0 / head_dim) + eps)
-
         use_q_weight = (tile_gn.index < num_heads_q)[None, :, None]
-        w_blk = torch.where(
-            use_q_weight, q_weight[None, None, tile_n], k_weight[None, None, tile_n]
-        )
-
-        x_blk = (x_blk * rms[:, :, None]).to(qkv.dtype) * w_blk
-
-        qkv[tile_m, tile_gn, tile_n] = x_blk
-
-        pos_id = position_ids[tile_m]
-        cos_blk = cos_sin_cache[pos_id, hl.arange(embed_dim)]
-        sin_blk = cos_sin_cache[pos_id, hl.arange(embed_dim) + embed_dim]
 
         if is_neox:
             x1_offset = hl.arange(embed_dim)
@@ -306,8 +306,43 @@ def fused_qk_norm_rope(
             x1_offset = hl.arange(embed_dim) * 2
             x2_offset = x1_offset + 1
 
-        x1_blk = qkv[tile_m, tile_gn, x1_offset]
-        x2_blk = qkv[tile_m, tile_gn, x2_offset]
+        # Partial RoPE still requires RMSNorm over the full head, including the
+        # unrotated tail, so retain the full-head normalization path.
+        if rotary_dim < head_dim:
+            x_blk = qkv[tile_m, tile_gn, tile_n].to(dtype=torch.float32)
+            rms = torch.rsqrt(x_blk.pow(2).sum(dim=-1) * (1.0 / head_dim) + eps)
+            weight = torch.where(
+                use_q_weight,
+                q_weight[None, None, tile_n],
+                k_weight[None, None, tile_n],
+            )
+            x_blk = (x_blk * rms[:, :, None]).to(qkv.dtype) * weight
+            qkv[tile_m, tile_gn, tile_n] = x_blk
+            x1_blk = qkv[tile_m, tile_gn, x1_offset]
+            x2_blk = qkv[tile_m, tile_gn, x2_offset]
+        else:
+            # Full RoPE covers the entire head. Keep both rotary halves in
+            # registers through RMSNorm and RoPE to avoid a store/reload round trip.
+            x1_blk = qkv[tile_m, tile_gn, x1_offset].to(dtype=torch.float32)
+            x2_blk = qkv[tile_m, tile_gn, x2_offset].to(dtype=torch.float32)
+            rms = x1_blk.pow(2).sum(dim=-1) + x2_blk.pow(2).sum(dim=-1)
+            rms = torch.rsqrt(rms * (1.0 / head_dim) + eps)
+            x1_weight = torch.where(
+                use_q_weight,
+                q_weight[None, None, x1_offset],
+                k_weight[None, None, x1_offset],
+            )
+            x2_weight = torch.where(
+                use_q_weight,
+                q_weight[None, None, x2_offset],
+                k_weight[None, None, x2_offset],
+            )
+            x1_blk = (x1_blk * rms[:, :, None]).to(qkv.dtype) * x1_weight
+            x2_blk = (x2_blk * rms[:, :, None]).to(qkv.dtype) * x2_weight
+
+        pos_id = position_ids[tile_m]
+        cos_blk = cos_sin_cache[pos_id, hl.arange(embed_dim)]
+        sin_blk = cos_sin_cache[pos_id, hl.arange(embed_dim) + embed_dim]
 
         o1_blk = x1_blk * cos_blk[:, None, :] - x2_blk * sin_blk[:, None, :]
         o2_blk = x2_blk * cos_blk[:, None, :] + x1_blk * sin_blk[:, None, :]
