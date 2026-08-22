@@ -15,6 +15,11 @@ from torch.distributed import ProcessGroup, all_gather
 
 from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.distributed.eplb.migration_scheduler import (
+    MigrationInstruction,
+    build_migration_instructions,
+    schedule_migration_batches,
+)
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
@@ -170,6 +175,49 @@ def get_ep_ranks_with_experts_batch(
     return ranks_to_send_map, ranks_to_recv_map
 
 
+def _execute_migration_batch(
+    batch: list[MigrationInstruction],
+    num_local_experts: int,
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+    ep_rank: int,
+    expert_weights: Sequence[torch.Tensor],
+    expert_weights_buffers: Sequence[torch.Tensor],
+    communicator: EplbCommunicator,
+    layer_idx: int,
+) -> None:
+    """Execute one batch of rank-pair-disjoint expert transfers."""
+    base = ep_rank * num_local_experts
+    old_local = old_indices[base : base + num_local_experts]
+    new_local = new_indices[base : base + num_local_experts]
+    old_rows: dict[int, int] = {}
+    new_rows: dict[int, int] = {}
+    for row, expert_id in enumerate(old_local):
+        if expert_id != -1:
+            old_rows.setdefault(int(expert_id), row)
+    for row, expert_id in enumerate(new_local):
+        if expert_id != -1:
+            new_rows.setdefault(int(expert_id), row)
+
+    communicator.set_transfer_context(old_indices, layer_idx)
+    for instruction in batch:
+        if instruction.src_rank == ep_rank:
+            src_row = old_rows[instruction.expert_id]
+            communicator.add_send(
+                [weight[src_row] for weight in expert_weights],
+                instruction.dst_rank,
+                expert_id=instruction.expert_id,
+            )
+        elif instruction.dst_rank == ep_rank:
+            dst_row = new_rows[instruction.expert_id]
+            communicator.add_recv(
+                [buffer[dst_row] for buffer in expert_weights_buffers],
+                instruction.src_rank,
+                expert_id=instruction.expert_id,
+            )
+    communicator.execute()
+
+
 def move_to_buffer(
     num_local_experts: int,
     old_indices: np.ndarray,
@@ -180,6 +228,7 @@ def move_to_buffer(
     ep_rank: int,
     communicator: EplbCommunicator,
     layer_idx: int = 0,
+    enable_migration_batching: bool = False,
 ) -> TransferMetadata:
     """
     Rearranges expert weights during EPLB rebalancing.
@@ -196,6 +245,8 @@ def move_to_buffer(
         ep_rank: Rank of this process in expert parallel group.
         communicator: EplbCommunicator instance for P2P communication.
         layer_idx: Index of the MoE layer being transferred.
+        enable_migration_batching: Schedule remote transfers in batches where
+            each rank communicates with at most one peer.
 
     Returns:
         TransferMetadata: Metadata needed for completing remote weight transfers.
@@ -267,6 +318,31 @@ def move_to_buffer(
                 with torch.cuda.stream(cuda_stream):
                     for w, b in zip(expert_weights, expert_weights_buffers):
                         b[dst].copy_(w[src_local], non_blocking=True)
+
+    if enable_migration_batching:
+        instructions = build_migration_instructions(
+            num_local_experts, old_indices, new_indices
+        )
+        for batch in schedule_migration_batches(instructions):
+            _execute_migration_batch(
+                batch=batch,
+                num_local_experts=num_local_experts,
+                old_indices=old_indices,
+                new_indices=new_indices,
+                ep_rank=ep_rank,
+                expert_weights=expert_weights,
+                expert_weights_buffers=expert_weights_buffers,
+                communicator=communicator,
+                layer_idx=layer_idx,
+            )
+        return TransferMetadata(
+            is_unchanged=is_unchanged,
+            is_received_locally=is_received_locally,
+            recv_primary_mask=recv_primary_mask,
+            recv_count=recv_count,
+            recv_expert_ids=recv_expert_ids,
+            recv_dst_rows=recv_dst_rows,
+        )
 
     communicator.set_transfer_context(old_indices, layer_idx)
 
@@ -436,6 +512,7 @@ def transfer_layer(
     cuda_stream: torch.cuda.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
     layer_idx: int = 0,
+    enable_migration_batching: bool = False,
 ) -> TransferMetadata:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -458,6 +535,8 @@ def transfer_layer(
         cuda_stream: CUDA stream for async copies (can be None for sync mode).
         rank_mapping: Optional rank mapping for elastic expert parallelism.
         layer_idx: Index of the MoE layer being transferred.
+        enable_migration_batching: Schedule remote transfers in batches where
+            each rank communicates with at most one peer.
 
     Returns:
         TransferMetadata: Metadata needed for completing remote weight transfers,
@@ -506,6 +585,7 @@ def transfer_layer(
         ep_rank=ep_group.rank(),
         communicator=communicator,
         layer_idx=layer_idx,
+        enable_migration_batching=enable_migration_batching,
     )
 
 
@@ -518,6 +598,7 @@ def rearrange_expert_weights_inplace(
     communicator: EplbCommunicator,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
+    enable_migration_batching: bool = False,
 ) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -540,6 +621,8 @@ def rearrange_expert_weights_inplace(
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
+        enable_migration_batching: Schedule remote transfers in batches where
+            each rank communicates with at most one peer.
     """
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -608,6 +691,7 @@ def rearrange_expert_weights_inplace(
             ep_rank=ep_rank,
             communicator=communicator,
             layer_idx=layer_idx,
+            enable_migration_batching=enable_migration_batching,
         )
 
         move_from_buffer(
