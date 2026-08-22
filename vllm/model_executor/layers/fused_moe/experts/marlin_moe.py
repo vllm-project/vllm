@@ -95,6 +95,8 @@ def _fused_marlin_moe(
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
+    # The marlin moe kernel reads topk_weights as fp32.
+    assert topk_weights.dtype == torch.float32
     M, K = hidden_states.size()
     N = marlin_moe_intermediate_size(w1, w2)
     w13_num_shards = 2 if activation.is_gated else 1
