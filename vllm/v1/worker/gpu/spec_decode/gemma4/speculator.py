@@ -9,6 +9,7 @@ with the target model via cross-model KV sharing.
 
 from collections import defaultdict
 
+import torch
 import torch.nn as nn
 
 from vllm.compilation.backends import set_model_tag
@@ -127,12 +128,61 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             target_idx = candidates[-1]
             target_layer_name = f"{target_prefix}.{target_idx}.self_attn.attn"
             attn.kv_sharing_target_layer_name = target_layer_name
+            self._inherit_kv_scales(attn, target_layer_name)
             logger.info(
                 "Gemma4 MTP: draft layer %d (%s) -> %s",
                 draft_idx,
                 draft_layer_type,
                 target_layer_name,
             )
+
+    def _inherit_kv_scales(
+        self,
+        draft_attn: nn.Module,
+        target_layer_name: str,
+    ) -> None:
+        """Share the target layer's KV-cache scales with the KV-sharing draft layer.
+
+        Draft layers read (and write drafts into) the target layer's physical
+        KV cache, so they must quantize/dequantize with the scales the target
+        wrote it with. The draft checkpoint carries no scales, so without this
+        the draft attention silently uses 1.0, which collapses MTP acceptance
+        on targets with calibrated KV scales (modelopt kv_cache_quant_algo or
+        compressed-tensors kv_cache_scheme checkpoints). The tensors are shared
+        by reference rather than copied in place: quant formats store them in
+        different shapes (modelopt fills the default 0-dim buffers, while
+        compressed-tensors reassigns shape-[1] or per-head parameters).
+        """
+        forward_ctx = self.vllm_config.compilation_config.static_forward_context
+        target_attn = forward_ctx.get(target_layer_name)
+        if target_attn is None:
+            logger.warning(
+                "Gemma4 MTP: attention layer '%s' not found in forward context; "
+                "draft KV scales left at defaults",
+                target_layer_name,
+            )
+            return
+        for name in (
+            "_q_scale",
+            "_k_scale",
+            "_v_scale",
+            "_prob_scale",
+            "_k_scale_cpu",
+            "_v_scale_cpu",
+        ):
+            src = getattr(target_attn, name, None)
+            if isinstance(src, torch.Tensor) and hasattr(draft_attn, name):
+                setattr(draft_attn, name, src)
+        for name in ("_q_scale_float", "_k_scale_float", "_v_scale_float"):
+            if hasattr(target_attn, name) and hasattr(draft_attn, name):
+                setattr(draft_attn, name, getattr(target_attn, name))
+        logger.info(
+            "Gemma4 MTP: draft layer inherits KV scales from %s "
+            "(k_scale=%.6f, v_scale=%.6f)",
+            target_layer_name,
+            draft_attn._k_scale_float,
+            draft_attn._v_scale_float,
+        )
 
     def _share_embeddings(
         self,
