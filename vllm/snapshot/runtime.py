@@ -631,11 +631,24 @@ class LocalSnapshotTools:
     ) -> SnapshotManifest:
         identity = self.current_identity(inventory.gpu_uuid)
         redacted_argv = list(engine_argv)
+        redact_api_keys = False
         for index, argument in enumerate(redacted_argv):
-            if argument == "--hf-token" and index + 1 < len(redacted_argv):
-                redacted_argv[index + 1] = "***"
+            if argument == "--api-key":
+                redact_api_keys = True
+            elif argument.startswith("--api-key="):
+                redacted_argv[index] = "--api-key=***"
+                redact_api_keys = False
+            elif argument == "--hf-token":
+                if index + 1 < len(redacted_argv):
+                    redacted_argv[index + 1] = "***"
+                redact_api_keys = False
             elif argument.startswith("--hf-token="):
                 redacted_argv[index] = "--hf-token=***"
+                redact_api_keys = False
+            elif argument.startswith("-"):
+                redact_api_keys = False
+            elif redact_api_keys:
+                redacted_argv[index] = "***"
         engine_argv = tuple(redacted_argv)
         revision = str(getattr(args, "revision", None) or "")
         tokenizer_revision = str(getattr(args, "tokenizer_revision", None) or revision)
