@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+from types import SimpleNamespace
 
 import huggingface_hub.constants
 import pytest
@@ -9,8 +10,28 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
+    get_quant_config,
     maybe_remap_kv_scale_name,
 )
+
+
+@pytest.mark.cpu_test
+def test_callable_hf_overrides_allow_default_quant_config():
+    """Config transforms must not block config-free quantization methods."""
+    model_config = SimpleNamespace(
+        quantization="fp8",
+        quantization_config=None,
+        hf_config=SimpleNamespace(
+            quantization_config=None,
+            compression_config=None,
+            text_config=None,
+        ),
+        hf_overrides=lambda config: config,
+    )
+
+    quant_config = get_quant_config(model_config, SimpleNamespace())
+
+    assert quant_config.get_name() == "fp8"
 
 
 def test_download_weights_from_hf():

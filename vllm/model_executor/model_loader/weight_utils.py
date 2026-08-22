@@ -290,6 +290,14 @@ def get_quant_config(
     # hf_overrides
     hf_overrides = model_config.hf_overrides
     if not isinstance(hf_overrides, dict):
+        # Online quantizers with no config files construct a valid default
+        # config. Callable HF overrides have already been applied while loading
+        # the model config and must not prevent that default path.
+        if (
+            model_config.quantization_config is None
+            and not quant_cls.get_config_filenames()
+        ):
+            return quant_cls()
         raise ValueError(
             "hf_overrides must be a dict for get_quant_config "
             "to get the quantization config from it."
