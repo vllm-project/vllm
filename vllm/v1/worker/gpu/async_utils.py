@@ -205,6 +205,31 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         return self.model_runner_output
 
+class AsyncScoreOutput(AsyncModelRunnerOutput):
+    """Asynchronously transfer final score-only request outputs to the CPU."""
+
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        main_stream: torch.cuda.Stream,
+        copy_stream: torch.cuda.Stream,
+    ):
+        self.model_runner_output = model_runner_output
+        self.copy_event = torch.cuda.Event(blocking=True)
+
+        with stream(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            self.prompt_logprobs_dict = {
+                req_id: scores.to_cpu_nonblocking() if scores is not None else None
+                for req_id, scores in model_runner_output.prompt_logprobs_dict.items()
+            }
+            self.copy_event.record(copy_stream)
+
+    def get_output(self) -> ModelRunnerOutput:
+        self.copy_event.synchronize()
+        self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
+        return self.model_runner_output
+
 
 class AsyncPoolingOutput(AsyncModelRunnerOutput):
     def __init__(
