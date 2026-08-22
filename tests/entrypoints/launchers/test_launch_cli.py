@@ -380,14 +380,27 @@ def _fake_snapshot_tools() -> Any:
     return tools
 
 
-def test_snapshot_create_abort_kills_surviving_child_process_group(
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_snapshot_timeout_must_be_positive_and_finite(
+    value: str, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("VLLM_SNAPSHOT_TIMEOUT_S", value)
+    with pytest.raises(ValueError, match="positive finite number"):
+        LocalSnapshotTools()
+
+
+def test_snapshot_create_abort_reaps_after_process_group_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     tools = LocalSnapshotTools()
-    process = create_autospec(subprocess.Popen, instance=True)
-    process.poll.return_value = 1
-    process.wait.return_value = 1
-    tools._children[100] = process
+    process = subprocess.Popen(
+        [sys.executable, "-c", "raise SystemExit(1)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    tools._children[process.pid] = process
     (tmp_path / "child.log").write_text("root failed")
     killed: list[tuple[int, signal.Signals]] = []
     monkeypatch.setattr(
@@ -395,14 +408,32 @@ def test_snapshot_create_abort_kills_surviving_child_process_group(
         "killpg",
         lambda pid, sig: killed.append((pid, sig)),
     )
+    monkeypatch.setattr(os, "waitid", lambda *_args: object(), raising=False)
 
-    with pytest.raises(SnapshotCreateError, match="root failed"):
-        tools.wait_ready(tmp_path, 100)
-    tools.abort_create(100)
+    try:
+        with pytest.raises(SnapshotCreateError, match="root failed"):
+            tools.wait_ready(tmp_path, process.pid)
+        assert process.returncode is None
+        tools.abort_create(process.pid)
+    finally:
+        if process.pid in tools._children:
+            tools.abort_create(process.pid)
 
-    assert killed == [(100, signal.SIGKILL)]
-    assert 100 not in tools._children
-    process.wait.assert_called_once_with(timeout=10)
+    assert killed == [(process.pid, signal.SIGKILL)]
+    assert process.pid not in tools._children
+
+
+def test_snapshot_create_abort_rejects_surviving_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    tools = LocalSnapshotTools()
+    process = create_autospec(subprocess.Popen, instance=True)
+    process.wait.side_effect = subprocess.TimeoutExpired("snapshot child", 10)
+    tools._children[100] = process
+    monkeypatch.setattr(os, "killpg", lambda _pid, _sig: None)
+
+    with pytest.raises(SnapshotCreateError, match="survived SIGKILL"):
+        tools.abort_create(100)
 
 
 @pytest.mark.asyncio

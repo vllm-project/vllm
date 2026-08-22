@@ -110,6 +110,8 @@ class LocalSnapshotTools:
         self.plugin_dir = Path(plugin_dir) if plugin_dir else None
         self.shm_dir = Path("/dev/shm")
         self.timeout_s = float(os.environ.get("VLLM_SNAPSHOT_TIMEOUT_S", "900"))
+        if not 0 < self.timeout_s < float("inf"):
+            raise ValueError("VLLM_SNAPSHOT_TIMEOUT_S must be a positive finite number")
         self._children: dict[int, subprocess.Popen[bytes]] = {}
         self._restored_processes: dict[int, tuple[tuple[int, int], ...]] = {}
 
@@ -188,6 +190,7 @@ class LocalSnapshotTools:
     def wait_ready(self, workdir: Path, root_pid: int) -> Oracle:
         ready_file = workdir / "ready.json"
         deadline = time.monotonic() + self.timeout_s
+        waitid = os.waitid  # type: ignore[attr-defined]
         while time.monotonic() < deadline:
             if ready_file.is_file() and ready_file.stat().st_size:
                 payload = json.loads(ready_file.read_text())
@@ -197,7 +200,11 @@ class LocalSnapshotTools:
                     sampled_token_logprob=payload["sampled_token_logprob"],
                 )
             process = self._children.get(root_pid)
-            if process is not None and process.poll() is not None:
+            if process is not None and waitid(
+                os.P_PID,
+                root_pid,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            ):
                 log = (workdir / "child.log").read_text(errors="replace")
                 raise SnapshotCreateError(f"snapshot child exited before ready:\n{log}")
             try:
@@ -1037,6 +1044,8 @@ class LocalSnapshotTools:
             os.killpg(root_pid, signal.SIGKILL)
         try:
             process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            return
+        except subprocess.TimeoutExpired as error:
+            raise SnapshotCreateError(
+                f"snapshot child process group {root_pid} survived SIGKILL"
+            ) from error
         self._children.pop(root_pid, None)
