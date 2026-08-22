@@ -598,6 +598,8 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # image with vLLM installed
 FROM ${FINAL_BASE_IMAGE} AS vllm-runtime-base
 
+ARG TARGETPLATFORM
+ARG max_jobs=2
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG NCCL_VERSION
@@ -666,6 +668,20 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         # numactl CLI for NUMA binding at runtime
         numactl && \
     rm -rf /var/lib/apt/lists/*
+
+# Install the initialized-snapshot runtime on the architecture supported by
+# `vllm snapshot`. CRIU and its CUDA plugin are built from the same pinned
+# source. The `cuda-checkpoint`-compatible helper is built from NVIDIA Dynamo's
+# Apache-2.0 source against the public CUDA Driver checkpoint APIs instead of
+# redistributing NVIDIA's proprietary cuda-checkpoint binary.
+COPY tools/install_snapshot_runtime.sh /usr/local/bin/install_snapshot_runtime.sh
+RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
+        MAX_JOBS="${max_jobs}" /usr/local/bin/install_snapshot_runtime.sh; \
+    else \
+        echo "Initialized snapshots are not installed for ${TARGETPLATFORM}"; \
+    fi
+
+ENV CRIU_CUDA_PLUGIN_DIR=/usr/local/lib/criu
 
 # Install uv for faster pip installs
 RUN python3 -m pip install uv
