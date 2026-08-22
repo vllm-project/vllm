@@ -117,6 +117,8 @@ def test_extract_hidden_states_with_predictable_dummy_model(
             "kv_connector_extra_config": {
                 "shared_storage_path": tmp_path,
                 "allow_custom_save_path": True,
+                # Force 64-token BF16 staging chunks through the production path.
+                "max_device_staging_bytes": 64 * 2 * num_layers * 256,
             },
         },
         max_model_len=1024,
