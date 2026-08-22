@@ -19,7 +19,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.platform_utils import get_device_name_as_file_name
+from vllm.utils.platform_utils import (
+    get_device_name_as_file_name,
+    resolve_rocm_device_config_file_path,
+)
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 if current_platform.is_xpu():
@@ -85,11 +88,15 @@ def get_ssm_configs(
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
     if user_defined_config_folder is not None:
         config_file_paths.append(
-            os.path.join(user_defined_config_folder, json_file_name)
+            resolve_rocm_device_config_file_path(
+                os.path.join(user_defined_config_folder, json_file_name)
+            )
         )
 
     # Bundled default
-    config_file_paths.append(os.path.join(_CONFIGS_DIR, json_file_name))
+    config_file_paths.append(
+        resolve_rocm_device_config_file_path(os.path.join(_CONFIGS_DIR, json_file_name))
+    )
 
     for path in config_file_paths:
         if os.path.exists(path):
