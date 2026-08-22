@@ -52,6 +52,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     get_function_parameters,
     register_vllm_structural_tag,
 )
+from vllm.v1.engine.detokenizer import check_stop_strings
 
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
@@ -232,6 +233,13 @@ class HarmonyParser(DelegatingParser):
 
         reasoning = "\n".join(reasoning_parts) or None
         content = "\n".join(content_parts) or None
+
+        if not request.include_stop_str_in_output:
+            stop = _normalize_stop(request.stop)
+            if stop:
+                reasoning = _strip_trailing_stop_string(reasoning, stop)
+                content = _strip_trailing_stop_string(content, stop)
+
         return reasoning, content, tool_calls or None
 
     def parse_delta(
@@ -385,6 +393,41 @@ class HarmonyParser(DelegatingParser):
         if constrain_index == -1:
             return recipient
         return recipient[:constrain_index].rstrip() or None
+
+
+def _normalize_stop(stop: str | list[str] | None) -> list[str]:
+    if stop is None:
+        return []
+    return [stop] if isinstance(stop, str) else list(stop)
+
+
+def _strip_trailing_stop_string(text: str | None, stop: list[str]) -> str | None:
+    """Remove a matched client stop string from Harmony-parsed channel text.
+
+    ``BaseIncrementalDetokenizer`` already excludes the stop string from the
+    character-level ``output_text`` when ``include_stop_str_in_output`` is
+    false, but Harmony reconstructs ``reasoning``/``content`` from the raw,
+    untruncated token stream (``output.token_ids`` still contains the
+    stop-matching token; see ``BaseIncrementalDetokenizer.update``'s
+    ``skipped_stop_token_id`` bookkeeping). That truncation therefore never
+    reaches whichever Harmony channel the stop string lands in. Reuse the
+    same matching logic here so both paths agree on what "excluded from
+    output" means, regardless of which channel absorbed the stop.
+    """
+    if not text:
+        return text
+    match = check_stop_strings(
+        output_text=text,
+        new_char_count=len(text),
+        stop=stop,
+        include_in_output=False,
+    )
+    if match is None:
+        return text
+    _, truncate_to = match
+    if truncate_to == -1:
+        return text
+    return text[:truncate_to] or None
 
 
 # Harmomy's stop tokens are <|return|>, <|call|>, <|endoftext|>
