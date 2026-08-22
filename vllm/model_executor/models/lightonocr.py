@@ -38,7 +38,18 @@ from vllm.multimodal.processing import (
 _I = TypeVar("_I", bound=Mistral3ProcessingInfo)
 
 
-class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
+class LightOnOCRProcessingInfo(Mistral3ProcessingInfo):
+    def get_vision_encoder_info(
+        self,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
+    ) -> PixtralHFEncoderInfo:
+        # LightOnOCR prompt updates use vision_config.image_size directly;
+        # preserve that behavior rather than inheriting Mistral3's processor
+        # longest_edge override.
+        return PixtralHFEncoderInfo(self.get_hf_config())
+
+
+class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessingInfo]):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -125,7 +136,7 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingIn
 
 @MULTIMODAL_REGISTRY.register_processor(
     LightOnOCRMultiModalProcessor,
-    info=Mistral3ProcessingInfo,
+    info=LightOnOCRProcessingInfo,
     dummy_inputs=Mistral3DummyInputsBuilder,
 )
 class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
