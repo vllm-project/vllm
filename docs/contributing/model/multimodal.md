@@ -534,8 +534,8 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
 
 !!! note
     The target and content of each update are token sequences. When converting
-    text to token sequences, remember to encode it with `add_special_tokens=False`
-    to match how the prompt itself is tokenized. Otherwise, the updated prompt
+    text to token sequences, remember to encode it with
+    `cached_encode(..., add_special_tokens=False)`. Otherwise, the updated prompt
     may contain duplicated special tokens or fail to match the target.
 
 === "Basic example: LLaVA"

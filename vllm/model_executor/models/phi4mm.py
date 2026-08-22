@@ -938,14 +938,17 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         tokenizer = self.info.get_tokenizer()
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
-        image_token_ids = [
-            cached_encode(tokenizer, tok, add_special_tokens=False)
-            for tok in image_tokens
-        ]
-        audio_token_ids = [
-            cached_encode(tokenizer, tok, add_special_tokens=False)
-            for tok in audio_tokens
-        ]
+
+        def get_image_token_ids(item_idx: int) -> list[int]:
+            return cached_encode(
+                tokenizer, image_tokens[item_idx], add_special_tokens=False
+            )
+
+        def get_audio_token_ids(item_idx: int) -> list[int]:
+            return cached_encode(
+                tokenizer, audio_tokens[item_idx], add_special_tokens=False
+            )
+
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -980,12 +983,12 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token_ids.__getitem__,
+                target=get_image_token_ids,
                 replacement=get_image_replacement_phi4mm,
             ),
             PromptReplacement(
                 modality="audio",
-                target=audio_token_ids.__getitem__,
+                target=get_audio_token_ids,
                 replacement=get_audio_replacement_phi4mm,
             ),
         ]
