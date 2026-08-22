@@ -13,12 +13,28 @@ from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent
-from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
+from .rebalance_execute import (
+    AsyncEplbCycleComplete,
+    AsyncEplbLayerResult,
+    AsyncEplbResult,
+    transfer_layer,
+)
 
 if TYPE_CHECKING:
     from .eplb_state import EplbModelState, EplbState
 
 logger = init_logger(__name__)
+
+
+def _publish_result_and_wait(
+    model_state: "EplbModelState",
+    result: AsyncEplbResult,
+    cuda_stream: torch.cuda.Stream,
+) -> None:
+    assert model_state.pending_result is None
+    model_state.pending_result = result
+    result.consumed_event.wait(stream=cuda_stream)
+    assert model_state.pending_result is None
 
 
 def start_async_worker(
@@ -87,7 +103,6 @@ def transfer_run_periodically(
 
         assert state.is_async
         for model_state in state.model_states.values():
-            layer_idx = 0
             # Set the async worker's CUDA stream on the communicator
             model_state.communicator.set_stream(cuda_stream)
             num_layers = model_state.model.num_moe_layers
@@ -101,13 +116,30 @@ def transfer_run_periodically(
                 model_state, state, physical_to_logical_map_cpu, cuda_stream
             )
 
-            # Execute one EPLB layer transfer per model forward pass. Each iteration
-            # of this loop will copy the new set of expert weights into
-            # model_state.expert_buffer, which will be consumed by the main thread in
-            # move_to_workspace.
+            changed_layer_indices = [
+                layer_idx
+                for layer_idx in range(num_layers)
+                if not torch.equal(
+                    physical_to_logical_map_cpu[layer_idx],
+                    new_physical_to_logical_map[layer_idx],
+                )
+            ]
+
+            if not changed_layer_indices:
+                consumed_event = CpuGpuEvent()
+                _publish_result_and_wait(
+                    model_state,
+                    AsyncEplbCycleComplete(consumed_event=consumed_event),
+                    cuda_stream,
+                )
+                continue
+
+            # Execute one changed EPLB layer transfer per model forward pass. Each
+            # iteration copies the new expert weights into model_state.expert_buffer,
+            # which the main thread consumes in move_to_workspace.
             # We sync the rebalanced flag across ranks before each iteration so
             # all ranks make a coordinated decision to continue or stop.
-            while layer_idx < num_layers:
+            for changed_idx, layer_idx in enumerate(changed_layer_indices):
                 flag = torch.tensor(
                     [int(model_state.rebalanced)],
                     dtype=torch.int32,
@@ -147,16 +179,19 @@ def transfer_run_periodically(
                 # it. Record is called by the main thread after move_from_buffer().
                 consumed_event = CpuGpuEvent()
 
-                model_state.pending_result = AsyncEplbLayerResult(
+                result = AsyncEplbLayerResult(
                     layer_idx=layer_idx,
                     new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
                     transfer_metadata=transfer_metadata,
+                    completes_cycle=changed_idx == len(changed_layer_indices) - 1,
                     consumed_event=consumed_event,
                 )
 
                 # Block this thread until the main thread and main stream
                 # finish copying model_state.expert_buffer into
                 # model_state.model.expert_weights[layer_idx]
-                consumed_event.wait(stream=cuda_stream)
-                assert model_state.pending_result is None
-                layer_idx += 1
+                _publish_result_and_wait(
+                    model_state,
+                    result,
+                    cuda_stream,
+                )
