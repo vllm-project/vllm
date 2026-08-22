@@ -60,6 +60,19 @@ def _reused_prompt_token_ids(request: Any) -> list[int] | None:
     return kv.pop("prompt_token_ids", None) or None
 
 
+def _build_prompt_extras(request: Any) -> dict[str, Any]:
+    """Collect per-request options to attach to the rendered prompts."""
+    extras: dict[str, Any] = {
+        k: v
+        for k in ("mm_processor_kwargs", "cache_salt")
+        if (v := getattr(request, k, None)) is not None
+    }
+    if getattr(request, "skip_pixel_values", False):
+        extras["return_raw_mm_bytes"] = True
+
+    return extras
+
+
 class OnlineRenderer:
     def __init__(
         self,
@@ -368,11 +381,7 @@ class OnlineRenderer:
         return await renderer.render_cmpl_async(
             parsed_prompts,
             tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := getattr(request, k, None)) is not None
-            },
+            prompt_extras=_build_prompt_extras(request),
             skip_mm_cache=skip_mm_cache,
         )
 
@@ -427,11 +436,7 @@ class OnlineRenderer:
                 [messages],
                 chat_params,
                 tok_params,
-                prompt_extras={
-                    k: v
-                    for k in ("mm_processor_kwargs", "cache_salt")
-                    if (v := getattr(request, k, None)) is not None
-                },
+                prompt_extras=_build_prompt_extras(request),
                 skip_mm_cache=skip_mm_cache,
             )
 

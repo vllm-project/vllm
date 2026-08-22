@@ -196,6 +196,23 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    skip_pixel_values: bool = Field(
+        default=False,
+        description=(
+            "If true, the /render response returns the original encoded "
+            "image bytes in ``features.raw_images`` instead of serializing "
+            "the processed tensors into ``features.kwargs_data``, which is "
+            "far smaller on the wire. Tokenization, ``mm_hashes`` and "
+            "``mm_placeholders`` are unaffected; ``/generate`` re-runs the "
+            "HF processor over the bytes (consulting its cache first). Only "
+            "supported on the `/v1/completions/render` and "
+            "`/v1/chat/completions/render` endpoints; ignored on regular "
+            "generation endpoints. Honored only when every multimodal item "
+            "retained its source bytes (images loaded from a URL, data URL "
+            "or file); otherwise ``kwargs_data`` is returned as usual."
+        ),
+    )
+
     cache_salt: str | None = Field(
         default=None,
         min_length=1,

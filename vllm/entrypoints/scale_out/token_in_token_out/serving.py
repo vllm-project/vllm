@@ -11,7 +11,10 @@ import msgspec
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
+from vllm.entrypoints.chat_utils import (
+    MODALITY_PLACEHOLDERS_MAP,
+    AsyncMultiModalItemTracker,
+)
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     clamp_prompt_logprobs,
@@ -31,12 +34,14 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import EngineInput, TokensPrompt, mm_input
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import EngineInput, TextPrompt, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
+    MultiModalKwargsOptionalItems,
     PlaceholderRange,
 )
 from vllm.outputs import RequestOutput
@@ -52,6 +57,7 @@ from .protocol import (
     GenerateResponseChoice,
     GenerateResponseStreamChoice,
     GenerateStreamResponse,
+    MultiModalFeatures,
 )
 
 logger = init_logger(__name__)
@@ -99,6 +105,80 @@ class ServingTokens(GenerateBaseServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
+
+    async def _reprocess_raw_images(
+        self,
+        features: MultiModalFeatures,
+    ) -> MultiModalKwargsOptionalItems:
+        """Rebuild multimodal tensors from the render step's source bytes.
+
+        The render step set ``skip_pixel_values``, so it sent the original
+        encoded image bytes instead of the processed tensors. Re-running the
+        HF processor here reproduces them, hitting the processor cache when
+        the same image was seen before.
+
+        The processor runs over a synthetic placeholder-only prompt, not over
+        ``token_ids``. Those ids are already placeholder-expanded and the
+        processor has no already-applied detection, so feeding them back in
+        would match the first placeholder token and expand it a second time.
+        Only the resulting tensors are kept; the synthetic prompt's own token
+        ids and placeholder ranges are discarded in favour of the render
+        step's.
+
+        Args:
+            features: Render-step features carrying ``raw_images``.
+
+        Returns:
+            The reproduced per-modality tensors.
+
+        Raises:
+            VLLMValidationError: If an entry is unusable, the model has no
+                placeholder string, or the recomputed hashes disagree with
+                the render step's — which means the two tiers are not
+                configured identically.
+        """
+        raw_images = features.raw_images or {}
+        if set(features.mm_hashes) != set(raw_images) or set(raw_images) - {"image"}:
+            raise VLLMValidationError(
+                f"raw_images must cover exactly the image modality, but got "
+                f"{sorted(raw_images)} against mm_hashes "
+                f"{sorted(features.mm_hashes)}"
+            )
+
+        tracker = AsyncMultiModalItemTracker(self.model_config)
+        mm_parser = tracker.create_parser()
+        for i, entry in enumerate(raw_images.get("image", [])):
+            if entry is None:
+                raise VLLMValidationError(f"raw_images['image'][{i}] is null")
+            # `entry` is already base64; `load_base64` ignores the media type.
+            mm_parser.parse_image(f"data:image/*;base64,{entry}")
+
+        mm_data, _ = await tracker.resolve_items()
+        placeholders = mm_parser.mm_placeholder_storage().get(
+            MODALITY_PLACEHOLDERS_MAP["image"], []
+        )
+        if len(placeholders) != len(raw_images.get("image", [])):
+            raise VLLMValidationError(
+                "This model does not define an image placeholder string and "
+                "cannot accept raw_images; re-render without skip_pixel_values"
+            )
+
+        (rendered,) = await self.online_renderer.renderer.render_cmpl_async(
+            [TextPrompt(prompt="".join(placeholders), multi_modal_data=mm_data)]
+        )
+        if rendered["type"] != "multimodal":
+            raise VLLMValidationError("raw_images did not produce multimodal input")
+
+        if dict(rendered["mm_hashes"]) != dict(features.mm_hashes):
+            raise VLLMValidationError(
+                f"Hashes recomputed from raw_images do not match the render "
+                f"step's ({dict(rendered['mm_hashes'])} vs "
+                f"{dict(features.mm_hashes)}). The render and generate tiers "
+                f"must run the same model with the same --media-io-kwargs, "
+                f"and mm_processor_kwargs are not carried over."
+            )
+
+        return rendered["mm_kwargs"]
 
     async def serve_tokens(
         self,
@@ -173,21 +253,29 @@ class ServingTokens(GenerateBaseServing):
                 for modality, ranges in features.mm_placeholders.items()
             }
 
-            # Deserialize tensor data when present; None → cache hit.
-            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
-            if features.kwargs_data is not None:
-                for modality, items in features.kwargs_data.items():
-                    mm_kwargs[modality] = [
-                        decode_mm_kwargs_item(item) if item is not None else None
-                        for item in items
-                    ]
+            resolved_mm_kwargs: MultiModalKwargsOptionalItems
+            if features.raw_images is not None:
+                try:
+                    resolved_mm_kwargs = await self._reprocess_raw_images(features)
+                except VLLMValidationError as e:
+                    return self.create_error_response(str(e))
             else:
-                for modality, hashes in features.mm_hashes.items():
-                    mm_kwargs[modality] = [None] * len(hashes)
+                # Deserialize tensor data when present; None → cache hit.
+                mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
+                if features.kwargs_data is not None:
+                    for modality, items in features.kwargs_data.items():
+                        mm_kwargs[modality] = [
+                            decode_mm_kwargs_item(item) if item is not None else None
+                            for item in items
+                        ]
+                else:
+                    for modality, hashes in features.mm_hashes.items():
+                        mm_kwargs[modality] = [None] * len(hashes)
+                resolved_mm_kwargs = MultiModalKwargsItems(mm_kwargs)
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
-                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
+                mm_kwargs=resolved_mm_kwargs,
                 mm_hashes=features.mm_hashes,
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
