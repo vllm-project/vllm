@@ -9,6 +9,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -55,14 +56,19 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    validate_fp8_block_shape_moe,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt8DynamicTensorSym,
@@ -159,15 +165,32 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         per_channel = (
             self.weight_qscheme == "per_channel" and self.input_qscheme == "per_channel"
         )
-        self.act_quant_group_shape = (
-            GroupShape.PER_TOKEN if per_channel else GroupShape.PER_TENSOR
-        )
-        if not (per_tensor or per_channel):
+        per_block = self.weight_qscheme == "per_block"
+        if not (per_tensor or per_channel or per_block):
             raise ValueError(
-                "For FP8 Fused MoE layers, only per-tensor and per-channel "
-                "scales for weights and activations are supported. Found "
-                f"{self.weight_qscheme}, {self.input_qscheme}"
+                "For FP8 Fused MoE layers, only per-tensor, per-channel and "
+                "per-block scales for weights and activations are supported. "
+                f"Found {self.weight_qscheme}, {self.input_qscheme}"
             )  # noqa E501
+
+        self.weight_block_size: list[int] | None = None
+        if per_block:
+            block_size = self.weight_quant.get("block_size")
+            if not block_size:
+                raise ValueError(
+                    "Quark W8A8 FP8 per-block MoE quantization requires "
+                    "`block_size` in the weight quantization config."
+                )
+            self.weight_block_size = list(block_size)
+        self.block_quant = self.weight_block_size is not None
+
+        if per_channel:
+            self.act_quant_group_shape = GroupShape.PER_TOKEN
+        elif per_block:
+            assert self.weight_block_size is not None
+            self.act_quant_group_shape = GroupShape(1, self.weight_block_size[1])
+        else:
+            self.act_quant_group_shape = GroupShape.PER_TENSOR
 
         self.static_input_scales = not self.input_quant.get("is_dynamic")
         if self.static_input_scales and per_channel:
@@ -175,9 +198,17 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 "For FP8 Fused MoE layer, we require either per tensor or "
                 "channelwise, dynamic per token quantization."
             )
+        if self.static_input_scales and per_block:
+            raise ValueError(
+                "For FP8 Fused MoE layer with per-block weights, dynamic "
+                "activation quantization is required."
+            )
 
         # Determine quant keys for oracle backend selection
-        if per_channel:
+        if per_block:
+            weight_key = kFp8Static128BlockSym
+            activation_key = kFp8Dynamic128Sym
+        elif per_channel:
             weight_key = kFp8StaticChannelSym
             activation_key = kFp8DynamicTokenSym
         elif self.static_input_scales:
@@ -210,6 +241,16 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
         params_dtype = torch.float8_e4m3fn
+
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            layer.weight_block_size = self.weight_block_size
+            block_n, block_k = self.weight_block_size[0], self.weight_block_size[1]
+            validate_fp8_block_shape_moe(
+                intermediate_size_per_partition,
+                self.weight_block_size,
+                get_tensor_model_parallel_world_size(),
+            )
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
@@ -283,6 +324,35 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             # Add PER-CHANNEL quantization for RoutedExperts.weight_loader.
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
+            )
+            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        elif self.weight_qscheme == "per_block":
+            # One scale per (block_n, block_k) tile of each expert's weight.
+            w13_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    self.moe.w13_num_shards
+                    * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                    (hidden_size + block_k - 1) // block_k,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_weight_scale", w13_weight_scale)
+            w2_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    (hidden_size + block_n - 1) // block_n,
+                    (intermediate_size_per_partition + block_k - 1) // block_k,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_weight_scale", w2_weight_scale)
+            # Add PER-BLOCK quantization for RoutedExperts.weight_loader.
+            extra_weight_attrs.update(
+                {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
             )
             set_weight_attrs(w13_weight_scale, extra_weight_attrs)
             set_weight_attrs(w2_weight_scale, extra_weight_attrs)
@@ -466,6 +536,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             a2_scale=layer.w2_input_scale,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
+            block_shape=self.weight_block_size,
             per_act_token_quant=self.input_qscheme == "per_channel",
             per_out_ch_quant=self.weight_qscheme == "per_channel",
             swiglu_limit=getattr(layer, "swiglu_limit", None),
