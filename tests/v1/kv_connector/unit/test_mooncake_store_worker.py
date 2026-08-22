@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.distributed.kv_events import KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     rdma_utils,
 )
@@ -29,11 +30,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BlobBlockHashes,
     ChunkedTokenDatabase,
+    HNDStoreLayout,
     KeyMetadata,
     LoadSpec,
     PoolKey,
+    RankLocalStoreLayout,
     ReqMeta,
-    TPSharedChunkedTokenDatabase,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -81,7 +83,9 @@ def _default_send_coord() -> mooncake_store_worker.MooncakeStoreCoordinator:
     )
 
 
-def _make_tp_shared_db() -> tuple[TPSharedChunkedTokenDatabase, torch.Tensor]:
+def _make_tp_shared_db(
+    tp_rank: int = 0,
+) -> tuple[ChunkedTokenDatabase, torch.Tensor]:
     num_blocks = 2
     local_heads = 4
     block_size = 16
@@ -97,22 +101,25 @@ def _make_tp_shared_db() -> tuple[TPSharedChunkedTokenDatabase, torch.Tensor]:
         strides,
         dtype=torch.float16,
     )
-    db = TPSharedChunkedTokenDatabase(
-        KeyMetadata(
-            "test-model",
-            0,
-            0,
-            0,
-            0,
-            store_namespace=_TP_SHARED_NAMESPACE,
-        ),
+    metadata = KeyMetadata(
+        "test-model",
+        tp_rank,
+        0,
+        0,
+        0,
+        store_namespace=_TP_SHARED_NAMESPACE,
+    )
+    layout = HNDStoreLayout(
+        metadata,
+        block_size,
         block_size,
         local_tp_size=2,
         store_tp_size=4,
-        tp_rank=0,
+        tp_rank=tp_rank,
         num_kv_heads=8,
     )
-    db.set_kv_cache_tensors([tensor], num_blocks)
+    db = ChunkedTokenDatabase(metadata, block_size, store_layout=layout)
+    layout.register_kv_caches([tensor], num_blocks, (), ())
     return db, tensor
 
 
@@ -400,25 +407,25 @@ def test_tp_shared_hnd_round_trips_prefill_shards_into_decode():
             torch.arange(128, dtype=torch.float16).view(shape) + tp_rank * 1000
         )
         producer_tensors.append(tensor)
-        db = TPSharedChunkedTokenDatabase(
-            KeyMetadata(
-                "test-model",
-                tp_rank,
-                0,
-                0,
-                0,
-                store_namespace=_TP_SHARED_NAMESPACE,
-            ),
+        metadata = KeyMetadata(
+            "test-model",
+            tp_rank,
+            0,
+            0,
+            0,
+            store_namespace=_TP_SHARED_NAMESPACE,
+        )
+        layout = HNDStoreLayout(
+            metadata,
+            block_size,
             block_size,
             local_tp_size=4,
             store_tp_size=4,
             tp_rank=tp_rank,
             num_kv_heads=8,
         )
-        db.set_kv_cache_tensors([tensor], 1)
-        addrs, sizes, _ = db.prepare_values_for_shards(
-            [(0, block_size)], [0], [tp_rank]
-        )
+        layout.register_kv_caches([tensor], 1, (), ())
+        addrs, sizes, _ = layout.prepare_values([(0, block_size)], [0], [tp_rank])
         stored[tp_rank] = b"".join(
             ctypes.string_at(addr, size)
             for addr, size in zip(addrs[0], sizes[0], strict=True)
@@ -431,26 +438,26 @@ def test_tp_shared_hnd_round_trips_prefill_shards_into_decode():
             dtype=torch.float16,
         )
         tensor.zero_()
-        db = TPSharedChunkedTokenDatabase(
-            KeyMetadata(
-                "test-model",
-                tp_rank,
-                0,
-                0,
-                0,
-                store_namespace=_TP_SHARED_NAMESPACE,
-            ),
+        metadata = KeyMetadata(
+            "test-model",
+            tp_rank,
+            0,
+            0,
+            0,
+            store_namespace=_TP_SHARED_NAMESPACE,
+        )
+        layout = HNDStoreLayout(
+            metadata,
+            block_size,
             block_size,
             local_tp_size=2,
             store_tp_size=4,
             tp_rank=tp_rank,
             num_kv_heads=8,
         )
-        db.set_kv_cache_tensors([tensor], 1)
-        shard_ids = db.store_shard_ids
-        addrs, sizes, _ = db.prepare_values_for_shards(
-            [(0, block_size)] * 2, [0], shard_ids
-        )
+        layout.register_kv_caches([tensor], 1, (), ())
+        shard_ids = layout.local_shard_ids
+        addrs, sizes, _ = layout.prepare_values([(0, block_size)] * 2, [0], shard_ids)
         for shard_id, shard_addrs, shard_sizes in zip(
             shard_ids, addrs, sizes, strict=True
         ):
@@ -483,6 +490,65 @@ def test_tp_shared_sending_writes_each_canonical_shard():
         f"{_tp_shared_prefix(1)}@6831",
     ]
     assert len(addrs) == len(sizes) == 4
+
+
+def test_tp_shared_kv_events_aggregate_once_per_logical_block():
+    aggregator = KVEventAggregator(num_workers=2)
+
+    for tp_rank in range(2):
+        store = MagicMock()
+        store.batch_is_exist.return_value = [0, 0]
+        store.batch_put_from_multi_buffers.return_value = [256, 256]
+        db, _ = _make_tp_shared_db(tp_rank)
+        thread = _make_store_sending_thread(
+            store,
+            token_databases=[db],
+            tp_rank=tp_rank,
+            replicate_config=SimpleNamespace(),
+        )
+        thread.enable_kv_event = True
+
+        _run_store_req(thread, _make_event_store_req(16))
+
+        events = thread.get_kv_events()
+        assert len(events) == 1
+        aggregator.add_events(events)
+
+    assert len(aggregator.get_common_events()) == 1
+
+
+def test_tp_shared_kv_event_waits_for_all_missing_shards():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, -1]
+    db, _ = _make_tp_shared_db()
+    thread = _make_store_sending_thread(
+        store,
+        token_databases=[db],
+        replicate_config=SimpleNamespace(),
+    )
+    thread.enable_kv_event = True
+
+    _run_store_req(thread, _make_event_store_req(16))
+
+    assert thread.get_kv_events() == []
+
+
+def test_tp_shared_kv_event_counts_existing_shards_as_satisfied():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [1, 0]
+    store.batch_put_from_multi_buffers.return_value = [256]
+    db, _ = _make_tp_shared_db()
+    thread = _make_store_sending_thread(
+        store,
+        token_databases=[db],
+        replicate_config=SimpleNamespace(),
+    )
+    thread.enable_kv_event = True
+
+    _run_store_req(thread, _make_event_store_req(16))
+
+    assert len(thread.get_kv_events()) == 1
 
 
 def test_tp_shared_receiving_reads_each_local_canonical_shard():
@@ -1098,8 +1164,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
     )
     db0.set_kv_caches_base_addr([0x1000])
     db0.set_block_len([256])
-    db0.prepare_values = MagicMock(wraps=db0.prepare_values)
-    db0.prepare_value = MagicMock(side_effect=AssertionError("scalar path called"))
+    db0.store_layout.prepare_values = MagicMock(wraps=db0.store_layout.prepare_values)
 
     db1 = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
@@ -1107,8 +1172,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
     )
     db1.set_kv_caches_base_addr([0x2000])
     db1.set_block_len([512])
-    db1.prepare_values = MagicMock(wraps=db1.prepare_values)
-    db1.prepare_value = MagicMock(side_effect=AssertionError("scalar path called"))
+    db1.store_layout.prepare_values = MagicMock(wraps=db1.store_layout.prepare_values)
 
     thread = _make_store_sending_thread(
         store,
@@ -1126,10 +1190,12 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
         ),
     )
 
-    db0.prepare_value.assert_not_called()
-    db1.prepare_value.assert_not_called()
-    db0.prepare_values.assert_called_once_with([(0, 16), (32, 48)], [1, 2, 3])
-    db1.prepare_values.assert_called_once_with([(16, 32), (32, 48)], [3, 2, 1])
+    db0.store_layout.prepare_values.assert_called_once_with(
+        [(0, 16), (32, 48)], [1, 2, 3], [None, None]
+    )
+    db1.store_layout.prepare_values.assert_called_once_with(
+        [(16, 32), (32, 48)], [3, 2, 1], [None, None]
+    )
 
     keys, addrs, sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     assert [key.rsplit("@", 1)[-1] for key in keys] == [
@@ -1756,8 +1822,10 @@ def test_recv_thread_splits_disk_offload_loads_by_budget():
     assert second_keys == [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
     ]
-    base_addr = thread.token_databases[0].kv_caches_base_addr[0]
-    block_len = thread.token_databases[0].block_len[0]
+    layout = thread.token_databases[0].store_layout
+    assert isinstance(layout, RankLocalStoreLayout)
+    base_addr = layout.kv_caches_base_addr[0]
+    block_len = layout.block_len[0]
     assert first_addrs == [[base_addr], [base_addr + block_len]]
     assert second_addrs == [[base_addr + 2 * block_len]]
     expected_size = block_len
@@ -1949,8 +2017,8 @@ def test_worker_enables_canonical_store_tp_layout(tmp_path, monkeypatch):
 
     assert w.store_tp_size == 4
     assert w.token_dbs[0].metadata.store_namespace == _TP_SHARED_NAMESPACE
-    assert isinstance(w.token_dbs[0], TPSharedChunkedTokenDatabase)
-    assert w.token_dbs[0].store_shard_ids == (0, 1)
+    assert isinstance(w.token_dbs[0].store_layout, HNDStoreLayout)
+    assert w.token_dbs[0].store_layout.local_shard_ids == (0, 1)
     assert len(w._lookup_key_prefixes[0]) == 4
 
 
@@ -2052,12 +2120,12 @@ def test_lcm_store_tp_gives_prefill_and_decode_common_namespace(tmp_path, monkey
             _make_kv_cache_config(),
         )
         assert store_worker.store_tp_size == 4
-        assert isinstance(store_worker.token_dbs[0], TPSharedChunkedTokenDatabase)
-        assert store_worker.token_dbs[0].store_shard_ids == expected_shards
+        assert isinstance(store_worker.token_dbs[0].store_layout, HNDStoreLayout)
+        assert store_worker.token_dbs[0].store_layout.local_shard_ids == expected_shards
         workers.append(store_worker)
 
     shard_keys = [
-        store_worker.token_dbs[0].key_for_shard(2, BlockHash(b"h"))
+        store_worker.token_dbs[0].store_layout.key_for(2, BlockHash(b"h"))
         for store_worker in workers
     ]
     assert len(set(shard_keys)) == 1
@@ -2176,7 +2244,8 @@ def test_store_tp_opt_in_isolates_different_pp_sizes(tmp_path, monkeypatch):
             ),
             _make_kv_cache_config(),
         )
-        keys.append(w.token_dbs[0].key_for(BlockHash(b"h")))
+        layout = w.token_dbs[0].store_layout
+        keys.append(layout.key_for(layout.local_shard_ids[0], BlockHash(b"h")))
 
     assert "@store_pp:1" in keys[0]
     assert "@store_pp:2" in keys[1]
@@ -2996,18 +3065,28 @@ def test_lookup_key_prefixes_cover_dcp_rank_namespaces():
 def test_lookup_key_prefixes_cover_canonical_store_tp_shards():
     worker = _make_bare_worker()
     worker.store_tp_size = 4
+    metadata = KeyMetadata(
+        "test-model",
+        0,
+        0,
+        0,
+        0,
+        group_id=0,
+        store_namespace=_TP_SHARED_NAMESPACE,
+    )
     worker.token_dbs = [
         ChunkedTokenDatabase(
-            KeyMetadata(
-                "test-model",
-                0,
-                0,
-                0,
-                0,
-                group_id=0,
-                store_namespace=_TP_SHARED_NAMESPACE,
-            ),
+            metadata,
             block_size=16,
+            store_layout=HNDStoreLayout(
+                metadata,
+                block_size=16,
+                hash_block_size=16,
+                local_tp_size=2,
+                store_tp_size=4,
+                tp_rank=0,
+                num_kv_heads=8,
+            ),
         )
     ]
     worker._init_lookup_key_prefixes()
@@ -3506,9 +3585,10 @@ def test_register_kv_caches_blocks_first_single_segment():
     tensor = torch.zeros(num_blocks, page_size_elements, dtype=torch.float16)
     _register_with_mocked_threads(worker, {"layer0": tensor})
 
-    db = worker.token_dbs[0]
-    assert db.kv_caches_base_addr == [tensor.untyped_storage().data_ptr()]
-    assert db.block_len == [tensor.untyped_storage().nbytes() // num_blocks]
+    layout = worker.token_dbs[0].store_layout
+    assert isinstance(layout, RankLocalStoreLayout)
+    assert layout.kv_caches_base_addr == [tensor.untyped_storage().data_ptr()]
+    assert layout.block_len == [tensor.untyped_storage().nbytes() // num_blocks]
     worker.store.register_buffer.assert_called_once_with(
         tensor.untyped_storage().data_ptr(),
         tensor.untyped_storage().nbytes(),
@@ -3534,11 +3614,12 @@ def test_register_kv_caches_kv_first_two_segments():
     )
     _register_with_mocked_threads(worker, {"layer0": tensor})
 
-    db = worker.token_dbs[0]
+    layout = worker.token_dbs[0].store_layout
+    assert isinstance(layout, RankLocalStoreLayout)
     seg_stride = tensor.stride(0) * tensor.element_size()
     base = tensor.untyped_storage().data_ptr()
-    assert db.kv_caches_base_addr == [base, base + seg_stride]
-    assert db.block_len == [seg_stride // num_blocks] * 2
+    assert layout.kv_caches_base_addr == [base, base + seg_stride]
+    assert layout.block_len == [seg_stride // num_blocks] * 2
 
 
 def test_register_kv_caches_cross_layer_single_segment():
@@ -3570,9 +3651,10 @@ def test_register_kv_caches_cross_layer_single_segment():
         # Use the cross-layer wrapper key, same as register_cross_layers_kv_caches
         worker.register_kv_caches({"__cross_layer__": tensor})
 
-    db = worker.token_dbs[0]
-    assert len(db.kv_caches_base_addr) == 1
-    assert db.kv_caches_base_addr[0] == tensor.untyped_storage().data_ptr()
+    layout = worker.token_dbs[0].store_layout
+    assert isinstance(layout, RankLocalStoreLayout)
+    assert len(layout.kv_caches_base_addr) == 1
+    assert layout.kv_caches_base_addr[0] == tensor.untyped_storage().data_ptr()
 
     expected_block_len = tensor.untyped_storage().nbytes() // num_blocks
     # block_len should be per_layer_page_size * num_layers
@@ -3580,8 +3662,8 @@ def test_register_kv_caches_cross_layer_single_segment():
         expected_block_len
         == num_layers * per_layer_page_elements * tensor.element_size()
     )
-    assert len(db.block_len) == 1
-    assert db.block_len[0] == expected_block_len
+    assert len(layout.block_len) == 1
+    assert layout.block_len[0] == expected_block_len
 
     # Also verify via register_cross_layers_kv_caches wrapper
     worker2 = _make_bare_worker(num_gpu_blocks=num_blocks)
@@ -3599,9 +3681,10 @@ def test_register_kv_caches_cross_layer_single_segment():
     ):
         worker2.register_cross_layers_kv_caches(tensor)
 
-    db2 = worker2.token_dbs[0]
-    assert db2.kv_caches_base_addr == db.kv_caches_base_addr
-    assert db2.block_len == db.block_len
+    layout2 = worker2.token_dbs[0].store_layout
+    assert isinstance(layout2, RankLocalStoreLayout)
+    assert layout2.kv_caches_base_addr == layout.kv_caches_base_addr
+    assert layout2.block_len == layout.block_len
 
 
 # ---------------------------------------------------------------------------
