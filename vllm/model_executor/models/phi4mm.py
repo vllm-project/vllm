@@ -868,43 +868,52 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
 
 
 class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if not mm_data:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        sr = self.info.get_feature_extractor(**mm_kwargs).sampling_rate
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        sr = self.info.get_feature_extractor(**hf_processor_mm_kwargs).sampling_rate
         if audio_data := mm_data.get("audios", []):
             mm_data["audios"] = [(data, sr) for data in audio_data]
 
-        processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
+        )
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         num_img_tokens = [
             self.info.get_num_image_tokens(
                 image_width=img_size[0],
                 image_height=img_size[1],
                 processor=hf_processor,
             )
-            for img_size in processed_outputs["image_sizes"]
+            for img_size in processed_data["image_sizes"]
         ]
-        processed_outputs["num_img_tokens"] = num_img_tokens
+        processed_data["num_img_tokens"] = num_img_tokens
 
-        audio_features = processed_outputs["input_audio_embeds"]
+        audio_features = processed_data["input_audio_embeds"]
         feature_sizes = [
             self.info.get_audio_num_frames(len(audio), sr) for audio in audio_data
         ]
-        processed_outputs["input_audio_embeds"] = [
+        processed_data["input_audio_embeds"] = [
             audio_features[idx, :size] for idx, size in enumerate(feature_sizes)
         ]
+        processed_data.update(passthrough_data)
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,

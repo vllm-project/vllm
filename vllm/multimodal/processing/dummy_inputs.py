@@ -91,10 +91,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             # prompt tokens.
             dummy_prompt = []
         else:
-            dummy_prompt = tokenizer.encode(
-                dummy_text,
-                **self.info.default_tok_params.get_encode_kwargs(),
-            )
+            dummy_prompt = tokenizer.encode(dummy_text, truncation=False)
 
         return ProcessorInputs(
             prompt=dummy_prompt,

@@ -942,16 +942,6 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
     image_placeholder: str = "<image>"
     bos_image_placeholder: str = "<|endoftext|><image>"
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Moondream3's processor handles images directly rather than exposing a
-        # separate `image_processor`, so keep the cache path on text+MM calls.
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
-
     @cached_property
     def bos_image_placeholder_tokens(self) -> list[int]:
         tokenizer = self.info.get_tokenizer()

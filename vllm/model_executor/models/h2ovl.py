@@ -135,7 +135,7 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+    ) -> MultiModalProcessingInfo:
         # The processor logic is different for len(images) <= 1 vs > 1
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
