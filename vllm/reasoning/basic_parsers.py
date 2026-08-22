@@ -157,28 +157,39 @@ class BaseThinkingReasoningParser(ReasoningParser):
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
-        """
-        Extract reasoning content from the model output.
+        """Extract reasoning content and main content from the model output.
 
         This is the base implementation that works for most models.
         Subclasses can override this method for specific behavior.
-        """
-        # Check if the start token is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.start_token)
-        model_output = (
-            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
-        )
+        If start and end tokens delimit reasoning, text preceding the start token
+        and text following the end token are preserved as content.
 
-        # For models that may not generate start token,
-        # assume the reasoning content is always at the start.
-        if self.end_token not in model_output:
-            return model_output, None
+        Args:
+            model_output: The raw output string from the model.
+            request: The chat completion or responses request protocol.
+
+        Returns:
+            A tuple of `(reasoning_content, main_content)`.
+        """
+        if self.start_token in model_output:
+            content_before, _, after_start = model_output.partition(self.start_token)
+            reasoning, end_found, content_after = after_start.partition(
+                self.end_token
+            )
+            if not end_found:
+                return reasoning, content_before or None
+
+            return reasoning, (content_before + content_after) or None
         else:
-            reasoning, _, content = model_output.partition(self.end_token)
-            # If generation stops right after end-of-think, return null content
-            final_content = content or None
-            return reasoning, final_content
+            # For models that may not generate start token,
+            # assume the reasoning content is always at the start.
+            if self.end_token not in model_output:
+                return model_output, None
+            else:
+                reasoning, _, content = model_output.partition(self.end_token)
+                # If generation stops right after end-of-think, return null content
+                final_content = content or None
+                return reasoning, final_content
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Count tokens that fall within start/end thinking markers.
