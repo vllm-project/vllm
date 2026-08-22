@@ -96,6 +96,26 @@ def test_serialize_message_pydantic_model_returns_dict() -> None:
     assert serialized["message"] == "hello"
 
 
+def test_stored_input_messages_are_isolated_from_context_mutation() -> None:
+    serving = MagicMock(spec=OpenAIServingResponses)
+    serving.msg_store = {}
+    messages: list = [{"role": "user", "content": "Hello"}]
+
+    OpenAIServingResponses._store_input_messages(serving, "resp_test", messages)
+    messages.append(
+        ResponseReasoningItem(
+            id="rs_test",
+            type="reasoning",
+            summary=[],
+            content=[],
+        )
+    )
+
+    assert serving.msg_store["resp_test"] == [
+        {"role": "user", "content": "Hello"}
+    ]
+
+
 @pytest.fixture
 def mock_serving_responses():
     """Create a mock OpenAIServingResponses instance"""
