@@ -1501,7 +1501,7 @@ class MoRIIOConnectorWorker:
                 elif msg == MoRIIOConstants.POP_DONE_RECV:
                     _, req_id = sock.recv_multipart()
                     logger.debug(
-                        "MoRIIO handshake listener received done recv for req",
+                        "MoRIIO handshake listener received done recv for req %s",
                         req_id.decode(),
                     )
 
