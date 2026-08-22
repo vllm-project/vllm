@@ -396,13 +396,13 @@ def sparse_attn_indexer(
         )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None
-        assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
+        # MXFP4 insert supported via the mxfp4 branch of indexer_k_quant_and_cache
         ops.indexer_k_quant_and_cache(
             k,
             kv_cache,
             slot_mapping_for_cache,
             quant_block_size,
-            scale_fmt,
+            "mxfp4" if use_fp4_cache else scale_fmt,
         )
 
     # The indexer and main MLA may classify the same short extend differently
