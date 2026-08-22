@@ -248,6 +248,10 @@ class FlexibleArgumentParser(ArgumentParser):
         if args is None:
             args = sys.argv[1:]
 
+        # Reset from any previous parse_args() call on this instance so a
+        # `--help=<keyword>` from an earlier call can't leak into this one.
+        self._search_keyword = None
+
         if args and args[0] == "serve":
             # Check for --model in command line arguments first
             try:
@@ -309,7 +313,7 @@ class FlexibleArgumentParser(ArgumentParser):
         processed_args = list[str]()
         for i, arg in enumerate(args):
             if arg.startswith("--help="):
-                FlexibleArgumentParser._search_keyword = arg.split("=", 1)[-1].lower()
+                self._search_keyword = arg.split("=", 1)[-1].lower()
                 processed_args.append("--help")
             elif arg.startswith("--"):
                 if "=" in arg:
