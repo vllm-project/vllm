@@ -123,8 +123,7 @@ def mock_request():
 
 
 class TestParseGemma4Args:
-    """Values are returned as strings; type coercion to proper JSON types
-    happens at the engine layer."""
+    """Bare values are converted to their JSON types (int, float, bool, None)."""
 
     def test_empty_string(self):
         assert _parse_gemma4_args("") == {}
@@ -148,23 +147,23 @@ class TestParseGemma4Args:
 
     def test_integer_value(self):
         result = _parse_gemma4_args("count:42")
-        assert result == {"count": "42"}
+        assert result == {"count": 42}
 
     def test_float_value(self):
         result = _parse_gemma4_args("score:3.14")
-        assert result == {"score": "3.14"}
+        assert result == {"score": 3.14}
 
     def test_boolean_true(self):
         result = _parse_gemma4_args("flag:true")
-        assert result == {"flag": "true"}
+        assert result == {"flag": True}
 
     def test_boolean_false(self):
         result = _parse_gemma4_args("flag:false")
-        assert result == {"flag": "false"}
+        assert result == {"flag": False}
 
     def test_null_value(self):
         result = _parse_gemma4_args("param:null")
-        assert result == {"param": "null"}
+        assert result == {"param": None}
 
     def test_mixed_types(self):
         result = _parse_gemma4_args(
@@ -172,9 +171,9 @@ class TestParseGemma4Args:
         )
         assert result == {
             "name": "test",
-            "count": "42",
-            "active": "true",
-            "score": "3.14",
+            "count": 42,
+            "active": True,
+            "score": 3.14,
         }
 
     def test_nested_object(self):
@@ -194,7 +193,7 @@ class TestParseGemma4Args:
         assert result == {"outer": {"inner": "val"}}
 
         result = _parse_gemma4_args('<|"|>name<|"|>:<|"|>Alice<|"|>,count:42')
-        assert result == {"name": "Alice", "count": "42"}
+        assert result == {"name": "Alice", "count": 42}
 
     def test_unterminated_string(self):
         """Unterminated strings should take everything after the delimiter."""
@@ -237,7 +236,7 @@ class TestParseGemma4Args:
 
         # Non-partial mode parses trailing dot normally
         result = _parse_gemma4_args("left:108.,right:22.8", partial=False)
-        assert result == {"left": "108.", "right": "22.8"}
+        assert result == {"left": 108.0, "right": 22.8}
 
     @pytest.mark.timeout(5)
     def test_malformed_partial_array(self):
@@ -256,7 +255,7 @@ class TestParseGemma4Array:
 
     def test_bare_values(self):
         result = _parse_gemma4_array("42,true,3.14")
-        assert result == ["42", "true", "3.14"]
+        assert result == [42, True, 3.14]
 
     @pytest.mark.timeout(5)
     def test_string_element_with_closing_bracket(self):
@@ -266,7 +265,7 @@ class TestParseGemma4Array:
     @pytest.mark.timeout(5)
     def test_stray_closing_bracket(self):
         result = _parse_gemma4_array("42,]trailing")
-        assert result == ["42"]
+        assert result == [42]
 
     def test_trailing_dot_float_partial_withheld(self):
         """Array elements with trailing dot withheld in partial mode."""
@@ -275,7 +274,7 @@ class TestParseGemma4Array:
 
         # Stable elements before trailing-dot element are kept
         result = _parse_gemma4_array("42,108.,3", partial=True)
-        assert result == ["42"]
+        assert result == [42]
 
 
 # ---------------------------------------------------------------------------
