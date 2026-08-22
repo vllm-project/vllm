@@ -909,6 +909,26 @@ class MistralParser(ParserEngine):
                     return True
         return False
 
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        if self._reasoning_encoding == "none":
+            return True
+        if not delta_ids:
+            return self.is_reasoning_end(list(input_ids))
+        end_id = self._reasoning_end_token_id
+        start_id = self._reasoning_start_token_id
+        bot_id = self.bot_token_id
+        for token_id in reversed(delta_ids):
+            if end_id is not None and token_id == end_id:
+                return True
+            # [TOOL_CALLS] acts as an implicit reasoning-end marker
+            if bot_id is not None and token_id == bot_id:
+                return True
+            if start_id is not None and token_id == start_id:
+                return False
+        return False
+
     def extract_reasoning(
         self,
         model_output: str,
