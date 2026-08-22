@@ -386,10 +386,8 @@ def _ensure_api_router_importable():
         "vllm.entrypoints.openai.responses.serving": {
             "OpenAIServingResponses": MagicMock(),
         },
-        "vllm.entrypoints.openai.utils": {
+        "vllm.entrypoints.serve.utils.api_utils": {
             "validate_json_request": MagicMock(),
-        },
-        "vllm.entrypoints.utils": {
             "load_aware_call": lambda f: f,
             "with_cancellation": lambda f: f,
         },
