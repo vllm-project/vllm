@@ -1440,11 +1440,16 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                 ]
                 if token_id is not None
             ]
-            self._visual_token_ids_tensor_cache = torch.tensor(
+            visual_token_ids_tensor_cache = torch.tensor(
                 visual_token_ids, dtype=torch.long
             )
         else:
-            self._visual_token_ids_tensor_cache = None
+            visual_token_ids_tensor_cache = None
+        self.register_buffer(
+            "_visual_token_ids_tensor_cache",
+            visual_token_ids_tensor_cache,
+            persistent=False,
+        )
 
     def compute_logits(
         self,

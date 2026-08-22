@@ -209,6 +209,23 @@ class LamportWorkspace:
 
         self._workspace = torch.tensor(ptrs, dtype=torch.int64, device="cuda")
 
+    def reset(self) -> None:
+        """Restore the protocol state in place after sleep-mode remapping."""
+        _lamport_fill_neg_zero(self._lamport.local_ptr, 3 * self.comm_size)
+        self._flag_buf.zero_()
+        self._layout_buf.copy_(
+            torch.tensor(
+                [0, self.comm_size], dtype=torch.int64, device=self._layout_buf.device
+            )
+        )
+        ptrs = [0] * (2 * self.world_size)
+        ptrs += self._lamport.serialize()
+        ptrs.append(self._flag_buf.data_ptr())
+        ptrs.append(self._layout_buf.data_ptr())
+        self._workspace.copy_(
+            torch.tensor(ptrs, dtype=torch.int64, device=self._workspace.device)
+        )
+
     @property
     def workspace(self) -> torch.Tensor:
         """Device tensor (int64) that can be passed to the kernel
@@ -289,6 +306,19 @@ def get_allreduce_workspace(
     process_group : optional
         ``torch.distributed`` process group.
     """
+    return get_allreduce_workspace_owner(
+        rank, world_size, comm_size, max_tokens, process_group
+    ).workspace
+
+
+def get_allreduce_workspace_owner(
+    rank: int,
+    world_size: int,
+    comm_size: int | None = None,
+    max_tokens: int = 16384,
+    process_group=None,
+) -> LamportWorkspace:
+    """Return the cached owner for sleep-aware workspace registration."""
     if comm_size is None:
         comm_size = LamportWorkspace.compute_comm_size_for_minimax(
             max_tokens, world_size, fused_qk=True
@@ -299,4 +329,4 @@ def get_allreduce_workspace(
         if key not in _workspace_cache:
             ws = LamportWorkspace(rank, world_size, comm_size, process_group)
             _workspace_cache[key] = ws
-        return _workspace_cache[key].workspace
+        return _workspace_cache[key]
