@@ -1,0 +1,724 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import multiprocessing as mp
+
+import numpy as np
+import pytest
+import torch
+
+from vllm.config import ModelConfig, ParallelConfig, VllmConfig
+from vllm.config.multimodal import MultiModalConfig
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import (
+    BaseMultiModalProcessorCache,
+    BaseMultiModalReceiverCache,
+    MultiModalCache,
+    MultiModalCacheMissError,
+    MultiModalProcessorCacheInItem,
+    MultiModalProcessorCacheItem,
+    MultiModalProcessorCacheItemMetadata,
+    MultiModalProcessorOnlyCache,
+    MultiModalProcessorSenderCache,
+    MultiModalReceiverCache,
+    ShmObjectStoreReceiverCache,
+    ShmObjectStoreSenderCache,
+)
+from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    MultiModalSharedField,
+    PlaceholderRange,
+)
+from vllm.multimodal.processing import PromptInsertion
+from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
+
+from ..utils import create_new_process_for_each_test
+
+pytestmark = pytest.mark.cpu_test
+
+
+def _dummy_elem(
+    size: int,
+    *,
+    rng: np.random.RandomState | None = None,
+):
+    if rng is None:
+        data = torch.empty((size,), dtype=torch.int8)
+    else:
+        data = torch.from_numpy(rng.randint(4, size=(size,), dtype=np.int8))
+
+    return MultiModalFieldElem(
+        data=data,
+        field=MultiModalSharedField(batch_size=1),
+    )
+
+
+def _dummy_item(
+    size_by_key: dict[str, int],
+    *,
+    rng: np.random.RandomState | None = None,
+):
+    return MultiModalKwargsItem(
+        {key: _dummy_elem(size, rng=rng) for key, size in size_by_key.items()}
+    )
+
+
+def _dummy_items(
+    size_by_key_modality: dict[str, dict[str, int]],
+    *,
+    rng: np.random.RandomState | None = None,
+):
+    return MultiModalKwargsItems(
+        {
+            modality: [_dummy_item(size_by_key, rng=rng)]
+            for modality, size_by_key in size_by_key_modality.items()
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("item", "expected_size"),
+    [
+        (_dummy_item({"a1": 100}), 100),
+        (_dummy_item({"a1": 100, "a2": 110}), 210),
+        (_dummy_items({"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}), 460),  # noqa: E501
+    ],
+)
+def test_cache_item_size(item, expected_size):
+    cache = MultiModalCache.get_lru_cache(2048, type(item))
+
+    cache[""] = item
+    assert cache.currsize == expected_size
+
+    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
+
+    cache[""] = MultiModalProcessorCacheItem(item, [prompt_update])
+    assert cache.currsize == expected_size
+
+    cache[""] = MultiModalProcessorCacheItemMetadata(item, [prompt_update])
+    assert cache.currsize == expected_size
+
+    cache[""] = item.get_data()
+    assert cache.currsize == expected_size
+
+
+def _create_vllm_config(
+    *,
+    mm_processor_cache_gb: float,
+    enable_ipc: bool,
+):
+    return VllmConfig(
+        model_config=ModelConfig(
+            model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            mm_processor_cache_gb=mm_processor_cache_gb,
+        ),
+        parallel_config=ParallelConfig(data_parallel_size=1 if enable_ipc else 2),
+    )
+
+
+def _compare_caches(
+    config_0: VllmConfig,
+    config_1: VllmConfig,
+    *,
+    item_capacity: int = 8,
+    hit_rate: float = 0.5,
+    max_items_per_iter: int = 3,
+    is_cached_calls_per_iter: int,
+    n_iter: int = 100,
+    seed: int = 0,
+):
+    cache_0_p0 = MULTIMODAL_REGISTRY.processor_cache_from_config(config_0)
+    cache_0_p1 = MULTIMODAL_REGISTRY.engine_receiver_cache_from_config(config_0)
+    cache_1_p0 = MULTIMODAL_REGISTRY.processor_cache_from_config(config_1)
+    cache_1_p1 = MULTIMODAL_REGISTRY.engine_receiver_cache_from_config(config_1)
+
+    cache_size_gb = max(
+        config_0.model_config.multimodal_config.mm_processor_cache_gb,
+        config_1.model_config.multimodal_config.mm_processor_cache_gb,
+    )
+    item_size_gb = int(cache_size_gb / item_capacity)
+
+    rng = np.random.RandomState(seed)
+    all_items = [
+        _dummy_item({"key": item_size_gb}, rng=rng)
+        for _ in range(int(item_capacity / hit_rate))
+    ]
+    all_hashes = [
+        MultiModalHasher.hash_kwargs("blake3", item=item.get_data())
+        for item in all_items
+    ]
+
+    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
+
+    for it in range(n_iter):
+        num_items_to_select = rng.randint(0, max_items_per_iter)
+        item_idxs_to_select = rng.choice(len(all_items), num_items_to_select)
+
+        selected_items = [all_items[idx] for idx in item_idxs_to_select]
+        selected_hashes = [all_hashes[idx] for idx in item_idxs_to_select]
+
+        if cache_0_p0 is None:
+            cache_0_p0_out = selected_items
+        else:
+            for _ in range(is_cached_calls_per_iter):
+                cache_0_p0.is_cached(selected_hashes)
+
+            cache_0_p0_out = [
+                item
+                for item, _ in cache_0_p0.get_and_update(
+                    [(item, [prompt_update]) for item in selected_items],
+                    selected_hashes,
+                )
+            ]
+
+        if cache_1_p0 is None:
+            cache_1_p0_out = selected_items
+        else:
+            for _ in range(is_cached_calls_per_iter):
+                cache_1_p0.is_cached(selected_hashes)
+
+            cache_1_p0_out = [
+                item
+                for item, _ in cache_1_p0.get_and_update(
+                    [(item, [prompt_update]) for item in selected_items],
+                    selected_hashes,
+                )
+            ]
+
+        if cache_0_p1 is None:
+            cache_0_p1_out = cache_0_p0_out
+        else:
+            cache_0_p1_out = cache_0_p1.get_and_update(cache_0_p0_out, selected_hashes)
+
+        if cache_1_p1 is None:
+            cache_1_p1_out = cache_1_p0_out
+        else:
+            cache_1_p1_out = cache_1_p1.get_and_update(cache_1_p0_out, selected_hashes)
+
+        assert cache_0_p1_out == cache_1_p1_out, f"Failed at {it=}"
+
+
+@pytest.mark.parametrize("is_cached_calls_per_iter", [1, 2, 3])
+def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
+    cache_size_gb = 1 / (1 << 20)
+
+    vllm_config_ipc_enabled = _create_vllm_config(
+        mm_processor_cache_gb=cache_size_gb,
+        enable_ipc=True,
+    )
+    vllm_config_ipc_disabled = _create_vllm_config(
+        mm_processor_cache_gb=0,
+        enable_ipc=False,
+    )
+    vllm_config_cache_disabled = _create_vllm_config(
+        mm_processor_cache_gb=cache_size_gb,
+        enable_ipc=True,
+    )
+
+    _compare_caches(
+        vllm_config_ipc_enabled,
+        vllm_config_ipc_disabled,
+        is_cached_calls_per_iter=is_cached_calls_per_iter,
+    )
+    _compare_caches(
+        vllm_config_ipc_disabled,
+        vllm_config_cache_disabled,
+        is_cached_calls_per_iter=is_cached_calls_per_iter,
+    )
+    _compare_caches(
+        vllm_config_cache_disabled,
+        vllm_config_ipc_enabled,
+        is_cached_calls_per_iter=is_cached_calls_per_iter,
+    )
+
+
+class _StubModelConfig:
+    """Minimal model-config stand-in: the cache classes only call
+    get_multimodal_config(), so this lets us construct them directly without a
+    real model, keeping this unit test free of any Hugging Face / network lookup.
+    """
+
+    def __init__(self, mm_processor_cache_gb: float) -> None:
+        self._mm_config = MultiModalConfig(mm_processor_cache_gb=mm_processor_cache_gb)
+
+    def get_multimodal_config(self) -> MultiModalConfig:
+        return self._mm_config
+
+
+@pytest.mark.skip_global_cleanup
+def test_oversized_item_is_served_uncached():
+    """Items larger than the processor cache must not crash insert.
+
+    cachetools.LRUCache raises ValueError("value too large") when a single
+    item exceeds maxsize. Engine profiling uses a max-size dummy item, so this
+    used to abort EngineCore startup (vllm-project/vllm#52835). Skip the
+    insert and serve the item uncached instead.
+    """
+    # 1 KiB cache; a 4 KiB item cannot fit even if the cache is empty.
+    model_config = _StubModelConfig(mm_processor_cache_gb=1024 / GiB_bytes)
+    item = MultiModalKwargsItem.dummy(nbytes=4096)
+    small = MultiModalKwargsItem.dummy(nbytes=64)
+
+    p0_only = MultiModalProcessorOnlyCache(model_config)  # type: ignore[arg-type]
+    assert p0_only.get_and_update_item((item, []), "big")[0] is item
+    assert not p0_only.is_cached_item("big")
+    assert p0_only.get_and_update_item((small, []), "small")[0] is small
+    assert p0_only.is_cached_item("small")
+
+    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    assert p0.get_and_update_item((item, []), "big")[0] is item
+    assert not p0.is_cached_item("big")
+    assert p1.get_and_update_item(item, "big") is item
+    assert "big" not in p1._cache
+
+
+def test_mm_cache_miss_raises_and_recovers():
+    """A P0/P1 multimodal cache drift must be recoverable, not a hard crash.
+
+    Reproduces the production failure: the P0 sender cache believes an item is
+    cached on P1 (so it sends ``data=None``), but the P1 receiver cache does not
+    have it. The receiver must raise ``MultiModalCacheMissError`` (carrying the
+    hash) instead of asserting; ``P0.invalidate()`` must drop the stale shadow
+    entry; and resending the item with data must repopulate both caches.
+
+    Caches are built directly (not via the registry) so the test needs no real
+    model or network.
+    """
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(nbytes=64)
+
+    # Drift: the item reaches P1 with no data (P0 would have sent data=None on a
+    # stale HIT) but P1 does not have it. Must raise a typed, retryable error
+    # carrying the hash -- not assert.
+    with pytest.raises(MultiModalCacheMissError) as exc_info:
+        p1.get_and_update_item(None, mm_hash)
+    assert exc_info.value.mm_hashes == [mm_hash]
+
+    # Give P0 a (now stale) shadow entry for the hash.
+    miss = p0.get_and_update_item((item, []), mm_hash)
+    assert miss[0] is item  # MISS path returns the data to forward to P1
+    assert p0.is_cached_item(mm_hash)
+    # On the next request P0 short-circuits to data=None -- the drift bug when
+    # P1 lacks the item.
+    hit = p0.get_and_update_item((item, []), mm_hash)
+    assert hit[0] is None
+
+    # Recovery: drop the stale P0 entry so the client's resend-with-data takes
+    # the MISS path again and repopulates P1.
+    p0.invalidate(mm_hash)
+    assert not p0.is_cached_item(mm_hash)
+
+    resent = p0.get_and_update_item((item, []), mm_hash)
+    assert resent[0] is item  # MISS again -> data is resent
+    assert p1.get_and_update_item(item, mm_hash) == item  # P1 now caches it
+    # A subsequent uuid-only request now succeeds on P1.
+    assert p1.get_and_update_item(None, mm_hash) == item
+
+
+def test_mm_cache_miss_batches_all_drifted_hashes():
+    """All hashes drifted within one request must surface in a single error.
+
+    Otherwise a request with k drifted items needs k client retries (each resend
+    un-shadows only the one reported hash). get_and_update_features collects every
+    miss and raises once, so a single retry recovers the whole request -- while the
+    non-drifted items in the same request are still ingested.
+    """
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    item = MultiModalKwargsItem.dummy(nbytes=64)
+
+    def _feature(
+        mm_hash: str, data: MultiModalKwargsItem | None
+    ) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+        )
+
+    # A and C carry data; B, D, E arrive data=None (stale P0 shadow HITs) but P1
+    # has none of them -- all three must be reported together, in order.
+    features = [
+        _feature("A", item),
+        _feature("B", None),
+        _feature("C", item),
+        _feature("D", None),
+        _feature("E", None),
+    ]
+    with pytest.raises(MultiModalCacheMissError) as exc_info:
+        p1.get_and_update_features(features)
+    assert exc_info.value.mm_hashes == ["B", "D", "E"]
+    # The non-drifted items were still ingested into P1 before the raise.
+    assert "A" in p1._cache and "C" in p1._cache
+
+
+def _run_test_cache_eviction_lru(
+    p0_cache: BaseMultiModalProcessorCache,
+    p1_cache: BaseMultiModalReceiverCache,
+    base_item_size: int,
+):
+    request1_hashes = [
+        "image_A",
+        "image_B",
+        "image_C",
+    ]
+    request1_items = {
+        h: MultiModalKwargsItem.dummy(nbytes=2 * base_item_size)
+        for h in request1_hashes
+    }
+
+    request2_hashes = ["image_D", "image_E", "image_A", "image_C"]
+    request2_items = {
+        h: MultiModalKwargsItem.dummy(nbytes=1 * base_item_size)
+        for h in request2_hashes
+    }
+
+    ##########################
+    # STEP 1: Request 1 send
+    ##########################
+    sender_is_cached_item_req1 = p0_cache.is_cached(request1_hashes)
+    # Cache is empty
+    assert sender_is_cached_item_req1 == [False, False, False]
+
+    # Touch all mm hash for P0 Cache before process
+    for mm_hash in request1_hashes:
+        p0_cache.touch_sender_cache_item(mm_hash)
+
+    ###########################
+    # Process request 1 for P0 Cache
+    ###########################
+    item_tuple: MultiModalProcessorCacheInItem
+    for i, h in enumerate(request1_hashes):
+        # Use precomputed cache state
+        is_cached = sender_is_cached_item_req1[i]
+        item_tuple = (request1_items[h], []) if not is_cached else None
+        print(f"Request 1: key={h} | cached={is_cached}")
+
+        p0_cache.get_and_update_item(item_tuple, h)
+
+    ###########################
+    # Process request 1 for P1 Cache
+    ###########################
+    # Touch all mm hash for P1 Cache before process
+    for mm_hash in request1_hashes:
+        p1_cache.touch_receiver_cache_item(mm_hash)
+
+    for h in request1_hashes:
+        p1_cache.get_and_update_item(request1_items[h], h)
+
+    expected_hashes = ["image_A", "image_B", "image_C"]
+    assert list(p0_cache._cache.order) == expected_hashes
+
+    ##########################
+    # STEP 2: Request 2 send
+    ##########################
+    sender_is_cached_item_req2 = p0_cache.is_cached(request2_hashes)
+    assert sender_is_cached_item_req2 == [False, False, True, True]
+
+    # Touch all mm hash for P0 Cache before process
+    for mm_hash in request2_hashes:
+        p0_cache.touch_sender_cache_item(mm_hash)
+
+    ###########################
+    # Process request 2 for P0 Cache
+    ###########################
+    for i, h in enumerate(request2_hashes):
+        # Use precomputed cache state again
+        is_cached = sender_is_cached_item_req2[i]
+        item_tuple = (request2_items[h], []) if not is_cached else None
+        print(f"Request 2: key={h} | cached={is_cached}")
+
+        p0_cache.get_and_update_item(item_tuple, h)
+
+    ###########################
+    # Process request 2 for P1 Cache
+    ###########################
+
+    # Touch all mm hash for P1 Cache before process
+    for mm_hash in request2_hashes:
+        p1_cache.touch_receiver_cache_item(mm_hash)
+
+    for h in request2_hashes:
+        p1_cache.get_and_update_item(request2_items[h], h)
+
+    expected_hashes = ["image_D", "image_E", "image_A", "image_C"]
+    assert list(p0_cache._cache.order) == expected_hashes
+
+
+def test_cache_eviction_lru_cache():
+    model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        mm_processor_cache_gb=6 / GiB_bytes,
+    )
+    sender_cache = MultiModalProcessorSenderCache(model_config)
+    receiver_cache = MultiModalReceiverCache(model_config)
+
+    _run_test_cache_eviction_lru(sender_cache, receiver_cache, base_item_size=1)
+
+
+# This test verifies shared-memory cache eviction behavior across processor (p0)
+# and receiver (p1) caches.
+# Flow summary:
+# 1. Request 1 adds images A, B, C — completely filling the cache.
+# 2. Request 2 tries to add image_G and image_A, but image_G cannot be added because
+#    cache is full and A is protected from eviction — cache remains unchanged.
+# 3. Request 3 adds image_G, image_H, image_I and image_B
+#    this time, image_A is evicted, freeing 5MB space
+#    and image_G, image_H successfully fits,
+#    image_B is protected from eviction then image_i cannot be added.
+#    This proving normal eviction and reuse behavior.
+def _run_test_cache_eviction_shm(
+    p0_cache: BaseMultiModalProcessorCache,
+    p1_cache: BaseMultiModalReceiverCache,
+    base_item_size: int,
+):
+    request1_hashes = ["image_A", "image_B", "image_C"]
+    request1_items = {
+        h: MultiModalKwargsItem.dummy(5 * base_item_size) for h in request1_hashes
+    }
+    request1_items_p0_result = []
+
+    request2_hashes = ["image_G", "image_A"]
+    request2_items = {
+        h: MultiModalKwargsItem.dummy(
+            (5 if h in request1_hashes else 2) * base_item_size
+        )
+        for h in request2_hashes
+    }
+    request2_items_p0_result = []
+
+    request3_hashes = ["image_G", "image_H", "image_I", "image_B"]
+    request3_items = {
+        h: MultiModalKwargsItem.dummy(
+            (5 if h in request1_hashes else 2) * base_item_size
+        )
+        for h in request3_hashes
+    }
+    request3_items_p0_result = []
+
+    ##########################
+    # STEP 1: Request 1 send
+    # This will fill up the cache
+    ##########################
+    sender_is_cached_item_req1 = p0_cache.is_cached(request1_hashes)
+    # Cache is empty
+    assert sender_is_cached_item_req1 == [False, False, False]
+
+    # Touch all mm hash for P0 Cache before process
+    for mm_hash in request1_hashes:
+        p0_cache.touch_sender_cache_item(mm_hash)
+
+    ###########################
+    # Process request 1 for P0 Cache
+    ###########################
+    item_tuple: MultiModalProcessorCacheInItem
+    for i, h in enumerate(request1_hashes):
+        # Use precomputed cache state
+        is_cached = sender_is_cached_item_req1[i]
+        item_tuple = (request1_items[h], []) if not is_cached else None
+        print(f"Request 1: key={h} | cached={is_cached}")
+
+        p0_result = p0_cache.get_and_update_item(item_tuple, h)
+        # Only get mm item, ignore prompt update result
+        request1_items_p0_result.append(p0_result[0])
+
+    ###########################
+    # Process request 1 for P1 Cache
+    ###########################
+    # Touch all mm hash for P1 Cache before process
+    for mm_hash, mm_item in zip(request1_hashes, request1_items_p0_result):
+        p1_cache.touch_receiver_cache_item(mm_hash, mm_item)
+
+    for mm_hash, mm_item in zip(request1_hashes, request1_items_p0_result):
+        p1_cache.get_and_update_item(mm_item, mm_hash)
+
+    expected_hashes = ["image_A", "image_B", "image_C"]
+    assert list(p0_cache._shm_cache.key_index.keys()) == expected_hashes
+
+    ##########################
+    # STEP 2: Request 2 send
+    # There is no eviction because image_A is protected
+    # No new item can add to cache
+    ##########################
+    sender_is_cached_item_req2 = p0_cache.is_cached(request2_hashes)
+    assert sender_is_cached_item_req2 == [False, True]
+
+    # Touch all mm hash for P0 Cache before process
+    for mm_hash in request2_hashes:
+        p0_cache.touch_sender_cache_item(mm_hash)
+
+    ###########################
+    # Process request 2 for P0 Cache
+    ###########################
+    for i, h in enumerate(request2_hashes):
+        # Use precomputed cache state again
+        is_cached = sender_is_cached_item_req2[i]
+        item_tuple = (request2_items[h], []) if not is_cached else None
+        print(f"Request 2: key={h} | cached={is_cached}")
+
+        p0_result = p0_cache.get_and_update_item(item_tuple, h)
+        # Only get mm item, ignore prompt update result
+        request2_items_p0_result.append(p0_result[0])
+
+    # image_A cannot be evict then
+    # image_G will fail to allocate anyway and image_A still in cache
+    assert p0_cache.is_cached(request2_hashes) == [False, True]
+
+    ###########################
+    # Process request 2 for P1 Cache
+    ###########################
+
+    # Touch all mm hash for P1 Cache before process
+    for mm_hash, mm_item in zip(request2_hashes, request2_items_p0_result):
+        p1_cache.touch_receiver_cache_item(mm_hash, mm_item)
+
+    for mm_hash, mm_item in zip(request2_hashes, request2_items_p0_result):
+        p1_cache.get_and_update_item(mm_item, mm_hash)
+
+    # Prove that cache state is unchanged
+    expected_hashes = ["image_A", "image_B", "image_C"]
+    assert list(p0_cache._shm_cache.key_index.keys()) == expected_hashes
+
+    ##########################
+    # STEP 3: Request 3 send
+    ##########################
+    ##### Prove that cache eviction work normally
+    sender_is_cached_item_req3 = p0_cache.is_cached(request3_hashes)
+    assert sender_is_cached_item_req3 == [False, False, False, True]
+
+    # Touch all mm hash for P0 Cache before process
+    for mm_hash in request3_hashes:
+        p0_cache.touch_sender_cache_item(mm_hash)
+
+    ###########################
+    # Process request 3 for P0 Cache
+    ###########################
+    for i, h in enumerate(request3_hashes):
+        # Use precomputed cache state again
+        is_cached = sender_is_cached_item_req3[i]
+        item_tuple = (request3_items[h], []) if not is_cached else None
+        print(f"Request 3: key={h} | cached={is_cached}")
+        p0_result = p0_cache.get_and_update_item(item_tuple, h)
+        # Only get mm item, ignore prompt update result
+        request3_items_p0_result.append(p0_result[0])
+
+    # image_A got evict and image_G add to cache
+    # image_B is still protected
+    # image_G, image_H fit but image_I cannot fit
+    assert p0_cache.is_cached(request3_hashes) == [True, True, False, True]
+
+    ###########################
+    # Process request 3 for P1 Cache
+    ###########################
+
+    # Touch all mm hash for P1 Cache before process
+    for mm_hash, mm_item in zip(request3_hashes, request3_items_p0_result):
+        p1_cache.touch_receiver_cache_item(mm_hash, mm_item)
+
+    for mm_hash, mm_item in zip(request3_hashes, request3_items_p0_result):
+        p1_cache.get_and_update_item(mm_item, mm_hash)
+
+    expected_hashes = ["image_B", "image_C", "image_G", "image_H"]
+    assert list(p0_cache._shm_cache.key_index.keys()) == expected_hashes
+
+
+def test_cache_eviction_shm_cache():
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            mm_processor_cache_type="shm",
+            mm_shm_cache_max_object_size_mb=6,
+            mm_processor_cache_gb=15.2 * MiB_bytes / GiB_bytes,
+        ),
+    )
+    sender_cache = ShmObjectStoreSenderCache(vllm_config)
+    receiver_cache = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
+
+    _run_test_cache_eviction_shm(sender_cache, receiver_cache, base_item_size=MiB_bytes)
+
+
+def test_processor_cache_shared_across_loras():
+    """Test that processor cache uses mm_hash to share data across LoRAs."""
+    model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        mm_processor_cache_gb=1,
+    )
+    receiver_cache = MultiModalReceiverCache(model_config)
+
+    base_mm_hash = "image_hash_abc123"
+    lora_a_identifier = f"12345:{base_mm_hash}"
+    lora_b_identifier = f"67890:{base_mm_hash}"
+
+    item_data = MultiModalKwargsItem.dummy(1024)
+
+    feature_lora_a = MultiModalFeatureSpec(
+        data=item_data,
+        modality="image",
+        identifier=lora_a_identifier,
+        mm_position=PlaceholderRange(offset=0, length=100),
+        mm_hash=base_mm_hash,
+    )
+
+    receiver_cache.get_and_update_features([feature_lora_a])
+    assert base_mm_hash in receiver_cache._cache
+
+    feature_lora_b = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier=lora_b_identifier,
+        mm_position=PlaceholderRange(offset=0, length=100),
+        mm_hash=base_mm_hash,
+    )
+
+    receiver_cache.get_and_update_features([feature_lora_b])
+    assert feature_lora_b.data == item_data
+
+
+_SLEEP_VISION_PROMPT = (
+    "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
+    "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+    "What is in the image?<|im_end|>\n"
+    "<|im_start|>assistant\n"
+)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="sleep mode regression requires a CUDA GPU",
+)
+def test_sleep_wake_preserves_mm_cache_consistency():
+    """Regression for vllm-project/vllm#42995."""
+    from vllm import LLM, SamplingParams
+    from vllm.assets.image import ImageAsset
+
+    image = ImageAsset("stop_sign").pil_image
+    prompt = {
+        "prompt": _SLEEP_VISION_PROMPT,
+        "multi_modal_data": {"image": image},
+    }
+    sampling_params = SamplingParams(temperature=0, max_tokens=8)
+
+    llm = LLM(
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+        max_model_len=2048,
+    )
+
+    llm.generate([prompt], sampling_params)
+    llm.sleep(level=1)
+    llm.wake_up()
+    output2 = llm.generate([prompt], sampling_params)
+    assert output2[0].outputs[0].text

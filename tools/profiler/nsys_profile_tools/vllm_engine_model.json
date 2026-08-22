@@ -1,0 +1,63 @@
+{
+  "vllm": {
+    "llama": {
+      "fused_moe_kernel|GroupProblemShape|group_gemm_starts|bmm_|GemmUniversal": "moe_gemm",
+      "gemm|nvjet": "gemm",
+      "moe|sigmoid": "moe",
+      "CatArrayBatched|prepare_inputs": "prepare_next",
+      "ncclDevKernel|cross_device_reduce": "nccl_and_custom_ar",
+      "_norm_|Norm": "norm",
+      "act_and_mul_": "activation",
+      "Rotary": "rope",
+      "SoftMax": "softmax",
+      "flash|fmha": "attn",
+      "elementwise": "elementwise",
+      "fp8_quant|cvt_": "quantize",
+      "reduce_kernel": "reduce",
+      "triton": "triton_kernel",
+      "CUDA mem": "non-gpu-H_D_memops",
+      ".*": "misc"
+    },
+    "ds": {
+      "block_fp8|gemm_fp8_blockwise": "block_fp8_gemm",
+      "fused_moe_kernel|_group_gemm|GroupProblemShape|GemmUniversal|bmm_": "moe_gemm",
+      "gemm|matmul|nvjet": "gemm",
+      "moe|sigmoid|expert": "moe",
+      "CatArrayBatched": "prepare_next",
+      "ncclDevKernel|cross_device_reduce": "nccl_and_custom_ar",
+      "Norm|_norm_": "norm",
+      "sbtopk": "topk",
+      "act_and_mul_": "activation",
+      "compute_position_kernel": "rope",
+      "elementwise": "elementwise",
+      "fp8_quant|quant_fp8|cvt_": "quantize",
+      "reduce": "reduce",
+      "SoftMax": "softmax",
+      "_fwd_|FlashAttn|_mla_|_attn_|fmha": "attn",
+      "triton": "triton_kernel",
+      "topk": "topk",
+      "CUDA mem": "non-gpu-H_D_memops",
+      ".*": "misc"
+    },
+    "gpt-oss": {
+      "block_fp8|gemm_fp8_blockwise": "block_fp8_gemm",
+      "fused_moe_kernel|_group_gemm|GroupProblemShape|GemmUniversal|bmm_|matmul_ogs_|_topk_forward|_combined_routing|_sum_bitmatrix_rows|_compute_writeback_idx": "moe_gemm",
+      "gemm|matmul|nvjet": "gemm",
+      "moe|sigmoid|expert|splitKreduce": "moe",
+      "CatArrayBatched": "prepare_next",
+      "ncclDevKernel|cross_device_reduce": "nccl_and_custom_ar",
+      "Norm|_norm_": "norm",
+      "topk": "topk",
+      "act_and_mul_": "activation",
+      "compute_position_kernel": "rope",
+      "elementwise": "elementwise",
+      "fp8_quant|quant_fp8|cvt_|quantize": "quantize",
+      "reduce": "reduce",
+      "SoftMax": "softmax",
+      "_fwd_|FlashAttn|_mla_|_attn_|_flash_|flash::prepare_varlen|fmha": "attn",
+      "triton": "triton_kernel",
+      "CUDA mem": "non-gpu-H_D_memops",
+      ".*": "misc"
+    }
+  }
+}

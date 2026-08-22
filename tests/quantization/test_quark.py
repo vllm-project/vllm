@@ -1,0 +1,732 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Test model set-up and weight loading for quark-quantized models.
+
+Run `pytest tests/quantization/test_quark.py`.
+
+See also `tests/kernels/moe/test_ocp_mx_moe.py`.
+"""
+
+import importlib.metadata
+from dataclasses import dataclass
+from importlib.util import find_spec
+
+import huggingface_hub
+import lm_eval
+import pytest
+import torch
+from packaging import version
+
+from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+    QuarkConfig,
+    QuarkLinearMethod,
+    QuarkW8A8Fp8,
+    QuarkW8A8Fp8PerBlock,
+    QuarkW8A8Int8,
+)
+from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkW4A8Fp8MoEMethod,
+    QuarkW8A8Int8MoEMethod,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    quant_dequant_mxfp4,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+)
+from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
+else:
+
+    def on_gfx942() -> bool:
+        return False
+
+    def on_gfx950() -> bool:
+        return False
+
+
+from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
+
+# Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
+QUARK_MXFP4_MIN_VERSION = "0.12"
+
+QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
+    importlib.metadata.version("amd-quark")
+) >= version.parse(QUARK_MXFP4_MIN_VERSION)
+
+AITER_AVAILABLE = is_aiter_found_and_supported()
+
+DEVICE_TYPE = current_platform.device_type
+
+if QUARK_MXFP4_AVAILABLE:
+    from quark.torch.export.nn.modules.realquantizer import StaticScaledRealQuantizer
+    from quark.torch.kernel import mx as mx_kernel
+    from quark.torch.quantization.config.config import FP4PerGroupSpec
+
+try:
+    hf_api().list_repo_refs(
+        "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ"
+    )
+    HF_HUB_AMD_ORG_ACCESS = True
+except huggingface_hub.errors.RepositoryNotFoundError:
+    HF_HUB_AMD_ORG_ACCESS = False
+
+
+@pytest.fixture(scope="function", autouse=True)
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+def test_quark_config_has_no_model_specific_fused_mappings():
+    config = QuarkConfig({})
+
+    assert "gate_up_proj" not in config.packed_modules_mapping
+    assert "fused_wqa_wkv" not in config.packed_modules_mapping
+
+
+def test_quark_config_preserves_existing_packed_modules_mapping():
+    class CustomQuarkConfig(QuarkConfig):
+        packed_modules_mapping = {"custom_proj": ["a", "b"]}
+
+    config = CustomQuarkConfig({})
+
+    assert config.packed_modules_mapping["custom_proj"] == ["a", "b"]
+
+
+def test_quark_fp8_w8a8_detects_per_block_config():
+    config = QuarkConfig({})
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    assert config._is_fp8_w8a8(weight_config, input_config)
+
+
+def test_quark_fp8_w8a8_rejects_per_block_static_input():
+    config = QuarkConfig({})
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": False,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    assert not config._is_fp8_w8a8(weight_config, input_config)
+
+
+def test_quark_fp8_w8a8_rejects_per_block_group_size_mismatch():
+    config = QuarkConfig({})
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 64,
+        "symmetric": True,
+    }
+
+    assert not config._is_fp8_w8a8(weight_config, input_config)
+
+
+def test_quark_w8a8_fp8_per_block_requires_block_size():
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    with pytest.raises(ValueError, match="requires `block_size`"):
+        QuarkW8A8Fp8PerBlock(weight_config, input_config)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("tp", [1])
+def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
+    model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        kv_cache_dtype=kv_cache_dtype,
+        tensor_parallel_size=tp,
+    ) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+
+            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Fp8)
+
+            if isinstance(qkv_proj.scheme, QuarkW8A8Fp8):
+                assert len(qkv_proj.input_scale.shape) == 0
+                assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
+                assert len(qkv_proj.weight_scale.shape) == 0
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+
+
+@pytest.mark.parametrize("tp", [1])
+def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
+    model_path = "amd/Qwen2.5-1.5B-Instruct-ptpc-Quark-ts"
+    with vllm_runner(model_path, enforce_eager=True, tensor_parallel_size=tp) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+
+            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Fp8)
+
+            if isinstance(qkv_proj.scheme, QuarkW8A8Fp8):
+                assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
+                assert qkv_proj.weight_scale.shape[0] == qkv_proj.weight.shape[1]
+                assert qkv_proj.weight_scale.shape[1] == 1
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+
+
+@pytest.mark.parametrize("tp", [1])
+def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
+    model_path = "amd/Llama-3.1-8B-Instruct-w-int8-a-int8-sym-test"
+    with vllm_runner(model_path, enforce_eager=True, tensor_parallel_size=tp) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+
+            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+
+
+@pytest.mark.parametrize("tp", [1])
+def test_quark_int8_w8a8_moe(vllm_runner, tp):
+    """Test W8A8 INT8 MoE quantization with a tiny Qwen3 MoE model."""
+    model_path = "amd/tiny-qwen3-moe-w8a8-int8"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        tensor_parallel_size=tp,
+        gpu_memory_utilization=0.1,
+    ) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            # MoE experts should use QuarkW8A8Int8MoEMethod
+            moe = layer.mlp.experts
+            assert isinstance(moe._quant_method, QuarkW8A8Int8MoEMethod), (
+                f"Expected QuarkW8A8Int8MoEMethod, got {type(moe._quant_method)}"
+            )
+            # Non-MoE linear layers should use QuarkW8A8Int8
+            qkv_proj = layer.self_attn.qkv_proj
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello", max_tokens=4)
+        assert output
+
+
+@pytest.mark.skipif(
+    not (on_gfx950() or on_gfx942()),
+    reason="Quark W4A8 (INT4-FP8) MoE requires the AITER kernel on gfx942/gfx950",
+)
+@pytest.mark.parametrize("tp", [1])
+def test_quark_w4a8_fp8_moe(vllm_runner, monkeypatch, tp):
+    """Test W4A8 (INT4 weight + FP8 activation) MoE with a tiny Qwen3 MoE model.
+
+    W4A8 dispatches through the AITER fused MoE kernel, so AITER must be on.
+    """
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    model_path = "amd/tiny-qwen3-moe-w4a8"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        tensor_parallel_size=tp,
+        gpu_memory_utilization=0.1,
+    ) as llm:
+
+        def check_model(model):
+            moe = model.model.layers[0].mlp.experts
+            assert isinstance(moe._quant_method, QuarkW4A8Fp8MoEMethod), (
+                f"Expected QuarkW4A8Fp8MoEMethod, got {type(moe._quant_method)}"
+            )
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello", max_tokens=4)
+        assert output
+
+
+def test_quark_fp8_parity(vllm_runner):
+    quark_model_id = "amd-quark/llama-tiny-fp8-quark-quant-method"
+    fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"
+
+    llm_kwargs = {
+        "tensor_parallel_size": 1,
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.1,
+    }
+    with (
+        vllm_runner(quark_model_id, **llm_kwargs) as quark_handle,
+        vllm_runner(fp8_model_id, **llm_kwargs) as fp8_handle,
+    ):
+
+        def get_state_dict(model):
+            return {k: v.cpu() for k, v in model.state_dict().items()}
+
+        (quark_state_dict,) = quark_handle.apply_model(get_state_dict)
+        (fp8_state_dict,) = fp8_handle.apply_model(get_state_dict)
+
+    assert fp8_state_dict.keys() == quark_state_dict.keys()
+
+    for key in fp8_state_dict:
+        assert torch.equal(fp8_state_dict[key], quark_state_dict[key])
+
+
+@dataclass
+class AccuracyTestConfig:
+    model_name: str
+    excepted_value: float
+
+    def get_model_args(
+        self,
+        tp_size: int,
+        model_max_len: int | None = None,
+        kwargs: dict | None = None,
+    ) -> dict:
+        if kwargs is None:
+            kwargs = {}
+
+        model_args = {
+            "pretrained": self.model_name,
+            "dtype": "auto",
+            "add_bos_token": True,
+            "tensor_parallel_size": tp_size,
+            "gpu_memory_utilization": 0.7,
+            **kwargs,
+        }
+        if model_max_len is not None:
+            model_args["max_model_len"] = model_max_len
+
+        return model_args
+
+
+GSM8K_ACCURACY_CONFIGS = [
+    # Private model.
+    AccuracyTestConfig(
+        model_name="amd/DeepSeek-R1-WMXFP4-AMXFP4-Scale-UINT8-MoE-Quant",
+        excepted_value=0.96,
+    ),
+]
+
+WIKITEXT_ACCURACY_CONFIGS = [
+    AccuracyTestConfig(
+        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
+        excepted_value=11.3,
+    ),
+    AccuracyTestConfig(
+        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
+        excepted_value=10.6,
+    ),
+    AccuracyTestConfig(
+        model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.45
+    ),
+]
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize(
+    "config",
+    [pytest.param(val, id=f"config:{val}") for val in WIKITEXT_ACCURACY_CONFIGS],
+)
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(val, id=f"tp_size:{val}") for val in [1, 2]]
+)
+def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
+
+    task = "wikitext"
+    rtol = 0.1
+
+    # Smaller cudagraph_capture_sizes to speed up the test.
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=config.get_model_args(
+            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
+        ),
+        tasks=task,
+        batch_size=64,
+    )
+
+    EXPECTED_VALUE = config.excepted_value
+    measured_value = results["results"][task]["word_perplexity,none"]
+    assert (
+        measured_value < EXPECTED_VALUE + rtol
+        and measured_value > EXPECTED_VALUE - rtol
+    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_nvfp4_wikitext_correctness(tp_size: int):
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
+
+    # NOTE: expected_value from nvidia/Qwen3-30B-A3B-NVFP4
+    expected_value = 11.2391
+
+    model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
+    task = "wikitext"
+
+    rtol = 0.25
+
+    config = AccuracyTestConfig(
+        model_name=model_name,
+        excepted_value=expected_value,
+    )
+
+    model_args = config.get_model_args(
+        tp_size=tp_size,
+        kwargs={
+            "cudagraph_capture_sizes": [16],
+        },
+    )
+    model_args.pop("add_bos_token")
+
+    # Smaller cudagraph_capture_sizes to speed up the test.
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=model_args,
+        tasks=task,
+        batch_size=64,
+    )
+
+    EXPECTED_VALUE = config.excepted_value
+    measured_value = results["results"][task]["word_perplexity,none"]
+    assert (
+        measured_value < EXPECTED_VALUE + rtol
+        and measured_value > EXPECTED_VALUE - rtol
+    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
+@pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.skipif(
+    not HF_HUB_AMD_ORG_ACCESS,
+    reason="Read access to huggingface.co/amd is required for this test.",
+)
+def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
+    device_count = torch.accelerator.device_count()
+    if device_count < 8:
+        pytest.skip(f"This test requires >=8 gpus, got only {device_count}")
+
+    task = "gsm8k"
+    rtol = 0.03
+
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=config.get_model_args(tp_size=8, model_max_len=38768),
+        tasks=task,
+        batch_size=64,
+        num_fewshot=8,
+    )
+
+    EXPECTED_VALUE = config.excepted_value
+    measured_value = results["results"][task]["exact_match,strict-match"]
+    assert (
+        measured_value - rtol < EXPECTED_VALUE
+        and measured_value + rtol > EXPECTED_VALUE
+    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[int]):
+    torch.manual_seed(0)
+
+    hidden_size = 64 * 32
+    inp = (torch.rand(1, hidden_size, dtype=float_dtype, device=DEVICE_TYPE) - 0.5) * 2
+    for i in range(hidden_size // 32):
+        inp[:, i * 32 : (i + 1) * 32] = (
+            inp[:, i * 32 : (i + 1) * 32] * scalings[i % len(scalings)]
+        )
+
+    inp_kernel = inp.clone()
+    inp_kernel_clone = inp_kernel.clone()
+
+    res_hip = mx_kernel.qdq_mxfp4_hip(inp_kernel_clone, "even")
+    res_torch = qdq_mxfp4_torch(inp_kernel, "even")
+
+    for i in range(hidden_size // 32):
+        assert torch.all(torch.isfinite(res_hip[:, i * 32 : (i + 1) * 32]))
+        assert torch.all(torch.isfinite(res_torch[:, i * 32 : (i + 1) * 32]))
+
+        torch.testing.assert_close(
+            res_hip[:, i * 32 : (i + 1) * 32], res_torch[:, i * 32 : (i + 1) * 32]
+        )
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+def test_mxfp4_dequant_kernel_match_quark(
+    float_dtype: torch.dtype, scalings: list[int]
+):
+    qspec = FP4PerGroupSpec(
+        ch_axis=-1,
+        group_size=32,
+        scale_format="e8m0",
+        scale_calculation_mode="even",
+        is_dynamic=False,
+    ).to_quantization_spec()
+
+    weight_quantizer = StaticScaledRealQuantizer(
+        qspec=qspec,
+        quantizer=None,
+        reorder=False,
+        real_quantized=True,
+        float_dtype=float_dtype,
+        device=DEVICE_TYPE,
+    )
+
+    observer = qspec.observer_cls(qspec, device=DEVICE_TYPE)
+
+    hidden_size = 512
+    shape = (11008, hidden_size)
+
+    w = (torch.rand(shape, device=DEVICE_TYPE, dtype=float_dtype) - 0.5) * 2
+
+    # Make it so that different groups have different scales.
+    for i in range(hidden_size // 32):
+        w[:, i * 32 : (i + 1) * 32] = (
+            w[:, i * 32 : (i + 1) * 32] * scalings[i % len(scalings)]
+        )
+
+    observer(w)
+    scale, _ = observer._calculate_qparams()
+    weight_quantizer.scale = scale
+
+    w_mxfp4 = weight_quantizer.to_real_quantize_params(w).to(DEVICE_TYPE)
+    weight_quantizer.maybe_convert_and_transpose_scale()
+
+    scale = weight_quantizer.scale
+
+    out_hip = mx_kernel.dq_mxfp4_hip(w_mxfp4, scale, float_dtype)
+
+    out_torch = dq_mxfp4_torch(w_mxfp4, scale, float_dtype)
+
+    assert torch.equal(out_hip, out_torch)
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.skipif(
+    not AITER_AVAILABLE,
+    reason="AITER is not found or not supported on the current platform",
+)
+@pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+def test_mxfp4_dynamic_quant_match_quark(
+    float_dtype: torch.dtype, scalings: list[float]
+):
+    """`AiterMxfp4LinearKernel` quantizes weights dynamically through AITER's
+    `dynamic_mxfp4_quant`, while the emulation path quantizes/dequantizes
+    through Quark's `qdq_mxfp4`. Check that both agree on the same input.
+    """
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    torch.manual_seed(0)
+
+    hidden_size = 32 * 64
+    inp = (torch.rand(48, hidden_size, dtype=float_dtype, device=DEVICE_TYPE) - 0.5) * 2
+    for i in range(hidden_size // 32):
+        inp[:, i * 32 : (i + 1) * 32] = (
+            inp[:, i * 32 : (i + 1) * 32] * scalings[i % len(scalings)]
+        )
+
+    x_q, x_s = dynamic_mxfp4_quant(inp)
+    out_dynamic_quant = dq_mxfp4_torch(x_q, x_s, float_dtype)
+
+    out_quark_qdq = quant_dequant_mxfp4(inp)
+
+    assert torch.equal(out_dynamic_quant, out_quark_qdq)
+
+
+# Unit tests for ``is_layer_skipped`` fused-name handling.
+
+FUSED_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+}
+
+
+def test_fused_name_listed_directly_is_skipped():
+    # Regression for Step-3.5-Flash-FP8: the checkpoint lists the fused
+    # name (``qkv_proj``) directly in ``modules_to_not_convert``. When a
+    # ``packed_modules_mapping`` is registered on the model, the fused
+    # match must still win over per-shard expansion.
+    ignored = ["model.layers.0.self_attn.qkv_proj"]
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=ignored,
+        fused_mapping=FUSED_MAPPING,
+    )
+    assert is_layer_skipped(
+        prefix="model.layers.0.mlp.gate_up_proj",
+        ignored_layers=["model.layers.0.mlp.gate_up_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_unfused_shards_listed_is_skipped():
+    # Quark INT8 style: per-shard names listed; all shards present means
+    # the fused layer is skipped via expansion.
+    ignored = [
+        "model.layers.0.self_attn.q_proj",
+        "model.layers.0.self_attn.k_proj",
+        "model.layers.0.self_attn.v_proj",
+    ]
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=ignored,
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_partial_shards_raises():
+    # Only some shards listed -> ambiguous, must raise. Fused name is
+    # not in ignored_layers, so we fall through to per-shard expansion.
+    ignored = ["model.layers.0.self_attn.q_proj"]
+    with pytest.raises(ValueError):
+        is_layer_skipped(
+            prefix="model.layers.0.self_attn.qkv_proj",
+            ignored_layers=ignored,
+            fused_mapping=FUSED_MAPPING,
+        )
+
+
+def test_not_skipped_when_nothing_listed():
+    assert not is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=["model.layers.0.mlp.gate_up_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_non_fused_layer_unaffected():
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.o_proj",
+        ignored_layers=["model.layers.0.self_attn.o_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+    assert not is_layer_skipped(
+        prefix="model.layers.0.self_attn.o_proj",
+        ignored_layers=["model.layers.1.self_attn.o_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_substr_match_on_fused_name():
+    # Substring matching: a fused-name match should also
+    # short-circuit before shard expansion.
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=["self_attn.qkv_proj"],
+        fused_mapping=FUSED_MAPPING,
+        match_mode="substring",
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefix", "ignored_layer", "expected"),
+    [
+        ("model.layers.0.self_attn.b_proj", "b_proj", True),
+        ("model.layers.0.self_attn.q_b_proj", "b_proj", False),
+        ("model.layers.0.self_attn.kv_b_proj", "b_proj", False),
+        ("model.layers.5.self_attn.g_proj", "5.self_attn.g_proj", True),
+        ("model.layers.6.self_attn.g_proj", "5.self_attn.g_proj", False),
+    ],
+)
+def test_suffix_match_at_module_boundary(prefix, ignored_layer, expected):
+    assert (
+        is_layer_skipped(
+            prefix=prefix,
+            ignored_layers=[ignored_layer],
+            match_mode="suffix",
+        )
+        is expected
+    )
