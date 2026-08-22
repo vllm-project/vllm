@@ -29,6 +29,7 @@ Memory-efficient attention for decoding.
 It supports page size >= 1.
 """
 
+import functools
 import logging
 
 import torch
@@ -39,7 +40,57 @@ from vllm.triton_utils import tl, triton
 
 is_hip_ = current_platform.is_rocm()
 
+_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2)
+
 logger = logging.getLogger(__name__)
+
+# The stage-1 grid's head tiling. Exported because the caller sizes
+# num_kv_splits against this kernel's parallelism and the two must not drift.
+_WIDE_TILE_MIN_KV_GROUP = 64
+
+@functools.lru_cache(maxsize=None)
+def _unit_scale(device: torch.device) -> torch.Tensor:
+    """Stand-in for an absent quantization scale.
+
+    Cached because the decode path is cudagraph-captured: building the tensor
+    per call would allocate inside the capture region every step.
+    """
+    return torch.ones((), dtype=torch.float32, device=device)
+
+
+
+
+def stage1_block_h(is_mla: bool, kv_group_num: int) -> int:
+    """Query-head tile for `_fwd_grouped_kernel_stage1`.
+
+    A folded non-causal block arrives as many query heads on one row. Widening
+    the tile is what stops each tile rereading the whole KV span; 64 is the
+    widest that beat the alternatives on gfx950 (128 needs 8 warps to avoid
+    spilling and is still 2x slower).
+    """
+    # HIP only: the compensating BLOCK_N=64 below is gfx-specific, and at the
+    # NVIDIA BLOCK_N the wide tile needs 108544 B of shared memory, over the
+    # 101376 B that sm89 and sm120 allow -- and TRITON_MLA is sm120's default
+    # MLA backend, so it would abort on the first decode rather than fall back.
+    if is_hip_ and is_mla and kv_group_num >= _WIDE_TILE_MIN_KV_GROUP:
+        return 64
+    return 16
+
+
+def stage1_head_tiles(q_head_num: int, kv_group_num: int, is_mla: bool) -> int:
+    block_h = stage1_block_h(is_mla, kv_group_num)
+    return triton.cdiv(q_head_num, min(block_h, kv_group_num))
+
+
+def stage1_workgroups_per_cu(is_mla: bool, kv_group_num: int) -> int:
+    """How many stage-1 workgroups a CU can host at once.
+
+    The wide tile's fp32 [64, 512] accumulator saturates the 512-VGPR budget,
+    so only one workgroup is resident; assuming two over-splits the KV.
+    """
+    return 1 if stage1_block_h(is_mla, kv_group_num) > 16 else 2
+
+
 
 # Only print the following warnings when triton version < 3.2.0.
 # The issue won't affect performance or accuracy.
@@ -298,6 +349,7 @@ def _fwd_grouped_kernel_stage1(
     stride_mid_os,
     k_scale,
     v_scale,
+    q_scale,
     kv_group_num: tl.constexpr,
     q_head_num: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -311,6 +363,7 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
+    IS_FP8_KV: tl.constexpr = False,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -337,6 +390,11 @@ def _fwd_grouped_kernel_stage1(
         cache_modifier=".ca",
     )
 
+    # A quantized query is widened once here; e4m3 fits bf16 exactly, and
+    # its scale rides on the temperature with the key's.
+    if q.dtype.is_fp8():
+        q = q.to(tl.bfloat16)
+
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
         mask_dpe = offs_dpe < Lk
@@ -349,6 +407,8 @@ def _fwd_grouped_kernel_stage1(
             other=0.0,
             cache_modifier=".ca",
         )
+        if qpe.dtype.is_fp8():
+            qpe = qpe.to(tl.bfloat16)
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
     split_kv_start = kv_len_per_split * split_kv_id
@@ -366,6 +426,9 @@ def _fwd_grouped_kernel_stage1(
 
         ks = tl.load(k_scale)
         vs = tl.load(v_scale)
+        qs = tl.load(q_scale)
+        qk_scale = sm_scale * ks * qs if IS_FP8_KV else sm_scale
+        acc_scale = (ks if IS_MLA else vs) if IS_FP8_KV else 1.0
         for start_n in tl.range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
             kv_page_number = tl.load(
@@ -388,10 +451,8 @@ def _fwd_grouped_kernel_stage1(
                 other=0.0,
                 cache_modifier=".cg",
             )
-
-            if k.dtype.is_fp8():
-                k = (k.to(tl.float32) * ks).to(q.dtype)
-            qk = tl.dot(q, k.to(q.dtype))
+            k = k.to(q.dtype)
+            qk = tl.dot(q, k)
             if BLOCK_DPE > 0:
                 offs_buf_kpe = kv_off_k[None, :] + base_offs_kpe
                 kpe = tl.load(
@@ -400,10 +461,8 @@ def _fwd_grouped_kernel_stage1(
                     other=0.0,
                     cache_modifier=".cg",
                 )
-                if kpe.dtype.is_fp8():
-                    kpe = (kpe.to(tl.float32) * ks).to(qpe.dtype)
                 qk += tl.dot(qpe, kpe.to(qpe.dtype))
-            qk *= sm_scale
+            qk *= qk_scale
 
             if logit_cap > 0:
                 qk = logit_cap * tanh(qk / logit_cap)
@@ -423,8 +482,7 @@ def _fwd_grouped_kernel_stage1(
                     mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
                     other=0.0,
                 )
-                if v.dtype.is_fp8():
-                    v = (v.to(tl.float32) * vs).to(q.dtype)
+                v = v.to(q.dtype)
             else:
                 # MLA uses a single c_kv.
                 # loading the same c_kv to interpret it as v is not necessary.
@@ -449,7 +507,7 @@ def _fwd_grouped_kernel_stage1(
 
         tl.store(
             Att_Out + offs_mid_o,
-            acc / e_sum[:, None],
+            acc * (acc_scale / e_sum)[:, None],
             mask=(mask_h[:, None]) & (mask_dv[None, :]),
         )
 
@@ -480,6 +538,7 @@ def _decode_grouped_att_m_fwd(
     logit_cap,
     k_scale,
     v_scale,
+    q_scale,
     is_mla=False,
 ):
     # with is_mla there is only a single c_kv in smem.
@@ -510,7 +569,9 @@ def _decode_grouped_att_m_fwd(
     batch, head_num = q.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
 
-    BLOCK_H = 16
+    BLOCK_H = stage1_block_h(is_mla, kv_group_num)
+    if BLOCK_H > 16 and is_hip_:
+        BLOCK = 64
     NUM_KV_SPLITS = num_kv_splits
     grid = (
         batch,
@@ -525,6 +586,11 @@ def _decode_grouped_att_m_fwd(
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
+        if is_mla:
+            # Measured on the folded DSpark shape: the extra stage spills
+            # (310 slots, 708 B/thread) yet still halves the kernel, so the
+            # pipelining is worth more than the scratch traffic.
+            num_stages = 2
     elif not is_hip_ and BLOCK_DMODEL >= 1024:
         # Avoid shared memory overflow on NVIDIA when BLOCK_DMODEL is large
         # like non-MLA D_QK=576, BLOCK_DMODEL=1024, BLOCK_H=16
@@ -553,6 +619,7 @@ def _decode_grouped_att_m_fwd(
         att_out.stride(2),
         k_scale,
         v_scale,
+        q_scale,
         kv_group_num=kv_group_num,
         q_head_num=head_num,
         BLOCK_DMODEL=BLOCK_DMODEL,
@@ -568,6 +635,7 @@ def _decode_grouped_att_m_fwd(
         Lk=Lk,
         Lv=Lv,
         IS_MLA=is_mla,
+        IS_FP8_KV=k_buffer.dtype in _FP8_DTYPES,
         **extra_kargs,
     )
 
@@ -731,6 +799,7 @@ def decode_attention_fwd_grouped(
     logit_cap=0.0,
     k_scale=None,
     v_scale=None,
+    q_scale=None,
     is_mla=False,
 ):
     _decode_grouped_att_m_fwd(
@@ -746,6 +815,7 @@ def decode_attention_fwd_grouped(
         logit_cap,
         k_scale,
         v_scale,
+        q_scale,
         is_mla=is_mla,
     )
     _decode_softmax_reducev_fwd(
@@ -768,14 +838,17 @@ def decode_attention_fwd(
     logit_cap=0.0,
     k_scale=None,
     v_scale=None,
+    q_scale=None,
     is_mla=False,
 ):
     assert num_kv_splits == attn_logits.shape[2]
 
+    if q_scale is None:
+        q_scale = _unit_scale(q.device)
     if k_scale is None:
-        k_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
+        k_scale = _unit_scale(q.device)
     if v_scale is None:
-        v_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
+        v_scale = _unit_scale(q.device)
 
     kv_group_num = q.shape[1] // v_buffer.shape[-2]
 
@@ -814,5 +887,6 @@ def decode_attention_fwd(
             logit_cap,
             k_scale,
             v_scale,
+            q_scale,
             is_mla=is_mla,
         )
