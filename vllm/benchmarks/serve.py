@@ -1998,8 +1998,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("Ramp-up start and end RPS must be non-negative")
         if args.ramp_up_start_rps > args.ramp_up_end_rps:
             raise ValueError("Ramp-up start RPS must be less than end RPS")
-        if args.ramp_up_strategy == "exponential" and args.ramp_up_start_rps == 0:
-            raise ValueError("For exponential ramp-up, the start RPS cannot be 0.")
+        if args.ramp_up_start_rps == 0:
+            raise ValueError("--ramp-up-start-rps must be > 0")
 
     label = args.label
 
