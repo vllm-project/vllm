@@ -39,8 +39,11 @@ def parse_args():
     parser.add_argument(
         "--file-pattern",
         type=str,
-        default=ShardedStateLoader.DEFAULT_PATTERN,
-        help="string pattern of saved filenames",
+        help=f"string pattern of saved filenames."
+        f"{ShardedStateLoader.TP_ONLY_PATTERN!r} for tensor parallel only "
+        f"(pipeline parallelism is 1). "
+        f"{ShardedStateLoader.PP_AND_TP_PATTERN!r} for pipeline and "
+        f"tensor parallel.",
     )
     parser.add_argument(
         "--max-file-size",
