@@ -773,6 +773,50 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
     assert response.metrics is None
 
 
+_WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather in a given city",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_required_tool_choice_does_not_claim_a_tool_call_it_did_not_make():
+    """``finish_reason`` must not say "tool_calls" when there are none.
+
+    With no tool parser configured the parse yields no calls, so a "required"
+    request would otherwise answer "tool_calls" beside an empty ``tool_calls``.
+    The streaming path already requires ``tools_streamed[i]``.
+    """
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    response = await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Hello, how are you?"}],
+            tools=[_WEATHER_TOOL],
+            tool_choice="required",
+            max_tokens=10,
+            stream=False,
+        ),
+        _single_request_output(_make_metrics_request_output()),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Hello, how are you?"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    )
+    choice = response.choices[0]
+    assert not choice.message.tool_calls
+    assert choice.finish_reason == "stop"
+
+
 @pytest.mark.asyncio
 async def test_chat_streaming_metrics_ride_on_usage_chunk():
     serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
