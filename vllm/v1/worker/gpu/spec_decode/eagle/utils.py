@@ -16,13 +16,19 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
         return True
     if target is None:
         return False
+    # A quantized layer registers packed weights (`weight_packed`, `qweight`,
+    # ...) instead of `weight`, so the two copies cannot be compared. Keep the
+    # draft's own copy rather than assuming it matches the target.
+    w = getattr(draft, "weight", None)
+    target_w = getattr(target, "weight", None)
+    if not isinstance(w, torch.Tensor) or not isinstance(target_w, torch.Tensor):
+        return False
     # torch.equal on GPU allocates a bool mask the size of the input.
     # Use the faster GPU path when there is plenty of headroom;
     # otherwise compare on CPU.
-    w = draft.weight
     if w.is_cuda and torch.accelerator.get_memory_info(w.device)[0] < w.numel() * 2:
-        return torch.equal(w.cpu(), target.weight.cpu())
-    return torch.equal(w, target.weight)
+        return torch.equal(w.cpu(), target_w.cpu())
+    return torch.equal(w, target_w)
 
 
 def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module):
