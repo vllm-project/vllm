@@ -44,9 +44,12 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
+from vllm.multimodal.processing.processor import MultiModalProcessingInfo
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.funasr import FunASRFeatureExtractor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -777,6 +780,20 @@ class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
             processed_data["input_ids"] = processed_data.pop("labels")
 
         return processed_data
+
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingInfo:
+        # Dithering injects noise into the extracted features, so the
+        # feature extractor is not a pure function of its input. Since the
+        # processing cache assumes that processor outputs are invariant
+        # across calls, bypass the cache when dithering is active.
+        if self.info.get_feature_extractor().dither > 0:
+            return self._apply_hf_processor(inputs, timing_ctx)
+
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
     def _get_mm_fields_config(
         self,

@@ -396,7 +396,9 @@ class NanoNemotronVLMultiModalProcessor(
         )
 
     def _get_audio_fields_config(self, hf_inputs: BatchFeature):
-        audio_num_clips = torch.as_tensor(hf_inputs["audio_num_clips"])
+        audio_num_clips = torch.as_tensor(
+            hf_inputs.get("audio_num_clips", torch.empty(0))
+        )
 
         return dict(
             input_audio_features=MultiModalFieldConfig.flat_from_sizes(
