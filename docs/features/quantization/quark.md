@@ -314,3 +314,70 @@ lm_eval --model vllm \
     --tasks mmlu \
     --batch_size auto
 ```
+
+## Online Quantization
+
+All the workflows above are *offline* quantization: you run a script, write a new quantized checkpoint to disk, and later load it for serving. Quark also supports *online* quantization, where vLLM loads an ordinary high-precision (`bf16`) checkpoint and quantizes each layer's weights at load time — inside the weight-loading hook, just before serving. No new checkpoint is written to disk.
+
+Online quantization uses plain round-to-nearest, so it does not run accuracy-recovery algorithms (rotation, SmoothQuant, GPTQ, AWQ) and does not shrink the on-disk footprint. What it buys you is fast iteration: no export step, no second copy on disk, and an instant switch between schemes. Its quant math is aligned byte-for-byte with Quark's offline export, so what you validate online is what you get offline. Use online quantization to *find* the scheme and per-layer selection you want; use offline quantization to *ship* it with maximum accuracy and the smallest on-disk size.
+
+The integration is a vLLM plugin registered as the `quark_online` quantization backend — no fork of vLLM, no patched checkpoint format. It supports three key use cases:
+
+- **Flexible config parsing** — a terse config expands into Quark's verbose per-layer config, delegating all per-layer matching to a real `QuarkConfig`.
+- **Per-layer / mixed schemes** — dispatch a different method per layer (e.g. MXFP4 experts with FP8 attention on an MoE model). Each online method subclasses the matching offline scheme, so a load-time quantized layer runs the identical inference kernel as an offline one.
+- **Re-quantizing an already-quantized checkpoint** — an FP8 block-scale checkpoint (e.g. DeepSeek-R1) is dequantized and re-quantized to a target scheme layer-locally at load time, with no new checkpoint.
+
+Three presets ship ready to use:
+
+| Preset key | Scheme |
+| --- | --- |
+| `ptpc_fp8` | FP8 E4M3, per-channel weight + dynamic per-token activation |
+| `mxfp4` | MXFP4, per-group (group size 32) with E8M0 block scale |
+| `linear_ptpc_fp8_moe_mxfp4` | Mixed: attention in FP8, MoE experts in MXFP4 |
+
+!!! note
+    `mxfp4` requires native MXFP4 support (CDNA4-class GPUs such as AMD Instinct MI350/MI355). On MI300, keep the same layer-selection strategy but express it in `ptpc_fp8`.
+
+### Python API
+
+```python
+from vllm import LLM, SamplingParams
+from quark.online_quantization.vllm import HF_QUANTIZATION_CONFIGS
+
+llm = LLM(
+    model="Qwen/Qwen3-30B-A3B-Thinking-2507",
+    quantization="quark_online",
+    hf_overrides=HF_QUANTIZATION_CONFIGS["ptpc_fp8"],
+    enforce_eager=True,
+    tensor_parallel_size=1,
+)
+out = llm.generate(["The capital of France is"], SamplingParams(temperature=0.0, max_tokens=100))
+print(out)
+```
+
+### Native vLLM CLI
+
+```bash
+export VLLM_PLUGINS="${VLLM_PLUGINS:-quark_online_quant}"
+ONLINE_QUANT_CONFIG='{"online_quant_config": {"global_quant_config": "ptpc_fp8", "exclude_layer": ["lm_head"]}}'
+
+vllm serve Qwen/Qwen3-8B \
+  --trust-remote-code \
+  --tensor-parallel-size 1 \
+  --additional-config "$ONLINE_QUANT_CONFIG"
+```
+
+### Re-quantizing an offline checkpoint
+
+No extra arguments — the same `hf_overrides` detects the checkpoint's existing config and merges it automatically:
+
+```python
+llm = LLM(
+    model="deepseek-ai/DeepSeek-R1",           # ships quant_method: "fp8"
+    quantization="quark_online",
+    hf_overrides=HF_QUANTIZATION_CONFIGS["ptpc_fp8"],
+    tensor_parallel_size=8,
+)
+```
+
+The plugin can be disabled with `QUARK_DISABLE_VLLM_PLUGIN=1`, and it steps aside automatically if another platform plugin (e.g. ATOM) has already taken over the backend.
