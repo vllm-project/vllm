@@ -6,8 +6,11 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.sampling_params import RepetitionDetectionParams
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.core.sched.utils import check_sequence_repetition
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     MoveDirectionality,
@@ -15,6 +18,13 @@ from vllm.v1.sample.logits_processor.interface import (
 
 if TYPE_CHECKING:
     from vllm.config.reasoning import ReasoningConfig
+
+logger = init_logger(__name__)
+
+# Sentinel budget for requests tracked only for reasoning loop breaking: large
+# enough that the budget countdown never trips, so the existing budget state
+# machine runs unchanged and only a loop detection can force the end sequence.
+_LOOP_BREAK_ONLY_BUDGET = 1 << 62
 
 
 def maybe_create_thinking_budget_state_holder(
@@ -62,6 +72,26 @@ class ThinkingBudgetStateHolder:
             self.think_start_token_ids = rs if rs else []
             self.think_end_token_ids = re if re else []
 
+        self.loop_break_params: RepetitionDetectionParams | None = None
+        self.loop_break_min_reasoning_tokens = 256
+        self.loop_break_check_interval = 16
+        if (
+            reasoning_config is not None
+            and getattr(reasoning_config, "loop_break_max_pattern_size", 0) > 0
+        ):
+            # __post_init__ validates the combination at engine-init time.
+            self.loop_break_params = RepetitionDetectionParams(
+                max_pattern_size=reasoning_config.loop_break_max_pattern_size,
+                min_pattern_size=reasoning_config.loop_break_min_pattern_size,
+                min_count=reasoning_config.loop_break_min_count,
+            )
+            self.loop_break_min_reasoning_tokens = getattr(
+                reasoning_config, "loop_break_min_reasoning_tokens", 256
+            )
+            self.loop_break_check_interval = max(
+                1, getattr(reasoning_config, "loop_break_check_interval", 16)
+            )
+
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
         self.cu_num_tokens: dict[int, int] = {}
@@ -89,12 +119,27 @@ class ThinkingBudgetStateHolder:
 
         for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
             thinking_token_budget = params.thinking_token_budget
-            if thinking_token_budget is not None:
-                self._state[index] = self._init_state_entry(
-                    prompt_tok_ids, thinking_token_budget
+            loop_break = self._loop_break_active_for(params)
+            if thinking_token_budget is not None or loop_break:
+                effective_budget = (
+                    thinking_token_budget
+                    if thinking_token_budget is not None
+                    else _LOOP_BREAK_ONLY_BUDGET
                 )
-                self._state[index]["output_tok_ids"] = output_tok_ids
-                self._state[index]["spec_token_ids"] = []
+                entry = self._init_state_entry(prompt_tok_ids, effective_budget)
+                entry["output_tok_ids"] = output_tok_ids
+                entry["spec_token_ids"] = []
+                entry["loop_break"] = loop_break
+                if loop_break:
+                    entry["lb_scan_pos"] = 0
+                    entry["lb_in_think"] = entry["in_think"]
+                    # None: the section began in the prompt, so every output
+                    # token so far belongs to it.
+                    entry["lb_section_begin"] = None
+                    entry["lb_think_len"] = entry["think_count"]
+                    entry["lb_last_check_len"] = 0
+                    entry["lb_fired"] = False
+                self._state[index] = entry
             else:
                 self._state.pop(index, None)
 
@@ -146,6 +191,8 @@ class ThinkingBudgetStateHolder:
             state["in_spec_mode"] = self.in_spec_mode
             state["force_index"] = []
             self._update_think_state(state)
+            if state.get("loop_break"):
+                self._update_loop_break_state(state)
 
     def apply_to_logits(
         self,
@@ -158,6 +205,116 @@ class ThinkingBudgetStateHolder:
             return logits
         spec_lists = spec_token_ids or []
         return self._apply_forcing_to_logits(logits, predict_bonus_token, spec_lists)
+
+    def _loop_break_active_for(self, params: Any) -> bool:
+        """Server-configured loop breaking, minus a per-request opt-out.
+
+        ``thinking_loop_break=False`` opts a request out; ``None`` (the
+        default) follows the server configuration. ``True`` cannot enable
+        loop breaking on a server that has not configured it, because the
+        detection parameters live in ``ReasoningConfig``.
+        """
+        if self.loop_break_params is None:
+            return False
+        override = getattr(params, "thinking_loop_break", None)
+        if override is None:
+            return True
+        return bool(override)
+
+    def _update_loop_break_state(self, state: dict[str, Any]) -> None:
+        """Track the current reasoning section and break exact loops.
+
+        Runs after ``_update_think_state`` so a detection this step cannot be
+        undone by the budget machinery's rejected-end recovery, and keeps its
+        own lightweight section tracking (``lb_*`` keys) because the budget
+        path skips section bookkeeping while comfortably under budget.
+
+        On detection the request is flipped into the exact ``in_end`` state
+        the budget-exhaustion transition produces, so all forced-end
+        enforcement (spec decode, bonus-token double call, platform paths)
+        is shared with the thinking-budget feature.
+        """
+        output = state.get("output_tok_ids", [])
+        current_length = len(output)
+        scan_pos = state.get("lb_scan_pos", 0)
+        if current_length <= scan_pos:
+            return
+
+        start_ids = self.think_start_token_ids
+        end_ids = self.think_end_token_ids
+        max_marker = max(len(start_ids), len(end_ids), 1)
+        # Overlap by marker-length - 1 so a marker sequence spanning the
+        # previous scan edge is still seen.
+        window_begin = max(0, scan_pos - (max_marker - 1))
+        window = output[window_begin:]
+        last_start = self._find_last_sequence_index(window, start_ids)
+        last_end = self._find_last_sequence_index(window, end_ids)
+
+        if last_end > last_start:
+            # The section ended (naturally or forced); re-arm for the next.
+            state["lb_in_think"] = False
+            state["lb_section_begin"] = None
+            state["lb_think_len"] = 0
+            state["lb_last_check_len"] = 0
+            state["lb_fired"] = False
+        elif last_start > last_end:
+            state["lb_in_think"] = True
+            state["lb_section_begin"] = window_begin + last_start + len(start_ids)
+            state["lb_think_len"] = current_length - state["lb_section_begin"]
+        elif state.get("lb_in_think"):
+            state["lb_think_len"] = state.get("lb_think_len", 0) + (
+                current_length - scan_pos
+            )
+        state["lb_scan_pos"] = current_length
+
+        if state.get("lb_fired", False):
+            # Keep forcing until the end sequence actually lands: under spec
+            # decode a forced end token can be rejected, and the budget
+            # machinery's rejected-end recovery then flips the request back
+            # to in_think. Re-assert the forced end every step while the
+            # section is still open; the tracker above clears ``lb_fired``
+            # once the end sequence appears in the accepted output.
+            if state.get("lb_in_think") and not state.get("in_end", False):
+                state["in_think"] = False
+                state["in_end"] = True
+                state["end_count"] = 0
+                state["bonus_token_forced"] = False
+                state["force_index"] = [0]
+            return
+
+        if not state.get("lb_in_think") or state.get("in_end", False):
+            return
+        think_len = state.get("lb_think_len", 0)
+        if think_len < self.loop_break_min_reasoning_tokens:
+            return
+        if (
+            think_len - state.get("lb_last_check_len", 0)
+            < self.loop_break_check_interval
+        ):
+            return
+        state["lb_last_check_len"] = think_len
+
+        params = self.loop_break_params
+        assert params is not None
+        # ``check_sequence_repetition`` anchors at the sequence end and never
+        # indexes back more than max_pattern_size * min_count tokens; slice
+        # just that tail, clamped to the section start so a pattern cannot
+        # span into the prompt or a previous section.
+        need = params.max_pattern_size * params.min_count
+        section_begin = state.get("lb_section_begin") or 0
+        tail_begin = max(section_begin, current_length - need)
+        if check_sequence_repetition(output[tail_begin:], params):
+            state["lb_fired"] = True
+            state["in_think"] = False
+            state["in_end"] = True
+            state["end_count"] = 0
+            state["bonus_token_forced"] = False
+            state["force_index"] = [0]
+            logger.info(
+                "Breaking a repeating reasoning loop after %d reasoning "
+                "tokens; forcing the reasoning end sequence.",
+                think_len,
+            )
 
     @staticmethod
     def _find_last_sequence_index(target_list: list[int], token_ids: list[int]) -> int:

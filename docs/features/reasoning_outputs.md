@@ -317,6 +317,26 @@ for output in outputs:
     print("text:", output.outputs[0].text)
 ```
 
+## Reasoning Loop Breaking
+
+Reasoning models can fall into an exact repeating token cycle inside the reasoning section and burn tokens until `max_tokens` or a `thinking_token_budget`. Reasoning loop breaking detects such cycles and forces `reasoning_end_str` as soon as one is confirmed, so the model exits the loop and answers from the reasoning it already has. Thinking is never disabled, and the request is not terminated — unlike `repetition_detection` (a sampling parameter), which finishes the whole request when a pattern repeats anywhere in the output.
+
+Enable it server-side on `ReasoningConfig`, which also supplies the reasoning delimiters. Detection semantics match `RepetitionDetectionParams`: a pattern of `loop_break_min_pattern_size..loop_break_max_pattern_size` tokens repeated `loop_break_min_count` consecutive times triggers the break. Detection is scoped to the current reasoning section, starts after `loop_break_min_reasoning_tokens` reasoning tokens, and runs every `loop_break_check_interval` accepted reasoning tokens. It is integrated with the thinking-budget enforcement machinery and therefore works with speculative decoding.
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+  --reasoning-parser qwen3 \
+  --reasoning-config '{
+    "reasoning_start_str": "<think>",
+    "reasoning_end_str": "</think>",
+    "loop_break_max_pattern_size": 128,
+    "loop_break_min_pattern_size": 4,
+    "loop_break_min_count": 4
+  }'
+```
+
+Values of `loop_break_min_pattern_size >= 4` and `loop_break_min_count >= 3` are recommended so benign short repeats (separator runs, ellipses) cannot trigger a break. Individual requests can opt out with the `thinking_loop_break: false` sampling parameter; `null` (the default) follows the server configuration.
+
 ## Automatic `enable_thinking` Activation
 
 Some models (such as Gemma 4, DeepSeek-V4-Pro and IBM Granite 3.2) require `enable_thinking: true` in their chat template kwargs to activate thinking mode — without it, reasoning tokens are never generated regardless of other settings.

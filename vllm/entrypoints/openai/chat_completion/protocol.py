@@ -256,6 +256,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     thinking_token_budget: ThinkingTokenBudget = None
+    thinking_loop_break: bool | None = Field(
+        default=None,
+        description=(
+            "Per-request control for server-configured reasoning loop "
+            "breaking. null follows the server configuration; false opts "
+            "this request out. true cannot enable the feature on a server "
+            "that has not configured it."
+        ),
+    )
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -742,6 +751,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             thinking_token_budget=self.thinking_token_budget,
+            thinking_loop_break=self.thinking_loop_break,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
