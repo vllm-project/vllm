@@ -292,6 +292,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         )
         self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
 
+        # How long to retain submit_store batches that have no bound fetch.
+        # Can be configured via the tier config as `unbound_store_timeout_s`.
+        self._unbound_store_timeout_s: float = float(
+            kwargs.pop("unbound_store_timeout_s", _UNBOUND_STORE_TIMEOUT_S)
+        )
+
         self._sessions: dict[str, P2PSession] = {}
         # kv_request_id → session, set when the bound session has received
         # FetchMsg for that id. submit_store after binding routes directly
@@ -705,7 +711,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """
         if not self._unbound_stores:
             return
-        deadline = time.monotonic() - _UNBOUND_STORE_TIMEOUT_S
+        timeout = self._unbound_store_timeout_s
+        deadline = time.monotonic() - timeout
         expired: list[str] | None = None
         for kid, batches in self._unbound_stores.items():
             # Batches are appended in arrival order, so the head is oldest.
@@ -727,7 +734,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 "without a fetch — failing %d job(s)",
                 self._local_id,
                 kid,
-                _UNBOUND_STORE_TIMEOUT_S,
+                timeout,
                 len(batches),
             )
 
