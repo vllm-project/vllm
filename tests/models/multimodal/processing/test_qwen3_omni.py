@@ -7,9 +7,78 @@ from typing import Any
 import numpy as np
 import pytest
 
+from vllm.model_executor.models.qwen2_5_omni_thinker import (
+    Qwen2_5OmniThinkerMultiModalDataParser,
+    _get_second_per_grid_ts,
+    _presampled_videos_hf_inputs,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ...utils import build_model_context
+
+
+def test_presampled_video_uses_effective_fps() -> None:
+    metadata = {
+        "total_num_frames": 525,
+        "fps": 25.0,
+        "duration": 525 / 25,
+        "frames_indices": list(range(0, 525, 5))[:104],
+        "do_sample_frames": False,
+    }
+
+    video = np.zeros((104, 2, 2, 3), dtype=np.uint8)
+    mm_data, mm_kwargs = _presampled_videos_hf_inputs(
+        {"videos": [(video, metadata)]},
+        {"videos_kwargs": {"max_frames": 360}},
+    )
+
+    assert mm_data["videos"][0] is video
+    assert mm_kwargs["videos_kwargs"] == {
+        "max_frames": 360,
+        "do_sample_frames": False,
+        "fps": 104 / (525 / 25),
+    }
+
+
+def test_video_without_loader_metadata_preserves_hf_kwargs() -> None:
+    mm_data = {"videos": [np.zeros((2, 2, 2, 3), dtype=np.uint8)]}
+    mm_kwargs = {"videos_kwargs": {"fps": 2.0}}
+
+    returned_data, returned_kwargs = _presampled_videos_hf_inputs(mm_data, mm_kwargs)
+
+    assert returned_data is mm_data
+    assert returned_kwargs is mm_kwargs
+
+
+def test_video_parser_keeps_loader_metadata_without_custom_items() -> None:
+    video = np.zeros((4, 2, 2, 3), dtype=np.uint8)
+    metadata = {
+        "total_num_frames": 8,
+        "fps": 2.0,
+        "duration": 4.0,
+        "frames_indices": [0, 2, 4, 6],
+        "do_sample_frames": False,
+    }
+    parser = Qwen2_5OmniThinkerMultiModalDataParser(spatial_merge_size=2)
+
+    videos = parser.parse_mm_data({"video": (video, metadata)})[
+        "video"
+    ].get_processor_data()["videos"]
+
+    assert videos[0][0] is video
+    assert videos[0][1] is metadata
+
+
+def test_processor_timing_takes_precedence_over_request_kwargs() -> None:
+    assert (
+        _get_second_per_grid_ts(
+            {"second_per_grid_ts": [1.0019]},
+            {"second_per_grid_ts": [2.0]},
+            item_idx=0,
+            default=2.0,
+        )
+        == 1.0019
+    )
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen3-Omni-30B-A3B-Instruct"])

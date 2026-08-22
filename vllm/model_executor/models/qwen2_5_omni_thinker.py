@@ -76,6 +76,7 @@ from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ModalityDataItems,
     MultiModalDataItems,
+    VideoProcessorItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -351,6 +352,72 @@ class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
 
         return super()._parse_audio_data(data)
 
+    def _parse_video_data(self, data):
+        parsed = super()._parse_video_data(data)
+        if not isinstance(parsed, VideoProcessorItems):
+            return parsed
+
+        metadata = parsed.metadata
+        if not isinstance(metadata, list) or any(item is None for item in metadata):
+            return parsed
+
+        videos = list(zip(parsed.data, metadata))
+        return VideoProcessorItems(videos, metadata=metadata)
+
+
+def _presampled_videos_hf_inputs(
+    mm_data: Mapping[str, object],
+    mm_kwargs: Mapping[str, object],
+) -> tuple[Mapping[str, object], Mapping[str, object]]:
+    """Prevent HF from re-sampling videos already sampled by vLLM."""
+    videos: Any = mm_data.get("videos")
+    if (
+        not isinstance(videos, list)
+        or not videos
+        or any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[1], Mapping)
+            for item in videos
+        )
+    ):
+        return mm_data, mm_kwargs
+
+    mm_data = dict(mm_data)
+    mm_data["videos"] = [item[0] for item in videos]
+    sampled_fps: list[float] = []
+    for _, metadata in videos:
+        duration = metadata.get("duration")
+        frame_indices = metadata.get("frames_indices")
+        if not duration or not frame_indices:
+            return mm_data, mm_kwargs
+        sampled_fps.append(len(frame_indices) / float(duration))
+
+    mm_kwargs = dict(mm_kwargs)
+    videos_kwargs = dict(mm_kwargs.get("videos_kwargs") or {})
+    videos_kwargs["do_sample_frames"] = False
+    if "fps" not in videos_kwargs:
+        videos_kwargs["fps"] = sampled_fps[0]
+        if any(fps != sampled_fps[0] for fps in sampled_fps[1:]):
+            logger.warning_once(
+                "Videos with different sampled FPS values are not supported "
+                "by the Qwen Omni HF processor; using the first video's FPS"
+            )
+    mm_kwargs["videos_kwargs"] = videos_kwargs
+    return mm_data, mm_kwargs
+
+
+def _get_second_per_grid_ts(
+    out_mm_data: Mapping[str, object],
+    hf_processor_mm_kwargs: Mapping[str, object],
+    item_idx: int,
+    default: float,
+) -> float:
+    values: Any = out_mm_data.get("second_per_grid_ts")
+    if values is None:
+        values = hf_processor_mm_kwargs.get("second_per_grid_ts")
+    return default if values is None else float(values[item_idx])
+
 
 class Qwen2_5OmniThinkerProcessingInfo(
     Qwen2AudioProcessingInfo, Qwen2_5_VLProcessingInfo
@@ -507,6 +574,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
+        mm_data, mm_kwargs = _presampled_videos_hf_inputs(mm_data, mm_kwargs)
 
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
         if audios:
@@ -842,11 +910,12 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
             audio_in_video_item_idx += 1
 
-            second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
-            if second_per_grid_ts:
-                video_second_per_grid_t = second_per_grid_ts[item_idx]
-            else:
-                video_second_per_grid_t = 1.0
+            video_second_per_grid_t = _get_second_per_grid_ts(
+                out_mm_data,
+                hf_processor_mm_kwargs,
+                item_idx,
+                default=1.0,
+            )
 
             updates = self.omni_get_updates_use_audio_in_video(
                 thinker_config=thinker_config,
