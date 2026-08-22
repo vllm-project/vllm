@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassBatchedExpertsW4A8Fp8,
         CutlassExpertsW4A8Fp8,
     )
 
@@ -35,13 +36,14 @@ class W4A8MoeBackend(Enum):
 
 def backend_to_kernel_cls(
     backend: W4A8MoeBackend,
-) -> list[type["CutlassExpertsW4A8Fp8"]]:
+) -> list[type["CutlassExpertsW4A8Fp8"] | type["CutlassBatchedExpertsW4A8Fp8"]]:
     if backend == W4A8MoeBackend.CUTLASS:
         from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+            CutlassBatchedExpertsW4A8Fp8,
             CutlassExpertsW4A8Fp8,
         )
 
-        return [CutlassExpertsW4A8Fp8]
+        return [CutlassExpertsW4A8Fp8, CutlassBatchedExpertsW4A8Fp8]
     else:
         raise ValueError(f"Unknown W4A8 MoE backend: {backend.value}")
 
@@ -50,7 +52,10 @@ def select_w4a8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None = kInt4Static,
     activation_key: QuantKey | None = kFp8DynamicTokenSym,
-) -> tuple[W4A8MoeBackend, type["CutlassExpertsW4A8Fp8"]]:
+) -> tuple[
+    W4A8MoeBackend,
+    type["CutlassExpertsW4A8Fp8"] | type["CutlassBatchedExpertsW4A8Fp8"],
+]:
     backend = W4A8MoeBackend.CUTLASS
 
     activation_format = (
@@ -165,7 +170,7 @@ def make_w4a8_moe_quant_config(
 def make_w4a8_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-    experts_cls: type["CutlassExpertsW4A8Fp8"],
+    experts_cls: type["CutlassExpertsW4A8Fp8"] | type["CutlassBatchedExpertsW4A8Fp8"],
     b_strides1: torch.Tensor,
     b_strides2: torch.Tensor,
     group_size: int,
@@ -181,12 +186,20 @@ def make_w4a8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
+    expert_kwargs = {}
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        expert_kwargs = {
+            "max_num_tokens": prepare_finalize.max_num_tokens_per_rank(),
+            "num_dispatchers": prepare_finalize.num_dispatchers(),
+        }
+
     experts = experts_cls(
         moe_config=moe_config,
         quant_config=moe_quant_config,
         b_strides1=b_strides1,
         b_strides2=b_strides2,
         group_size=group_size,
+        **expert_kwargs,
     )
 
     return mk.FusedMoEKernel(

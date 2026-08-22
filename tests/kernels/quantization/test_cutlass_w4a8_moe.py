@@ -11,6 +11,13 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation,
+)
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+    run_cutlass_moe_w4a8_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_rows,
     quantize_weights,
@@ -341,3 +348,196 @@ def test_cutlass_w4a8_moe_mm_cuda_graph():
     g.replay()
 
     torch.testing.assert_close(out_static, out_ref, rtol=1e-2, atol=1e-2)
+
+
+def make_batched_pipeline_weight(
+    num_experts: int,
+    out_features: int,
+    in_features: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    w_qs = []
+    w_ss = []
+    for _ in range(num_experts):
+        weight = to_fp8(torch.randn((in_features, out_features), device="cuda"))
+        _, w_q, w_s, _ = cutlass_quantize(
+            torch.float8_e4m3fn,
+            weight.to(torch.float16),
+            scalar_types.int4,
+            torch.float8_e4m3fn,
+            GROUP_SIZE,
+        )
+        w_qs.append(w_q)
+        w_ss.append(w_s)
+
+    weight_q, weight_scale, b_strides = cutlass_preprocess(w_qs, w_ss)
+    channel_scale = (
+        torch.rand(
+            (num_experts, out_features, 1),
+            dtype=torch.float32,
+            device="cuda",
+        )
+        .mul_(0.05)
+        .add_(0.001)
+    )
+    return weight_q, weight_scale, channel_scale, b_strides
+
+
+@pytest.mark.skipif(
+    not IS_SUPPORTED_BY_GPU,
+    reason="W4A8 Grouped GEMM is not supported on this GPU type.",
+)
+def test_cutlass_w4a8_batched_pipeline_matches_flatten_reference():
+    set_random_seed(42)
+    num_experts = 4
+    padded_m = 8
+    hidden = 512
+    intermediate = 256
+    counts = [0, 8, 1, 5]
+    device = torch.device("cuda")
+
+    w1, w1_scale, w1_chan_scale, b_strides1 = make_batched_pipeline_weight(
+        num_experts,
+        intermediate * 2,
+        hidden,
+    )
+    w2, w2_scale, w2_chan_scale, b_strides2 = make_batched_pipeline_weight(
+        num_experts,
+        hidden,
+        intermediate,
+    )
+    expert_num_tokens = torch.tensor(counts, dtype=torch.int32, device=device)
+    hidden_states = torch.randn(
+        (num_experts, padded_m, hidden),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    a1q, a1q_scale = ops.scaled_fp8_quant(
+        hidden_states.view(-1, hidden),
+        use_per_token_if_dynamic=True,
+    )
+    a1q = a1q.view_as(hidden_states)
+    a1q_scale = a1q_scale.view(num_experts, padded_m, 1)
+
+    a_strides1 = torch.full((num_experts,), hidden, dtype=torch.int64, device=device)
+    a_strides2 = torch.full(
+        (num_experts,), intermediate, dtype=torch.int64, device=device
+    )
+    c_strides1 = torch.full(
+        (num_experts,), intermediate * 2, dtype=torch.int64, device=device
+    )
+    c_strides2 = a_strides1
+    s_strides1 = torch.zeros((num_experts, 2), dtype=torch.int64, device=device)
+    s_strides1[:, 0] = intermediate * 2
+    s_strides2 = torch.zeros_like(s_strides1)
+    s_strides2[:, 0] = hidden
+
+    workspace13 = torch.empty(
+        (num_experts, padded_m, hidden),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    workspace2 = torch.empty_like(workspace13)
+    output = torch.empty_like(workspace13)
+    topk_ids = torch.zeros((1, 2), dtype=torch.int64, device=device)
+    run_cutlass_moe_w4a8_fp8(
+        output=output,
+        hidden_states=a1q,
+        w1=w1,
+        w2=w2,
+        topk_ids=topk_ids,
+        activation=MoEActivation.SILU,
+        global_num_experts=num_experts,
+        expert_map=None,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1q_scale=a1q_scale,
+        a2_scale=None,
+        w1_chan_scale=w1_chan_scale,
+        w2_chan_scale=w2_chan_scale,
+        a_strides1=a_strides1,
+        a_strides2=a_strides2,
+        b_strides1=b_strides1,
+        b_strides2=b_strides2,
+        c_strides1=c_strides1,
+        c_strides2=c_strides2,
+        s_strides1=s_strides1,
+        s_strides2=s_strides2,
+        workspace13=workspace13,
+        workspace2=workspace2,
+        expert_num_tokens=expert_num_tokens,
+        out_dtype=torch.bfloat16,
+        per_act_token=True,
+        per_out_ch=True,
+        use_batched_format=True,
+        topk_weights=None,
+        group_size=GROUP_SIZE,
+        permute_scratch=None,
+    )
+
+    expert_offsets = (
+        torch.arange(num_experts, dtype=torch.int64, device=device) * padded_m
+    )
+    problem_sizes1 = torch.tensor(
+        [[intermediate * 2, count, hidden] for count in counts],
+        dtype=torch.int32,
+        device=device,
+    )
+    problem_sizes2 = torch.tensor(
+        [[hidden, count, intermediate] for count in counts],
+        dtype=torch.int32,
+        device=device,
+    )
+    mm1 = torch.empty(
+        (num_experts * padded_m, intermediate * 2),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    ops.cutlass_w4a8_moe_mm(
+        mm1,
+        a1q.view(-1, hidden),
+        w1,
+        a1q_scale.view(-1, 1),
+        w1_chan_scale,
+        w1_scale,
+        GROUP_SIZE,
+        expert_offsets,
+        problem_sizes1,
+        a_strides1,
+        b_strides1,
+        c_strides1,
+        s_strides1,
+    )
+    activation = torch.empty(
+        (num_experts * padded_m, intermediate),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    apply_moe_activation(MoEActivation.SILU, activation, mm1)
+    a2q, a2q_scale = ops.scaled_fp8_quant(
+        activation,
+        use_per_token_if_dynamic=True,
+    )
+    reference = torch.empty_like(output)
+    ops.cutlass_w4a8_moe_mm(
+        reference.view(-1, hidden),
+        a2q,
+        w2,
+        a2q_scale,
+        w2_chan_scale,
+        w2_scale,
+        GROUP_SIZE,
+        expert_offsets,
+        problem_sizes2,
+        a_strides2,
+        b_strides2,
+        c_strides2,
+        s_strides2,
+    )
+
+    for expert, count in enumerate(counts):
+        torch.testing.assert_close(
+            output[expert, :count],
+            reference[expert, :count],
+            rtol=1e-2,
+            atol=3e-2,
+        )
