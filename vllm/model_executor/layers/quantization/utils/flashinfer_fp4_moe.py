@@ -8,15 +8,15 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    align_fp4_moe_weights_for_fi,
-    align_trtllm_fp4_moe_hidden_dim_for_fi,
-)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_activation_quant,
+)
+from vllm.utils.flashinfer import (
+    align_fp4_moe_weights_for_fi,
+    align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 
 if TYPE_CHECKING:
