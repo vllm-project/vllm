@@ -32,7 +32,10 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                 backend = get_attn_backend()
                 assert backend.supports_pcp(), (
                     "PCP requires attention backend support, "
-                    f"but {backend.get_name()} does not support PCP."
+                    f"but {backend.get_name()} does not support PCP. "
+                    "Try a different attention backend via "
+                    "--attention-backend, or disable PCP by setting "
+                    "--prefill-context-parallel-size to 1."
                 )
             layer_impl = getattr(layer, "impl", None)
             if layer_impl is None:
@@ -47,8 +50,9 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "Decode Context Parallelism (DCP) requires attention "
                     "implementations to return the softmax LSE during decode, "
                     f"but {layer_impl.__class__.__name__} does not. "
-                    "Try a different backend by setting "
-                    "--attention-backend or disable DCP."
+                    "Try a different attention backend via "
+                    "--attention-backend, or disable DCP by setting "
+                    "--decode-context-parallel-size to 1."
                 )
 
 
