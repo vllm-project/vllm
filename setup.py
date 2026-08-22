@@ -892,8 +892,7 @@ class precompiled_wheel_utils:
         1. user-specified wheel location (can be either local or remote, via
            VLLM_PRECOMPILED_WHEEL_LOCATION)
         2. user-specified variant (VLLM_PRECOMPILED_WHEEL_VARIANT) from nightly repo
-           or auto-detected CUDA variant based on system (torch, nvidia-smi)
-        3. the default variant from nightly repo
+           or CUDA variant selected from VLLM_MAIN_CUDA_VERSION, torch, or nvidia-smi
 
         If downloading from the nightly repo, the commit can be specified via
         VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, the head commit in the main branch
@@ -924,25 +923,10 @@ class precompiled_wheel_utils:
                 )
                 commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
             print(f"Using precompiled wheel commit {commit} with variant {variant}")
-            try_default = False
-            wheels, repo_url, download_filename = None, None, None
-            try:
-                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    commit, variant
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to fetch precompiled wheel metadata for variant %s: %s",
-                    variant,
-                    e,
-                )
-                try_default = True  # try outside handler to keep the stacktrace simple
-            if try_default:
-                print("Trying the default variant from remote")
-                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    commit, None
-                )
-                # if this also fails, then we have nothing more to try / cache
+            download_filename = None
+            wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                commit, variant
+            )
             assert wheels is not None and repo_url is not None, (
                 "Failed to fetch precompiled wheel metadata"
             )
