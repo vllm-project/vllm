@@ -513,6 +513,16 @@ class FusedMoEExperts(ABC):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
 
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:  # noqa: B027
+        """Re-bind derived per-expert state after a weight cache IPC load.
+
+        The daemon runs `process_weights_after_loading` and exports the
+        resulting tensors, so the client skips it. Experts that stash derived
+        layer tensors as Python attributes must re-bind them here from the
+        already-processed layer parameters instead of recomputing them.
+        """
+        pass
+
     @staticmethod
     def is_monolithic() -> bool:
         raise NotImplementedError("Implemented by subclasses.")

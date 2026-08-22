@@ -74,3 +74,15 @@ class NvFp4LinearKernel(ABC):
     ) -> torch.Tensor:
         """Run the quantized GEMM."""
         raise NotImplementedError
+
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        """Rebuild non-tensor state after a weight cache IPC load.
+
+        The weight cache daemon exports only tensors, having already run
+        ``process_weights_after_loading``. Kernels that stash plain Python
+        attributes (not registered parameters/buffers) on the layer must
+        recompute them here. Kernels that only transform tensors need no
+        override.
+        """
+        return
+

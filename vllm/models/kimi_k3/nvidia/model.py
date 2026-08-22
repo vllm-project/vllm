@@ -1580,7 +1580,14 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            if self._maybe_ignore_quant_config(quant_config) is not None:
+            on_meta = any(p.is_meta for p in self.vision_tower.parameters())
+            if on_meta:
+                # Built under a meta-device context (weight-cache IPC loader).
+                # Device placement and dtype casting are handled by the loader
+                # after daemon tensors are mapped in; an eager .to() is invalid
+                # for meta tensors.
+                pass
+            elif self._maybe_ignore_quant_config(quant_config) is not None:
                 self.vision_tower = self.vision_tower.to(device=self.device)
             else:
                 self.vision_tower = self.vision_tower.to(
@@ -1620,9 +1627,10 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
             )
-            self.mm_projector = self.mm_projector.to(
-                device=self.device, dtype=model_config.dtype
-            )
+            if not any(p.is_meta for p in self.mm_projector.parameters()):
+                self.mm_projector = self.mm_projector.to(
+                    device=self.device, dtype=model_config.dtype
+                )
 
         self.quant_config = quant_config
         with self._mark_language_model(vllm_config):

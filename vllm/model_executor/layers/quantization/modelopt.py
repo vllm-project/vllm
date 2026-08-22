@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -1215,6 +1216,13 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # Convert layer to NVFP4 linear kernel format
         self.kernel.process_weights_after_loading(layer)
 
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        # The daemon exported the renamed/derived scale parameters
+        # (input_global_scale, weight_global_scale, alpha,
+        # input_global_scale_inv) and the repacked weight tensors already;
+        # only the kernel's non-tensor state has to be recovered.
+        self.kernel.init_kernels_after_ipc_load(layer)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -1359,6 +1367,14 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         del layer.weight_scale_2
 
         self.kernel.process_weights_after_loading(layer)
+
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        # has_bias is plain Python state set in process_weights_after_loading;
+        # the daemon exports only tensors, so recompute it before delegating
+        # to the kernel's non-tensor state recovery.
+        if not hasattr(layer, "has_bias"):
+            layer.has_bias = getattr(layer, "bias", None) is not None
+        self.kernel.init_kernels_after_ipc_load(layer)
 
     def apply(
         self,
@@ -1580,6 +1596,34 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+
+    def init_kernels_after_ipc_load(self, layer: RoutedExperts) -> None:
+        # The daemon exported weights already in kernel format, so the tensor
+        # conversion (`convert_to_nvfp4_moe_kernel_format`) and the experts'
+        # `process_weights_after_loading` must not run again. Only the Python
+        # kernel object is rebuilt, and the experts re-bind their derived
+        # per-expert tensors from the exported layer parameters.
+        #
+        # Only the TRTLLM backend has been verified for IPC weight sharing: its
+        # experts re-bind derived state via `init_kernels_after_ipc_load`. Other
+        # backends may stash post-processing state that the base no-op hook
+        # cannot recover, so fail closed rather than serve wrong numerics.
+        if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            raise NotImplementedError(
+                f"NVFP4 MoE backend {self.nvfp4_backend.value!r} is not verified "
+                "for weight cache IPC sharing; only 'flashinfer_trtllm' is. Set "
+                "moe_backend='flashinfer_trtllm' or use the default --load-format."
+            )
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.experts_cls is not None
+        self.moe_kernel = make_nvfp4_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            backend=self.nvfp4_backend,
+            routing_tables=layer._expert_routing_tables(),
+        )
+        self.moe_kernel.fused_experts.init_kernels_after_ipc_load(layer)
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(

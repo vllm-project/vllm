@@ -201,6 +201,17 @@ class TrtLlmNvFp4ExpertsBase:
             )
             self.gemm1_alpha = layer.gemm1_alpha
 
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        # `process_weights_after_loading` fused the input scales into
+        # `w13/w2_weight_scale_2` in-place and registered the folded per-expert
+        # tensors below on the layer. The daemon exported those already-folded
+        # parameters, so re-bind them directly instead of recomputing (which
+        # would double-fold the fused scales).
+        self.g1_scale_c = layer.g1_scale_c
+        for attr in ("gemm1_clamp_limit", "gemm1_beta", "gemm1_alpha"):
+            if hasattr(layer, attr):
+                setattr(self, attr, getattr(layer, attr))
+
     @staticmethod
     def _supports_current_device() -> bool:
         """Supports only Blackwell-family GPUs."""

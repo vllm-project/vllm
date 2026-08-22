@@ -23,9 +23,11 @@ are rejected at launch.
 
 import multiprocessing
 import os
+import queue
 import signal
 import socket
 import sys
+from collections.abc import Callable
 
 import torch
 
@@ -49,6 +51,24 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def _report_ready(message: str) -> None:
+    """Write a readiness message straight to the original stderr descriptor.
+
+    Loading the model pulls in FlashInfer's CuTeDSL JIT compiler, which swaps
+    ``sys.stdout``/``sys.stderr`` for in-memory buffers while compiling kernels
+    across worker threads. That save/restore races on the interpreter-global
+    streams and can leave them (and vLLM's logging handler, which caches the
+    original stream object) detached, silently swallowing everything logged
+    afterwards -- including the daemon's readiness announcement. Since operators
+    rely on that line to know the daemon is serving, write it directly to file
+    descriptor 2 so it bypasses the logging machinery entirely.
+    """
+    try:
+        os.write(2, (message + "\n").encode())
+    except OSError:
+        pass
 
 
 def export_entries(
@@ -143,12 +163,18 @@ class WeightCacheDaemon:
         assert self.model is not None
         self.entries, self.aliases = export_entries(self.model)
 
-    def serve_forever(self) -> None:
+    def serve_forever(
+        self, ready_callback: Callable[[], None] | None = None
+    ) -> None:
         """Serve requests until terminated.
 
         The socket is only bound once the model is fully cached, so clients
         get a connection error (and fall back to disk) until the daemon is
         ready.
+
+        Args:
+            ready_callback: Invoked once the socket is bound and listening,
+                so the launcher can report overall readiness.
         """
         socket_path = self._socket_path()
         ensure_private_socket_dir(
@@ -163,6 +189,11 @@ class WeightCacheDaemon:
         logger.info(
             "Weight cache daemon rank %d serving on %s", self.tp_rank, socket_path
         )
+        print(
+            f"Weight cache daemon rank {self.tp_rank} ready: serving on {socket_path}"
+        )
+        if ready_callback is not None:
+            ready_callback()
         try:
             while True:
                 conn, _ = server.accept()
@@ -250,12 +281,13 @@ def _run_daemon(
     vllm_config: VllmConfig,
     distributed_init_method: str,
     socket_dir: str | None,
+    ready_queue: "multiprocessing.Queue[int]",
 ) -> None:
     daemon = WeightCacheDaemon(
         vllm_config, tp_rank, distributed_init_method, socket_dir
     )
     daemon.load_model()
-    daemon.serve_forever()
+    daemon.serve_forever(ready_callback=lambda: ready_queue.put(tp_rank))
 
 
 def main() -> None:
@@ -304,6 +336,7 @@ def main() -> None:
 
     distributed_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
     ctx = multiprocessing.get_context("spawn")
+    ready_queue: "multiprocessing.Queue[int]" = ctx.Queue()
     procs = [
         ctx.Process(
             target=_run_daemon,
@@ -312,6 +345,7 @@ def main() -> None:
                 vllm_config,
                 distributed_init_method,
                 args.weight_cache_socket_dir,
+                ready_queue,
             ),
             name=f"vllm-weight-cache-daemon-{rank}",
         )
@@ -326,6 +360,34 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
+
+    ready_ranks: set[int] = set()
+    while len(ready_ranks) < tp_size:
+        try:
+            ready_ranks.add(ready_queue.get(timeout=1.0))
+        except queue.Empty:
+            dead = [p for p in procs if p.exitcode is not None]
+            if dead:
+                logger.error(
+                    "Weight cache daemon rank(s) exited during startup "
+                    "(exitcodes=%s); shutting down.",
+                    [p.exitcode for p in dead],
+                )
+                for proc in procs:
+                    proc.terminate()
+                for proc in procs:
+                    proc.join()
+                sys.exit(max((p.exitcode or 0) for p in procs))
+    logger.info(
+        "===== Weight cache daemon READY: all %d ranks serving in %s =====",
+        tp_size,
+        args.weight_cache_socket_dir or "the default socket dir",
+    )
+    _report_ready(
+        f"===== Weight cache daemon READY: all {tp_size} rank(s) serving in "
+        f"{args.weight_cache_socket_dir or 'the default socket dir'} ====="
+    )
+
     for proc in procs:
         proc.join()
     sys.exit(max(proc.exitcode or 0 for proc in procs))

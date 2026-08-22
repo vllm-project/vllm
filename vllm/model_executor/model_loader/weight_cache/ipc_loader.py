@@ -189,10 +189,12 @@ class IpcModelLoader(BaseModelLoader):
     def _check_supported(vllm_config: VllmConfig, model_config: ModelConfig) -> None:
         check_ipc_quant_support(model_config, where="engine")
         cache_dtype = vllm_config.cache_config.cache_dtype
-        if cache_dtype != "auto":
+        if cache_dtype != "auto" and not str(cache_dtype).startswith("fp8"):
             # BaseKVCacheMethod.process_weights_after_loading turns the loaded
-            # k/v scale parameters into plain float attributes, which the
-            # tensor-only export cannot reproduce.
+            # k/v scale parameters into plain float attributes. For fp8 cache
+            # dtypes those are rebuilt from the exported scale buffers by
+            # init_kernels_after_ipc_load; other quantized cache dtypes are not
+            # verified.
             raise UnsupportedQuantForIPCError(
                 f"[weight_cache:engine] kv cache dtype {cache_dtype!r} is not "
                 "supported by the weight cache; use --kv-cache-dtype auto."

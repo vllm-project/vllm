@@ -801,6 +801,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
 
+        self._build_moe_kernel(layer)
+
+    def _build_moe_kernel(self, layer: RoutedExperts) -> None:
         # Build quant config
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
@@ -862,6 +865,35 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             return
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+
+    def init_kernels_after_ipc_load(self, layer: RoutedExperts) -> None:
+        # _setup_kernel converts weights into the runtime kernel layout via
+        # replace_parameter (real Parameters, exported by the daemon) and then
+        # builds the kernel objects on this method instance. Only the latter
+        # (moe_quant_config, moe_kernel) are non-tensor state the client must
+        # rebuild; the weight conversion must not re-run on the already-swizzled
+        # exported tensors.
+        if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
+            return
+
+        is_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            is_gfx1250 = on_gfx1250()
+        if self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
+        ):
+            # These backends stash the swizzled scales in
+            # self.w13/w2_precision_config during weight conversion (not
+            # exported) and keep weights as wrapped triton tensors, so the
+            # kernel cannot be rebuilt from the exported layer tensors alone.
+            raise NotImplementedError(
+                f"mxfp4 MoE backend {self.mxfp4_backend} is not verified for "
+                "weight cache IPC sharing"
+            )
+
+        self._build_moe_kernel(layer)
 
     def get_fused_moe_quant_config(
         self,

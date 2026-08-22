@@ -197,10 +197,20 @@ class BaseKVCacheMethod(QuantizeMethodBase):
     def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
         # process_weights_after_loading consumes the checkpoint scale
         # parameters and deletes them, so a weight cache daemon never exports
-        # them and the client is left with empty placeholders. Drop those; the
-        # derived _q/_k/_v/_prob scales keep the unquantized defaults from
-        # Attention.__init__, which is why the IPC loader only supports
-        # kv_cache_dtype="auto".
+        # them and the client is left with empty placeholders. Drop those.
         for name in ("k_scale", "v_scale", "q_scale", "prob_scale"):
             if hasattr(layer, name):
                 delattr(layer, name)
+
+        # The registered _k/_v/_q/_prob_scale buffers are exported by the daemon
+        # with the post-processed values, but the derived host-side copies (the
+        # plain float attrs and the CPU tensors read by FlashInfer/AITER
+        # backends) are not tensors and are not carried over IPC. Rebuild them
+        # from the exported buffers so fp8 kv cache scales are honored.
+        if hasattr(layer, "_k_scale"):
+            layer._k_scale_float = layer._k_scale.item()
+            layer._v_scale_float = layer._v_scale.item()
+            layer._q_scale_float = layer._q_scale.item()
+            layer._k_scale_cpu = layer._k_scale.detach().to("cpu")
+            layer._v_scale_cpu = layer._v_scale.detach().to("cpu")
+

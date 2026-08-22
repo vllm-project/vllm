@@ -28,6 +28,19 @@ from vllm.utils.flashinfer import (
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
+def _recover_cutlass_weights_padding_cols(layer: torch.nn.Module) -> None:
+    """Recompute the K-dim padding (bytes) set by process_weights_after_loading.
+
+    ``weights_padding_cols`` is plain Python state, so the weight cache daemon
+    (which exports only tensors) never carries it. It is a pure function of the
+    unpadded ``input_size_per_partition`` and the CUTLASS 32-element alignment,
+    matching ``pad_nvfp4_weight_for_cutlass``.
+    """
+    k = layer.input_size_per_partition
+    aligned = ((k + 31) // 32) * 32
+    layer.weights_padding_cols = (aligned - k) // 2
+
+
 class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cutedsl backend."""
 
@@ -55,6 +68,9 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         )
         layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
         layer.weights_padding_cols = weights_padding_cols
+
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        _recover_cutlass_weights_padding_cols(layer)
 
     def apply_weights(
         self,
@@ -131,6 +147,9 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         )
         layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
         layer.weights_padding_cols = weights_padding_cols
+
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        _recover_cutlass_weights_padding_cols(layer)
 
     def apply_weights(
         self,
@@ -269,6 +288,9 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
         layer.weights_padding_cols = weights_padding_cols
 
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        _recover_cutlass_weights_padding_cols(layer)
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -333,6 +355,9 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
         )
         layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
         layer.weights_padding_cols = weights_padding_cols
+
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        _recover_cutlass_weights_padding_cols(layer)
 
     def apply_weights(
         self,

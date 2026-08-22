@@ -81,10 +81,59 @@ def _fp8_round_trips_via_ipc(quant_config: Any) -> bool:
     return _quant_config_field(quant_config, "weight_block_size") is not None
 
 
+def _modelopt_mixed_round_trips_via_ipc(quant_config: Any) -> bool:
+    """Only MIXED_PRECISION checkpoints whose quantized layers are all NVFP4.
+
+    The NVFP4 MoE method rebuilds its kernel via ``init_kernels_after_ipc_load``
+    and the excluded (unquantized) layers export cleanly. Other mixed
+    sub-methods (per-tensor FP8, MXFP8) are not verified for IPC sharing, so a
+    checkpoint that uses any of them is rejected.
+    """
+    layers = _quant_config_field(quant_config, "quantized_layers")
+    if not isinstance(layers, dict) or not layers:
+        return False
+    verified = {"NVFP4", "W4A16_NVFP4"}
+    for info in layers.values():
+        algo = info.get("quant_algo") if isinstance(info, dict) else None
+        if not isinstance(algo, str) or algo.upper() not in verified:
+            return False
+    return True
+
+
+def _mxfp4_round_trips_via_ipc(quant_config: Any) -> bool:
+    """Only weight-only MXFP4 (``mxfp4-pack-quantized``) is verified.
+
+    Kimi-K3 ships routed experts as compressed-tensors ``mxfp4-pack-quantized``
+    and is rewritten to the ``mxfp4`` quant method (see
+    ``KimiK3ForConditionalGenerationConfig``), so the config still carries the
+    compressed-tensors ``format``/``config_groups`` fields. ``Mxfp4MoEMethod``
+    rebuilds its kernel via ``init_kernels_after_ipc_load`` and stores all
+    post-load weight state in exported tensors; unquantized layers export
+    cleanly. Any activation quantization or a checkpoint without this exact
+    weight-only MXFP4 layout is not verified for IPC sharing and is rejected.
+    """
+    if _quant_config_field(quant_config, "format") != "mxfp4-pack-quantized":
+        return False
+    groups = _quant_config_field(quant_config, "config_groups")
+    if not isinstance(groups, dict) or not groups:
+        return False
+    for group in groups.values():
+        if not isinstance(group, dict):
+            return False
+        if group.get("format") not in (None, "mxfp4-pack-quantized"):
+            return False
+        if group.get("input_activations") is not None:
+            return False
+    return True
+
+
 # quantization name -> predicate(quant_config) -> True when verified safe.
 IPC_QUANT_ALLOWLIST: dict[str | None, Any] = {
     None: lambda _quant_config: True,  # unquantized
     "fp8": _fp8_round_trips_via_ipc,
+    "modelopt_fp4": lambda _quant_config: True,
+    "modelopt_mixed": _modelopt_mixed_round_trips_via_ipc,
+    "mxfp4": _mxfp4_round_trips_via_ipc,
 }
 
 
@@ -105,7 +154,13 @@ def check_ipc_quant_support(model_config: ModelConfig, *, where: str) -> None:
             verified allowlist.
     """
     quantization = model_config.quantization
-    quant_config = getattr(model_config.hf_config, "quantization_config", None)
+    # Prefer the canonical, nested-aware config (multimodal models keep it under
+    # text_config); fall back to the raw hf_config for older code paths.
+    quant_config = getattr(
+        getattr(model_config, "model_arch_config", None), "quantization_config", None
+    )
+    if quant_config is None:
+        quant_config = getattr(model_config.hf_config, "quantization_config", None)
     if is_ipc_quant_supported(quantization, quant_config):
         return
     verified = ", ".join(
