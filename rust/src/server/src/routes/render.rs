@@ -17,7 +17,7 @@ use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::inference::generate::{
-    GenerateRequest, validate_request_compat as validate_generate_request,
+    GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
 };
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -86,13 +86,17 @@ fn lower_render_request(
         request_id: Some(text_request.request_id),
         model: Some(model),
         token_ids,
-        sampling_params: text_request.sampling_params,
+        sampling_params: GenerateSamplingParams {
+            n: None,
+            inner: text_request.sampling_params,
+        },
         stream,
         stream_options,
         cache_salt: text_request.cache_salt,
         priority: text_request.priority,
         kv_transfer_params: None,
         ec_transfer_params: None,
+        content_parts: None,
         other: Default::default(),
     };
     validate_generate_request(&request, &state.served_model_names)?;
