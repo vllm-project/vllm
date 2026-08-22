@@ -474,6 +474,80 @@ def test_placeholder_spec_token_ids_written_verbatim():
     assert input_batch.token_ids_cpu[0, 3:6].tolist() == [13, -1, -1]
 
 
+def test_condense_preserves_pooling_token_id_requirement():
+    """A pooling request keeps its token-ID requirement after condense."""
+    from vllm.pooling_params import PoolingParams
+
+    input_batch = InputBatch(
+        max_num_reqs=2,
+        max_model_len=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
+        max_num_batched_tokens=2 * (MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS),
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
+        is_pooling_model=True,
+    )
+    classify_request = _construct_pooling_request(0, PoolingParams(task="classify"))
+    token_classify_request = _construct_pooling_request(
+        1, PoolingParams(task="token_classify", requires_token_ids=True)
+    )
+
+    input_batch.add_request(classify_request)
+    input_batch.add_request(token_classify_request)
+    assert input_batch.logits_processing_needs_token_ids[:2].tolist() == [False, True]
+
+    input_batch.remove_request(classify_request.req_id)
+    input_batch.condense()
+    input_batch.refresh_metadata()
+
+    assert input_batch.req_ids == [token_classify_request.req_id]
+    assert input_batch.logits_processing_needs_token_ids[0]
+    metadata = input_batch.get_pooling_metadata()
+    assert metadata.prompt_token_ids is not None
+    assert metadata.get_prompt_token_ids()[0].tolist() == (
+        token_classify_request.prompt_token_ids
+    )
+
+
+def test_swap_states_preserves_pooling_token_id_requirement():
+    """Swapping pooling requests keeps token-ID metadata with each request."""
+    from vllm.pooling_params import PoolingParams
+
+    input_batch = InputBatch(
+        max_num_reqs=2,
+        max_model_len=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
+        max_num_batched_tokens=2 * (MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS),
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
+        is_pooling_model=True,
+    )
+    classify_request = _construct_pooling_request(0, PoolingParams(task="classify"))
+    token_classify_request = _construct_pooling_request(
+        1, PoolingParams(task="token_classify", requires_token_ids=True)
+    )
+
+    input_batch.add_request(classify_request)
+    input_batch.add_request(token_classify_request)
+    input_batch.swap_states(0, 1)
+    input_batch.refresh_metadata()
+
+    assert input_batch.req_ids == [
+        token_classify_request.req_id,
+        classify_request.req_id,
+    ]
+    assert input_batch.logits_processing_needs_token_ids[:2].tolist() == [True, False]
+    metadata = input_batch.get_pooling_metadata()
+    assert metadata.prompt_token_ids is not None
+    assert metadata.get_prompt_token_ids()[0].tolist() == (
+        token_classify_request.prompt_token_ids
+    )
+
+
 @pytest.mark.parametrize(
     ("pooling_params", "expect_device_prompt_token_ids", "expect_cpu_prompt_token_ids"),
     [
