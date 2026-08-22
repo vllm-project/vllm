@@ -98,18 +98,21 @@ class SampleRequest:
 
     Attributes:
         prompt: The input text prompt for the model.
-        multi_modal_data: Optional dictionary containing multi-modal data (e.g.
-            images).
         prompt_len: The length of the prompt in tokens.
         expected_output_len: The expected length of the output in tokens.
+        schema: The definition/constraint for the structured output.
+                Can be a JSON schema (dict), EBNF grammar (str),
+                regex pattern (str), or a list of choices (list).
+        structure_type: The type of structured output.
+        completion: Optional expected completion text for evaluation.
     """
 
     prompt: str
     prompt_len: int
     expected_output_len: int
-    schema: dict
+    schema: dict | str | list
     structure_type: str
-    completion: str = None
+    completion: str | None = None
 
 
 def sample_requests(
@@ -311,7 +314,7 @@ async def get_request(
 
     Args:
         input_requests:
-            A list of input requests, each represented as a tuple.
+            A list of input requests (SampleRequest objects).
         request_rate:
             The rate at which requests are generated (requests/s).
         burstiness (optional):
@@ -346,7 +349,7 @@ async def get_request(
 
 
 def calculate_metrics(
-    input_requests: list[tuple[str, int, int]],
+    input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
@@ -470,7 +473,7 @@ async def benchmark(
     disable_tqdm: bool,
     profile: bool,
     selected_percentile_metrics: list[str],
-    selected_percentiles: list[str],
+    selected_percentiles: list[float],
     ignore_eos: bool,
     max_concurrency: int | None,
     structured_output_ratio: float,
@@ -945,7 +948,14 @@ def create_argument_parser():
         "--tokenizer-mode",
         type=str,
         default="auto",
-        help="Name or path of the tokenizer, if not using the default tokenizer.",
+        help="""Tokenizer mode:\n
+        - "auto" will use the tokenizer from `mistral_common` for Mistral models
+        if available, otherwise it will use the "hf" tokenizer.\n
+        - "hf" will use the fast tokenizer if available.\n
+        - "slow" will always use the slow tokenizer.\n
+        - "mistral" will always use the tokenizer from `mistral_common`.\n
+        - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
+        - Other custom values can be supported via plugins.""",
     )
     parser.add_argument(
         "--num-prompts",
@@ -1021,10 +1031,10 @@ def create_argument_parser():
         "--result-filename",
         type=str,
         default=None,
-        help="Specify the filename to save benchmark json results."
+        help="Specify the filename to save benchmark results. "
         "If not specified, results will be saved in "
-        "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
-        " format.",
+        "{structured_output_ratio}so_{backend}_{request_rate}qps_"
+        "{model}_{dataset}_{num_prompts}_out{output_len}.txt format.",
     )
     parser.add_argument(
         "--ignore-eos",

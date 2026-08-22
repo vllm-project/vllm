@@ -41,7 +41,7 @@ class RequestFuncOutput:
     generated_text: str = ""
     success: bool = False
     latency: float = 0.0
-    output_tokens: int = 0
+    output_tokens: int | None = 0
     ttft: float = 0.0  # Time to first token
     itl: list[float] = field(default_factory=list)  # list of inter-token latencies
     tpot: float = 0.0  # avg next-token latencies
@@ -483,8 +483,8 @@ async def async_request_openai_audio(
     api_url = request_func_input.api_url
     assert api_url.endswith(("transcriptions", "translations")), (
         "OpenAI Chat Completions API URL must end with 'transcriptions' "
+        "or `translations`."
     )
-    "or `translations`."
 
     async with aiohttp.ClientSession(
         trust_env=True, timeout=AIOHTTP_TIMEOUT
