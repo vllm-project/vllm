@@ -124,3 +124,74 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+class TestToolCallContinuationOrdering:
+    def test_split_delta_replays_argument_tail_before_state_switch(self):
+        """An argument-only group is the tail of the open tool call and must
+        come before reasoning/content; a named group is a new call and stays
+        after them."""
+        tail = _make_tool_call(0, arguments='"}')
+        new_call = _make_tool_call(1, name="g", arguments="{")
+        delta = DeltaMessage(reasoning="r", content="c", tool_calls=[new_call, tail])
+
+        result = split_delta(delta)
+
+        assert len(result) == 4
+        assert result[0].tool_calls == [tail]
+        assert result[1].reasoning == "r"
+        assert result[2].content == "c"
+        assert result[3].tool_calls == [new_call]
+
+    def test_argument_tail_interleaved_with_reasoning(self):
+        """Regression: one engine step can span the end of a tool call and
+        the start of the next reasoning segment (common with speculative
+        decoding). The argument tail must extend the open call instead of
+        reopening TOOL_CALL with name=None, which failed
+        ResponseFunctionToolCallItem validation and aborted the SSE stream
+        without a terminal response event."""
+        processor = SimpleStreamingEventProcessor()
+        _run_through_processor(
+            processor,
+            DeltaMessage(tool_calls=[_make_tool_call(0, name="f", arguments='{"a')]),
+        )
+        assert processor.state.current_state == _StateType.TOOL_CALL
+
+        events = _run_through_processor(
+            processor,
+            DeltaMessage(
+                reasoning="think",
+                tool_calls=[_make_tool_call(0, arguments='":1}')],
+            ),
+        )
+
+        types = [e.type for e in events]
+        tail_idx = types.index("response.function_call_arguments.delta")
+        reasoning_idx = types.index("response.reasoning_text.delta")
+        assert tail_idx < reasoning_idx
+
+        added = [e for e in events if e.type == "response.output_item.added"]
+        assert [e.item.type for e in added] == ["reasoning"]
+        done = [e for e in events if e.type == "response.function_call_arguments.done"]
+        assert len(done) == 1
+        assert done[0].arguments == '{"a":1}'
+        assert processor.state.current_state == _StateType.REASONING
+
+    def test_orphan_argument_delta_does_not_abort_stream(self):
+        """Defensive: an argument-only delta arriving while no tool call is
+        open must not crash item validation mid-stream."""
+        processor = SimpleStreamingEventProcessor()
+        events = _run_through_processor(
+            processor,
+            DeltaMessage(tool_calls=[_make_tool_call(0, arguments='{"a":1}')]),
+        )
+
+        added = [e for e in events if e.type == "response.output_item.added"]
+        assert len(added) == 1
+        assert added[0].item.type == "function_call"
+        assert added[0].item.name == ""
+        deltas = [
+            e for e in events if e.type == "response.function_call_arguments.delta"
+        ]
+        assert len(deltas) == 1
+        assert deltas[0].delta == '{"a":1}'
