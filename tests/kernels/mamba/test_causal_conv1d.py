@@ -392,3 +392,32 @@ def test_causal_conv1d_varlen(
     )
     unpadded_out = out[:, : out_ref_tensor.shape[-1]]
     assert torch.allclose(unpadded_out, out_ref_tensor, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("num_accepted", [0, 4])
+def test_causal_conv1d_update_invalid_accepted_count_is_fail_closed(
+    num_accepted: int,
+):
+    """An invalid speculative offset must not read or update adjacent state."""
+    device = DEVICE
+    batch, dim, seqlen, width = 1, 64, 3, 4
+    x = torch.randn(batch, dim, seqlen, device=device)
+    weight = torch.randn(dim, width, device=device)
+    conv_state = torch.randn(3, dim, width - 1 + seqlen - 1, device=device)
+    state_before = conv_state.clone()
+    state_indices = torch.tensor([1], dtype=torch.int32, device=device)
+    accepted = torch.tensor([num_accepted], dtype=torch.int32, device=device)
+    out = torch.full_like(x, torch.nan)
+
+    result = causal_conv1d_update(
+        x,
+        conv_state,
+        weight,
+        conv_state_indices=state_indices,
+        num_accepted_tokens=accepted,
+        out=out,
+    )
+
+    torch.testing.assert_close(result, torch.zeros_like(result))
+    torch.testing.assert_close(conv_state, state_before)

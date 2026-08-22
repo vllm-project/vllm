@@ -18,6 +18,9 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    fused_recurrent_kda_fwd as fused_recurrent_kda_fwd_amd,
+)
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
 from vllm.models.kimi_k3.nvidia.kda import (
@@ -53,6 +56,10 @@ pytestmark = pytest.mark.skipif(
 PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
+}
+SPEC_DECODE_IMPLS = {
+    "nvidia": fused_recurrent_kda_fwd,
+    "amd": fused_recurrent_kda_fwd_amd,
 }
 
 
@@ -573,6 +580,55 @@ def test_kda_spec_decode_correctness(
         err_atol=3e-3,
     )
     assert torch.isnan(output_storage[..., H * D :]).all()
+
+
+@pytest.mark.parametrize("impl", SPEC_DECODE_IMPLS.keys())
+@pytest.mark.parametrize("num_accepted", [0, 4])
+@torch.inference_mode()
+def test_kda_spec_invalid_accepted_count_is_fail_closed(
+    impl: str,
+    num_accepted: int,
+):
+    """Invalid accepted counts must not select an adjacent KDA state row."""
+    H, D, T = 2, 128, 3
+    torch.manual_seed(2026)
+
+    q = torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    gate = -torch.rand_like(q)
+    beta = torch.rand(1, T, H, dtype=torch.float32, device=DEVICE)
+    cu_seqlens = torch.tensor([0, T], dtype=torch.int32, device=DEVICE)
+
+    state_indices_storage = torch.zeros(3, T, dtype=torch.int32, device=DEVICE)
+    state_indices_storage[1] = torch.arange(1, T + 1, dtype=torch.int32, device=DEVICE)
+    # Keep the old out-of-row accesses inside allocated storage so this test
+    # is a deterministic semantic regression rather than an illegal-address probe.
+    state_indices_storage[0, -1] = 4
+    state_indices_storage[2, 0] = 5
+    state_indices = state_indices_storage[1:2]
+
+    state = torch.randn(T + 3, H, D, D, dtype=torch.float32, device=DEVICE)
+    state_before = state.clone()
+    output = torch.full_like(v, torch.nan)
+    accepted = torch.tensor([num_accepted], dtype=torch.int32, device=DEVICE)
+
+    actual, actual_state = SPEC_DECODE_IMPLS[impl](
+        q=q,
+        k=k,
+        v=v,
+        g=gate,
+        beta=beta,
+        initial_state=state,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=accepted,
+        out=output,
+    )
+
+    assert actual.data_ptr() == output.data_ptr()
+    torch.testing.assert_close(actual, torch.zeros_like(actual))
+    torch.testing.assert_close(actual_state, state_before)
 
 
 @pytest.mark.parametrize(
