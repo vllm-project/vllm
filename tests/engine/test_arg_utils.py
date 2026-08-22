@@ -142,6 +142,27 @@ class DummyConfig:
     """Nested config"""
 
 
+def test_optional_literal_accepts_none_on_the_cli():
+    """A choice shown in --help has to be one the parser accepts.
+
+    argparse converts with `type` before it checks `choices`, and optional_type
+    turns "None" into None, so advertising the string left every optional
+    Literal flag rejecting the value its own help text offered.
+    """
+    parser = FlexibleArgumentParser()
+    parser.add_argument(
+        "--optional-literal", **get_kwargs(DummyConfig)["optional_literal"]
+    )
+
+    # Both spellings optional_type accepts.
+    assert parser.parse_args(["--optional-literal=None"]).optional_literal is None
+    assert parser.parse_args(["--optional-literal="]).optional_literal is None
+    # The real choices are unaffected.
+    assert parser.parse_args(["--optional-literal=x"]).optional_literal == "x"
+    # And it is still offered, which is what made the rejection contradictory.
+    assert "None" in parser.format_help()
+
+
 @pytest.mark.parametrize(
     ("type_hint", "expected"),
     [
@@ -179,8 +200,12 @@ def test_get_kwargs():
     assert kwargs["optional_bool_or_str"]["nargs"] == "?"
     assert kwargs["optional_bool_or_str"]["const"] is True
     assert "action" not in kwargs["optional_bool_or_str"]
-    # optional literals should have None as a choice
-    assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
+    # optional literals should have None as a choice. The sentinel is the object
+    # None, not its spelling: argparse converts with `type` before it checks
+    # `choices`, and optional_type returns None, so the string would be advertised
+    # in --help and then rejected. `str()` in argparse's help rendering is what
+    # keeps "None" visible there.
+    assert kwargs["optional_literal"]["choices"] == ["x", "y", None]
     # tuples should have the correct nargs
     assert kwargs["tuple_n"]["nargs"] == "+"
     assert kwargs["tuple_2"]["nargs"] == 2
