@@ -37,7 +37,7 @@ class CacheInfo(NamedTuple):
     @property
     def hit_ratio(self) -> float:
         if self.total == 0:
-            return 0
+            return 0.0
 
         return self.hits / self.total
 
