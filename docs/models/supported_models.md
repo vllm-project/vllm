@@ -692,6 +692,9 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
     For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
 
+!!! note
+    For `Qwen3-VL` and `Qwen3-VL-MOE`, running FP8 models on Blackwell GPUs (e.g., RTX 5080) with vLLM versions prior to v0.24.0 may cause the engine to silently hang during generation due to DeepGEMM kernel compilation deadlocks. To resolve this issue, please upgrade to vLLM v0.25.0 or newer. Alternatively, set the environment variable `VLLM_USE_DEEP_GEMM=0` as a workaround.
+    
 #### Transcription
 
 Speech2Text models trained specifically for Automatic Speech Recognition.
