@@ -234,6 +234,45 @@ async def test_handle_event_previous_response_not_found():
 
 
 @pytest.mark.asyncio
+async def test_handle_event_error_message_is_sanitized():
+    """Internal exception details are scrubbed before reaching the client.
+
+    Guards against leaking server file paths and memory addresses to remote
+    WebSocket clients via the processing_error event.
+    """
+    from unittest.mock import AsyncMock
+
+    from vllm.entrypoints.openai.responses.websocket import (
+        WebSocketResponsesConnection,
+    )
+
+    ws = AsyncMock()
+    serving = AsyncMock()
+    conn = WebSocketResponsesConnection(ws, serving)
+    conn._process_response_create = AsyncMock(
+        side_effect=RuntimeError(
+            "boom in /home/user/vllm/entrypoints/serving.py "
+            "for <object at 0x7f9c1a2b3c4d>"
+        )
+    )
+
+    await conn.handle_event(
+        {
+            "type": "response.create",
+            "model": "test-model",
+            "input": "hello",
+        }
+    )
+
+    payload = json.loads(ws.send_text.call_args[0][0])
+    assert payload["error"]["code"] == "processing_error"
+    message = payload["error"]["message"]
+    assert "/home/user" not in message
+    assert "0x7f9c1a2b3c4d" not in message
+    assert "boom" in message
+
+
+@pytest.mark.asyncio
 async def test_handle_connection_accept_and_receive_loop():
     """handle_connection accepts, processes messages, handles disconnect."""
     from unittest.mock import AsyncMock
@@ -375,6 +414,10 @@ def _ensure_api_router_importable():
     _stub_modules: dict[str, dict[str, object]] = {
         "vllm.entrypoints.openai.engine.protocol": {
             "ErrorResponse": type("ErrorResponse", (BaseModel,), {}),
+            # Pulled in transitively by vllm.entrypoints.serve.__init__ when
+            # websocket.py imports sanitize_message.
+            "ErrorInfo": type("ErrorInfo", (BaseModel,), {}),
+            "GenerationError": type("GenerationError", (Exception,), {}),
         },
         "vllm.entrypoints.openai.responses.protocol": {
             "ResponsesRequest": type("ResponsesRequest", (BaseModel,), {}),
