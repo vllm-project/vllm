@@ -32,7 +32,16 @@ else()
   set(_qutlass_bin "${_qutlass_fc_root}/qutlass-build")
   set(_qutlass_sub "${_qutlass_fc_root}/qutlass-subbuild")
 
-  if(EXISTS "${_qutlass_src}/qutlass/csrc/bindings.cpp")
+  find_package(Git REQUIRED)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${_qutlass_src}" rev-parse HEAD
+    RESULT_VARIABLE _qutlass_git_result
+    OUTPUT_VARIABLE _qutlass_git_revision
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+  if(_qutlass_git_result EQUAL 0 AND
+     _qutlass_git_revision STREQUAL _QUTLASS_UPSTREAM_TAG)
     set(qutlass_SOURCE_DIR "${_qutlass_src}")
     set(qutlass_BINARY_DIR "${_qutlass_bin}")
   else()
