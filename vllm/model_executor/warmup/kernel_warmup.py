@@ -60,14 +60,10 @@ def _ll_bf16_router_shapes_from_model(
     for module in model.modules():
         if not isinstance(module, GateLinear):
             continue
-        weight = getattr(module, "weight", None)
-        if not isinstance(weight, torch.Tensor):
+        if not module.allow_ll_bf16_gemm:
             continue
-        if weight.dim() != 2 or weight.dtype != torch.bfloat16:
-            continue
-        n, k = weight.shape
-        if k % 8 == 0:
-            shapes.add((int(k), int(n)))
+        n, k = module.weight.shape
+        shapes.add((int(k), int(n)))
     return tuple(sorted(shapes))
 
 
@@ -78,9 +74,6 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
         ll_bf16_gemm_kernel,
     )
-
-    if not is_ll_bf16_gemm_available():
-        return
 
     shapes = _ll_bf16_router_shapes_from_model(model)
     if not shapes:
