@@ -230,6 +230,10 @@ class TieringOffloadingManager(OffloadingManager):
             for tier_idx, tier in enumerate(self.secondary_tiers)
         }
 
+        self._tier_index: dict[SecondaryTierManager, int] = {
+            tier: i for i, tier in enumerate(self.secondary_tiers)
+        }
+
     @property
     def _transfer_jobs(self) -> dict[JobId, JobMetadata]:
         return self._jobs
@@ -331,6 +335,35 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         transfer_job.keys, transfer_job.req_context
                     )
+                    self._update_backpressure(tier, job_metadata)
+
+    def _should_store_to_tier(
+        self, tier: SecondaryTierManager, num_blocks: int
+    ) -> bool:
+        detector = tier.bp_detector
+        if detector is None:
+            return True
+        return detector.should_store(num_blocks)
+
+    def _update_backpressure(
+        self, tier: SecondaryTierManager, job_metadata: JobMetadata
+    ) -> None:
+        detector = tier.bp_detector
+        if detector is None:
+            return
+        was_under_pressure = detector.is_under_pressure()
+        tj = job_metadata.transfer_job
+        num_bytes = len(tj.keys) * tier.block_size_bytes
+        detector.update(tj.submit_time, num_bytes)
+        if detector.is_under_pressure() != was_under_pressure:
+            tier_idx = self._tier_index[tier]
+            logger.info(
+                "Tier #%d (%s) back-pressure %s (stats=%s)",
+                tier_idx,
+                tier.tier_type,
+                "activated" if detector.is_under_pressure() else "cleared",
+                detector.stats,
+            )
 
     @override
     def lookup(
@@ -621,8 +654,10 @@ class TieringOffloadingManager(OffloadingManager):
             return
 
         for tier_idx in request_level_tiers:
-            job_metadata = self.create_store_job(ready_keys, req_context, tier_idx)
             tier = self.secondary_tiers[tier_idx]
+            if not self._should_store_to_tier(tier, len(ready_keys)):
+                continue
+            job_metadata = self.create_store_job(ready_keys, req_context, tier_idx)
             tier.submit_store(job_metadata)
 
     @override
@@ -660,6 +695,8 @@ class TieringOffloadingManager(OffloadingManager):
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
             for tier_idx, tier in enumerate(self.secondary_tiers):
+                if not self._should_store_to_tier(tier, len(keys)):
+                    continue
                 job_metadata = self.create_store_job(keys, req_context, tier_idx)
                 tier.submit_store(job_metadata)
 
@@ -861,6 +898,10 @@ class TieringOffloadingManager(OffloadingManager):
             del self._req_state[req_id]
         self._processed_jobs_this_step = False
 
+        for tier in self.secondary_tiers:
+            if tier.bp_detector is not None:
+                tier.bp_detector.reset()
+
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = self.primary_tier.get_stats()
@@ -868,6 +909,7 @@ class TieringOffloadingManager(OffloadingManager):
         if stats is not None and stats.is_empty():
             stats = None
 
+        self._metrics.record_backpressure(self.secondary_tiers)
         metrics_stats = self._metrics.take_stats()
         if metrics_stats is not None:
             if stats is None:

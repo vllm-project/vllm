@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
+    from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 
 
 class ExampleSecondaryTierManager(SecondaryTierManager):
@@ -51,17 +52,20 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         primary_kv_view: memoryview,
         tier_type: str,
         custom_param: int = 0,
+        backpressure_detector: "BackpressureDetector | None" = None,
     ):
         """
         Initialize the example secondary tier.
 
         Args:
             custom_param: Dummy parameter demonstrating custom args.
+            backpressure_detector: Optional backpressure detector.
         """
         super().__init__(
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
+            backpressure_detector=backpressure_detector,
         )
 
         logger.info(
