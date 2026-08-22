@@ -203,12 +203,25 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   }
 #endif
 
-  CUmemAccessDesc accessDesc = {};
-  accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  accessDesc.location.id = device;
-  accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+  CUmemAccessDesc accessDesc[2] = {};
+  size_t numAccessDesc = 0;
+  accessDesc[numAccessDesc].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  accessDesc[numAccessDesc].location.id = device;
+  accessDesc[numAccessDesc].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+  numAccessDesc++;
+#ifdef USE_ROCM
+  // Grant the host read/write access to this VMM range.  On large-BAR devices
+  // (MI300X) PyTorch's _local_scalar_dense_cuda reads scalar tensors by
+  // dereferencing the device pointer directly from the host side, bypassing
+  // hipMemcpy.  Without a host mapping that dereference triggers SIGSEGV,
+  // silently killing the worker process with no Python traceback.
+  accessDesc[numAccessDesc].location.type = CU_MEM_LOCATION_TYPE_HOST;
+  accessDesc[numAccessDesc].location.id = 0;
+  accessDesc[numAccessDesc].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+  numAccessDesc++;
+#endif
 
-  CUDA_CHECK(cuMemSetAccess(d_mem, size, &accessDesc, 1));
+  CUDA_CHECK(cuMemSetAccess(d_mem, size, accessDesc, numAccessDesc));
   if (error_code != 0) {
     return;
   }
