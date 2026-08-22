@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import hashlib
 import io
+import itertools
 import json
 import logging
 import os
@@ -81,6 +82,10 @@ def encoder_rr_assignment(
 # Diagnostic switch: forward the original request to the decoder so the
 # only difference from the rewrite path is the rewrite itself.
 NO_REWRITE = False
+# Decode-side retries for a retryable internal error (`finish_reason="error"`,
+# e.g. an encoder embedding the connector could not deliver). Re-issuing runs
+# the encode again, which produces a fresh transfer.
+DECODE_RETRIES = 1
 
 
 # Grid metadata reported by the encoder instance, keyed by item index.
@@ -122,6 +127,7 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
     here -- a second derivation could disagree with the encoder's.
     """
     rewritten = 0
+    transfer_items = []
     idx = 0
     new_messages = []
     for msg in req_data.get("messages", []):
@@ -137,13 +143,19 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             meta = dict(item_meta.get(idx) or {})
             idx += 1
             item_uuid = meta.pop("mm_hash", None)
+            transfer_id = meta.pop("transfer_id", None)
             # Whatever keys the encoder reported are the metadata its model
             # declared as needed to size the placeholder range; the proxy does
             # not need to know their names.
             metadata = {k: _b64_tensor(v) for k, v in meta.items()}
             if not metadata or not item_uuid:
-                # The encoder reported no metadata (e.g. the item came from its
-                # processor cache); let the decoder process the media itself.
+                # Nothing to size the placeholder range with. A processor cache
+                # hit is not a cause on its own: with the default `lru` type the
+                # engine restores the item before the scheduler reports it. It
+                # goes missing when the encode request failed, or under
+                # `--mm-processor-cache-type shm`, where a hit replaces the item
+                # with its shared-memory address and only the worker restores
+                # it. Send the media so the decoder can derive the grid itself.
                 new_content.append(item)
                 continue
             new_content.append(
@@ -153,13 +165,22 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
                     "uuid": item_uuid,
                 }
             )
+            if transfer_id is not None:
+                transfer_items.append(
+                    {"mm_hash": item_uuid, "transfer_id": transfer_id}
+                )
             rewritten += 1
         new_messages.append({**msg, "content": new_content})
 
     if not rewritten:
         return req_data
     logger.info("Rewrote %d image item(s) as metadata references", rewritten)
-    return {**req_data, "messages": new_messages}
+    rewritten_request = {**req_data, "messages": new_messages}
+    if transfer_items:
+        ec_transfer_params = dict(req_data.get("ec_transfer_params") or {})
+        ec_transfer_params["ec_items"] = transfer_items
+        rewritten_request["ec_transfer_params"] = ec_transfer_params
+    return rewritten_request
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
@@ -185,6 +206,7 @@ async def fanout_encoder_primer(
     orig_request: dict,
     e_urls: list[str],
     req_id: str,
+    consumer_zmq: str | None = None,
 ) -> dict[int, dict]:
     """
     1. Build one request *per MM item* with all text removed.
@@ -207,6 +229,7 @@ async def fanout_encoder_primer(
 
     tasks = []
     item_uuids: dict[int, str] = {}
+    item_transfer_ids: dict[int, str] = {}
     item_meta: dict[int, dict] = {}
 
     # Round-robin over encode servers to distribute load a bit. The cursor
@@ -230,6 +253,8 @@ async def fanout_encoder_primer(
         item_uuid = None if NO_REWRITE else content_uuid(item)
         if item_uuid is not None:
             item_uuids[idx] = item_uuid
+        transfer_id = uuid.uuid4().hex
+        item_transfer_ids[idx] = transfer_id
 
         encoder_req = {
             # You *may* need to keep additional fields
@@ -246,6 +271,11 @@ async def fanout_encoder_primer(
             # once the prompt is encoded and its embeddings are published.
             "stream": False,
         }
+        if consumer_zmq is not None:
+            encoder_req["ec_transfer_params"] = {
+                "consumer_zmq": consumer_zmq,
+                "ec_items": [{"mm_hash": item_uuid, "transfer_id": transfer_id}],
+            }
         tasks.append(
             encode_session.post(
                 f"{target_url}/v1/chat/completions",
@@ -295,7 +325,11 @@ async def fanout_encoder_primer(
             reported = []
         if reported and idx in item_uuids:
             # One item per encoder request, so the first entry is this item's.
-            item_meta[idx] = {**reported[0], "mm_hash": item_uuids[idx]}
+            item_meta[idx] = {
+                **reported[0],
+                "mm_hash": item_uuids[idx],
+                "transfer_id": item_transfer_ids[idx],
+            }
 
     logger.info(
         "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
@@ -461,40 +495,88 @@ async def on_shutdown() -> None:
 ###############################################################################
 
 
+async def prepare_for_decode(
+    req_data: dict,
+    req_id: str,
+    e_urls: list[str],
+    p_url: str,
+    consumer_zmq: str | None,
+) -> tuple[dict, float, float]:
+    """Encode, rewrite and prefill, returning the body to send to decode.
+
+    `req_data` is left untouched so a retry starts from the original media
+    rather than from a body whose images are already metadata references.
+    """
+    _t0 = time.perf_counter()
+    item_meta = await fanout_encoder_primer(req_data, e_urls, req_id, consumer_zmq)
+    _t1 = time.perf_counter()
+    prepared = req_data if NO_REWRITE else rewrite_for_decode(req_data, item_meta)
+    _t2 = time.perf_counter()
+    prepared = await maybe_prefill(prepared, p_url, req_id)
+    return prepared, _t1 - _t0, _t2 - _t1
+
+
 async def forward_non_stream(
-    req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
+    req_data: dict,
+    req_id: str,
+    e_urls: list[str],
+    p_url: str,
+    d_url: str,
+    consumer_zmq: str | None,
+    dp_rank: int | None = None,
 ) -> dict:
     try:
-        # Step 1: Process through Encoder instance (if has MM input)
-        _t0 = time.perf_counter()
-        item_meta = await fanout_encoder_primer(req_data, e_urls, req_id)
-        _t1 = time.perf_counter()
-        req_data = req_data if NO_REWRITE else rewrite_for_decode(req_data, item_meta)
-        _t2 = time.perf_counter()
-
-        # Step 2: Process through Prefill instance
-        req_data = await maybe_prefill(req_data, p_url, req_id)
-
-        # Step 3: Process through Decode instance
-        logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
-        headers = {"x-request-id": req_id}
-
-        # Non-streaming response
-        async with decode_session.post(
-            f"{d_url}/v1/chat/completions", json=req_data, headers=headers
-        ) as resp:
-            resp.raise_for_status()
-            out = await resp.json()
-            _t3 = time.perf_counter()
-            logger.info(
-                "STAGE %s encode=%.1f rewrite=%.1f decode=%.1f total=%.1f",
-                "no-rewrite" if NO_REWRITE else "rewrite",
-                (_t1 - _t0) * 1e3,
-                (_t2 - _t1) * 1e3,
-                (_t3 - _t2) * 1e3,
-                (_t3 - _t0) * 1e3,
+        for attempt in range(DECODE_RETRIES + 1):
+            _t0 = time.perf_counter()
+            prepared, encode_s, rewrite_s = await prepare_for_decode(
+                req_data, req_id, e_urls, p_url, consumer_zmq
             )
-            return out
+            _t2 = time.perf_counter()
+
+            logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
+            headers = {"x-request-id": req_id}
+            if dp_rank is not None:
+                headers["X-data-parallel-rank"] = str(dp_rank)
+
+            async with decode_session.post(
+                f"{d_url}/v1/chat/completions", json=prepared, headers=headers
+            ) as resp:
+                if resp.status >= 400:
+                    detail = await resp.text()
+                    # 500 is the decoder's retryable internal error, which
+                    # includes an encoder embedding it could not obtain. Redoing
+                    # the encode publishes the item again.
+                    if resp.status == 500 and attempt < DECODE_RETRIES:
+                        logger.warning(
+                            "[%s] Decode returned 500, re-encoding and retrying "
+                            "(attempt %d/%d): %s",
+                            req_id,
+                            attempt + 1,
+                            DECODE_RETRIES,
+                            detail[:200],
+                        )
+                        continue
+                    logger.error(
+                        "[%s] Decode request returned status %s: %s",
+                        req_id,
+                        resp.status,
+                        detail,
+                    )
+                    raise HTTPException(status_code=resp.status, detail=detail)
+                out = await resp.json()
+                _t3 = time.perf_counter()
+                logger.info(
+                    "STAGE %s encode=%.1f rewrite=%.1f decode=%.1f total=%.1f "
+                    "attempt=%d",
+                    "no-rewrite" if NO_REWRITE else "rewrite",
+                    encode_s * 1e3,
+                    rewrite_s * 1e3,
+                    (_t3 - _t2) * 1e3,
+                    (_t3 - _t0) * 1e3,
+                    attempt,
+                )
+                return out
+        raise HTTPException(status_code=500, detail="Decode failed after re-encoding")
 
     except HTTPException:
         raise
@@ -504,47 +586,66 @@ async def forward_non_stream(
 
 
 async def forward_stream(
-    req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
+    req_data: dict,
+    req_id: str,
+    e_urls: list[str],
+    p_url: str,
+    d_url: str,
+    consumer_zmq: str | None,
+    dp_rank: int | None = None,
 ) -> AsyncIterator[str]:
     try:
-        # Step 1: Process through Encoder instance (if has MM input)
-        _t0 = time.perf_counter()
-        item_meta = await fanout_encoder_primer(req_data, e_urls, req_id)
-        _t1 = time.perf_counter()
-        req_data = req_data if NO_REWRITE else rewrite_for_decode(req_data, item_meta)
-        _t2 = time.perf_counter()
+        for attempt in range(DECODE_RETRIES + 1):
+            _t0 = time.perf_counter()
+            prepared, encode_s, rewrite_s = await prepare_for_decode(
+                req_data, req_id, e_urls, p_url, consumer_zmq
+            )
+            _t2 = time.perf_counter()
 
-        # Step 2: Process through Prefill instance
-        req_data = await maybe_prefill(req_data, p_url, req_id)
+            logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
+            headers = {"x-request-id": req_id}
+            if dp_rank is not None:
+                headers["X-data-parallel-rank"] = str(dp_rank)
 
-        # Step 3: Process through Decode instance
-        logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
-        headers = {"x-request-id": req_id}
+            _first = None
+            async with decode_session.post(
+                f"{d_url}/v1/chat/completions",
+                json=prepared,
+                headers=headers,
+            ) as resp:
+                # Retry only before the first chunk: once anything reached the
+                # client the response cannot be replaced.
+                if resp.status == 500 and attempt < DECODE_RETRIES:
+                    detail = await resp.text()
+                    logger.warning(
+                        "[%s] Decode returned 500 before streaming, re-encoding "
+                        "and retrying (attempt %d/%d): %s",
+                        req_id,
+                        attempt + 1,
+                        DECODE_RETRIES,
+                        detail[:200],
+                    )
+                    continue
+                resp.raise_for_status()
+                async for chunk in resp.content.iter_chunked(1024):
+                    if chunk:
+                        if _first is None:
+                            _first = time.perf_counter()
+                        yield chunk.decode("utf-8", errors="ignore")
+            _t3 = time.perf_counter()
 
-        # Streaming response
-        _first = None
-        async with decode_session.post(
-            f"{d_url}/v1/chat/completions",
-            json=req_data,
-            headers=headers,
-        ) as resp:
-            resp.raise_for_status()
-            async for chunk in resp.content.iter_chunked(1024):
-                if chunk:
-                    if _first is None:
-                        _first = time.perf_counter()
-                    yield chunk.decode("utf-8", errors="ignore")
-        _t3 = time.perf_counter()
-
-        logger.info(
-            "STAGE %s encode=%.1f rewrite=%.2f decode_ttfb=%.1f decode_total=%.1f",
-            "no-rewrite" if NO_REWRITE else "rewrite",
-            (_t1 - _t0) * 1e3,
-            (_t2 - _t1) * 1e3,
-            ((_first or _t3) - _t2) * 1e3,
-            (_t3 - _t2) * 1e3,
-        )
-        logger.info("[%s] Streaming completed", req_id)
+            logger.info(
+                "STAGE %s encode=%.1f rewrite=%.2f decode_ttfb=%.1f "
+                "decode_total=%.1f attempt=%d",
+                "no-rewrite" if NO_REWRITE else "rewrite",
+                encode_s * 1e3,
+                rewrite_s * 1e3,
+                ((_first or _t3) - _t2) * 1e3,
+                (_t3 - _t2) * 1e3,
+                attempt,
+            )
+            logger.info("[%s] Streaming completed", req_id)
+            return
 
     except HTTPException:
         logger.exception("[%s] HTTPException in forward_stream", req_id)
@@ -569,16 +670,29 @@ async def chat_completions(request: Request):
 
         e_urls = app.state.e_urls  # we want the full list for fan-out
         p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
-        d_url = random.choice(app.state.d_urls)
+        decode_index = random.randrange(len(app.state.d_urls))
+        d_url = app.state.d_urls[decode_index]
+        dp_size = app.state.ec_consumer_dp_size
+        # Round-robin the replica, then name it to both halves: the decoder
+        # honours the rank header instead of its own balancer, and the encoder
+        # pushes to that replica's control channel. Choosing once here means a
+        # decode retry re-encodes to the same replica.
+        dp_rank = next(app.state.replica_counter) % dp_size if dp_size > 1 else None
+        ec_index = decode_index * dp_size + (dp_rank or 0)
+        consumer_zmq = app.state.d_ec_urls[ec_index] if app.state.d_ec_urls else None
 
         is_streaming = req_data.get("stream", False)
 
         if is_streaming:
             return StreamingResponse(
-                forward_stream(req_data, req_id, e_urls, p_url, d_url),
+                forward_stream(
+                    req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
+                ),
                 media_type="text/event-stream",
             )
-        result = await forward_non_stream(req_data, req_id, e_urls, p_url, d_url)
+        result = await forward_non_stream(
+            req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
+        )
         return JSONResponse(content=result)
 
     except HTTPException:
@@ -743,8 +857,8 @@ if __name__ == "__main__":
         "--prefill-servers-urls",
         required=True,
         help=(
-            'Comma-separated prefill URLs ("http://p1:8003,http://p2:8004") ',
-            'to enable E->P->D, set "disable" or "none" to enable E->PD',
+            'Comma-separated prefill URLs ("http://p1:8003,http://p2:8004") '
+            'to enable E->P->D, set "disable" or "none" to enable E->PD'
         ),
     )
     parser.add_argument(
@@ -752,15 +866,61 @@ if __name__ == "__main__":
         required=True,
         help='Comma-separated decode URLs ("http://d1:8005,http://d2:8006")',
     )
+    parser.add_argument(
+        "--decode-retries",
+        type=int,
+        default=1,
+        help=(
+            "Re-encode and re-send when decode returns 500, which is its "
+            "retryable internal error (an undeliverable encoder embedding "
+            "among them). 0 disables."
+        ),
+    )
+    parser.add_argument(
+        "--ec-consumer-zmq-addrs",
+        default="",
+        help=(
+            "Comma-separated Mooncake EC consumer control addresses, aligned "
+            "with --decode-servers-urls. Required when the consumers use the "
+            "Mooncake EC connector. With --ec-consumer-dp-size > 1, list each "
+            "server's replicas consecutively: s0r0,s0r1,s1r0,s1r1."
+        ),
+    )
+    parser.add_argument(
+        "--ec-consumer-dp-size",
+        type=int,
+        default=1,
+        help=(
+            "Data-parallel replicas per EC consumer. The proxy picks a replica "
+            "round-robin and names it to both halves of the request, because an "
+            "encoder push has to land where the request will run."
+        ),
+    )
 
     args = parser.parse_args()
     NO_REWRITE = args.no_rewrite
+    DECODE_RETRIES = max(0, args.decode_retries)
     app.state.e_urls = [
         u.strip() for u in args.encode_servers_urls.split(",") if u.strip()
     ]
     app.state.d_urls = [
         u.strip() for u in args.decode_servers_urls.split(",") if u.strip()
     ]
+    app.state.d_ec_urls = [
+        u.strip() for u in args.ec_consumer_zmq_addrs.split(",") if u.strip()
+    ]
+    if args.ec_consumer_dp_size < 1:
+        parser.error("--ec-consumer-dp-size must be at least 1")
+    app.state.ec_consumer_dp_size = args.ec_consumer_dp_size
+    app.state.replica_counter = itertools.count()
+    expected = len(app.state.d_urls) * args.ec_consumer_dp_size
+    if app.state.d_ec_urls and len(app.state.d_ec_urls) != expected:
+        parser.error(
+            "--ec-consumer-zmq-addrs must contain one address per consumer "
+            f"replica: expected {expected} "
+            f"({len(app.state.d_urls)} servers x {args.ec_consumer_dp_size} replicas), "
+            f"got {len(app.state.d_ec_urls)}"
+        )
     # handle prefill instances
     if args.prefill_servers_urls.lower() in ("disable", "none", ""):
         app.state.p_urls = []
@@ -777,6 +937,12 @@ if __name__ == "__main__":
     logger.info("Encode servers: %s", app.state.e_urls)
     logger.info("Prefill instances %s", app.state.p_urls)
     logger.info("Decode servers: %s", app.state.d_urls)
+    if app.state.ec_consumer_dp_size > 1:
+        logger.info(
+            "EC consumer replicas per server: %d (control addresses: %s)",
+            app.state.ec_consumer_dp_size,
+            app.state.d_ec_urls,
+        )
 
     uvicorn.run(
         app,
