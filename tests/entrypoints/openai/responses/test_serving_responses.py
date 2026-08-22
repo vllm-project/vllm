@@ -23,6 +23,7 @@ from openai.types.responses.tool import (
     Mcp,
     Tool,
 )
+from openai_harmony import ReasoningEffort, Role
 
 import vllm.envs as envs
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -94,6 +95,91 @@ def test_serialize_message_pydantic_model_returns_dict() -> None:
     assert isinstance(serialized, dict)
     assert serialized["type"] == "raw_message_tokens"
     assert serialized["message"] == "hello"
+
+
+@pytest.mark.parametrize(
+    ("instructions", "reasoning", "expected_effort"),
+    [
+        pytest.param(
+            "new instructions",
+            {"effort": "low"},
+            ReasoningEffort.LOW,
+            id="replace",
+        ),
+        pytest.param(None, None, ReasoningEffort.MEDIUM, id="remove"),
+    ],
+)
+def test_harmony_continuation_rebuilds_preamble(
+    instructions, reasoning, expected_effort
+) -> None:
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    serving.tool_server = None
+    serving.msg_store = {}
+
+    first_request = ResponsesRequest(
+        model="test",
+        input="first question",
+        instructions="old instructions",
+        reasoning={"effort": "high"},
+    )
+    previous_messages = serving._construct_input_messages_with_harmony(
+        first_request, None
+    )
+    previous_response = MagicMock(id="resp_1", output=[])
+    serving.msg_store[previous_response.id] = previous_messages
+
+    continuation = ResponsesRequest(
+        model="test",
+        input="follow-up question",
+        instructions=instructions,
+        reasoning=reasoning,
+        previous_response_id=previous_response.id,
+    )
+    messages = serving._construct_input_messages_with_harmony(
+        continuation, previous_response
+    )
+
+    roles = [message.author.role for message in messages]
+    expected_roles = [Role.SYSTEM]
+    if instructions is not None:
+        expected_roles.append(Role.DEVELOPER)
+    expected_roles.extend([Role.USER, Role.USER])
+    assert roles == expected_roles
+    assert messages[0].content[0].reasoning_effort == expected_effort
+    if instructions is not None:
+        assert messages[1].content[0].instructions == instructions
+
+
+def test_harmony_continuation_extracts_current_input_instructions() -> None:
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    serving.tool_server = None
+    serving.msg_store = {}
+    previous_response = MagicMock(id="resp_1", output=[])
+    serving.msg_store[previous_response.id] = (
+        serving._construct_input_messages_with_harmony(
+            ResponsesRequest(model="test", input="first question"), None
+        )
+    )
+
+    continuation = ResponsesRequest(
+        model="test",
+        input=[
+            {"role": "system", "content": "current instructions"},
+            {"role": "user", "content": "follow-up question"},
+        ],
+        previous_response_id=previous_response.id,
+    )
+    messages = serving._construct_input_messages_with_harmony(
+        continuation, previous_response
+    )
+
+    assert [message.author.role for message in messages] == [
+        Role.SYSTEM,
+        Role.DEVELOPER,
+        Role.USER,
+        Role.USER,
+    ]
+    assert messages[1].content[0].instructions == "current instructions"
 
 
 @pytest.fixture
