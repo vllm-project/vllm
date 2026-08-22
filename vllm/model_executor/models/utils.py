@@ -181,6 +181,13 @@ class WeightsMapper:
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
         )
 
+    def get_unstacked_mapper(self) -> "WeightsMapper":
+        """Return a mapper without stacked parameter mappings.
+
+        Kept for compatibility with external weight-loader plugins.
+        """
+        return replace(self, orig_to_new_stacked={})
+
 
 def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
     """Map each tied word embedding qualname to the first name it aliases."""
