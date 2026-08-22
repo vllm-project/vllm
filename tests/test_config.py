@@ -128,28 +128,19 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
-def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
-    """ROCm keeps DeepSeek V3.2 and V4 on their compiled MRV1 paths."""
-    from vllm.config.vllm import (
-        default_breakable_cudagraph_architectures,
-        default_v2_model_runner_architectures,
-    )
+def test_rocm_disables_deepseek_v32_breakable_cudagraph(monkeypatch):
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     # The lookup is lru_cached against a fixed platform.
-    default_v2_model_runner_architectures.cache_clear()
     default_breakable_cudagraph_architectures.cache_clear()
     try:
-        v2_architectures = default_v2_model_runner_architectures()
         breakable_architectures = default_breakable_cudagraph_architectures()
 
-        assert "DeepseekV32ForCausalLM" not in v2_architectures
-        assert "DeepseekV4ForCausalLM" not in v2_architectures
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
         assert "DeepseekV32MTPModel" not in breakable_architectures
     finally:
-        default_v2_model_runner_architectures.cache_clear()
         default_breakable_cudagraph_architectures.cache_clear()
 
 
@@ -168,17 +159,13 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     from vllm.compilation.breakable_cudagraph import (
         is_breakable_cudagraph_enabled,
     )
-    from vllm.config.vllm import (
-        default_breakable_cudagraph_architectures,
-        default_v2_model_runner_architectures,
-    )
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    default_v2_model_runner_architectures.cache_clear()
     default_breakable_cudagraph_architectures.cache_clear()
 
     model_config = SimpleNamespace(
@@ -216,7 +203,6 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         assert config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
     finally:
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
-        default_v2_model_runner_architectures.cache_clear()
         default_breakable_cudagraph_architectures.cache_clear()
 
 
@@ -351,7 +337,7 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
     [
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-1.7B-Base",
+                model="Qwen/Qwen3-32B",
                 architectures=["Qwen3ForCausalLM"],
                 runner_type="generate",
                 is_moe=False,
@@ -361,8 +347,8 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-32B",
-                architectures=["Qwen3ForCausalLM"],
+                model="Qwen/Qwen2-7B-Instruct",
+                architectures=["Qwen2ForCausalLM"],
                 runner_type="generate",
                 is_moe=False,
                 is_quantized=False,
@@ -497,7 +483,7 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 is_moe=True,
                 is_quantized=False,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -518,7 +504,7 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 is_quantized=False,
                 is_hybrid=True,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -529,7 +515,7 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 is_quantized=False,
                 is_attention_free=True,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -566,20 +552,10 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
     ],
 )
-def test_is_default_v2_model_runner_model(model_config, expected, monkeypatch):
-    from vllm.config.vllm import default_v2_model_runner_architectures
-    from vllm.platforms import current_platform
-
-    # The expectations below are the platform-independent defaults; ROCm's
-    # DeepSeek V4 carve-out is covered by test_rocm_defaults_deepseek_v4_to_mrv1.
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    default_v2_model_runner_architectures.cache_clear()
+def test_is_default_v2_model_runner_model(model_config, expected):
     config = SimpleNamespace(model_config=model_config)
 
-    try:
-        assert VllmConfig._is_default_v2_model_runner_model(config) is expected
-    finally:
-        default_v2_model_runner_architectures.cache_clear()
+    assert VllmConfig._is_default_v2_model_runner_model(config) is expected
 
 
 @pytest.mark.skip_global_cleanup

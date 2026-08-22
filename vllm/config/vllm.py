@@ -66,21 +66,6 @@ else:
 
 logger = init_logger(__name__)
 
-DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
-    {
-        "DeepseekV2ForCausalLM",
-        "DeepseekV32ForCausalLM",
-        "DeepseekV4ForCausalLM",
-        "GlmMoeDsaForCausalLM",
-        "GraniteMoeForCausalLM",
-        "InklingForCausalLM",
-        "InklingForConditionalGeneration",
-        "KimiK3ForConditionalGeneration",
-        "LongcatFlashNgramForCausalLM",
-        "Qwen2MoeForCausalLM",
-    }
-)
-
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "DeepseekV32MTPModel",
@@ -97,21 +82,6 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
-
-
-@lru_cache
-def default_v2_model_runner_architectures() -> frozenset[str]:
-    """Architectures defaulting to the V2 model runner on this platform."""
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        # TODO(rocm): These models are either unsupported by MRV2 or slower with
-        # MRV2 on AMD GPUs.
-        return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES - {
-            "DeepseekV32ForCausalLM",
-            "DeepseekV4ForCausalLM",
-        }
-    return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
 
 @lru_cache
@@ -679,9 +649,6 @@ class VllmConfig:
         if self.model_config is not None and self.model_config.is_diffusion:
             return True
 
-        if not self._is_default_v2_model_runner_model():
-            return False
-
         if not HAS_TRITON:
             logger.warning_once(
                 "Model Runner V2 requires Triton; using the V1 model runner instead."
@@ -721,26 +688,6 @@ class VllmConfig:
         layer_types = getattr(draft_config.hf_config, "layer_types", None) or []
         num_sliding = sum(lt == "sliding_attention" for lt in layer_types)
         return 0 < num_sliding < len(layer_types)
-
-    def _is_default_v2_model_runner_model(self) -> bool:
-        model_config = self.model_config
-        if model_config is None:
-            return False
-
-        architectures = getattr(model_config, "architectures", [])
-        default_architectures = default_v2_model_runner_architectures()
-        is_default_v2_architecture = any(
-            arch in default_architectures for arch in architectures
-        )
-
-        if getattr(model_config, "is_hybrid", False) and (
-            not is_default_v2_architecture
-        ):
-            return False
-
-        if getattr(model_config, "is_attention_free", False):
-            return False
-        return is_default_v2_architecture or not model_config.is_moe
 
     def _uses_breakable_cudagraph_by_default(self) -> bool:
         model_config = self.model_config
