@@ -1256,6 +1256,7 @@ class Qwen2_5_VLForConditionalGeneration(
 
     supports_encoder_tp_data = True
     supports_mm_device_do_normalize = True
+    supports_tower_connector_lora = True
 
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
