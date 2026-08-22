@@ -137,6 +137,25 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
         if not rocm_aiter_ops.is_linear_fp8_enabled():
+            # The architecture gate for every aiter fp8 GEMM lives here, but
+            # indirectly: is_linear_fp8_enabled is wrapped in
+            # @if_aiter_supported, which short-circuits to None on anything
+            # below CDNA3 no matter how the env vars are set. It is real and
+            # load-bearing -- gfx90a is rejected here even with aiter
+            # installed and all three VLLM_ROCM_USE_AITER* flags set -- but
+            # nothing about it is visible at this call site, and the message
+            # below used to blame the env vars for it. That reads as "you
+            # configured this wrong" on hardware where no configuration would
+            # have helped. Name the real cause when it is the arch.
+            from vllm.platforms.rocm import get_cdna_version
+
+            cdna = get_cdna_version()
+            if cdna <= 2:
+                return (
+                    False,
+                    "requires CDNA3+ (gfx942/gfx950); aiter has no fp8 GEMM "
+                    f"for this architecture (CDNA {cdna}).",
+                )
             return (
                 False,
                 "requires setting `VLLM_ROCM_USE_AITER=1` "
@@ -225,6 +244,20 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "requires ROCm."
 
         if not rocm_aiter_ops.is_linear_hipbmm_enabled():
+            # Same indirect CDNA3+ gate as
+            # AiterPreshuffledPerTokenFp8ScaledMMLinearKernel above, reached
+            # via @if_aiter_supported plus an explicit get_cdna_version() > 2
+            # inside is_linear_hipbmm_enabled. Report the arch when that is
+            # what rejected the layer, rather than blaming the env vars.
+            from vllm.platforms.rocm import get_cdna_version
+
+            cdna = get_cdna_version()
+            if cdna <= 2:
+                return (
+                    False,
+                    "requires CDNA3+ (gfx942/gfx950); aiter has no fp8 GEMM "
+                    f"for this architecture (CDNA {cdna}).",
+                )
             return (
                 False,
                 "requires setting `VLLM_ROCM_USE_AITER=1`, "
