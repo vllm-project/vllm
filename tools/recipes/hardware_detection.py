@@ -47,9 +47,7 @@ class HardwareInfo:
 
 
 def _read_socket_id(cpu_id: int) -> int | None:
-    path = Path(
-        f"/sys/devices/system/cpu/cpu{cpu_id}/topology/physical_package_id"
-    )
+    path = Path(f"/sys/devices/system/cpu/cpu{cpu_id}/topology/physical_package_id")
     try:
         return int(path.read_text().strip())
     except (OSError, ValueError):
@@ -75,18 +73,14 @@ def detect_hardware() -> HardwareInfo:
         effective_numa_nodes = sorted(cpu_numa_nodes)
 
     physical_cores = {
-        (cpu.numa_node, cpu.physical_core)
-        for cpu in cpus
-        if cpu.physical_core >= 0
+        (cpu.numa_node, cpu.physical_core) for cpu in cpus if cpu.physical_core >= 0
     }
 
     numa_nodes = []
     for node_id in effective_numa_nodes:
         node_cpus = [cpu for cpu in cpus if cpu.numa_node == node_id]
         node_physical_cores = {
-            cpu.physical_core
-            for cpu in node_cpus
-            if cpu.physical_core >= 0
+            cpu.physical_core for cpu in node_cpus if cpu.physical_core >= 0
         }
         memory = get_memory_node_info(node_id)
         numa_nodes.append(
@@ -100,9 +94,7 @@ def detect_hardware() -> HardwareInfo:
         )
 
     socket_ids = {
-        socket_id
-        for cpu in cpus
-        if (socket_id := _read_socket_id(cpu.id)) is not None
+        socket_id for cpu in cpus if (socket_id := _read_socket_id(cpu.id)) is not None
     }
 
     return HardwareInfo(
