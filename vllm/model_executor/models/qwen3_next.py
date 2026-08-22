@@ -9,7 +9,12 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -24,6 +29,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
+from vllm.model_executor.layers.fused_qkv_norm_rope_cache import (
+    attn_layer_supports_gated_qk_norm_rope_kvcache,
+)
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -303,11 +311,24 @@ class Qwen3NextAttention(nn.Module):
         # TODO: support MRoPE
         mm_config = model_config.multimodal_config if model_config else None
         text_only = mm_config is None or mm_config.language_model_only
+        vllm_config = get_current_vllm_config_or_none()
+        compile_fusion_enabled = (
+            vllm_config is not None
+            and vllm_config.compilation_config.pass_config.fuse_qk_norm_rope_kvcache
+        )
+        self.use_qk_norm_rope_kvcache_compile_fusion = (
+            compile_fusion_enabled
+            and text_only
+            and self.attn_output_gate
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and attn_layer_supports_gated_qk_norm_rope_kvcache(self.attn)
+        )
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
             and current_platform.is_cuda()
             and text_only
+            and not self.use_qk_norm_rope_kvcache_compile_fusion
         )
 
     def _project_qkv_gate(
@@ -363,6 +384,8 @@ class Qwen3NextAttention(nn.Module):
         k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
             -1, self.num_kv_heads * self.head_dim
         )
+        if self.use_qk_norm_rope_kvcache_compile_fusion and positions.ndim == 2:
+            positions = positions[0]
         q, k = self.rotary_emb(positions, q, k)
         return q, k, v, gate
 
