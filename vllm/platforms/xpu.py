@@ -360,6 +360,25 @@ class XPUPlatform(Platform):
         # This allows custom workers (like vllm-omni workers) to be used on XPU
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+
+        # Batched experts can only be fed by a batched dispatch.
+        if (
+            parallel_config.enable_expert_parallel
+            and vllm_config.kernel_config.moe_backend == "batched_triton"
+            and parallel_config.all2all_backend == "allgather_reducescatter"
+        ):
+            parallel_config.all2all_backend = "alltoall_batched"
+            # The token budget was already sized for a non-batched dispatch.
+            sched = vllm_config.scheduler_config
+            sched.max_num_batched_tokens = min(
+                sched.max_num_batched_tokens,
+                sched.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP,
+            )
+            logger.info_once(
+                "XPU MoE: using alltoall_batched dispatch, max_num_batched_tokens=%d",
+                sched.max_num_batched_tokens,
+            )
+
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
 

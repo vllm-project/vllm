@@ -91,15 +91,19 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             b_type = quant_config.quant_dtype
 
+        # One expert receives at most num_tokens rows, so max_num_tokens
+        # (scheduler-wide) over-allocates by orders of magnitude at decode.
+        capacity = min(self.max_num_tokens, num_tokens)
+
         b_a1 = torch.zeros(
-            (num_local_experts, self.max_num_tokens, hidden_dim),
+            (num_local_experts, capacity, hidden_dim),
             dtype=b_type,
             device=a1.device,
         )
 
         if quant_config.is_quantized:
             scale_shape = quant_config.batched_scale_shape(
-                num_local_experts, self.max_num_tokens, hidden_dim
+                num_local_experts, capacity, hidden_dim
             )
 
             b_a1_scale = torch.zeros(scale_shape, dtype=torch.float32, device=a1.device)
