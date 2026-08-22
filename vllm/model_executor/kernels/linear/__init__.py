@@ -396,12 +396,12 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
 # in priority/performance order (when available)
 _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
     PlatformEnum.CUDA: [
+        MarlinFP8ScaledMMLinearKernel,
         FlashInferFP8ScaledMMLinearKernel,
         CutlassFP8ScaledMMLinearKernel,
         B12xTensorFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
-        MarlinFP8ScaledMMLinearKernel,
         HummingFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
@@ -436,8 +436,8 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         CutlassFp8BlockScaledMMKernel,
         B12xFp8BlockScaledMMKernel,
         MarlinFP8ScaledMMLinearKernel,
-        HummingFP8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
+        HummingFP8ScaledMMLinearKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
