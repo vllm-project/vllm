@@ -298,6 +298,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
 
         replacement_id = hf_processor.audio_replacement_token_id  # type: ignore
 
@@ -322,9 +323,14 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         return [
             PromptReplacement(
                 modality="audio",
-                # `replacement_id` is paired with `<|audio|>` in
-                # `UltravoxProcessingInfo.get_hf_processor`
-                target=[replacement_id],
+                # `<|audio|>` is paired with `replacement_id` in
+                # `UltravoxProcessingInfo.get_hf_processor`, but it is not
+                # guaranteed to be a single vocab entry, so match the encoded
+                # placeholder text instead of `replacement_id`
+                target=tokenizer.encode(
+                    hf_processor.audio_token_replacement,  # type: ignore
+                    add_special_tokens=False,
+                ),
                 replacement=get_replacement_ultravox,
             )
         ]
