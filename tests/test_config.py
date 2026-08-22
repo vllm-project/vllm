@@ -199,6 +199,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ),
     )
     config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash2_draft = lambda: False
     config._is_default_v2_model_runner_model = lambda: (
         VllmConfig._is_default_v2_model_runner_model(config)
     )
@@ -290,6 +291,29 @@ def test_v2_model_runner_supports_extract_hidden_states():
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
+
+
+def test_dflash2_draft_forces_v2_model_runner():
+    """A DFlash2 draft must reach the V2 speculator, the only one that runs its
+    candidate selector; on V1 it would draft as DFlash1 without raising."""
+
+    def config(method, architectures):
+        return SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method=method,
+                draft_model_config=SimpleNamespace(architectures=architectures),
+            )
+        )
+
+    assert VllmConfig._is_dflash2_draft(config("dflash", ["DFlash2DraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(config("dflash", ["DFlashDraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(config("eagle", ["DFlash2DraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(SimpleNamespace(speculative_config=None))
+    assert not VllmConfig._is_dflash2_draft(
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -2039,6 +2063,41 @@ def test_draft_sample_method_gumbel_is_rejected():
             num_speculative_tokens=1,
             draft_sample_method="gumbel",
         )
+
+
+@patch("vllm.config.speculative.ModelConfig")
+def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
+    """Regression test: MTP + runai_streamer should use model_weights (original
+    S3 URL) for the draft model, not model (local cache dir set by
+    pull_runai_model_from_obj_storage)."""
+    from unittest.mock import MagicMock
+
+    s3_url = "s3://my-bucket/Qwen3-35B-A3B-FP8"
+    local_cache = "/root/.cache/vllm/assets/model_streamer/abcd1234"
+
+    mock_draft = MagicMock()
+    mock_draft.model = local_cache
+    mock_draft.hf_config.model_type = "deepseek_mtp"
+    mock_draft.hf_config.n_predict = None
+    mock_draft.max_model_len = 4096
+    mock_model_config_cls.return_value = mock_draft
+
+    target_config = MagicMock()
+    target_config.model = local_cache
+    target_config.model_weights = s3_url
+    target_config.hf_text_config.model_type = "deepseek_v3"
+    target_config.quantization = None
+    target_config.max_model_len = 4096
+
+    SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=target_config,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    actual_model = mock_model_config_cls.call_args.kwargs["model"]
+    assert actual_model == s3_url
 
 
 def test_ir_op_priority_default():
