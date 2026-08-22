@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 import warnings
 
 import pytest
@@ -71,9 +72,14 @@ def test_registry_imports(model_arch):
         )
         is not None
     ):
-        assert registered_model.inspect_model_cls() == (
-            model_registry._ModelInfo.from_model_cls(model_cls)
-        )
+        direct_info = registered_model.inspect_model_cls()
+        dynamic_info = model_registry._ModelInfo.from_model_cls(model_cls)
+
+        for field in dataclasses.fields(dynamic_info):
+            direct_value = getattr(direct_info, field.name)
+            dynamic_value = getattr(dynamic_info, field.name)
+            assert type(direct_value) is type(dynamic_value), field.name
+            assert direct_value == dynamic_value, field.name
 
     if model_arch in _SPECULATIVE_DECODING_MODELS:
         return  # Ignore these models which do not have a unified format
