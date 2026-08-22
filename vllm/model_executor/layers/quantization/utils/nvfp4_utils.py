@@ -57,7 +57,9 @@ def cutlass_fp4_supported() -> bool:
     if not current_platform.is_cuda():
         return False
     capability_tuple = current_platform.get_device_capability()
-    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+    if capability_tuple is None or capability_tuple.to_int() != 100:
+        return False
+    capability = capability_tuple.to_int()
     return cutlass_scaled_mm_supports_fp4(capability)
 
 
