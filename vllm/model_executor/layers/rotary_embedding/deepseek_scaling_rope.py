@@ -223,8 +223,22 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
                 self.is_neox_style,
             )
             return query, key
-        else:
-            return self.forward_native(positions, query, key, offsets)
+
+        from vllm import _custom_ops as ops
+
+        # Same fused in-place kernel as RotaryEmbedding.forward_cuda; the
+        # YaRN scaling only changes the precomputed cos/sin cache. RoPE is
+        # applied to the leading `rotary_dim` of each head (rope_dim_offset
+        # stays 0, unlike DeepseekV4ScalingRotaryEmbedding).
+        ops.rotary_embedding(
+            torch.add(positions, offsets) if offsets is not None else positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+            self.is_neox_style,
+        )
+        return query, key
 
 
 class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
