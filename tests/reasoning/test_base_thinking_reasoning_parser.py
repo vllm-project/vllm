@@ -436,3 +436,26 @@ class TestBaseThinkingReasoningParserEdgeCases:
         # Should treat as regular content since tokens don't match exactly
         assert reasoning == ("<test:thinking>Not a real token</test:thinking>Content")
         assert content is None
+
+    def test_end_token_id_without_literal_substring(self, test_tokenizer):
+        """Test streaming when end_token_id is present in multi-token delta but end_token string is not in delta_text."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        start_id = parser.start_token_id
+        end_id = parser.end_token_id
+
+        # Scenario: start token in previous_token_ids, multi-token delta with end_token_id
+        # but delta_text does not contain '</test:think>' literally
+        delta_msg = parser.extract_reasoning_streaming(
+            previous_text="thinking text ",
+            current_text="thinking text step complete",
+            delta_text="step complete",
+            previous_token_ids=[start_id, 100],
+            current_token_ids=[start_id, 100, 101, end_id],
+            delta_token_ids=[101, end_id],
+        )
+        assert delta_msg is not None
+        # Ensures delta_text was not truncated with delta_text[:-1]
+        assert delta_msg.reasoning == "step complete"
+        assert delta_msg.content is None
+
+
