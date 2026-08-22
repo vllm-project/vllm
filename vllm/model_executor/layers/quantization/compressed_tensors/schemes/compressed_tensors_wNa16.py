@@ -44,7 +44,15 @@ WNA16_SUPPORTED_TYPES_MAP = {
     7: scalar_types.uint7b64,
     8: scalar_types.uint8b128,
 }
-WNA16_ZP_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4, 8: scalar_types.uint8}
+WNA16_ZP_SUPPORTED_TYPES_MAP = {
+    2: scalar_types.uint2,
+    3: scalar_types.uint3,
+    4: scalar_types.uint4,
+    5: scalar_types.uint5,
+    6: scalar_types.uint6,
+    7: scalar_types.uint7,
+    8: scalar_types.uint8,
+}
 WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
 
