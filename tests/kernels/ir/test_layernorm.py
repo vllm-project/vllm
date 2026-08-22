@@ -434,3 +434,63 @@ class TestFusedAddRMSNorm:
                 torch.library.opcheck(
                     torch.ops.vllm_ir.fused_add_rms_norm.maybe_inplace, args
                 )
+
+
+@pytest.mark.skipif(
+    not IS_GPGPU_DEVICE,
+    reason="Currently only kernels on CUDA, ROCm and XPU",
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("n_tokens", [8, 512])
+@pytest.mark.parametrize("hidden_size", [2048, 8192])
+def test_vllm_c_fused_add_rms_norm_rounding_order(
+    dtype: torch.dtype, n_tokens: int, hidden_size: int
+) -> None:
+    """vllm_c fused_add_rms_norm must match the native IR, which keeps
+    x.float() + residual.float() in FP32 through the variance and output
+    computation (see #52104).
+
+    Non-uniform inputs are required: when every element of a row is equal, the
+    rsqrt normalization exactly cancels a uniform per-element scale, so the
+    rounding order is unobservable. With random inputs, rounding the sum to
+    the input dtype before computing the variance (the old behavior) biases
+    each output by about half an ULP and is easy to detect.
+    """
+    impl = ir.ops.fused_add_rms_norm.impls["vllm_c"]
+    if not impl.supported:
+        pytest.skip("vllm_c impl not supported on this platform")
+
+    device = current_platform.device_type
+    g = torch.Generator(device=device).manual_seed(0)
+    x = torch.randn(n_tokens, hidden_size, dtype=dtype, device=device, generator=g)
+    x_residual = torch.randn(
+        n_tokens, hidden_size, dtype=dtype, device=device, generator=g
+    )
+    weight = torch.randn(hidden_size, dtype=dtype, device=device, generator=g)
+    epsilon = 1e-6
+
+    # Native IR semantics: keep x + residual in FP32 through the variance and
+    # output; round only on the residual write-back and the weight multiply.
+    summed_fp32 = x.float() + x_residual.float()
+    variance = summed_fp32.square().mean(dim=-1, keepdim=True)
+    native = summed_fp32 * torch.rsqrt(variance + epsilon)
+    native = (native.to(weight.dtype) * weight).to(dtype)
+    native_residual = summed_fp32.to(dtype)
+
+    output, residual_out = impl.impl_fn(x.clone(), x_residual.clone(), weight, epsilon)
+
+    # The residual write-back is a plain elementwise FP32 add followed by a
+    # single round, so it must match bit-exactly.
+    torch.testing.assert_close(residual_out, native_residual, rtol=0.0, atol=0.0)
+
+    # The variance differs from the reference only in the FP32 summation
+    # order, so the output may differ by rounding noise but not
+    # systematically. Rounding the sum before the variance (the bug) shifts
+    # roughly half of the outputs by one ULP.
+    mismatches = torch.count_nonzero(output != native).item()
+    numel = output.numel()
+    assert mismatches / numel < 0.01, (
+        "vllm_c fused_add_rms_norm diverges from native IR semantics "
+        f"({mismatches}/{numel} elements differ); the variance must be "
+        "computed from the unrounded FP32 sum"
+    )
