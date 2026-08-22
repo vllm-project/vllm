@@ -71,7 +71,10 @@ class SharedOffloadRegion:
     the rest open the existing file and wait until it reaches the expected
     size.  Each worker then mmap()s the full file.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap
+    File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
+    given, the path is unlinked once every worker has mapped the file, so
+    the kernel reclaims the memory when the last worker exits, no matter
+    how it exits; mappings taken before the unlink stay valid.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -83,6 +86,7 @@ class SharedOffloadRegion:
         rank: int | None,
         kv_bytes_per_block: int,
         cpu_page_size: int,
+        barrier: Callable[[], None] | None = None,
     ) -> None:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_block % self.page_size == 0
@@ -138,6 +142,22 @@ class SharedOffloadRegion:
             flags=mmap.MAP_SHARED,
             prot=mmap.PROT_READ | mmap.PROT_WRITE,
         )
+
+        if barrier is not None:
+            # Every worker has mapped the file once the barrier releases, so
+            # its name is no longer needed and dropping it here means no exit
+            # path — including SIGKILL — can leak the file.
+            try:
+                barrier()
+            except Exception:
+                self.mmap_obj.close()
+                os.close(self.fd)
+                if self._creator:
+                    os.unlink(self.mmap_path)
+                raise
+            if self._creator:
+                os.unlink(self.mmap_path)
+                logger.info("Unlinked mmap file %s", self.mmap_path)
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
@@ -302,6 +322,8 @@ class SharedOffloadRegion:
             try:
                 os.unlink(self.mmap_path)
                 logger.info("Removed mmap file %s", self.mmap_path)
+            except FileNotFoundError:
+                pass  # already unlinked after the all-mapped barrier
             except Exception:
                 logger.warning(
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
