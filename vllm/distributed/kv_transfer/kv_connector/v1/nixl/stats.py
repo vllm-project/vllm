@@ -95,7 +95,7 @@ class NixlKVConnectorStats(KVConnectorStats):
                 "Avg post time (ms)": 0,
                 "P90 post time (ms)": 0,
                 "Avg MB per transfer": 0,
-                "Throughput (MB/s)": 0,
+                "Avg per-transfer throughput (MB/s)": 0,
                 "Avg number of descriptors": 0,
             }
 
@@ -110,8 +110,16 @@ class NixlKVConnectorStats(KVConnectorStats):
         total_mb = mb.sum()
         avg_mb = total_mb / n
 
-        total_time_seconds = xfer_time.sum()
-        throughput_mb_s = total_mb / total_time_seconds
+        # Mean of positive-duration per-transfer rates is well-defined under
+        # concurrent transfers. Zero-duration telemetry has no defined rate.
+        # total_mb / xfer_time.sum() would inflate the denominator by concurrency
+        # because independent per-handle durations overlap in steady state.
+        positive_duration = xfer_time > 0
+        avg_throughput_mb_s = (
+            (mb[positive_duration] / xfer_time[positive_duration]).mean()
+            if positive_duration.any()
+            else 0.0
+        )
 
         return {
             "Num successful transfers": n,
@@ -120,7 +128,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             "Avg post time (ms)": round(post_time.mean() * 1e3, 3),
             "P90 post time (ms)": round(np.percentile(post_time, 90).item() * 1e3, 3),
             "Avg MB per transfer": round(avg_mb, 3),
-            "Throughput (MB/s)": round(throughput_mb_s, 3),
+            "Avg per-transfer throughput (MB/s)": round(avg_throughput_mb_s, 3),
             "Avg number of descriptors": round(descs.mean(), 1),
         }
 
