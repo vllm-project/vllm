@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
@@ -8,6 +9,7 @@ from typing import (
     Any,
     Literal,
     Protocol,
+    cast,
     get_args,
 )
 
@@ -44,6 +46,13 @@ _KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
+
+_LN_2 = math.log(2.0)
+
+
+def log2_lse_to_ln(lse: torch.Tensor) -> torch.Tensor:
+    """Convert a base-2 log-sum-exp tensor to natural-log units."""
+    return lse * _LN_2
 
 
 def compute_mm_prefix_range_tensor(
@@ -255,7 +264,10 @@ def get_num_attention_heads_from_layers(
     )
     if not attn_layers:
         return None
-    heads = {layer.impl.num_heads for layer in attn_layers.values()}
+    heads = {
+        cast(Any, getattr(layer, "impl", layer)).num_heads
+        for layer in attn_layers.values()
+    }
     assert len(heads) == 1, (
         f"All layers in one attention group must share num_heads; "
         f"got {heads} for {layer_names}."

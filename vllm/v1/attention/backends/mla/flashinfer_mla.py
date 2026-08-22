@@ -174,10 +174,16 @@ class FlashInferMLABackend(MLACommonBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128, 192]
-        from vllm.config import get_current_vllm_config
-
         vllm_config = get_current_vllm_config()
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.method == "dspark"
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+        ):
+            return "FlashInfer MLA does not support DSpark with DCP"
+
+        # FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128, 192]
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
@@ -278,9 +284,8 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         seq_lens = attn_metadata.decode.seq_lens
 
         if not attn_metadata.causal:
-            # Non-causal DSpark block: flatten to single-token decode rows with
-            # per-row context seq_lens (trtllm-gen has no causal flag and would
-            # otherwise mask the block causally).
+            # FlashInfer decode has no causal flag. For TP-only DSpark, flatten
+            # each non-causal query block into independent single-token rows.
             query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
             q = q.unsqueeze(1)
             if query_len > 1:

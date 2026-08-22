@@ -62,11 +62,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 )
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
+    get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
@@ -89,6 +91,11 @@ logger = init_logger(__name__)
 
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
+
+    # Transfer mode included in the NIXL compatibility hash so that a push
+    # (WRITE) connector and a pull (READ) connector never handshake together.
+    # Overridden by NixlPushConnectorWorker.
+    _TRANSFER_MODE: str = "pull"
 
     def _compute_desc_ids(
         self,
@@ -363,6 +370,9 @@ class NixlBaseConnectorWorker:
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
 
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
@@ -555,6 +565,23 @@ class NixlBaseConnectorWorker:
             "enforce_handshake_compat", True
         )
 
+    def _validate_remote_parallel_config(
+        self, agent_metadata: NixlAgentMetadata
+    ) -> None:
+        local_pcp_size = self.pcp_size
+        local_dcp_size = self.dcp_size
+        remote_pcp_size = agent_metadata.pcp_size
+        remote_dcp_size = agent_metadata.dcp_size
+        if (local_pcp_size > 1 and remote_dcp_size > 1) or (
+            remote_pcp_size > 1 and local_dcp_size > 1
+        ):
+            raise NotImplementedError(
+                "NixlConnector PCP requires decode_context_parallel_size=1 "
+                "on both instances. "
+                f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
+                f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
+            )
+
     def _sync_block_size_with_kernel(self) -> None:
         backends = get_current_attn_backends(self.vllm_config)
         kernel_block_size = select_common_block_size(self.block_size, backends)
@@ -693,6 +720,8 @@ class NixlBaseConnectorWorker:
                     raise RuntimeError(
                         f"Failed to decode NixlAgentMetadata. Error: {e}"
                     ) from e
+
+                self._validate_remote_parallel_config(metadata)
 
                 # Ensure engine id matches.
                 if metadata.engine_id != expected_engine_id:
@@ -976,6 +1005,7 @@ class NixlBaseConnectorWorker:
             self.vllm_config,
             self.backend_name,
             self.transfer_topo.cross_layers_blocks,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
         total_size = storage.nbytes()
@@ -1026,6 +1056,8 @@ class NixlBaseConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            dcp_size=self.dcp_size,
+            pcp_size=self.pcp_size,
         )
         assert self.compat_hash is not None
         encoder = msgspec.msgpack.Encoder()
@@ -1066,7 +1098,10 @@ class NixlBaseConnectorWorker:
             is_mamba=self._has_mamba,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
-            self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
+            self.vllm_config,
+            self.backend_name,
+            self.transfer_topo.cross_layers_blocks,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
         if self.use_host_buffer:
@@ -1267,6 +1302,8 @@ class NixlBaseConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            dcp_size=self.dcp_size,
+            pcp_size=self.pcp_size,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1873,14 +1910,16 @@ class NixlBaseConnectorWorker:
 
         local_block_ids = meta.local_physical_block_ids
         # TODO (NickLucche) D2H<>H2D ops could benefit from coalescing io across groups
-        for group_block_ids in local_block_ids:
-            self.copy_blocks(
-                self.host_xfer_buffers,
-                self.device_kv_caches,
-                group_block_ids,
-                group_block_ids,
-                "h2d",
-            )
+        # The h2d block copies below are intentionally synchronous.
+        with gpu_sync_allowed():
+            for group_block_ids in local_block_ids:
+                self.copy_blocks(
+                    self.host_xfer_buffers,
+                    self.device_kv_caches,
+                    group_block_ids,
+                    group_block_ids,
+                    "h2d",
+                )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "synced recved kv of request[%s] to device kv buffer,"
@@ -1894,26 +1933,28 @@ class NixlBaseConnectorWorker:
         assert self.use_host_buffer
         assert self.copy_blocks is not None
 
-        for req_id, meta in metadata.reqs_to_save.items():
-            meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids, self._physical_blocks_per_logical_kv_block
-            )
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "save_load_kv for request[%s] to host xfer buffer."
-                    "local_block_ids: %s. ",
-                    req_id,
-                    ",".join(map(str, meta.local_physical_block_ids)),
+        # The d2h block copies below are intentionally synchronous.
+        with gpu_sync_allowed():
+            for req_id, meta in metadata.reqs_to_save.items():
+                meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
+                    meta.local_block_ids, self._physical_blocks_per_logical_kv_block
                 )
-            # blocking
-            for group_block_ids in meta.local_physical_block_ids:
-                self.copy_blocks(
-                    self.device_kv_caches,
-                    self.host_xfer_buffers,
-                    group_block_ids,
-                    group_block_ids,
-                    "d2h",
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "save_load_kv for request[%s] to host xfer buffer."
+                        "local_block_ids: %s. ",
+                        req_id,
+                        ",".join(map(str, meta.local_physical_block_ids)),
+                    )
+                # blocking
+                for group_block_ids in meta.local_physical_block_ids:
+                    self.copy_blocks(
+                        self.device_kv_caches,
+                        self.host_xfer_buffers,
+                        group_block_ids,
+                        group_block_ids,
+                        "d2h",
+                    )
 
     @cached_property
     def _attention_kv_caches(self) -> list[torch.Tensor]:
