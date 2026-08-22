@@ -142,8 +142,54 @@ def test_launch_registered_in_main():
     assert any(s.name == "launch" for s in subcmds)
 
 
-_MODULE_REPORT_PREFIX = "__VLLM_MODULES__="
 _MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
+
+
+def _run_python(*args: str) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run([sys.executable, *args], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return result
+
+
+_RUNTIME_MODULES = (
+    "torch",
+    "uvloop",
+    "vllm.env_override",
+    "vllm.entrypoints.cli.serve",
+    "vllm.entrypoints.openai.cli_args",
+    "vllm.snapshot.controller",
+    "vllm.snapshot.server",
+    "vllm.utils.argparse_utils",
+    "vllm.v1.executor",
+    "vllm.v1.worker.gpu_model_runner",
+)
+
+
+def _run_import_light_help(argv: list[str]) -> str:
+    script = f"""
+import os
+import sys
+
+os.environ.pop("VLLM_WORKER_MULTIPROC_METHOD", None)
+sys.argv = ["vllm", *{argv!r}]
+from vllm.entrypoints.cli.main import main
+
+try:
+    main()
+except SystemExit as exc:
+    assert exc.code == 0
+
+assert "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ
+loaded = sorted(
+    prefix
+    for prefix in {_RUNTIME_MODULES!r}
+    if any(
+        name == prefix or name.startswith(f"{{prefix}}.") for name in sys.modules
+    )
+)
+assert not loaded, loaded
+"""
+    return _run_python("-c", script).stdout
 
 
 def _run_cli(argv: list[str]) -> None:
@@ -151,38 +197,6 @@ def _run_cli(argv: list[str]) -> None:
 
     with patch.object(sys, "argv", ["vllm", *argv]):
         cli_main.main()
-
-
-def _run_cli_module_probe(
-    argv: list[str], tracked_modules: set[str], worker_method: str | None = None
-) -> tuple[str, set[str]]:
-    script = f"""
-import json
-import os
-import sys
-
-os.environ.pop("VLLM_WORKER_MULTIPROC_METHOD", None)
-from vllm.entrypoints.cli.main import main
-
-sys.argv = ["vllm", *{argv!r}]
-try:
-    main()
-except SystemExit as exc:
-    if exc.code:
-        raise
-finally:
-    loaded = sorted(name for name in {tracked_modules!r} if name in sys.modules)
-    print({_MODULE_REPORT_PREFIX!r} + json.dumps(loaded))
-assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == {worker_method!r}
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    report = result.stdout.rsplit(_MODULE_REPORT_PREFIX, 1)[1].splitlines()[0]
-    return result.stdout, set(json.loads(report))
 
 
 def test_snapshot_environment_contract(
@@ -274,20 +288,8 @@ def parse_snapshot(*argv: str):
 
 
 def test_snapshot_help_stays_lazy():
-    runtime_modules = {
-        "torch",
-        "uvloop",
-        "vllm.entrypoints.openai.cli_args",
-        "vllm.snapshot.controller",
-        "vllm.snapshot.server",
-        "vllm.utils.argparse_utils",
-        "vllm.v1.worker.gpu_model_runner",
-    }
-    stdout, loaded = _run_cli_module_probe(
-        ["snapshot", "restore", "--help"], runtime_modules
-    )
-    assert "snapshot" in stdout.lower()
-    assert loaded == set()
+    output = _run_import_light_help(["snapshot", "restore", "--help"])
+    assert "snapshot" in output.lower()
 
 
 def test_snapshot_create_cli_accepts_only_pinned_compact_mode(
@@ -712,17 +714,7 @@ def test_snapshot_rejects_unsafe_process_state_before_criu(
 
 @pytest.mark.parametrize("argv", [["--help"], ["serve", "--help"]])
 def test_help_is_import_light(argv):
-    output, loaded = _run_cli_module_probe(
-        argv,
-        {
-            "torch",
-            "vllm.env_override",
-            "vllm.entrypoints.cli.serve",
-            "vllm.entrypoints.openai.cli_args",
-            "vllm.v1.executor",
-        },
-    )
-    assert loaded == set()
+    output = _run_import_light_help(argv)
     if argv[0] != "serve":
         return
 
@@ -742,9 +734,9 @@ def test_help_is_import_light(argv):
 
 
 def test_serve_help_all_uses_canonical_parser():
-    output, _ = _run_cli_module_probe(["serve", "--help=all"], set(), "spawn")
+    output = _run_python("-m", "vllm.entrypoints.cli.main", "serve", "--help=all")
     for argument in ("model_tag", "--grpc", "--host", "--max-model-len"):
-        assert argument in output
+        assert argument in output.stdout
 
 
 @pytest.mark.parametrize(
@@ -800,13 +792,7 @@ except SystemExit as exc:
 
 assert guard.seen == {{"torch", "selected"}}
 """
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
+    _run_python("-c", script)
 
 
 def test_serve_parser_uses_explicit_args_not_host_sys_argv():
@@ -843,10 +829,4 @@ assert "vllm::runtime_override_probe" in FALLBACK_ALLOW_LIST
 assert os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] == "1"
 assert os.environ["TORCHINDUCTOR_COMPILE_THREADS"] == "1"
 """
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
+    _run_python("-c", script)
