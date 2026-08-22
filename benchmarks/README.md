@@ -18,3 +18,24 @@ For full CLI reference see:
 - <https://docs.vllm.ai/en/latest/cli/bench/latency.html>
 - <https://docs.vllm.ai/en/latest/cli/bench/serve.html>
 - <https://docs.vllm.ai/en/latest/cli/bench/throughput.html>
+
+## Mixed Serving Boundary Benchmark
+
+Use `mixed_serving_boundary` when a single run needs to stress several serving
+boundaries at once: shared-prefix reuse, unique long-prefill requests, and
+short-prefill long-decode requests.
+
+```bash
+vllm bench serve \
+  --dataset-name mixed_serving_boundary \
+  --num-prompts 300 \
+  --request-rate 20 \
+  --save-result \
+  --save-detailed \
+  --result-dir ./results
+```
+
+The saved JSON includes `request_class_metrics`, which breaks down TTFT, TPOT,
+ITL, E2E latency, input tokens, and output tokens for each request class. This
+helps compare scheduler, prefix-cache, and decode changes without running three
+separate benchmarks.
