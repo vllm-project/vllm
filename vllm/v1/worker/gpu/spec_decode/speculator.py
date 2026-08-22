@@ -155,9 +155,6 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.max_num_reqs,
                 self.num_speculative_steps,
                 device,
-                use_log_q=(
-                    self.speculative_config.draft_sample_method == "probabilistic"
-                ),
             )
 
         self.draft_logits: torch.Tensor | None = None
@@ -399,7 +396,7 @@ class DraftModelSpeculator(BaseSpeculator):
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
         draft_step: torch.Tensor,
-        draft_tokens: torch.Tensor | None = None,
+        draft_tokens: torch.Tensor,
     ) -> None:
         if self.acceptance_estimator is not None:
             self.acceptance_estimator.predict(
@@ -408,6 +405,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 draft_step,
                 self.draft_token_confidence_probs,
                 draft_tokens,
+                self.temperature,
             )
 
     @final
