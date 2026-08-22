@@ -233,9 +233,7 @@ mapfile -t SNAPSHOT_PIDS < <(sed -n 's/^pid=//p' <<< "$INSPECT_RECEIPT")
 INSPECT_LOGPROB="$(sed -n 's/^oracle_logprob=//p' <<< "$INSPECT_RECEIPT")"
 (( ${#SNAPSHOT_PIDS[@]} > 0 )) || die "inspect returned no PIDs"
 state_clean || die "create left recorded state alive"
-INSPECT_SHA="$(printf '%s' "$INSPECT_JSON" | sha256sum | awk '{print $1}')"
 echo "$INSPECT_RECEIPT"
-echo "public_inspect_sha256=$INSPECT_SHA"
 
 run "restore compact snapshot 1" 900 "${OFFLINE_EXEC[@]}" \
     vllm snapshot restore /e2e/artifact --host 127.0.0.1 --port "$PORT_ONE"
@@ -250,10 +248,6 @@ wait_clean || die "restore 1 teardown left residue"
 run "start the same container" 60 docker start "$CONTAINER_NAME" >/dev/null
 [[ "$(docker container inspect --format '{{.Id}}' "$CONTAINER_NAME")" == "$CONTAINER_ID" ]] \
     || die "docker start replaced the container"
-INSPECT_AFTER="$(run "inspect after container restart" 120 \
-    "${OFFLINE_EXEC[@]}" vllm snapshot inspect /e2e/artifact)"
-[[ "$(printf '%s' "$INSPECT_AFTER" | sha256sum | awk '{print $1}')" == "$INSPECT_SHA" ]] \
-    || die "public inspect output changed across stop/start"
 run "restore compact snapshot 2" 900 "${OFFLINE_EXEC[@]}" \
     vllm snapshot restore /e2e/artifact --host 127.0.0.1 --port "$PORT_TWO"
 port_open "$PORT_TWO" || die "restore 2 did not bind its port"

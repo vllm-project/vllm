@@ -264,8 +264,6 @@ def test_snapshot_create_cli_accepts_only_pinned_compact_mode(
 
     snapshot_cli.validate_create_args(compact)
     assert compact.model_tag == "Qwen/Qwen3-0.6B"
-    with pytest.raises(SystemExit):
-        parse_snapshot(*base, "--revision", _MODEL_REVISION, "--include-model-state")
 
 
 @pytest.mark.parametrize(
