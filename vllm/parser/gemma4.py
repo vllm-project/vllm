@@ -574,10 +574,23 @@ class Gemma4Parser(ParserEngine):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
+        # In non-streaming mode, an explicit reasoning opener lets us
+        # identify preceding text as a reasoning preamble. Outputs without
+        # an opener remain plain content.
+        reasoning_start = model_output.find(CHANNEL_START)
+        preamble = ""
+        if reasoning_start > 0:
+            preamble = model_output[:reasoning_start]
+            model_output = model_output[reasoning_start:]
+
         reasoning, content = super().extract_reasoning(model_output, request)
         if reasoning:
             if reasoning.startswith(_GEMMA4_THOUGHT_PREFIX):
                 reasoning = reasoning[len(_GEMMA4_THOUGHT_PREFIX) :]
             elif reasoning == _GEMMA4_THOUGHT_PREFIX.rstrip():
                 reasoning = None
+
+        if preamble:
+            reasoning = preamble + (reasoning or "")
+
         return reasoning or None, content
