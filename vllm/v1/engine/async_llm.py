@@ -1089,9 +1089,14 @@ class AsyncLLM(EngineClient):
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
-        await self.engine_core.commit_elastic_ep()
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        set_scaling_elastic_ep(False)
+        try:
+            await self.engine_core.commit_elastic_ep()
+            self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+        finally:
+            set_scaling_elastic_ep(False)
+
+    async def get_external_elastic_ep_phase(self) -> str | None:
+        return await self.engine_core.get_external_elastic_ep_phase()
 
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest

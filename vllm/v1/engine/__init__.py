@@ -102,6 +102,9 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    coord_store_port: int = 0
+    coordinator_input_address: str | None = None
+    coordinator_output_address: str | None = None
 
 
 class EngineCoreRequest(

@@ -1240,6 +1240,13 @@ class EngineCoreProc(EngineCore):
                 ready_msg["parallel_config_hash"] = (
                     vllm_config.parallel_config.compute_hash()
                 )
+            if vllm_config.parallel_config.enable_elastic_ep:
+                ready_msg["coord_store_port"] = (
+                    vllm_config.parallel_config._coord_store_port
+                )
+                ready_msg["num_redundant_experts"] = (
+                    vllm_config.parallel_config.eplb_config.num_redundant_experts
+                )
 
             handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 
@@ -1270,14 +1277,34 @@ class EngineCoreProc(EngineCore):
                 f"minutes"
             )
         init_bytes = handshake_socket.recv()
-        init_message: EngineHandshakeMetadata = msgspec.msgpack.decode(
-            init_bytes, type=EngineHandshakeMetadata
-        )
+        num_redundant_experts: int | None = None
+        if (
+            envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+            and parallel_config is not None
+            and parallel_config.data_parallel_external_lb
+        ):
+            from vllm.distributed.elastic_ep.external_elastic_ep import (
+                ExternalElasticEPScaleUpHandshakeMetadata,
+            )
+
+            scale_up_message = msgspec.msgpack.decode(
+                init_bytes, type=ExternalElasticEPScaleUpHandshakeMetadata
+            )
+            init_message = scale_up_message.engine_metadata
+            num_redundant_experts = scale_up_message.num_redundant_experts
+        else:
+            init_message = msgspec.msgpack.decode(
+                init_bytes, type=EngineHandshakeMetadata
+            )
         logger.debug("Received init message: %s", init_message)
 
         if parallel_config is not None:
             for key, value in init_message.parallel_config.items():
                 setattr(parallel_config, key, value)
+            if num_redundant_experts is not None:
+                parallel_config.eplb_config.num_redundant_experts = (
+                    num_redundant_experts
+                )
 
         return init_message.addresses
 
@@ -1673,6 +1700,9 @@ class EngineCoreProc(EngineCore):
                 if self.vllm_config.lora_config is not None
                 else 0
             ),
+            coord_store_port=parallel_config._coord_store_port,
+            coordinator_input_address=self.addresses.coordinator_input,
+            coordinator_output_address=self.addresses.coordinator_output,
             kv_events_config=self.scheduler.get_kv_event_publisher_config(),
             weight_transfer_backend=(
                 self.vllm_config.weight_transfer_config.backend
@@ -2199,6 +2229,13 @@ class DPEngineCoreProc(EngineCoreProc):
                 if state.is_complete():
                     if state.worker_type == "removing":
                         raise SystemExit
+                    if (
+                        state.worker_type == "new"
+                        and self.vllm_config.parallel_config.data_parallel_external_lb
+                    ):
+                        # An independently launched rank has no external utility
+                        # caller to join the post-commit resume barrier.
+                        self.resume_scheduler()
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
                 elif not state.commit_requested and state.is_ready_for_switch():
@@ -2370,12 +2407,10 @@ class DPEngineCoreProc(EngineCoreProc):
             self.output_queue.put_nowait((0, outputs))
         else:
             encoder = MsgpackEncoder()
-            with (
-                zmq.Context() as ctx,
-                make_zmq_socket(
-                    ctx, self.addresses.outputs[0], zmq.PUSH, linger=4000
-                ) as socket,
-            ):
+            ctx = zmq.Context.instance()
+            with make_zmq_socket(
+                ctx, self.addresses.outputs[0], zmq.PUSH, linger=4000
+            ) as socket:
                 socket.send_multipart(encoder.encode(outputs))
 
     def _eep_scale_up_before_kv_init(self):
