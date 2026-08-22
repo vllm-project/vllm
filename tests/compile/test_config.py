@@ -8,6 +8,8 @@ import pytest
 import torch
 from pydantic import ValidationError
 
+from vllm.compilation.backends import make_compiler
+from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
@@ -32,6 +34,10 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from . import silly_attention  # noqa: F401
 
 DEVICE_TYPE = current_platform.device_type
+
+
+class CustomBackendForTest(CompilerInterface):
+    name = "custom_backend_for_test"
 
 
 def test_version():
@@ -110,6 +116,17 @@ def test_custom_op():
 def test_reject_contradictory_custom_ops(custom_ops, config_kwargs, match):
     with pytest.raises(ValueError, match=match):
         CompilationConfig(custom_ops=custom_ops, **config_kwargs)
+
+
+def test_custom_backend_uses_config_backend_instead_of_platform_default():
+    backend = f"{__name__}.CustomBackendForTest"
+    config = CompilationConfig(backend=backend)
+    config.mode = CompilationMode.VLLM_COMPILE
+
+    with patch.object(current_platform, "get_compile_backend", return_value="inductor"):
+        compiler = make_compiler(config)
+
+    assert isinstance(compiler, CustomBackendForTest)
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
