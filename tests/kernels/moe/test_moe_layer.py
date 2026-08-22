@@ -2097,27 +2097,58 @@ def test_moe_layer(
         test_config_batches = _group_deepep_ll_configs(test_configs)
 
     rocm_deepep = current_platform.is_rocm() and backend in DEEPEP_BACKENDS
+    cuda_deepep = current_platform.is_cuda() and backend in DEEPEP_BACKENDS
     parallel_worker = _parallel_worker_rocm_deepep if rocm_deepep else _parallel_worker
     launch_failures: list[str] = []
+
+    # On CUDA every DeepEP subtest destroys and recreates the DeepEP buffer,
+    # so NVSHMEM is fully re-initialized dozens of times per worker process.
+    # One of those re-inits can intermittently kill or hang the whole worker
+    # group before any subtest failure is recorded (observed as an NCCL
+    # 'unhandled cuda error' in nvshmem team init followed by SIGSEGV, and as
+    # 'nvshmem setup connections failed' followed by a hang). Bound the hang
+    # with a join timeout and retry such init crashes once with NVSHMEM/NCCL
+    # debug logging so a recurrence captures per-rank diagnostics. Genuine
+    # subtest failures are recorded in the shared report and never retried.
+    deepep_join_timeout_s = 900.0 if cuda_deepep else None
+    deepep_init_retry_env = {
+        "NVSHMEM_DEBUG": "INFO",
+        "NVSHMEM_DEBUG_SUBSYS": "INIT,TRANSPORT",
+        "NCCL_DEBUG": "WARN",
+    }
 
     try:
         for test_config_batch in test_config_batches:
             report_size_before = os.path.getsize(failure_report_path)
-            try:
-                parallel_launch_with_config(
-                    world_size,
-                    parallel_worker,
-                    vllm_config,
-                    None,
-                    test_config_batch,
-                    verbosity,
-                    failure_report_path=failure_report_path,
-                    deep_ep_handle_keepalive=[] if rocm_deepep else None,
-                )
-            except Exception as ex:
-                # Normal subtest failures are already in the shared report.
-                # Preserve launcher/setup errors that occur before that write.
-                if os.path.getsize(failure_report_path) == report_size_before:
+            max_attempts = 2 if cuda_deepep else 1
+            for attempt in range(max_attempts):
+                try:
+                    parallel_launch_with_config(
+                        world_size,
+                        parallel_worker,
+                        vllm_config,
+                        deepep_init_retry_env if attempt > 0 else None,
+                        deepep_join_timeout_s,
+                        test_config_batch,
+                        verbosity,
+                        failure_report_path=failure_report_path,
+                        deep_ep_handle_keepalive=[] if rocm_deepep else None,
+                    )
+                    break
+                except Exception as ex:
+                    # Normal subtest failures are already in the shared report.
+                    # Preserve launcher/setup errors that occur before that
+                    # write.
+                    if os.path.getsize(failure_report_path) != report_size_before:
+                        break
+                    if attempt + 1 < max_attempts:
+                        print(
+                            "DEEPEP-INIT-CRASH-RETRY: worker group died without"
+                            f" a recorded subtest failure ({ex!r}); retrying"
+                            " once with NVSHMEM/NCCL debug logging.",
+                            flush=True,
+                        )
+                        continue
                     launch_failures.append(str(ex))
 
         if os.path.getsize(failure_report_path) > 0:
