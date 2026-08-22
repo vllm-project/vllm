@@ -44,6 +44,10 @@ else:
     TokenPoolingType = Any
 
 
+from ._model_info import (
+    _BUILTIN_MODEL_INFO_PROFILES,
+    _get_builtin_model_info,
+)
 from .interfaces import (
     has_inner_state,
     has_noops,
@@ -764,6 +768,9 @@ _VLLM_MODELS = {
     **_TRANSFORMERS_BACKEND_MODELS,
 }
 
+if stale_entries := set(_BUILTIN_MODEL_INFO_PROFILES) - set(_VLLM_MODELS.values()):
+    raise RuntimeError(f"stale model info entries: {sorted(stale_entries)}")
+
 # This variable is used as the args for subprocess.run(). We
 # can modify  this variable to alter the args if needed. e.g.
 # when we use par format to pack things together, sys.executable
@@ -1003,6 +1010,10 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
     @logtime(logger=logger, msg="Registry inspect model class")
     def inspect_model_cls(self) -> _ModelInfo:
+        profile = _get_builtin_model_info(self.module_name, self.class_name)
+        if profile is not None:
+            return _ModelInfo(architecture=self.class_name, **profile)
+
         # Modules registered with a non-default location (e.g. the
         # hardware-isolated ``vllm.models.<name>`` layout) live outside
         # ``vllm/model_executor/models``. Resolve the module spec directly
