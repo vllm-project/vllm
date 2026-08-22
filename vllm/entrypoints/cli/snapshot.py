@@ -85,12 +85,6 @@ def run_restore(args: argparse.Namespace) -> None:
     restore_snapshot(args)
 
 
-def _add_restore_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("snapshot_dir")
-    parser.add_argument("--host", default=None)
-    parser.add_argument("--port", type=int, default=8000)
-
-
 class SnapshotSubcommand(CLISubcommand):
     """The `snapshot` subcommand for the vLLM CLI."""
 
@@ -134,7 +128,9 @@ class SnapshotSubcommand(CLISubcommand):
         restore_parser = actions.add_parser(
             "restore", help="Restore a same-host TP1 snapshot."
         )
-        _add_restore_arguments(restore_parser)
+        restore_parser.add_argument("snapshot_dir")
+        restore_parser.add_argument("--host", default=None)
+        restore_parser.add_argument("--port", type=int, default=8000)
         restore_parser.set_defaults(snapshot_dispatch=run_restore)
 
         return parser
