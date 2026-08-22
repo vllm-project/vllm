@@ -72,10 +72,18 @@ class HTTPVLLMWeightSyncClient:
     def start_weight_update(self) -> None:
         self._post("start_weight_update")
 
-    def update_weights(self, update_info: dict[str, Any]) -> None:
-        self._post(
-            "update_weights", {"update_info": _json_safe_update_info(update_info)}
-        )
+    def update_weights(
+        self, update_info: dict[str, Any] | list[dict[str, Any] | None]
+    ) -> None:
+        json_update_info: dict[str, Any] | list[dict[str, Any] | None]
+        if isinstance(update_info, list):
+            json_update_info = [
+                _json_safe_update_info(info) if info is not None else None
+                for info in update_info
+            ]
+        else:
+            json_update_info = _json_safe_update_info(update_info)
+        self._post("update_weights", {"update_info": json_update_info})
 
     def finish_weight_update(self, weight_version: str | None = None) -> None:
         json = (
@@ -105,7 +113,9 @@ class RayVLLMWeightSyncClient:
 
         ray.get([h.start_weight_update.remote() for h in self.handles])
 
-    def update_weights(self, update_info: dict[str, Any]) -> None:
+    def update_weights(
+        self, update_info: dict[str, Any] | list[dict[str, Any] | None]
+    ) -> None:
         import ray
 
         request = WeightTransferUpdateRequest(update_info=update_info)

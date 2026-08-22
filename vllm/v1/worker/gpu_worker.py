@@ -1326,7 +1326,7 @@ class Worker(WorkerBase):
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
 
-    def update_weights(self, update_info: dict) -> None:
+    def update_weights(self, update_info: dict | list[dict | None]) -> None:
         """
         Receive one weight update chunk from the trainer.
 
@@ -1336,7 +1336,9 @@ class Worker(WorkerBase):
         / start_draft_weight_update call selected.
 
         Args:
-            update_info: Dictionary containing backend-specific update info
+            update_info: Backend-specific update info, or a list indexed by
+                global worker rank across data parallel replicas. A `None`
+                entry skips that worker.
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1348,7 +1350,19 @@ class Worker(WorkerBase):
 
         with set_current_vllm_config(self.vllm_config):
             try:
-                self.weight_transfer_engine.update_weights(update_info)
+                if isinstance(update_info, list):
+                    parallel_config = self.vllm_config.parallel_config
+                    worker_rank = (
+                        parallel_config.data_parallel_rank
+                        * parallel_config.world_size
+                        + self.rank
+                    )
+                    local_update_info = update_info[worker_rank]
+                else:
+                    local_update_info = update_info
+                if local_update_info is None:
+                    return
+                self.weight_transfer_engine.update_weights(local_update_info)
             except BaseException:
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
