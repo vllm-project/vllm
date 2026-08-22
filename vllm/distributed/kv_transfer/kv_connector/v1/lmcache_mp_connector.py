@@ -690,26 +690,6 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
-    def get_block_ids_with_load_errors(self) -> set[int]:
-        """
-        Get the set of block IDs that failed to load.
-
-        Returns:
-            Set of block IDs that encountered load errors.
-            Empty set if no load errors occurred.
-
-        Notes:
-            - Applies to both sync- and async-loading requests.
-            - Async loading: failed blocks may be reported in any forward pass
-              up to and including the pass where the request ID is returned by
-              `get_finished()`. Even if failures occur, the request must still
-              be reported via `get_finished()`, and the failed block IDs must
-              appear here no later than that same pass.
-            - Sync loading: failed blocks should be reported in the forward
-              pass in which they are detected.
-        """
-        return self.worker_adapter.get_block_ids_with_load_errors()
-
     def shutdown(self):
         """
         Shutdown the connector. This is called when the worker process
