@@ -448,3 +448,49 @@ def test_sampler_bad_words(
                 assert logits_for_req[token_id] == -float("inf")
             else:
                 assert logits_for_req[token_id] != -float("inf")
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_sampler_mixed_topk_and_logprob_token_ids(device: str):
+    """Mixed batch: request 0 asks for top-k logprobs, request 1 asks for
+    logprob_token_ids. Requests that are not in logprob_token_ids must still
+    receive their true top-k logprob rows; the specific-token gather must not
+    replace other requests' results.
+
+    Guards against the Sampler.forward batch-global preference for
+    logprob_token_ids_tensors, which silently turns rows of requests without
+    logprob_token_ids into zero-padded, -inf logprob garbage whenever any
+    co-batched request sets logprob_token_ids.
+    """
+    torch.manual_seed(0)
+    torch.set_default_device(device)
+    k = 5
+    custom_ids = [3, 7, 99]
+
+    fake_logits = torch.rand(2, VOCAB_SIZE)
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, 2, VOCAB_SIZE, torch.device(device)
+    )
+    sampling_metadata.max_num_logprobs = k
+    sampling_metadata.logprob_token_ids = {1: custom_ids}
+
+    sampler = Sampler()
+    output = sampler.forward(fake_logits, sampling_metadata)
+    logprobs_tensors = output.logprobs_tensors
+    assert logprobs_tensors is not None
+
+    expected_logprobs = fake_logits.log_softmax(dim=-1, dtype=torch.float32)
+
+    # Request 0 (top-k): sampled token first, then its own true top-k tokens.
+    row0_ids = logprobs_tensors.logprob_token_ids[0].tolist()
+    row0_lps = logprobs_tensors.logprobs[0]
+    assert torch.isfinite(row0_lps).all(), (
+        f"top-k request got non-finite logprobs: {row0_lps.tolist()}"
+    )
+    assert row0_ids[0] == expected_logprobs[0].argmax().item()
+    assert set(row0_ids[1:]) == set(expected_logprobs[0].topk(k).indices.tolist())
+
+    # Request 1 (logprob_token_ids): sampled token plus the requested ids.
+    row1_ids = logprobs_tensors.logprob_token_ids[1].tolist()
+    assert row1_ids[0] == expected_logprobs[1].argmax().item()
+    assert set(custom_ids).issubset(row1_ids[1:])
