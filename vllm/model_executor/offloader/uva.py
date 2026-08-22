@@ -8,9 +8,12 @@ import torch
 import torch.nn as nn
 from torch.func import functional_call
 
-import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
+from vllm.model_executor.offloader.base import (
+    BaseOffloader,
+    resolve_offload_flag,
+    should_pin_memory,
+)
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -43,10 +46,19 @@ class UVAOffloader(BaseOffloader):
         self.cpu_offload_bytes = 0
         self.cpu_offload_params = cpu_offload_params or set()
 
+        from vllm.config import get_current_vllm_config_or_none
+
         self.pin_memory = should_pin_memory()
-        self.uva_offloading = (
-            is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
+        vllm_config = get_current_vllm_config_or_none()
+        config_value = (
+            vllm_config.offload_config.uva.disable_uva
+            if vllm_config is not None
+            else None
         )
+        disable_uva = resolve_offload_flag(
+            config_value, "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA"
+        )
+        self.uva_offloading = is_uva_available() and not disable_uva
 
     def wrap_modules(
         self,
