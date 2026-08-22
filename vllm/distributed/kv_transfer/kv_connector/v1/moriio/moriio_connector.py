@@ -103,6 +103,10 @@ def is_moriio_available() -> bool:
     return MoRIIO_enabled
 
 
+_PENDING_ACK_TTL_S = 30.0
+_PENDING_ACK_MAX_ENTRIES = 1024
+
+
 def get_moriio_remote_tp_rank(
     local_tp_rank: int, local_tp_size: int, remote_tp_size: int
 ) -> int:
@@ -1290,7 +1294,8 @@ class MoRIIOConnectorWorker:
         # BEFORE resolve_moriio_transfer_ack, so each ACK is counted exactly once
         # (on the tick its mapping exists) -- the heterogeneous-TP ack-counting
         # is preserved.
-        self._pending_unmapped_acks: list = []
+        # Each entry is (ack, enqueue_time) to allow TTL-based eviction.
+        self._pending_unmapped_acks: list[tuple[MoRIIOTransferAck | str, float]] = []
 
         # TODO: consider the integration of flashinfer or other backends.
         self.backend_name = backend.get_name()
@@ -1851,18 +1856,31 @@ class MoRIIOConnectorWorker:
             # whose transfer_id wasn't mapped yet (notify raced ahead of
             # start_load_kv); retry the lookup every tick. Buffered before
             # resolve_moriio_transfer_ack so each ACK is counted exactly once.
-            finished_acks = self._pending_unmapped_acks + list(
-                self.moriio_wrapper.pop_finished_req_ids()
-            )
+            now = time.perf_counter()
+            finished_acks = self._pending_unmapped_acks + [
+                (ack, now) for ack in self.moriio_wrapper.pop_finished_req_ids()
+            ]
             self._pending_unmapped_acks = []
             resolved_transfer_ids: set[TransferId] = set()
-            for ack in finished_acks:
+            for ack, enqueue_time in finished_acks:
                 transfer_id = ack if isinstance(ack, str) else ack.transfer_id
                 if transfer_id not in self.transfer_id_to_request_id:
-                    # Mapping not populated yet -- buffer and retry next tick,
-                    # do NOT drop (dropping leaks producer KV at high conc and
-                    # wedges the prefill).
-                    self._pending_unmapped_acks.append(ack)
+                    if now - enqueue_time > _PENDING_ACK_TTL_S:
+                        logger.warning(
+                            "Dropping unmapped ACK for transfer %s "
+                            "after %.1fs (TTL expired)",
+                            transfer_id,
+                            now - enqueue_time,
+                        )
+                    elif len(self._pending_unmapped_acks) >= _PENDING_ACK_MAX_ENTRIES:
+                        logger.warning(
+                            "Pending ACK buffer full (%d), dropping "
+                            "ACK for transfer %s",
+                            _PENDING_ACK_MAX_ENTRIES,
+                            transfer_id,
+                        )
+                    else:
+                        self._pending_unmapped_acks.append((ack, enqueue_time))
                     continue
                 resolved_transfer_id = resolve_moriio_transfer_ack(
                     ack,
