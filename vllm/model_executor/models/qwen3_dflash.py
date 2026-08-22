@@ -502,17 +502,30 @@ class DFlashQwen3Model(nn.Module):
             )
 
             packed, group_scale = qkv.weight_packed, qkv.weight_scale
-            out_f, in_f = int(packed.shape[0]), int(qkv.input_size)
-            bits = 32 * packed.shape[1] // in_f
-            q = unpack_from_int32(
-                packed.data, bits, torch.Size([out_f, in_f]), packed_dim=1
-            )
-            group = in_f // group_scale.shape[1]
+            in_f = int(qkv.input_size)
+            bits, remainder = divmod(32 * int(packed.shape[1]), in_f)
+            if remainder or group_scale.dim() != 2:
+                raise ValueError(
+                    f"DFlash context-KV precompute cannot read a packed weight of "
+                    f"{tuple(packed.shape)} over {in_f} input features with a "
+                    f"weight_scale of {tuple(group_scale.shape)}."
+                )
+
+            # Slice to the K/V rows *before* unpacking. The q rows are discarded
+            # either way, and both tensors are row-major over output features, so
+            # unpacking them first would trade ~3x the transient memory for
+            # nothing (2048 of 3072 rows at 27B geometry).
+            packed = packed.data[attn.q_size :]
+            group_scale = group_scale.data[attn.q_size :]
+            out_f = int(packed.shape[0])
+
+            q = unpack_from_int32(packed, bits, torch.Size([out_f, in_f]), packed_dim=1)
+            group = in_f // int(group_scale.shape[1])
             dense = (
                 q.to(torch.float32).reshape(out_f, in_f // group, group)
                 * group_scale.to(torch.float32)[..., None]
             ).reshape(out_f, in_f)
-            return dense.to(act_dtype)[attn.q_size :]
+            return dense.to(act_dtype)
 
         kv = w[attn.q_size :]
         if kv.dtype == act_dtype:
@@ -538,9 +551,7 @@ class DFlashQwen3Model(nn.Module):
             qkv, "output_sizes", None
         )
         if sizes is not None and s.numel() == len(sizes) and sum(sizes) == w.shape[0]:
-            s = torch.cat(
-                [s[i].expand(int(n)) for i, n in enumerate(sizes)]
-            )
+            s = torch.cat([s[i].expand(int(n)) for i, n in enumerate(sizes)])
 
         if s.numel() == w.shape[0]:
             s = s[attn.q_size :]
