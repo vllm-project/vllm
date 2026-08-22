@@ -13,8 +13,9 @@ proven universal optima.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from hardware_detection import HardwareInfo
 
@@ -108,8 +109,7 @@ def _resolve_gpu_memory_utilization(
     safe_fractions = [
         max(
             0.0,
-            node.available_memory_bytes / node.total_memory_bytes
-            - reserve_fraction,
+            node.available_memory_bytes / node.total_memory_bytes - reserve_fraction,
         )
         for node in hardware.numa_nodes
         if node.total_memory_bytes > 0

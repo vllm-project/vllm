@@ -2,7 +2,6 @@
 
 Utilities for consuming deployment configurations from [vLLM Recipes](https://recipes.vllm.ai/) and converting them into files that can be used directly with vLLM.
 
-
 ## Optimized Deployment Flow
 
 The recipe provides the validated deployment baseline. Hardware and workload
@@ -18,7 +17,6 @@ flowchart LR
     F --> D["vLLM Docker Image"]
     D --> E["OpenAI Endpoint"]
 ```
-
 
 ## `recipe_json_to_vllm_config.py`
 
