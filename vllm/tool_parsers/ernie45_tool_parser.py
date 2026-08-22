@@ -100,6 +100,15 @@ class Ernie45ToolParser(ToolParser):
                         )
                     )
 
+                if not tool_calls:
+                    # The start token was present but nothing parsed out of it,
+                    # e.g. a truncated block or the token appearing in prose.
+                    # Reporting tools_called=True here would claim a tool call
+                    # that does not exist and drop the text after the token.
+                    return ExtractedToolCallInformation(
+                        tools_called=False, tool_calls=[], content=model_output
+                    )
+
                 content = model_output[
                     : model_output.find(self.tool_calls_start_token)
                 ].rstrip("\n")
