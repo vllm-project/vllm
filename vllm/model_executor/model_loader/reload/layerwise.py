@@ -285,6 +285,10 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
     LOADING_LAYERS.clear()
 
+    finalize_model = getattr(model, "finalize_weights_after_layerwise_reload", None)
+    if finalize_model is not None:
+        finalize_model()
+
 
 def finalize_layerwise_reload(*args, **kwargs):
     finalize_layerwise_processing(*args, **kwargs)

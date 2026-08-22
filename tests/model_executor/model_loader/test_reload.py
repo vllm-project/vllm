@@ -665,6 +665,33 @@ def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
     assert torch.equal(layer.D, loaded["D"])
 
 
+class _ModelWithPostReloadCache(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.source = torch.nn.Parameter(torch.zeros(4))
+        self.source.weight_loader = default_weight_loader
+        self.register_buffer("derived", torch.zeros(1), persistent=False)
+        self.finalize_calls = 0
+
+    def finalize_weights_after_layerwise_reload(self) -> None:
+        self.derived.copy_(self.source.sum().reshape_as(self.derived))
+        self.finalize_calls += 1
+
+
+def test_layerwise_reload_refreshes_model_derived_cache():
+    model = _ModelWithPostReloadCache()
+    loaded = torch.arange(1, 5, dtype=torch.float32)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    model.source.weight_loader(model.source, loaded)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(model.source, loaded)
+    assert torch.equal(model.derived, loaded.sum().reshape_as(model.derived))
+    assert model.finalize_calls == 1
+
+
 class _RecordingQuantMethod(QuantizeMethodBase):
     """Records the layer's bias at the moment processing runs."""
 
