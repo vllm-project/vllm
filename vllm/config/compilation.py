@@ -1131,6 +1131,31 @@ class CompilationConfig:
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
 
+    def _set_cudagraph_mode_for_empty_splitting_ops(self) -> None:
+        if (
+            self.cudagraph_mode == CUDAGraphMode.PIECEWISE
+            or self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+        ):
+            logger.warning_once("Using piecewise cudagraph with empty splitting_ops")
+        if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            logger.warning_once(
+                "Piecewise compilation with empty splitting_ops does not "
+                "contain piecewise cudagraph. Setting cudagraph_"
+                "mode to NONE. Hint: If you are using attention "
+                "backends that support cudagraph, consider manually "
+                "setting cudagraph_mode to FULL or FULL_DECODE_ONLY "
+                "to enable full cudagraphs."
+            )
+            self.cudagraph_mode = CUDAGraphMode.NONE
+        elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+            logger.warning_once(
+                "Piecewise compilation with empty splitting_ops does "
+                "not contain piecewise cudagraph. Setting "
+                "cudagraph_mode to FULL."
+            )
+            self.cudagraph_mode = CUDAGraphMode.FULL
+        self.splitting_ops = []
+
     def set_splitting_ops_for_v1(
         self, all2all_backend: str, data_parallel_size: int = 1
     ):
@@ -1139,6 +1164,8 @@ class CompilationConfig:
         if self.mode != CompilationMode.VLLM_COMPILE:
             if self.splitting_ops is None:
                 self.splitting_ops = []
+            if len(self.splitting_ops) == 0:
+                self._set_cudagraph_mode_for_empty_splitting_ops()
             return
 
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
@@ -1185,31 +1212,7 @@ class CompilationConfig:
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
-                if (
-                    self.cudagraph_mode == CUDAGraphMode.PIECEWISE
-                    or self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
-                ):
-                    logger.warning_once(
-                        "Using piecewise cudagraph with empty splitting_ops"
-                    )
-                if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-                    logger.warning_once(
-                        "Piecewise compilation with empty splitting_ops does not "
-                        "contain piecewise cudagraph. Setting cudagraph_"
-                        "mode to NONE. Hint: If you are using attention "
-                        "backends that support cudagraph, consider manually "
-                        "setting cudagraph_mode to FULL or FULL_DECODE_ONLY "
-                        "to enable full cudagraphs."
-                    )
-                    self.cudagraph_mode = CUDAGraphMode.NONE
-                elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-                    logger.warning_once(
-                        "Piecewise compilation with empty splitting_ops does "
-                        "not contain piecewise cudagraph. Setting "
-                        "cudagraph_mode to FULL."
-                    )
-                    self.cudagraph_mode = CUDAGraphMode.FULL
-                self.splitting_ops = []
+                self._set_cudagraph_mode_for_empty_splitting_ops()
 
         if (
             not self.use_inductor_graph_partition
