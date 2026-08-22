@@ -29,6 +29,8 @@ logger = init_logger("test_sequence_parallel")
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 NVFP4_MODEL_ID = "nvidia/Llama-3.1-8B-Instruct-NVFP4"
 NVFP4_MODEL_INFO = _HfExamplesInfo(NVFP4_MODEL_ID)
+BLOCK_FP8_MODEL_ID = "RedHatAI/Qwen3-32B-FP8-block"
+BLOCK_FP8_MODEL_INFO = _HfExamplesInfo(BLOCK_FP8_MODEL_ID)
 
 
 class ParallelSetup(NamedTuple):
@@ -405,6 +407,41 @@ def test_tp_sp_nvfp4_generation(num_gpus_available: int):
     )
     _compare_sp_settings(
         NVFP4_MODEL_ID,
+        [] if comparison is None else [comparison],
+        method="generate",
+    )
+
+
+@create_new_process_for_each_test()
+def test_tp_sp_xpu_block_fp8_generation(num_gpus_available: int):
+    if not current_platform.is_xpu():
+        pytest.skip("XPU block FP8 sequence parallelism requires XPU")
+
+    comparison = _build_sp_args(
+        BLOCK_FP8_MODEL_ID,
+        ParallelSetup(
+            tp_size=2,
+            pp_size=1,
+            fuse_norm_quant=True,
+            fuse_act_quant=True,
+            eager_mode=False,
+        ),
+        "mp",
+        "auto",
+        SPTestOptions(
+            multi_node_only=False,
+            load_format=None,
+            model_info=BLOCK_FP8_MODEL_INFO,
+        ),
+        num_gpus_available,
+        use_inductor_graph_partition=True,
+        fuse_gemm_comms=False,
+        enable_prompt_embeds=False,
+        is_multimodal=False,
+    )
+    print(f"comparison {comparison}")
+    _compare_sp_settings(
+        BLOCK_FP8_MODEL_ID,
         [] if comparison is None else [comparison],
         method="generate",
     )
