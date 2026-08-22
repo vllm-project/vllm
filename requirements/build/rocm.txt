@@ -9,7 +9,7 @@ torchaudio==2.11.0
 triton==3.6.0
 cmake>=3.26.1,<4
 packaging>=24.2
-setuptools>=77.0.3,<80.0.0
+setuptools>=78.1.1,<80.0.0
 setuptools-scm>=8
 setuptools-rust>=1.9.0
 wheel
