@@ -2100,6 +2100,19 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     assert actual_model == s3_url
 
 
+def test_heterogeneous_vocab_rejects_local_argmax_reduction():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+    speculative_config.method = "draft_model"
+    speculative_config.use_heterogeneous_vocab = True
+    speculative_config.use_local_argmax_reduction = True
+
+    with pytest.raises(ValueError, match="cannot be used together"):
+        speculative_config._verify_args()
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig
