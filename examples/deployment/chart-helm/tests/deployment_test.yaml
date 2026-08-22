@@ -2,6 +2,112 @@ suite: test deployment
 templates:
   - deployment.yaml
 tests:
+  - it: should prefer custom affinity over legacy gpuModels
+    set:
+      gpuModels:
+        - TYPE_GPU_USED
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: model-cache
+              topologyKey: kubernetes.io/hostname
+      resources:
+        requests:
+          nvidia.com/gpu: 1
+        limits:
+          nvidia.com/gpu: 1
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].labelSelector.matchLabels
+          value:
+            app: model-cache
+      - notExists:
+          path: spec.template.spec.affinity.nodeAffinity
+      - equal:
+          path: spec.template.spec.runtimeClassName
+          value: nvidia
+
+  - it: should create legacy node affinity when gpuModels is set without custom affinity
+    set:
+      gpuModels:
+        - TYPE_GPU_USED
+      resources:
+        requests:
+          nvidia.com/gpu: 1
+        limits:
+          nvidia.com/gpu: 1
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key
+          value: nvidia.com/gpu.product
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values
+          value:
+            - TYPE_GPU_USED
+
+  - it: should not create legacy node affinity without an active GPU request
+    set:
+      affinity: {}
+      gpuModels:
+        - TYPE_GPU_USED
+      resources:
+        requests:
+          nvidia.com/gpu: 0
+        limits:
+          nvidia.com/gpu: 0
+    asserts:
+      - notExists:
+          path: spec.template.spec.affinity
+
+  - it: should not enable GPU scheduling when the GPU limit is zero
+    set:
+      affinity: {}
+      gpuModels:
+        - TYPE_GPU_USED
+      resources:
+        requests:
+          nvidia.com/gpu: 1
+        limits:
+          nvidia.com/gpu: 0
+    asserts:
+      - notExists:
+          path: spec.template.spec.affinity
+      - notExists:
+          path: spec.template.spec.runtimeClassName
+
+  - it: should render custom affinity without GPU scheduling
+    set:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-type
+                    operator: In
+                    values:
+                      - cpu
+      resources:
+        requests:
+          nvidia.com/gpu: 0
+        limits:
+          nvidia.com/gpu: 0
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key
+          value: node-type
+      - notExists:
+          path: spec.template.spec.runtimeClassName
+
+  - it: should not create affinity when affinity and gpuModels are empty
+    set:
+      affinity: {}
+      gpuModels: []
+    asserts:
+      - notExists:
+          path: spec.template.spec.affinity
+
   - it: should use configured labels for the deployment selector and pods
     set:
       labels:
