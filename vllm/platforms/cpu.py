@@ -125,6 +125,10 @@ class CpuPlatform(Platform):
         return meminfo.total_memory
 
     @classmethod
+    def current_device_index(cls) -> int:
+        return 0
+
+    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.

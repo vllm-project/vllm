@@ -559,9 +559,12 @@ def _support_torch_compile(
             # /tmp default during import, making setdefault a no-op.
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
 
+            from vllm.platforms import current_platform
+
             rank = self.vllm_config.parallel_config.rank
             dp_rank = self.vllm_config.parallel_config.data_parallel_index
-            cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
+            dev = current_platform.current_device_index()
+            cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}_dev{dev}")
             aot_compilation_path = os.path.join(cache_dir, "model")
             if not envs.VLLM_DISABLE_COMPILE_CACHE:
                 loaded_fn = _try_load_aot_compiled_fn(self, aot_compilation_path)
