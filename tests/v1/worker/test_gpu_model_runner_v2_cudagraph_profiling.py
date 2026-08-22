@@ -37,6 +37,7 @@ class _FakeCudaGraphManager:
         # Profiling hooks set by profile_cudagraph_memory.
         self._max_full_descs_to_capture: int | None = None
         self._capture_mem_samples: list[int] | None = None
+        self.use_breakable_cg = False
 
     def needs_capture(self) -> bool:
         return self._needs_capture
@@ -244,5 +245,42 @@ def test_profile_cudagraph_memory_clears_captured_graphs(monkeypatch):
     cgu.profile_cudagraph_memory(runner)
 
     # Profiling captures are discarded so the real capture re-captures them
-    # against the real KV cache.
+    # against the KV cache.
     assert cleared == ["piecewise", "breakable"]
+
+
+def test_profile_cudagraph_memory_redirects_wrapper_pools(monkeypatch):
+    """Piecewise wrappers must capture into the throwaway pool too.
+
+    Profiling graphs captured into the persistent global pool and then
+    discarded drop the pool's use_count to 0, tripping the c10 allocator's
+    create_or_incref_pool assert when the real capture reuses that pool.
+    """
+    _patch_module(monkeypatch)
+    runner = _make_profiling_runner(CUDAGraphMode.FULL_AND_PIECEWISE)
+
+    class _FakeWrapper:
+        def __init__(self) -> None:
+            self.graph_pool: Any = GLOBAL_POOL
+            self.pool_during_capture: Any = None
+
+        def clear_graphs(self) -> None:
+            pass
+
+    wrapper = _FakeWrapper()
+    cgu.CUDAGraphWrapper._all_instances.add(wrapper)
+    try:
+        capture_model = runner.capture_model
+
+        def _capture_model() -> int:
+            wrapper.pool_during_capture = wrapper.graph_pool
+            return capture_model()
+
+        runner.capture_model = _capture_model
+
+        cgu.profile_cudagraph_memory(runner)
+
+        assert wrapper.pool_during_capture == THROWAWAY_POOL
+        assert wrapper.graph_pool == GLOBAL_POOL
+    finally:
+        cgu.CUDAGraphWrapper._all_instances.discard(wrapper)

@@ -739,13 +739,30 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     # Don't count profiling captures; the real capture_model() runs later.
     saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
     saved_capture_triggers = compilation_counter.num_gpu_runner_capture_triggers
+    all_wrappers: list[Any] = []
+    original_pools: dict[int, Any] = {}
     try:
         if not manager.needs_capture():
             return 0
-        # Capture FULL graphs into a throwaway pool so their memory is
-        # reclaimed on teardown rather than retained by the persistent
-        # global pool (which the real capture reuses).
+        # Capture all profiling graphs into a throwaway pool so their memory
+        # is reclaimed on teardown rather than retained by the persistent
+        # global pool (which the real capture reuses). This must include the
+        # piecewise wrappers, not just the FULL-graph manager pool: graphs
+        # captured into the global pool and then discarded drop its use_count
+        # to 0, and the real capture on the same pool trips the c10 allocator's
+        # create_or_incref_pool assert ("use_count > 0 INTERNAL ASSERT FAILED").
         manager.pool = current_platform.graph_pool_handle()
+        if manager.use_breakable_cg:
+            # The breakable runner is otherwise created lazily during capture,
+            # after the pool swap below, and would capture into the global
+            # pool. Create it now so its pool gets swapped too.
+            manager.init_breakable_cg_runner(runner.model)
+        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
+            BreakableCUDAGraphWrapper._all_instances
+        )
+        for wrapper in all_wrappers:
+            original_pools[id(wrapper)] = wrapper.graph_pool
+            wrapper.graph_pool = manager.pool
         manager._max_full_descs_to_capture = _FULL_GRAPH_PROFILING_SAMPLES
         mem_samples: list[int] = []
         manager._capture_mem_samples = mem_samples
@@ -754,17 +771,21 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
 
         # The measured delta covers PIECEWISE, encoder and speculator graphs
         # plus the sampled FULL graphs; swap the sampled FULL cost for the
-        # extrapolated total. Conservative: FULL and PIECEWISE are measured in
-        # separate pools but share the global pool at runtime.
+        # extrapolated total. FULL and PIECEWISE share one pool here just as
+        # they share the global pool at runtime, so the overlap is not
+        # double-counted.
         num_full_graphs = len(manager._capture_descs.get(CUDAGraphMode.FULL, []))
         full_estimate = _extrapolate_full_graph_memory(mem_samples, num_full_graphs)
         return max(measured - sum(mem_samples) + full_estimate, 0)
     finally:
         compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
         compilation_counter.num_gpu_runner_capture_triggers = saved_capture_triggers
-        _teardown_profiling_state(runner)
         CUDAGraphWrapper.clear_all_graphs()
         BreakableCUDAGraphWrapper.clear_all_graphs()
+        for wrapper in all_wrappers:
+            if id(wrapper) in original_pools:
+                wrapper.graph_pool = original_pools[id(wrapper)]
+        _teardown_profiling_state(runner)
 
 
 def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) -> int:
