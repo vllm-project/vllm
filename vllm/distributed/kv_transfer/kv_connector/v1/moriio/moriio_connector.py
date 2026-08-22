@@ -1307,6 +1307,8 @@ class MoRIIOConnectorWorker:
         kv_layer: torch.Tensor,
         remote_notify_port: int,
         remote_ip: str,
+        multi_pod_hosts: list[str] | None = None,
+        remote_dp_size_local: int = 0,
     ) -> None:
         """Schedule a block write operation.
 
@@ -1341,6 +1343,8 @@ class MoRIIOConnectorWorker:
             event=event,
             remote_notify_port=remote_notify_port,
             remote_ip=remote_ip,
+            multi_pod_hosts=list(multi_pod_hosts or []),
+            remote_dp_size_local=remote_dp_size_local,
         )
         self._writer.schedule_write(task)
 
@@ -2385,18 +2389,8 @@ class MoRIIOConnectorWorker:
         )
 
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
-        # Stash multi_pod_hosts + local DP size on the worker so
-        # MoRIIOEngine._finalize_if_complete (which sees only the WriteTask,
-        # not ReqMeta) can pick the per-rank pod IP for the completion notify.
-        # Last-writer-wins is safe: all requests share the same topology.
-        if meta.multi_pod_hosts:
-            self.multi_pod_hosts = list(meta.multi_pod_hosts)
-        else:
-            self.multi_pod_hosts = [meta.remote_host]
-        if meta.remote_dp_size_local:
-            self.remote_dp_size_local = int(meta.remote_dp_size_local)
-        else:
-            self.remote_dp_size_local = int(meta.remote_dp_size)
+        hosts = list(meta.multi_pod_hosts) if meta.multi_pod_hosts else [meta.remote_host]
+        dp_local = int(meta.remote_dp_size_local or meta.remote_dp_size)
         self.schedule_write_blocks(
             request_id=req_id,
             transfer_id=meta.transfer_id,
@@ -2407,6 +2401,8 @@ class MoRIIOConnectorWorker:
             kv_layer=kv_layer,
             remote_notify_port=meta.remote_notify_port,
             remote_ip=meta.remote_host,
+            multi_pod_hosts=hosts,
+            remote_dp_size_local=dp_local,
         )
 
     def merge_contiguous_blocks(

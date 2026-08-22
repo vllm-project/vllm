@@ -315,13 +315,14 @@ class MoRIIOWriter:
             # so resolve the per-rank host from multi_pod_hosts (falls back to
             # task.remote_ip for single-pod or on any indexing miss).
             _remote_ip = task.remote_ip
-            _hosts = list(getattr(self.worker, "multi_pod_hosts", []) or [])
-            _dp_local = int(getattr(self.worker, "remote_dp_size_local", 0) or 0)
+            _hosts = list(task.multi_pod_hosts)
+            _dp_local = int(task.remote_dp_size_local or 0)
             if _hosts and _dp_local > 0:
                 _pod_idx = int(request_info.decode_dp_rank) // _dp_local
                 if 0 <= _pod_idx < len(_hosts):
                     _remote_ip = _hosts[_pod_idx]
             request_info.completion_remote_ip = _remote_ip
+            request_info.remote_dp_size_local = _dp_local
             if task.transfer_id in self._sealed_writes:
                 request_info.writes_expected = self._sealed_writes[task.transfer_id]
 
@@ -467,7 +468,7 @@ class MoRIIOWriter:
         # The notify port offset must use the per-pod local rank
         # (% dp_local), since each pod binds notify sockets only for its local
         # ranks. Single-pod is bit-identical (modulus is a no-op).
-        _dp_local = int(getattr(self.worker, "remote_dp_size_local", 0) or 0)
+        _dp_local = int(request_info.remote_dp_size_local or 0)
         _decode_dp_rank_for_port = int(request_info.decode_dp_rank)
         if _dp_local > 0:
             _decode_dp_rank_for_port = _decode_dp_rank_for_port % _dp_local
