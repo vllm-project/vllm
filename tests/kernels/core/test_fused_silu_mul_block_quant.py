@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
+from tests.utils import large_gpu_test
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -187,3 +188,35 @@ def test_silu_block_quant_edge_cases(
     assert not torch.isnan(out.float()).any()
     assert not torch.isnan(scales).any()
     assert not torch.isinf(scales).any()
+
+
+@large_gpu_test(min_gb=24)
+@torch.inference_mode()
+def test_silu_block_quant_int32_offset_overflow(default_vllm_config):
+    """Token offsets beyond INT32_MAX must not wrap (issue #53390)."""
+    hidden_size = 16384
+    group_size = 128
+    quant_dtype = current_platform.fp8_dtype()
+    # Smallest batch whose last token's input offset (token_idx * 2 *
+    # hidden_size) exceeds INT32_MAX.
+    num_tokens = (2**31 - 1) // (2 * hidden_size) + 2
+
+    x = torch.randn(
+        num_tokens, hidden_size * 2, dtype=torch.bfloat16, device="cuda"
+    )
+    out, scales = ops.silu_and_mul_per_block_quant(
+        x, group_size, quant_dtype, None, False
+    )
+    torch.cuda.synchronize()
+
+    last = x[-1:].contiguous()
+    ref_out, ref_scales = ref_silu_and_mul_per_block_quant(
+        last, quant_dtype, group_size
+    )
+    torch.testing.assert_close(scales[-1:], ref_scales, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        out[-1:].float() * scales[-1:].repeat_interleave(group_size, dim=1),
+        ref_out.float() * ref_scales.repeat_interleave(group_size, dim=1),
+        rtol=5e-2,
+        atol=5e-2,
+    )
