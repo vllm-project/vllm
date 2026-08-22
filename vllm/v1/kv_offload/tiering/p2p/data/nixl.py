@@ -215,7 +215,14 @@ class NixlTransport(DataTransport):
                     self._agent_name,
                     transfer_id,
                     exc,
+                    exc_info=True,
                 )
+                # Treat the transfer as failed so the post-loop cleanup
+                # removes it from _inflight and releases its handle
+                # (mirrors obj/manager.py:_poll_active_transfers).
+                if failed_ids is None:
+                    failed_ids = []
+                failed_ids.append(transfer_id)
                 continue
             if state == "DONE":
                 if done_ids is None:
