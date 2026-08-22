@@ -141,12 +141,14 @@ def _stored_event(
     keys: list[OffloadKey],
     medium: Medium = _CPU_MEDIUM,
     locality: Locality | None = None,
+    ownership: str | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
         medium=medium,
         removed=False,
         locality=locality,
+        ownership=ownership,
     )
 
 
@@ -154,12 +156,14 @@ def _removed_event(
     keys: list[OffloadKey],
     medium: Medium = _CPU_MEDIUM,
     locality: Locality | None = None,
+    ownership: str | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
         medium=medium,
         removed=True,
         locality=locality,
+        ownership=ownership,
     )
 
 
@@ -534,8 +538,14 @@ def test_secondary_stored_event_does_not_mutate_cpu_metadata():
     tracker, _, _, key = _lookup_chunk()
     expected_metadata = dict(tracker._pending_event_metadata)
 
-    stored = list(tracker.take_events([_stored_event([key], Medium.STORAGE)]))
+    stored = list(
+        tracker.take_events(
+            [_stored_event([key], Medium.STORAGE, ownership="custom")]
+        )
+    )
+
     assert stored[0].token_ids == [1, 2, 3, 4]
+    assert stored[0].ownership == "custom"
     assert tracker._pending_event_metadata == expected_metadata
 
 
@@ -548,9 +558,12 @@ def test_take_events_groups_removed_hashes_by_kv_group():
     key0 = _record_chunks(tracker, req0, group0_config, num_chunks=1)[0]
     key1 = _record_chunks(tracker, req1, group1_config, num_chunks=1)[0]
 
-    removed = list(tracker.take_events([_removed_event([key0, key1])]))
+    removed = list(
+        tracker.take_events([_removed_event([key0, key1], ownership="custom")])
+    )
 
     assert len(removed) == 2
+    assert {event.ownership for event in removed} == {"custom"}
     by_group = {event.group_idx: event.block_hashes for event in removed}
     assert by_group == {
         0: [_wire_hash(_hash(0)), _wire_hash(_hash(1))],
