@@ -146,9 +146,22 @@ class TopKTopPSampler(nn.Module):
             logits_to_return = logits
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
+        if generators and len(generators) == logits.shape[0]:
+            # Fully-seeded batch: random_sample skips the bulk noise fill
+            # and the per-row generator loop dominates, launch-bound. The
+            # softmax launches before that loop and hides completely under
+            # it, so it is effectively free there — while the log-space
+            # path would serialize an extra full-vocab pass after the loop
+            # (a measured net loss at large batch). Keep the probs path.
+            probs = logits.softmax(dim=-1, dtype=torch.float32)
+            return (
+                random_sample(probs, generators, self.use_fp64_gumbel),
+                logits_to_return,
+            )
+        # Otherwise (bulk noise is drawn): sample in log space, skipping
+        # the full-vocab softmax entirely.
         return (
-            random_sample(probs, generators, self.use_fp64_gumbel),
+            random_sample_from_logits(logits, generators, self.use_fp64_gumbel),
             logits_to_return,
         )
 
@@ -470,6 +483,41 @@ def random_sample(
         for i, generator in generators.items():
             q[i].exponential_(generator=generator)
     return sample_with_exponential_noise(probs, q)
+
+
+def random_sample_from_logits(
+    logits: torch.Tensor,
+    generators: dict[int, torch.Generator],
+    use_fp64_gumbel: bool = False,
+) -> torch.Tensor:
+    """Gumbel-max sampling directly on (possibly masked) logits.
+
+    Equivalent in distribution to ``random_sample(logits.softmax(-1), ...)``:
+    with q ~ Exp(1), argmax(softmax(logits) / q) == argmax(logits - log(q))
+    because the softmax normalizer is constant per row and exp is monotonic.
+    Skipping the softmax avoids a full-vocab kernel per step. Same noise
+    tensor, so seeded requests keep drawing the same RNG stream as before.
+    """
+    q = empty_exponential_noise_like(logits, use_fp64_gumbel)
+    # NOTE(woosuk): To batch-process the requests without their own seeds,
+    # which is the common case, we first assume that every request does
+    # not have its own seed. Then, we overwrite the values for the requests
+    # that have their own seeds.
+    if len(generators) != logits.shape[0]:
+        q.exponential_()
+    if generators:
+        # TODO(woosuk): This can be slow because we handle each request
+        # one by one. Optimize this.
+        for i, generator in generators.items():
+            q[i].exponential_(generator=generator)
+    # -inf logits (masked by top-k/top-p) stay -inf: q > 0 so log(q) is
+    # finite, and -inf - finite == -inf, which argmax never selects.
+    # Mutate q (scratch noise) rather than allocating a new tensor; with
+    # use_fp64_gumbel, q is fp64 and the subtraction promotes to fp64,
+    # matching random_sample's precision behavior.
+    q.log_()
+    torch.sub(logits, q, out=q)
+    return q.argmax(dim=-1).view(-1)
 
 
 def flashinfer_sample(
