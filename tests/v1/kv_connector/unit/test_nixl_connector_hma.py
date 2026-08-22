@@ -97,6 +97,46 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 
 @pytest.mark.cpu_test
+def test_packed_hma_keeps_scheduler_block_size():
+    """Packed HMA transfers must not find one kernel size for all groups.
+
+    DeepSeek-V4 has cache groups with different block sizes. Its packed cache
+    transfers one complete scheduler block slab, while each attention backend
+    uses the kernel block size selected for its own group. The scheduler's
+    global block size can therefore be smaller than an attention backend's
+    minimum supported size.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import KVCacheTensor
+
+    num_blocks = 8
+    worker = object.__new__(NixlConnectorWorker)
+    worker.block_size = 4
+    worker.num_blocks = num_blocks
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.kv_cache_config = make_kv_cache_config(block_size=4, num_blocks=num_blocks)
+    worker.kv_cache_config.kv_cache_tensors = [
+        KVCacheTensor(
+            size=num_blocks * 4096,
+            shared_by=["layer0", "layer2"],
+            block_stride=4096,
+        )
+    ]
+
+    with patch.object(bw, "select_common_block_size") as select_common_block_size:
+        worker._sync_block_size_with_kernel()
+
+    select_common_block_size.assert_not_called()
+    assert worker.block_size == 4
+    assert worker.num_blocks == num_blocks
+    assert worker._logical_num_blocks == num_blocks
+    assert worker._physical_blocks_per_logical_kv_block == 1
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "is_rocm,has_mamba,use_host_buffer,done_recving,failed_recving,expected_syncs",
     [
