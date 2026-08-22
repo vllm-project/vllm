@@ -481,3 +481,131 @@ fn validate_chat_cross_parameters(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::ChatCompletionRequest;
+
+    fn function_tool(name: &str) -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "parameters": {"type": "object"},
+            },
+        })
+    }
+
+    fn request_with_tool_choice(tool_choice: Value, tools: Option<Vec<Value>>) -> Value {
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": tools,
+            "tool_choice": tool_choice,
+        })
+    }
+
+    #[test]
+    fn allowed_tools_wire_shape_round_trips() {
+        let tool_choice = json!({
+            "type": "allowed_tools",
+            "allowed_tools": {
+                "mode": "auto",
+                "tools": [{
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                }],
+            },
+        });
+        let request: ChatCompletionRequest = serde_json::from_value(request_with_tool_choice(
+            tool_choice.clone(),
+            Some(vec![function_tool("get_weather")]),
+        ))
+        .expect("allowed_tools wire shape deserializes");
+
+        assert_eq!(
+            serde_json::to_value(request.tool_choice.as_ref().expect("tool choice is present"))
+                .expect("tool choice serializes"),
+            tool_choice
+        );
+    }
+
+    #[test]
+    fn allowed_tools_rejects_invalid_outer_discriminator() {
+        assert!(
+            serde_json::from_value::<ChatCompletionRequest>(request_with_tool_choice(
+                json!({
+                    "type": "not_allowed_tools",
+                    "allowed_tools": {"mode": "auto", "tools": []},
+                }),
+                Some(vec![function_tool("get_weather")]),
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn allowed_tools_rejects_legacy_flat_shape() {
+        assert!(
+            serde_json::from_value::<ChatCompletionRequest>(request_with_tool_choice(
+                json!({
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "function", "name": "get_weather"}],
+                }),
+                Some(vec![function_tool("get_weather")]),
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn allowed_tools_rejects_invalid_mode() {
+        assert!(
+            serde_json::from_value::<ChatCompletionRequest>(request_with_tool_choice(
+                json!({
+                    "type": "allowed_tools",
+                    "allowed_tools": {"mode": "sometimes", "tools": []},
+                }),
+                Some(vec![function_tool("get_weather")]),
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn allowed_tools_rejects_unsupported_reference_type() {
+        assert!(
+            serde_json::from_value::<ChatCompletionRequest>(request_with_tool_choice(
+                json!({
+                    "type": "allowed_tools",
+                    "allowed_tools": {
+                        "mode": "auto",
+                        "tools": [{"type": "mcp"}],
+                    },
+                }),
+                Some(vec![function_tool("get_weather")]),
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn allowed_tools_rejects_missing_function_name() {
+        assert!(
+            serde_json::from_value::<ChatCompletionRequest>(request_with_tool_choice(
+                json!({
+                    "type": "allowed_tools",
+                    "allowed_tools": {
+                        "mode": "auto",
+                        "tools": [{"type": "function", "function": {}}],
+                    },
+                }),
+                Some(vec![function_tool("get_weather")]),
+            ))
+            .is_err()
+        );
+    }
+}

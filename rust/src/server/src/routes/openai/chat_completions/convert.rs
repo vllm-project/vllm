@@ -14,7 +14,8 @@ use crate::error::{ApiError, bail_invalid_request, chat_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
-    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue, ToolReference,
+    AllowedTools, AllowedToolsMode, ChatMessage, ContentPart, MessageContent, Tool, ToolChoice,
+    ToolChoiceValue, ToolReference,
 };
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
@@ -82,7 +83,18 @@ pub(super) fn prepare_chat_request(
         .echo
         .then(|| extract_last_assistant_content(&request.messages))
         .flatten();
-    let messages: Vec<_> = request.messages.into_iter().map(convert_message).try_collect()?;
+    let allowed_tools = match request.tool_choice.as_ref() {
+        Some(ToolChoice::AllowedTools { allowed_tools, .. }) => Some(allowed_tools),
+        _ => None,
+    };
+    let tools = convert_tools(request.tools)?;
+    validate_allowed_tools(&tools, allowed_tools)?;
+    let tools = filter_allowed_tools(tools, allowed_tools);
+    let messages: Vec<_> = request
+        .messages
+        .into_iter()
+        .map(|message| convert_message_with_allowed_tools(message, allowed_tools))
+        .try_collect()?;
     let generation_prompt_mode = normalize_generation_prompt_mode(
         request.add_generation_prompt,
         request.continue_final_message,
@@ -132,7 +144,7 @@ pub(super) fn prepare_chat_request(
 
     let tool_context = ResolvedToolContext::new(
         &messages,
-        convert_tools(request.tools)?,
+        tools,
         request.tool_choice.as_ref().map(convert_tool_choice).transpose()?,
         request.parallel_tool_calls.unwrap_or(true),
     )
@@ -259,6 +271,13 @@ fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
 
 /// Lower one OpenAI chat message into the `vllm-chat` message shape.
 pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, ApiError> {
+    convert_message_with_allowed_tools(message, None)
+}
+
+fn convert_message_with_allowed_tools(
+    message: ChatMessage,
+    allowed_tools: Option<&AllowedTools>,
+) -> Result<VllmChatMessage, ApiError> {
     match message {
         ChatMessage::System { content, .. } => {
             Ok(VllmChatMessage::system(convert_content(content)?))
@@ -306,7 +325,7 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             name: _,
         } => Ok(VllmChatMessage::developer(
             convert_content(content)?,
-            convert_message_tools(tools)?,
+            convert_message_tools(tools, allowed_tools)?,
         )),
     }
 }
@@ -400,8 +419,56 @@ pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, A
         .collect()
 }
 
-fn convert_message_tools(tools: Option<Vec<Tool>>) -> Result<Option<Vec<ChatTool>>, ApiError> {
-    let tools = convert_tools(tools)?;
+fn filter_allowed_tools(
+    tools: Vec<ChatTool>,
+    allowed_tools: Option<&AllowedTools>,
+) -> Vec<ChatTool> {
+    let Some(allowed_tools) = allowed_tools else {
+        return tools;
+    };
+
+    tools
+        .into_iter()
+        .filter(|tool| {
+            allowed_tools.tools.iter().any(|allowed_tool| match allowed_tool {
+                ToolReference::Function { function } => tool.name == function.name,
+            })
+        })
+        .collect()
+}
+
+fn validate_allowed_tools(
+    tools: &[ChatTool],
+    allowed_tools: Option<&AllowedTools>,
+) -> Result<(), ApiError> {
+    let Some(allowed_tools) = allowed_tools else {
+        return Ok(());
+    };
+
+    if matches!(allowed_tools.mode, AllowedToolsMode::Required) && allowed_tools.tools.is_empty() {
+        bail_invalid_request!(
+            "Invalid value for 'tool_choice.allowed_tools.tools': 'required' mode requires at least one allowed function."
+        );
+    }
+
+    for tool_ref in &allowed_tools.tools {
+        let ToolReference::Function { function } = tool_ref;
+        if !tools.iter().any(|tool| tool.name == function.name) {
+            bail_invalid_request!(
+                "Invalid value for 'tool_choice.allowed_tools.tools': tool '{}' not found in 'tools'.",
+                function.name
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn convert_message_tools(
+    tools: Option<Vec<Tool>>,
+    allowed_tools: Option<&AllowedTools>,
+) -> Result<Option<Vec<ChatTool>>, ApiError> {
+    let tools = filter_allowed_tools(convert_tools(tools)?, allowed_tools);
     Ok((!tools.is_empty()).then_some(tools))
 }
 
@@ -416,10 +483,11 @@ fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiEr
         } if tool_type == "function" => Ok(ChatToolChoice::Function {
             name: function.name.clone(),
         }),
-        ToolChoice::AllowedTools { tools, .. } => bail_invalid_request!(
-            "allowed_tools tool_choice is not supported yet: {}.",
-            tools.iter().map(ToolReference::identifier).join(", ")
-        ),
+        ToolChoice::AllowedTools { allowed_tools, .. } => match &allowed_tools.mode {
+            AllowedToolsMode::Auto if allowed_tools.tools.is_empty() => Ok(ChatToolChoice::None),
+            AllowedToolsMode::Auto => Ok(ChatToolChoice::Auto),
+            AllowedToolsMode::Required => Ok(ChatToolChoice::Required),
+        },
         _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
     }
 }
@@ -441,15 +509,16 @@ mod tests {
     use vllm_text::{Prompt, output::TextDecodeOptions};
     use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
 
-    use super::prepare_chat_request;
+    use super::{convert_message_with_allowed_tools, prepare_chat_request};
     use crate::lora::LoraModelResolution;
     use crate::routes::openai::chat_completions::types::{
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
     use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
-        AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
-        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        AllowedTools, AllowedToolsChoiceType, AllowedToolsMode, AudioUrl, ChatMessage, ContentPart,
+        Function, FunctionCallResponse, FunctionChoice, ImageUrl, InputAudio, MessageContent,
+        StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, ToolReference, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -473,6 +542,35 @@ mod tests {
             }],
             stream: true,
             ..Default::default()
+        }
+    }
+
+    fn function_tool(name: &str) -> Tool {
+        Tool {
+            tool_type: "function".to_string(),
+            function: Function {
+                name: name.to_string(),
+                description: None,
+                parameters: json!({"type": "object"}),
+                strict: None,
+            },
+        }
+    }
+
+    fn allowed_tools_choice(mode: AllowedToolsMode, names: &[&str]) -> ToolChoice {
+        ToolChoice::AllowedTools {
+            tool_type: AllowedToolsChoiceType::AllowedTools,
+            allowed_tools: AllowedTools {
+                mode,
+                tools: names
+                    .iter()
+                    .map(|name| ToolReference::Function {
+                        function: FunctionChoice {
+                            name: (*name).to_string(),
+                        },
+                    })
+                    .collect(),
+            },
         }
     }
 
@@ -1179,7 +1277,7 @@ mod tests {
             }]),
             tool_choice: Some(ToolChoice::Function {
                 tool_type: "function".to_string(),
-                function: crate::routes::openai::utils::types::FunctionChoice {
+                function: FunctionChoice {
                     name: "get_weather".to_string(),
                 },
             }),
@@ -1200,6 +1298,340 @@ mod tests {
             }
         );
         assert!(prepared.options.is_named_tool_choice);
+    }
+
+    #[test]
+    fn prepare_chat_request_filters_allowed_tools_in_declaration_order() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Developer {
+                content: MessageContent::Text("developer instructions".to_string()),
+                tools: Some(vec![
+                    function_tool("developer_news"),
+                    function_tool("developer_time"),
+                    function_tool("developer_weather"),
+                ]),
+                name: None,
+            }],
+            tools: Some(vec![
+                function_tool("get_weather"),
+                function_tool("get_news"),
+                function_tool("get_time"),
+            ]),
+            tool_choice: Some(allowed_tools_choice(
+                AllowedToolsMode::Auto,
+                &["get_time", "get_weather"],
+            )),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        let initial_tool_names = prepared
+            .chat_request
+            .initial_tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let effective_tool_names = prepared
+            .chat_request
+            .tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        expect![[r#"
+            (
+                [
+                    "get_weather",
+                    "get_time",
+                ],
+                [
+                    "get_weather",
+                    "get_time",
+                ],
+                Auto,
+                false,
+                [
+                    Developer {
+                        content: Text(
+                            "developer instructions",
+                        ),
+                        tools: None,
+                    },
+                ],
+            )
+        "#]]
+        .assert_debug_eq(&(
+            initial_tool_names,
+            effective_tool_names,
+            prepared.chat_request.tool_choice().clone(),
+            prepared.options.is_named_tool_choice,
+            prepared.chat_request.messages,
+        ));
+    }
+
+    #[test]
+    fn convert_developer_message_filters_allowed_tools_in_declaration_order() {
+        let allowed_tools = AllowedTools {
+            mode: AllowedToolsMode::Auto,
+            tools: vec![
+                ToolReference::Function {
+                    function: FunctionChoice {
+                        name: "keep_first".to_string(),
+                    },
+                },
+                ToolReference::Function {
+                    function: FunctionChoice {
+                        name: "keep_second".to_string(),
+                    },
+                },
+            ],
+        };
+        let message = ChatMessage::Developer {
+            content: MessageContent::Text("developer instructions".to_string()),
+            tools: Some(vec![
+                function_tool("keep_second"),
+                function_tool("drop"),
+                function_tool("keep_first"),
+            ]),
+            name: None,
+        };
+
+        let converted = convert_message_with_allowed_tools(message, Some(&allowed_tools))
+            .expect("developer tools are valid");
+
+        expect![[r#"
+            Developer {
+                content: Text(
+                    "developer instructions",
+                ),
+                tools: Some(
+                    [
+                        Tool {
+                            name: "keep_second",
+                            description: None,
+                            parameters: Object {
+                                "type": String("object"),
+                            },
+                            strict: None,
+                        },
+                        Tool {
+                            name: "keep_first",
+                            description: None,
+                            parameters: Object {
+                                "type": String("object"),
+                            },
+                            strict: None,
+                        },
+                    ],
+                ),
+            }
+        "#]]
+        .assert_debug_eq(&converted);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_required_allowed_tools() {
+        let request = ChatCompletionRequest {
+            tools: Some(vec![
+                function_tool("get_weather"),
+                function_tool("get_time"),
+            ]),
+            tool_choice: Some(allowed_tools_choice(
+                AllowedToolsMode::Required,
+                &["get_time"],
+            )),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            (
+                prepared
+                    .chat_request
+                    .initial_tools()
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<Vec<_>>(),
+                prepared.chat_request.tool_choice().clone(),
+                prepared.options.is_named_tool_choice,
+            ),
+            (vec!["get_time"], ChatToolChoice::Required, false)
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_developer_only_allowed_tools_entry() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Developer {
+                content: MessageContent::Text("developer instructions".to_string()),
+                tools: Some(vec![function_tool("get_time")]),
+                name: None,
+            }],
+            tools: Some(vec![function_tool("get_weather")]),
+            tool_choice: Some(allowed_tools_choice(AllowedToolsMode::Auto, &["get_time"])),
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect_err("developer-only tools cannot authorize an allowlist entry");
+
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("tool 'get_time' not found in 'tools'")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_unknown_allowed_tool_for_required_and_missing_catalog() {
+        let cases = [
+            (
+                "required mode",
+                Some(vec![function_tool("get_weather")]),
+                AllowedToolsMode::Required,
+            ),
+            ("missing tools catalog", None, AllowedToolsMode::Auto),
+        ];
+
+        for (case, tools, mode) in cases {
+            let request = ChatCompletionRequest {
+                tools,
+                tool_choice: Some(allowed_tools_choice(mode, &["get_time"])),
+                ..base_request()
+            };
+
+            let error = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect_err(case);
+
+            assert!(
+                error
+                    .to_error_response()
+                    .error
+                    .message
+                    .contains("tool 'get_time' not found in 'tools'"),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_tools_filter_does_not_hide_unsupported_tool_types() {
+        let unsupported_tool = Tool {
+            tool_type: "custom".to_string(),
+            function: Function {
+                name: "unsupported".to_string(),
+                description: None,
+                parameters: json!({"type": "object"}),
+                strict: None,
+            },
+        };
+        let cases = [
+            (
+                "top-level tool",
+                vec![ChatMessage::User {
+                    content: MessageContent::Text("hello".to_string()),
+                    name: None,
+                }],
+                Some(vec![unsupported_tool.clone()]),
+            ),
+            (
+                "developer tool",
+                vec![ChatMessage::Developer {
+                    content: MessageContent::Text("developer instructions".to_string()),
+                    tools: Some(vec![unsupported_tool]),
+                    name: None,
+                }],
+                None,
+            ),
+        ];
+
+        for (case, messages, tools) in cases {
+            let request = ChatCompletionRequest {
+                messages,
+                tools,
+                tool_choice: Some(allowed_tools_choice(AllowedToolsMode::Auto, &[])),
+                ..base_request()
+            };
+
+            let error = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect_err(case);
+
+            assert!(
+                error
+                    .to_error_response()
+                    .error
+                    .message
+                    .contains("Only function tools are supported"),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepare_chat_request_treats_empty_auto_allowed_tools_as_no_tools() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Developer {
+                content: MessageContent::Text("developer instructions".to_string()),
+                tools: Some(vec![
+                    function_tool("get_weather"),
+                    function_tool("get_time"),
+                ]),
+                name: None,
+            }],
+            tools: Some(vec![
+                function_tool("get_weather"),
+                function_tool("get_time"),
+            ]),
+            tool_choice: Some(allowed_tools_choice(AllowedToolsMode::Auto, &[])),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            (
+                prepared.chat_request.initial_tools().to_vec(),
+                prepared.chat_request.tool_choice().clone(),
+                prepared.options.is_named_tool_choice,
+                prepared.chat_request.messages,
+            ),
+            (
+                Vec::new(),
+                ChatToolChoice::None,
+                false,
+                vec![VllmChatMessage::developer("developer instructions", None)],
+            )
+        );
     }
 
     #[test]
