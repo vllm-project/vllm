@@ -3932,6 +3932,32 @@ steps:
   commands:
   - pytest -v -s -m 'not slow_test' v1/spec_decode
 
+- label: ":amd: (MI355) Spec Decode AL MTP + Other Acceptance Nightly" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - vllm/v1/worker/gpu_model_runner.py
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/models/gemma4.py
+  - vllm/model_executor/models/gemma4_mm.py
+  - vllm/model_executor/models/gemma4_mtp.py
+  - vllm/model_executor/models/llama.py
+  - vllm/model_executor/models/llama_eagle3.py
+  - vllm/model_executor/models/medusa.py
+  - vllm/model_executor/models/registry.py
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - tests/v1/e2e/spec_decode/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/
+
 #------------------------------------------------------  mi355 · weight_loading  -------------------------------------------------------#
 
 - label: ":amd: (MI355) Weight Loading Multi-GPU" # TBD
