@@ -7,6 +7,7 @@ import torch
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.fused_sigmoid_gate import fused_sigmoid_mul_
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
 
@@ -221,6 +222,10 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         if self.g_proj is not None:
-            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
+            gate = self.g_proj(hidden_states)[0]
+            if current_platform.is_rocm():
+                attn_out = fused_sigmoid_mul_(attn_out, gate)
+            else:
+                attn_out = attn_out * gate.sigmoid()
 
         return self.o_proj(attn_out)[0]
