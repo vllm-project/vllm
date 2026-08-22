@@ -35,6 +35,11 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
+from vllm.model_executor.layers.fused_moe_finalize_norm import (
+    fused_moe_finalize_allreduce_rms_norm,
+    moe_tail_fusion_applies,
+)
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     MinimaxM3QKVParallelLinearWithIndexer,
@@ -118,6 +123,9 @@ class MiniMAXGemmaRMSNorm(nn.Module):
     updated ``(x, residual)`` pair is returned.
     """
 
+    # Scales by `1 + w`, for consumers that fold the norm into their own kernel.
+    rms_weight_bias = 1.0
+
     def __init__(
         self,
         hidden_size: int,
@@ -198,6 +206,7 @@ class MiniMaxM3MoE(nn.Module):
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
+        defer_finalize: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -267,12 +276,26 @@ class MiniMaxM3MoE(nn.Module):
             prefix=f"{prefix}.experts",
         )
 
+        # The RMSNorm that takes this block's deferred all-reduce takes its
+        # top-k reduction too, where the experts can leave it open -- and only
+        # where the consumer can close it out: a hidden dim it need not
+        # truncate, and a fused tail that can actually run here. The kernel's
+        # own capability is not knowable yet; it resolves in
+        # process_weights_after_loading, and every prepare/finalize reachable
+        # under `use_deferred_moe_finalize` supports the deferred form.
+        moe_config = self.experts.moe_config
+        moe_config.defer_moe_finalize = (
+            defer_finalize
+            and moe_config.hidden_dim == moe_config.hidden_dim_unpadded
+            and moe_tail_fusion_applies(moe_config.in_dtype)
+        )
+
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight.to(torch.float32))
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor | MoEOutput:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -281,6 +304,10 @@ class MiniMaxM3MoE(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
+        # An unfinalized output comes back as a MoEOutput for the next RMSNorm
+        # to close out; a finalized one is the usual [num_tokens, hidden].
+        if isinstance(final_hidden_states, MoEOutput):
+            return final_hidden_states
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -732,6 +759,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 layer_id=layer_id,
                 quant_config=quant_config,
                 reduce_results=reduce_results,
+                defer_finalize=not reduce_results,
                 prefix=f"{prefix}.block_sparse_moe",
             )
         else:
@@ -754,10 +782,17 @@ class MiniMaxM3DecoderLayer(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | MoEOutput,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.fuse_input_allreduce and residual is not None:
+        if isinstance(hidden_states, MoEOutput):
+            # The preceding MoE left its whole tail open, top-k reduction and
+            # all; close it out into this layer's input_layernorm.
+            assert residual is not None
+            hidden_states, residual = fused_moe_finalize_allreduce_rms_norm(
+                hidden_states, residual, self.input_layernorm
+            )
+        elif self.fuse_input_allreduce and residual is not None:
             hidden_states, residual = fused_allreduce_gemma_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
@@ -893,7 +928,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        if self.fuse_final_norm_allreduce:
+        if isinstance(hidden_states, MoEOutput):
+            assert residual is not None
+            hidden_states, _ = fused_moe_finalize_allreduce_rms_norm(
+                hidden_states, residual, self.norm
+            )
+        elif self.fuse_final_norm_allreduce:
             hidden_states, _ = fused_allreduce_gemma_rms_norm(
                 hidden_states, residual, self.norm
             )
