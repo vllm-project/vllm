@@ -44,6 +44,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
@@ -89,6 +90,16 @@ __all__ = [
     "QuarkOCP_MX_MoEMethod",
     "QuarkNvfp4MoEMethod",
 ]
+
+
+def _use_k3_situ_aiter_a8w4(
+    moe: FusedMoEConfig, ocp_mx_scheme: OCP_MX_Scheme | str
+) -> bool:
+    """Whether Quark K3 should override A4 activations with native A8."""
+    return (
+        ocp_mx_scheme == "w_mxfp4_a_mxfp4"
+        and rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
+    )
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
@@ -1091,8 +1102,16 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         else:
             self.static_input_scales = False
 
+        self.is_k3_situ_aiter_a8w4 = _use_k3_situ_aiter_a8w4(moe, self.ocp_mx_scheme)
+
         # Select backend based on OCP MX scheme
-        if self.ocp_mx_scheme == "w_mxfp4":
+        if self.is_k3_situ_aiter_a8w4:
+            # The checkpoint declares dynamic MXFP4 activations. This explicit
+            # opt-in keeps its packed MXFP4 weights/scales but quantizes SiTU
+            # activations to MXFP8 in AITER's native SiTUv2 A8W4 kernels.
+            self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
+        elif self.ocp_mx_scheme == "w_mxfp4":
             # W4A16: weight-only MXFP4
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
         elif self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
@@ -1137,6 +1156,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         logger.info_once(
             f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
         )
+        if self.is_k3_situ_aiter_a8w4:
+            logger.warning_once(
+                "Kimi-K3 Quark checkpoint declares dynamic MXFP4 activations; "
+                "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1 explicitly overrides "
+                "routed-MoE activations to MXFP8 and uses native AITER SiTUv2 "
+                "A8W4 with MXFP4 weights."
+            )
 
     def maybe_roundup_sizes(
         self,
@@ -1156,7 +1182,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if self.mxfp4_backend is not None:
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
-                    self.mxfp4_backend, hidden_size, intermediate_size_per_partition
+                    self.mxfp4_backend,
+                    hidden_size,
+                    intermediate_size_per_partition,
+                    activation=self.moe.activation,
                 )
             )
         return hidden_size, intermediate_size_per_partition
@@ -1286,20 +1315,35 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w2_bias = getattr(layer, "w2_bias", None)
 
         # Convert weights to kernel format (handles all backend-specific logic)
-        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
-                mxfp4_backend=self.mxfp4_backend,
-                layer=layer,
-                w13_weight=layer.w13_weight,
-                w2_weight=layer.w2_weight,
-                w13_weight_scale=layer.w13_weight_scale,
-                w2_weight_scale=layer.w2_weight_scale,
-                w13_bias=w13_bias,
-                w2_bias=w2_bias,
-                w13_input_scale=layer.w13_input_scale,
-                w2_input_scale=layer.w2_input_scale,
+        if self.is_k3_situ_aiter_a8w4:
+            w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
+                convert_weight_to_mxfp4_moe_kernel_format(
+                    mxfp4_backend=self.mxfp4_backend,
+                    layer=layer,
+                    w13_weight=layer.w13_weight,
+                    w2_weight=layer.w2_weight,
+                    w13_weight_scale=layer.w13_weight_scale,
+                    w2_weight_scale=layer.w2_weight_scale,
+                    w13_bias=w13_bias,
+                    w2_bias=w2_bias,
+                    activation=self.moe.activation,
+                )
             )
-        )
+        else:
+            w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
+                convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+                    mxfp4_backend=self.mxfp4_backend,
+                    layer=layer,
+                    w13_weight=layer.w13_weight,
+                    w2_weight=layer.w2_weight,
+                    w13_weight_scale=layer.w13_weight_scale,
+                    w2_weight_scale=layer.w2_weight_scale,
+                    w13_bias=w13_bias,
+                    w2_bias=w2_bias,
+                    w13_input_scale=layer.w13_input_scale,
+                    w2_input_scale=layer.w2_input_scale,
+                )
+            )
 
         # Handle weight/scale assignment based on backend type
         if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
