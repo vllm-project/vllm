@@ -17,6 +17,8 @@ class PoolingCursor:
     prompt_lens_cpu: torch.Tensor
     seq_lens_cpu: torch.Tensor
     num_scheduled_tokens_cpu: torch.Tensor
+    partial_prefill: bool | None = None
+    finished_mask: list[bool] | None = None
 
     def __getitem__(self, indices: slice) -> "PoolingCursor":
         return PoolingCursor(
@@ -25,13 +27,24 @@ class PoolingCursor:
             prompt_lens_cpu=self.prompt_lens_cpu[indices],
             seq_lens_cpu=self.seq_lens_cpu[indices],
             num_scheduled_tokens_cpu=self.num_scheduled_tokens_cpu[indices],
+            partial_prefill=False if self.partial_prefill is False else None,
+            finished_mask=None
+            if self.finished_mask is None
+            else self.finished_mask[indices],
         )
 
     def is_partial_prefill(self) -> bool:
-        return not torch.all(self.prompt_lens_cpu == self.num_scheduled_tokens_cpu)
+        if self.partial_prefill is not None:
+            return self.partial_prefill
+        return not torch.equal(self.prompt_lens_cpu, self.num_scheduled_tokens_cpu)
 
     def is_finished(self) -> torch.Tensor:
         return self.prompt_lens_cpu == self.seq_lens_cpu
+
+    def get_finished_mask(self) -> list[bool]:
+        if self.finished_mask is not None:
+            return self.finished_mask
+        return self.is_finished().tolist()
 
 
 class PoolingStates:
@@ -93,7 +106,9 @@ class PoolingMetadata:
         if prompt_token_ids is None:
             raise ValueError(
                 "prompt_token_ids is required but was not set. "
-                "Please set `requires_token_ids=True` in `get_pooling_updates`"
+                "Please set `requires_token_ids=True` for CPU token IDs or "
+                "`requires_token_ids_gpu=True` for model-device token IDs in "
+                "`get_pooling_updates`"
             )
         return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
@@ -130,9 +145,14 @@ class PoolingMetadata:
             )
 
         num_scheduled_tokens_cpu = torch.from_numpy(num_scheduled_tokens_np)
+        prompt_lens_np = prompt_lens.numpy()
+        seq_lens_np = seq_lens_cpu.numpy()
         if query_start_loc_gpu is None:
             cumsum = torch.zeros(
-                n_seq + 1, dtype=torch.int64, pin_memory=PIN_MEMORY, device="cpu"
+                n_seq + 1,
+                dtype=torch.int64,
+                pin_memory=PIN_MEMORY and device.type != "cpu",
+                device="cpu",
             )
             torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
             cumsum = cumsum.to(device, non_blocking=True)
@@ -155,4 +175,6 @@ class PoolingMetadata:
             prompt_lens_cpu=prompt_lens,
             seq_lens_cpu=seq_lens_cpu,
             num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+            partial_prefill=not np.array_equal(prompt_lens_np, num_scheduled_tokens_np),
+            finished_mask=np.equal(prompt_lens_np, seq_lens_np).tolist(),
         )

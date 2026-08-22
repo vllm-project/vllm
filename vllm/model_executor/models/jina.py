@@ -12,6 +12,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
@@ -103,6 +104,9 @@ class JinaForRankingPool(StepPool):
 
     def get_supported_tasks(self) -> set[PoolingTask]:
         return {"token_embed"}
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True, requires_token_ids_gpu=True)
 
     def forward(
         self,

@@ -478,7 +478,17 @@ def test_placeholder_spec_token_ids_written_verbatim():
     ("pooling_params", "expect_device_prompt_token_ids", "expect_cpu_prompt_token_ids"),
     [
         ({"task": "classify"}, False, False),
-        ({"task": "classify", "requires_token_ids": True}, True, True),
+        ({"task": "classify", "requires_token_ids": True}, False, True),
+        ({"task": "classify", "requires_token_ids_gpu": True}, True, False),
+        (
+            {
+                "task": "classify",
+                "requires_token_ids": True,
+                "requires_token_ids_gpu": True,
+            },
+            True,
+            True,
+        ),
     ],
 )
 def test_pooling_metadata_token_id_buffers(

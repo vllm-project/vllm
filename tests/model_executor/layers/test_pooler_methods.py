@@ -5,9 +5,11 @@
 from dataclasses import dataclass
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 
+from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.seqwise.methods import (
     CLSPool,
     LastPool,
@@ -99,6 +101,41 @@ def _make_metadata(
         pooling_states=pooling_states,
         pooling_cursor=cursor,
     )
+
+
+def test_build_pooling_cursor_caches_cpu_status() -> None:
+    metadata = PoolingMetadata(
+        prompt_lens=torch.tensor([3, 4, 2], dtype=torch.long),
+        prompt_token_ids=None,
+        prompt_token_ids_cpu=None,
+        pooling_params=[PoolingParams(task="embed") for _ in range(3)],
+        pooling_states=[PoolingStates() for _ in range(3)],
+    )
+    metadata.build_pooling_cursor(
+        np.array([3, 2, 2], dtype=np.int32),
+        seq_lens_cpu=torch.tensor([3, 2, 1], dtype=torch.long),
+        device=_CPU,
+    )
+
+    cursor = metadata.get_pooling_cursor()
+
+    assert cursor.is_partial_prefill() is True
+    assert cursor.get_finished_mask() == [True, False, False]
+    assert cursor[:1].is_partial_prefill() is False
+    assert cursor[1:2].is_partial_prefill() is True
+    assert cursor[1:].get_finished_mask() == [False, False]
+
+
+def test_pooling_params_update_combines_token_id_requirements() -> None:
+    update = PoolingParamsUpdate(requires_token_ids=True) | PoolingParamsUpdate(
+        requires_token_ids_gpu=True
+    )
+    params = PoolingParams(task="embed")
+
+    update.apply(params)
+
+    assert params.requires_token_ids is True
+    assert params.requires_token_ids_gpu is True
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +525,7 @@ class TestStepPool:
         pooler = self._make_step_pool()
         update = pooler.get_pooling_updates("token_classify")
         assert update.requires_token_ids is True
+        assert update.requires_token_ids_gpu is False
 
 
 # ---------------------------------------------------------------------------

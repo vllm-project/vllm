@@ -12,9 +12,7 @@ from vllm.model_executor.models.bert import (
     BertMLMHead,
     SPLADESparsePooler,
 )
-from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -119,18 +117,72 @@ def test_pooling_runner_gathers_required_token_ids() -> None:
     req_states = MagicMock(spec=RequestState)
     req_states.prompt_len = MagicMock(np=np.array([0, 2, 0, 3], dtype=np.int32))
     metadata = runner._get_pooling_metadata(
-        input_batch, req_states, torch.device(current_platform.device_type)
+        input_batch, req_states, torch.device("cpu")
     )
 
     expected = torch.tensor([[101, 11, 102], [101, 102, 0]])
     assert metadata.prompt_token_ids_cpu is not None
-    assert metadata.prompt_token_ids is not None
-    assert metadata.prompt_token_ids_cpu.is_pinned() == PIN_MEMORY
+    assert metadata.prompt_token_ids is None
+    assert metadata.prompt_token_ids_cpu.is_pinned() is False
     torch.testing.assert_close(
         metadata.prompt_lens, torch.tensor([3, 2], dtype=torch.int32)
     )
     torch.testing.assert_close(metadata.prompt_token_ids_cpu, expected)
+
+
+def test_pooling_runner_gathers_required_gpu_token_ids() -> None:
+    runner = PoolingRunner.__new__(PoolingRunner)
+    pooling_params = PoolingParams(task="embed", requires_token_ids_gpu=True)
+    runner.pooling_params = {1: pooling_params, 3: pooling_params}
+    runner.pooling_states = {1: PoolingStates(), 3: PoolingStates()}
+    runner.prompt_token_ids = {
+        1: torch.tensor([101, 102]),
+        3: torch.tensor([101, 11, 102]),
+    }
+
+    input_batch = MagicMock(spec=InputBatch)
+    input_batch.idx_mapping_np = np.array([3, 1], dtype=np.int32)
+    input_batch.num_reqs = 2
+    req_states = MagicMock(spec=RequestState)
+    req_states.prompt_len = MagicMock(np=np.array([0, 2, 0, 3], dtype=np.int32))
+    metadata = runner._get_pooling_metadata(
+        input_batch, req_states, torch.device("cpu")
+    )
+
+    expected = torch.tensor([[101, 11, 102], [101, 102, 0]])
+    assert metadata.prompt_token_ids_cpu is None
+    assert metadata.prompt_token_ids is not None
     torch.testing.assert_close(metadata.prompt_token_ids.cpu(), expected)
+
+
+def test_pooling_runner_gathers_mixed_required_token_ids() -> None:
+    runner = PoolingRunner.__new__(PoolingRunner)
+    cpu_pooling_params = PoolingParams(task="embed", requires_token_ids=True)
+    gpu_pooling_params = PoolingParams(task="embed", requires_token_ids_gpu=True)
+    runner.pooling_params = {1: cpu_pooling_params, 3: gpu_pooling_params}
+    runner.pooling_states = {1: PoolingStates(), 3: PoolingStates()}
+    runner.prompt_token_ids = {
+        1: torch.tensor([101, 102]),
+        3: torch.tensor([101, 11, 102]),
+    }
+
+    input_batch = MagicMock(spec=InputBatch)
+    input_batch.idx_mapping_np = np.array([1, 3], dtype=np.int32)
+    input_batch.num_reqs = 2
+    req_states = MagicMock(spec=RequestState)
+    req_states.prompt_len = MagicMock(np=np.array([0, 2, 0, 3], dtype=np.int32))
+    metadata = runner._get_pooling_metadata(
+        input_batch, req_states, torch.device("cpu")
+    )
+
+    assert metadata.prompt_token_ids_cpu is not None
+    assert metadata.prompt_token_ids is not None
+    torch.testing.assert_close(
+        metadata.prompt_token_ids_cpu[0], torch.tensor([101, 102, 0])
+    )
+    torch.testing.assert_close(
+        metadata.prompt_token_ids[1].cpu(), torch.tensor([101, 11, 102])
+    )
 
 
 def test_pooling_runner_stores_only_required_token_ids() -> None:
@@ -149,9 +201,16 @@ def test_pooling_runner_stores_only_required_token_ids() -> None:
         PoolingParams(task="embed", requires_token_ids=True),
         [101, 11, 102],
     )
+    runner.add_request(
+        "req-3",
+        3,
+        PoolingParams(task="embed", requires_token_ids_gpu=True),
+        [101, 12, 102],
+    )
 
     assert 1 not in runner.prompt_token_ids
     torch.testing.assert_close(runner.prompt_token_ids[2], torch.tensor([101, 11, 102]))
+    torch.testing.assert_close(runner.prompt_token_ids[3], torch.tensor([101, 12, 102]))
 
 
 def test_pooling_runner_releases_aborted_late_interaction_doc() -> None:
