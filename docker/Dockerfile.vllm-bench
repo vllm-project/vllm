@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1.7
+
+ARG RUST_VERSION=1.95
+ARG ALPINE_VERSION=3.22
+
+FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS build
+
+RUN apk add --no-cache \
+    cmake \
+    g++ \
+    openssl-dev \
+    openssl-libs-static \
+    perl \
+    pkgconf
+
+WORKDIR /workspace
+
+COPY rust-toolchain.toml ./
+COPY rust ./rust
+
+WORKDIR /workspace/rust
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/workspace/rust/target,sharing=locked \
+    cargo build --locked --release --package vllm-bench \
+    && cp target/release/vllm-bench /usr/local/bin/vllm-bench \
+    && strip /usr/local/bin/vllm-bench
+
+FROM alpine:${ALPINE_VERSION} AS vllm-bench
+
+LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
+    org.opencontainers.image.description="Standalone vLLM serving benchmark client" \
+    org.opencontainers.image.licenses="Apache-2.0"
+
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -H -u 65532 vllm-bench \
+    && mkdir -p /work /home/vllm-bench \
+    && chown -R vllm-bench:vllm-bench /work /home/vllm-bench
+
+COPY --from=build /usr/local/bin/vllm-bench /usr/local/bin/vllm-bench
+
+ENV HOME=/home/vllm-bench
+
+USER vllm-bench
+WORKDIR /work
+
+ENTRYPOINT ["/usr/local/bin/vllm-bench"]
