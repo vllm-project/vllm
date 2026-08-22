@@ -13,6 +13,8 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -48,7 +50,7 @@ class DummyRequest(Request):
         )
 
 
-def create_scheduler() -> Scheduler:
+def create_scheduler(hash_block_size: int = 16) -> Scheduler:
     vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
@@ -67,7 +69,10 @@ def create_scheduler() -> Scheduler:
             KVCacheGroupSpec(
                 ["layer"],
                 FullAttentionSpec(
-                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
                 ),
             )
         ],
@@ -77,8 +82,24 @@ def create_scheduler() -> Scheduler:
         kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
-        block_size=16,
-        hash_block_size=16,
+        block_size=hash_block_size,
+        hash_block_size=hash_block_size,
+    )
+
+
+def _make_hashed_session(
+    prompt_token_ids: list[int],
+    hash_block_size: int,
+    mm_features: list[MultiModalFeatureSpec] | None = None,
+) -> Request:
+    return Request(
+        request_id="session",
+        prompt_token_ids=list(prompt_token_ids),
+        sampling_params=SamplingParams(max_tokens=16),
+        pooling_params=None,
+        mm_features=mm_features,
+        block_hasher=get_request_block_hasher(hash_block_size, sha256),
+        resumable=True,
     )
 
 
@@ -313,6 +334,122 @@ class TestStreamingScheduler(unittest.TestCase):
         # num_new_tokens = num_tokens - num_computed_tokens = 6 - 4 = 2
         num_new_tokens = session.num_tokens - session.num_computed_tokens
         assert num_new_tokens == 2
+
+    def test_update_request_as_session_drops_stale_block_hashes(self):
+        """Discarded sampled tokens must not stay fingerprinted in block_hashes.
+
+        Regression for #49377: update_block_hashes only appends, and the hasher
+        resumes at len(block_hashes) * hash_block_size, so a discarded token
+        that completed a hash block would keep identifying the old sequence.
+        """
+        init_none_hash(sha256)
+        hash_block_size = 4
+        scheduler = create_scheduler(hash_block_size=hash_block_size)
+
+        prompt = [1, 2, 3]
+        discarded_token = 99
+        next_token = 4
+        session = _make_hashed_session(prompt, hash_block_size)
+        session.append_output_token_ids(discarded_token)
+        assert len(session.block_hashes) == 1
+        stale_hash = session.block_hashes[0]
+        session.num_computed_tokens = len(prompt)
+
+        scheduler._update_request_as_session(
+            session,
+            StreamingUpdate.from_request(
+                DummyRequest(request_id="session", prompt_token_ids=[next_token])
+            ),
+        )
+
+        expected = _make_hashed_session(prompt + [next_token], hash_block_size)
+        assert list(session.all_token_ids) == prompt + [next_token]
+        assert session.block_hashes == expected.block_hashes
+        assert session.block_hashes[0] != stale_hash
+
+    def test_update_request_as_session_keeps_valid_prefix_hashes(self):
+        """Full hash blocks inside the kept prefix must not be recomputed."""
+        init_none_hash(sha256)
+        hash_block_size = 4
+        scheduler = create_scheduler(hash_block_size=hash_block_size)
+
+        prompt = [1, 2, 3, 4, 5, 6, 7]
+        session = _make_hashed_session(prompt, hash_block_size)
+        kept_prefix_hash = session.block_hashes[0]
+        session.append_output_token_ids(99)
+        assert len(session.block_hashes) == 2
+        session.num_computed_tokens = len(prompt)
+
+        scheduler._update_request_as_session(
+            session,
+            StreamingUpdate.from_request(
+                DummyRequest(request_id="session", prompt_token_ids=[8])
+            ),
+        )
+
+        expected = _make_hashed_session(prompt + [8], hash_block_size)
+        assert session.block_hashes == expected.block_hashes
+        assert session.block_hashes[0] == kept_prefix_hash
+
+    def test_update_request_as_session_rehashes_multimodal_from_start(self):
+        """MM extra keys must match a full recompute after token truncation.
+
+        Incremental hashing resumes the MM scan from the last feature, so a
+        suffix-only invalidation can miss an earlier feature that still
+        overlaps the recomputed boundary block.
+        """
+        init_none_hash(sha256)
+        hash_block_size = 4
+        scheduler = create_scheduler(hash_block_size=hash_block_size)
+
+        prompt_mm = MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="image",
+            identifier="mm-a",
+            mm_position=PlaceholderRange(offset=5, length=1),
+        )
+        prompt = [1, 2, 3, 4, 5, 6, 7]
+        session = _make_hashed_session(prompt, hash_block_size, [prompt_mm])
+        session.append_output_token_ids(99)
+        session.num_computed_tokens = len(prompt)
+
+        new_mm = MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="image",
+            identifier="mm-b",
+            mm_position=PlaceholderRange(offset=2, length=1),
+        )
+        new_tokens = [8, 9, 10, 11]
+        scheduler._update_request_as_session(
+            session,
+            StreamingUpdate.from_request(
+                DummyRequest(
+                    request_id="session",
+                    prompt_token_ids=new_tokens,
+                    mm_features=[new_mm],
+                )
+            ),
+        )
+
+        expected_mm = [
+            MultiModalFeatureSpec(
+                data=MultiModalKwargsItem.dummy(),
+                modality="image",
+                identifier="mm-a",
+                mm_position=PlaceholderRange(offset=5, length=1),
+            ),
+            MultiModalFeatureSpec(
+                data=MultiModalKwargsItem.dummy(),
+                modality="image",
+                identifier="mm-b",
+                mm_position=PlaceholderRange(offset=len(prompt) + 2, length=1),
+            ),
+        ]
+        expected = _make_hashed_session(
+            prompt + new_tokens, hash_block_size, expected_mm
+        )
+        assert list(session.all_token_ids) == prompt + new_tokens
+        assert session.block_hashes == expected.block_hashes
 
     def test_streaming_e2e_lifecycle(self):
         """
