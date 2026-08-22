@@ -214,7 +214,10 @@ class RoutedExperts(PluggableLayer):
         )
 
     def _ensure_moe_quant_config_init(self):
-        if self.quant_method.moe_quant_config is None:
+        if (
+            self.quant_method.requires_moe_quant_config
+            and self.quant_method.moe_quant_config is None
+        ):
             # Note: the moe_quant_config can't be constructed until after
             # weight loading post processing.
             self.quant_method.moe_quant_config = (
