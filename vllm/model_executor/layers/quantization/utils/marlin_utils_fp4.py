@@ -233,7 +233,11 @@ def prepare_fp4_layer_for_marlin(
     part_size_n = layer.output_size_per_partition
     part_size_k = layer.input_size_per_partition
     padded_n, padded_k = marlin_padded_nk(part_size_n, part_size_k, group_size)
-    param_dtype = layer.params_dtype
+    # VocabParallelEmbedding / ParallelLMHead does not store params_dtype as an
+    # attribute
+    param_dtype = getattr(layer, "params_dtype", None)
+    if param_dtype is None:
+        param_dtype = torch.get_default_dtype()
 
     assert layer.weight.shape == (part_size_n, part_size_k // 2)
 
