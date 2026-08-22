@@ -71,8 +71,8 @@ def sample_tools() -> list[ChatCompletionToolsParam]:
     ]
 
 
-def make_parser(tools=None) -> DeepSeekV4EngineToolParser:
-    return DeepSeekV4EngineToolParser(MOCK_TOKENIZER, tools=tools)
+def make_parser(tools=None, **kwargs) -> DeepSeekV4EngineToolParser:
+    return DeepSeekV4EngineToolParser(MOCK_TOKENIZER, tools=tools, **kwargs)
 
 
 def make_request(tools=None) -> MagicMock:
@@ -146,6 +146,41 @@ def test_extract_tool_calls():
         "location": "Beijing",
         "unit": "celsius",
     }
+
+
+def test_keep_thinking_tags_in_non_streaming_content():
+    parser = make_parser(chat_template_kwargs={"keep_thinking_tags": True})
+    model_output = "<think>Let me check.</think> Here is the answer."
+
+    result = parser.extract_tool_calls(model_output, make_request())
+
+    assert not result.tools_called
+    assert result.content == model_output
+
+
+def test_keep_thinking_tags_does_not_disable_tool_parsing():
+    parser = make_parser(chat_template_kwargs={"keep_thinking_tags": True})
+    model_output = "<think>Let me check.</think> " + build_tool_call(
+        "get_weather", {"location": "Beijing"}
+    )
+
+    result = parser.extract_tool_calls(model_output, make_request())
+
+    assert result.tools_called
+    assert result.content == "<think>Let me check.</think> "
+    assert result.tool_calls[0].function.name == "get_weather"
+
+
+def test_keep_thinking_tags_in_streaming_content():
+    parser = make_parser(chat_template_kwargs={"keep_thinking_tags": True})
+    model_output = "<think>Let me check.</think> Here is the answer."
+
+    deltas = stream(parser, model_output, chunk_size=5)
+    final_delta = parser.finish_streaming()
+    if final_delta is not None:
+        deltas.append(final_delta)
+
+    assert "".join(delta.content or "" for delta in deltas) == model_output
 
 
 def test_function_calls_block_is_not_accepted():

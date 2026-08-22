@@ -267,6 +267,24 @@ class TestThinkingModeConfig:
         )
         assert parser.parser_engine_config.initial_state.name == expected_state
 
+    def test_keep_thinking_tags_preserves_special_tokens(self):
+        cfg = deepseek_v4_config(keep_thinking_tags=True)
+        assert cfg.preserve_tokens == {DSML_THINK_START, DSML_THINK_END}
+
+    def test_reasoning_adapter_ignores_keep_thinking_tags(self, mock_tokenizer):
+        parser = DeepSeekV4ParserReasoningAdapter(
+            mock_tokenizer,
+            chat_template_kwargs={"thinking": True, "keep_thinking_tags": True},
+        )
+
+        reasoning, content = parser.extract_reasoning(
+            "<think>Let me check.</think> Here is the answer.", None
+        )
+
+        assert reasoning == "Let me check."
+        assert content == "Here is the answer."
+        assert parser._parser_engine.reasoning_ended
+
     def test_thinking_mode_reasoning_without_tags(self, mock_tokenizer):
         parser = DeepSeekV4Parser(
             mock_tokenizer, chat_template_kwargs={"thinking": True}
