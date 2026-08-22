@@ -777,6 +777,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "falcon": FalconModelArchConfigConvertor,
     "falcon_mamba": MambaModelArchConfigConvertor,
     "gemma4": Gemma4ModelArchConfigConvertor,
+    "gemma4_assistant": Gemma4ModelArchConfigConvertor,
     "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
     "gemma4_text": Gemma4ModelArchConfigConvertor,
     "gemma4_unified": Gemma4ModelArchConfigConvertor,
