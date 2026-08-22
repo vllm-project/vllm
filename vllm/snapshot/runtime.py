@@ -159,7 +159,6 @@ class LocalSnapshotTools:
         workdir: Path,
         engine_argv: tuple[str, ...],
     ) -> int:
-        log_file = (workdir / "child.log").open("wb")
         command = [
             sys.executable,
             "-m",
@@ -175,15 +174,15 @@ class LocalSnapshotTools:
         ]
         child_environment = os.environ.copy()
         child_environment.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-        process = subprocess.Popen(
-            command,
-            env=child_environment,
-            stdin=subprocess.DEVNULL,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        log_file.close()
+        with (workdir / "child.log").open("wb") as log_file:
+            process = subprocess.Popen(
+                command,
+                env=child_environment,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
         self._children[process.pid] = process
         return process.pid
 
