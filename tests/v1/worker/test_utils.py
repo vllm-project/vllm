@@ -1,9 +1,85 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import torch
 
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.worker.utils import bind_kv_cache
+
+
+class _TestReplaySSMMixer(MambaMixer2):
+    _state_shapes = ((2,), (3,), (4,), (5,), (6,))
+    _state_dtypes = (
+        torch.float32,
+        torch.float32,
+        torch.float32,
+        torch.float32,
+        torch.float32,
+    )
+
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+        self.use_replayssm = True
+        self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
+        self.cache_config = SimpleNamespace(mamba_cache_mode="none")
+        self.replayssm_buffer_len = 16
+        self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
+        self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        self._updates_replayssm_trackers = True
+
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        return self._state_shapes
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+        return self._state_dtypes
+
+
+def _packed_replayssm_cache(num_blocks: int, fill_value: int = 0) -> torch.Tensor:
+    return torch.full((num_blocks, 1, 1, 80), fill_value, dtype=torch.int8)
+
+
+def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
+    mixers = [_TestReplaySSMMixer() for _ in range(3)]
+    layer_names = [f"layers.{i}.mixer" for i in range(3)]
+    ctx = dict(zip(layer_names, mixers))
+    kv_cache = {
+        layer_names[0]: _packed_replayssm_cache(4),
+        layer_names[1]: _packed_replayssm_cache(4),
+        layer_names[2]: _packed_replayssm_cache(4),
+    }
+    kv_cache_groups = [
+        SimpleNamespace(layer_names=[layer_names[0], layer_names[2]]),
+        SimpleNamespace(layer_names=[layer_names[1]]),
+    ]
+
+    bind_kv_cache(kv_cache, ctx, [], kv_cache_groups=kv_cache_groups)
+
+    assert (
+        mixers[0]._replayssm_ring_start.data_ptr()
+        == mixers[2]._replayssm_ring_start.data_ptr()
+    )
+    assert (
+        mixers[0]._replayssm_prev_num_accepted.data_ptr()
+        == mixers[2]._replayssm_prev_num_accepted.data_ptr()
+    )
+    assert (
+        mixers[1]._replayssm_ring_start.data_ptr()
+        != mixers[0]._replayssm_ring_start.data_ptr()
+    )
+    assert (
+        mixers[1]._replayssm_prev_num_accepted.data_ptr()
+        != mixers[0]._replayssm_prev_num_accepted.data_ptr()
+    )
+    assert mixers[0]._replayssm_ring_start.shape == (4,)
+    assert mixers[0]._replayssm_prev_num_accepted.shape == (4,)
+    assert mixers[0]._replayssm_ring_start.dtype == torch.int32
+    assert mixers[0]._replayssm_ring_start.is_contiguous()
+    assert torch.count_nonzero(mixers[0]._replayssm_ring_start) == 0
+    assert torch.count_nonzero(mixers[0]._replayssm_prev_num_accepted) == 0
+    assert [m._updates_replayssm_trackers for m in mixers] == [False, True, True]
 
 
 def test_bind_kv_cache(default_vllm_config):
