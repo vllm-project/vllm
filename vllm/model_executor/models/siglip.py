@@ -53,6 +53,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -145,6 +146,22 @@ class SiglipProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(
             image_width=target_width, image_height=target_height
         )
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        # SigLIP is trained with padding="max_length" and no attention mask, so
+        # the pooled embedding is read from the last position and unpadded text
+        # does not line up with the image embeddings. A checkpoint that declares
+        # attention_mask in tokenizer_config.json consumes a mask; leave it be.
+        # init_kwargs is read rather than tokenizer.model_input_names, which
+        # falls back to a class default that already contains attention_mask.
+        declared = getattr(self.get_tokenizer(), "init_kwargs", {}).get(
+            "model_input_names"
+        )
+        tok_params = super().get_default_tok_params()
+        if declared is not None and "attention_mask" in declared:
+            return tok_params
+
+        return tok_params.with_kwargs(pad_prompt_tokens=-1)
 
 
 class SiglipDummyInputsBuilder(BaseDummyInputsBuilder[SiglipProcessingInfo]):

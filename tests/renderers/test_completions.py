@@ -34,6 +34,7 @@ class MockModelConfig:
     tokenizer_revision = None
     tokenizer_mode = "auto"
     hf_config = MockHFConfig()
+    max_model_len: int = 1024
     encoder_config: dict[str, Any] | None = None
     enable_prompt_embeds: bool = True
     skip_tokenizer_init: bool = False

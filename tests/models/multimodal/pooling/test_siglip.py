@@ -33,7 +33,9 @@ MODELS = [
 def _run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    input_cases: list[tuple[list[str], PromptImageInput, dict[str, Any]]],
+    input_cases: list[
+        tuple[list[str], PromptImageInput, dict[str, Any], dict[str, Any]]
+    ],
     model: str,
     *,
     dtype: str,
@@ -50,9 +52,9 @@ def _run_test(
             vllm_model.embed(
                 input_texts,
                 images=input_images,
-                tokenization_kwargs=tokenization_kwargs,
+                tokenization_kwargs=vllm_tokenization_kwargs,
             )
-            for input_texts, input_images, tokenization_kwargs in input_cases
+            for input_texts, input_images, _, vllm_tokenization_kwargs in input_cases
         ]
 
         texts = [HF_TEXT_PROMPTS[0]]
@@ -65,7 +67,7 @@ def _run_test(
 
     with hf_runner(model, dtype=dtype, auto_cls=SiglipModel) as hf_model:
         hf_outputs_per_case = []
-        for input_texts, input_images, tokenization_kwargs in input_cases:
+        for input_texts, input_images, tokenization_kwargs, _ in input_cases:
             all_inputs = hf_model.get_inputs(
                 input_texts,
                 images=input_images,
@@ -103,25 +105,34 @@ def _run_test(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("explicit_padding", [True, False])
 def test_models(
     hf_runner,
     vllm_runner,
     image_assets,
     model: str,
     dtype: str,
+    explicit_padding: bool,
 ) -> None:
+    """Text embeddings must match HF whether or not the caller asks for padding.
+
+    SigLIP is trained with ``padding="max_length"`` and vLLM now applies it by
+    default, so ``explicit_padding=False`` sends vLLM no padding kwargs at all
+    and still has to reach the same embedding. Callers that cannot pass
+    tokenization kwargs (the OpenAI-compatible server) would otherwise get
+    embeddings that are not aligned with the image embeddings.
+    """
     text_images = [None] * len(HF_TEXT_PROMPTS)
     images = [asset.pil_image for asset in image_assets]
+    padding_kwargs = {"padding": "max_length", "max_length": 64}
     input_cases = [
         (
             HF_TEXT_PROMPTS,
             text_images,
-            {
-                "padding": "max_length",
-                "max_length": 64,
-            },
+            padding_kwargs,
+            padding_kwargs if explicit_padding else {},
         ),
-        (HF_IMAGE_PROMPTS, images, {}),
+        (HF_IMAGE_PROMPTS, images, {}, {}),
     ]
 
     _run_test(
