@@ -8,6 +8,7 @@ from typing import Any
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import cpu_supports_avx
 
 logger = init_logger(__name__)
 
@@ -15,6 +16,27 @@ logger = init_logger(__name__)
 NixlWrapper: Any
 nixl_agent_config: Any
 nixlXferTelemetry: Any
+
+
+def _nixl_is_safe_to_load() -> bool:
+    """Whether NIXL's native libraries can be loaded on this host.
+
+    The UCX library bundled with the NIXL wheels is compiled with AVX and
+    terminates the process from its native initializer on x86 CPUs that do
+    not support it (https://github.com/ai-dynamo/nixl/issues/2119). The
+    crash cannot be caught as a Python exception, so NIXL is treated as
+    unavailable on such hosts.
+    """
+    if cpu_supports_avx():
+        return True
+    logger.warning_once(
+        "Disabling NIXL: the UCX library bundled with NIXL is compiled "
+        "with AVX, which this x86 CPU does not support. Loading it would "
+        "terminate the process. NIXL-based features (KV transfer "
+        "connectors, the NIXL EPLB communicator) will be unavailable. "
+        "See https://github.com/ai-dynamo/nixl/issues/2119."
+    )
+    return False
 
 
 def _maybe_set_ucx_rcache_limit() -> None:
@@ -54,6 +76,10 @@ def _load_nixl_attr(name: str) -> Any:
         "nixlXferTelemetry": "nixlXferTelemetry",
     }[name]
 
+    if not _nixl_is_safe_to_load():
+        globals()[name] = None
+        return None
+
     _maybe_set_ucx_rcache_limit()
     try:
         module = importlib.import_module(_get_nixl_module_name(name))
@@ -84,9 +110,16 @@ def __getattr__(name: str) -> Any:
 
 
 def is_nixl_available() -> bool:
-    """Lightweight check for the platform's NIXL package without importing it."""
+    """Lightweight check for the platform's NIXL package without importing it.
+
+    Returns False on x86 CPUs without AVX, where loading the UCX library
+    bundled with NIXL terminates the process (see
+    ``_nixl_is_safe_to_load``).
+    """
     import importlib.util
 
+    if not _nixl_is_safe_to_load():
+        return False
     pkg = _get_nixl_package_name()
     return pkg in sys.modules or importlib.util.find_spec(pkg) is not None
 
