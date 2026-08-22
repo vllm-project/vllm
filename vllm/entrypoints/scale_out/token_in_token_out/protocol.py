@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, Literal, TypeAlias
 
+import torch
 from pydantic import (
     BaseModel,
     Field,
@@ -22,6 +23,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
 from vllm.logprobs import Logprob
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -32,15 +34,37 @@ from vllm.utils import random_uuid
 class PlaceholderRangeInfo(BaseModel):
     """Serializable placeholder location for a single multi-modal item."""
 
-    offset: int
+    offset: int = Field(ge=0)
     """Start index of the placeholder tokens in the prompt."""
 
-    length: int
+    length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
-    # TODO: add ``is_embed: list[bool] | None`` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
+    is_embed: list[bool] | None = None
+    """Positions within the range that receive multimodal embeddings."""
+
+    @model_validator(mode="after")
+    def _validate_is_embed_length(self) -> "PlaceholderRangeInfo":
+        if self.is_embed is not None and len(self.is_embed) != self.length:
+            raise ValueError("is_embed length must match placeholder length")
+        return self
+
+    @classmethod
+    def from_placeholder_range(cls, value: PlaceholderRange) -> "PlaceholderRangeInfo":
+        is_embed = value.is_embed.tolist() if value.is_embed is not None else None
+        return cls(offset=value.offset, length=value.length, is_embed=is_embed)
+
+    def to_placeholder_range(self) -> PlaceholderRange:
+        is_embed = (
+            torch.tensor(self.is_embed, dtype=torch.bool)
+            if self.is_embed is not None
+            else None
+        )
+        return PlaceholderRange(
+            offset=self.offset,
+            length=self.length,
+            is_embed=is_embed,
+        )
 
 
 class MultiModalFeatures(BaseModel):
@@ -65,6 +89,47 @@ class MultiModalFeatures(BaseModel):
     the item should be resolved from cache.  The entire field is
     ``None`` for metadata-only (cache-hit) responses.
     """
+
+    @model_validator(mode="after")
+    def _validate_parallel_fields(self) -> "MultiModalFeatures":
+        modalities = set(self.mm_hashes)
+        if set(self.mm_placeholders) != modalities:
+            raise ValueError(
+                "mm_hashes and mm_placeholders must use the same modalities"
+            )
+        if self.kwargs_data is not None and set(self.kwargs_data) != modalities:
+            raise ValueError("kwargs_data must use the same modalities as mm_hashes")
+
+        flattened_ranges: list[tuple[int, int]] = []
+        for modality in modalities:
+            num_hashes = len(self.mm_hashes[modality])
+            num_placeholders = len(self.mm_placeholders[modality])
+            if num_hashes != num_placeholders:
+                raise ValueError(
+                    f"{modality} mm_hashes and mm_placeholders must have "
+                    "the same length"
+                )
+            if (
+                self.kwargs_data is not None
+                and len(self.kwargs_data[modality]) != num_hashes
+            ):
+                raise ValueError(
+                    f"{modality} kwargs_data and mm_hashes must have the same length"
+                )
+            flattened_ranges.extend(
+                (placeholder.offset, placeholder.offset + placeholder.length)
+                for placeholder in self.mm_placeholders[modality]
+            )
+
+        flattened_ranges.sort()
+        for (offset, end), (next_offset, _) in zip(
+            flattened_ranges, flattened_ranges[1:]
+        ):
+            if next_offset < end:
+                raise ValueError(
+                    "mm_placeholders must be globally non-overlapping and sorted"
+                )
+        return self
 
 
 class GenerateRequest(BaseModel):
@@ -174,6 +239,20 @@ class GenerateRequest(BaseModel):
         instance = handler(data)
         instance._sampling_params_provided_keys = provided
         return instance
+
+    @model_validator(mode="after")
+    def _validate_multimodal_feature_bounds(self) -> "GenerateRequest":
+        if self.features is None:
+            return self
+
+        prompt_len = len(self.token_ids)
+        for ranges in self.features.mm_placeholders.values():
+            for placeholder in ranges:
+                if placeholder.offset + placeholder.length > prompt_len:
+                    raise ValueError(
+                        "mm_placeholders must remain within the token_ids sequence"
+                    )
+        return self
 
     def is_sampling_param_provided(self, name: str) -> bool:
         """Whether the caller explicitly set ``sampling_params.<name>``.

@@ -61,6 +61,7 @@ def init_scale_out_state(
 def register_scale_out_api_routers(
     app: FastAPI,
     supported_tasks: tuple["SupportedTask", ...],
+    enable_scale_out_disaggregation: bool = False,
 ):
     from .render.api_router import router as render_render
 
@@ -70,7 +71,7 @@ def register_scale_out_api_routers(
 
     app.include_router(derender_render)
 
-    if "generate" in supported_tasks:
+    if "generate" in supported_tasks and enable_scale_out_disaggregation:
         from .token_in_token_out.api_router import (
             attach_router as attach_disagg_router,
         )

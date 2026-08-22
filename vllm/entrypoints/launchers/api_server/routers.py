@@ -52,7 +52,13 @@ def register_api_routers(
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
 
-        register_scale_out_api_routers(app, supported_tasks)
+        register_scale_out_api_routers(
+            app,
+            supported_tasks,
+            enable_scale_out_disaggregation=getattr(
+                args, "enable_scale_out_disaggregation", False
+            ),
+        )
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import (

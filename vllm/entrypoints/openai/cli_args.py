@@ -174,6 +174,9 @@ class BaseFrontendArgs:
     If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
+    enable_scale_out_disaggregation: bool = False
+    """Expose the unauthenticated ``/inference/v1/generate`` scale-out
+    transport endpoint. Enable only in trusted, disaggregated deployments."""
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the ``system_fingerprint`` field on responses.
 
