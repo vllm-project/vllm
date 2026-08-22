@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -207,6 +208,33 @@ def init_kv_cache(
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
     return kv_caches
+
+
+@torch.inference_mode()
+def zero_mamba_kv_cache(
+    attn_groups: Sequence[Sequence[AttentionGroup]],
+    forward_context: Mapping[str, AttentionLayerBase],
+) -> None:
+    """Zero state caches whose physical storage was discarded during sleep."""
+    seen_views: set[tuple[int, torch.dtype, tuple[int, ...], tuple[int, ...]]] = set()
+    for groups in attn_groups:
+        for group in groups:
+            if not isinstance(group.kv_cache_spec, MambaSpec):
+                continue
+            for layer_name in group.layer_names:
+                kv_cache = forward_context[layer_name].kv_cache
+                assert isinstance(kv_cache, (list, tuple))
+                for state in kv_cache:
+                    view = (
+                        state.data_ptr(),
+                        state.dtype,
+                        tuple(state.shape),
+                        state.stride(),
+                    )
+                    if view in seen_views:
+                        continue
+                    seen_views.add(view)
+                    state.zero_()
 
 
 def build_slot_mappings_by_layer(
