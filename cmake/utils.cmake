@@ -592,13 +592,15 @@ endmacro()
 # LIBRARIES <libraries>      - Extra link libraries.
 # WITH_SOABI                 - Generate library with python SOABI suffix name.
 # USE_SABI <version>         - Use python stable api <version>
+# STABLE_LIBTORCH            - Link the libtorch C-shim only (not TORCH_LIBRARIES).
+#                              Use for TORCH_TARGET_VERSION / stable ABI modules.
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
 function (define_extension_target MOD_NAME)
   cmake_parse_arguments(PARSE_ARGV 1
     ARG
-    "WITH_SOABI"
+    "WITH_SOABI;STABLE_LIBTORCH"
     "DESTINATION;LANGUAGE;USE_SABI"
     "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
 
@@ -651,8 +653,11 @@ function (define_extension_target MOD_NAME)
 
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
+  # STABLE_LIBTORCH is the same for CPU stable-ABI modules (C-shim only).
   if (ARG_LANGUAGE STREQUAL "CUDA")
     target_link_libraries(${MOD_NAME} PRIVATE torch CUDA::cudart CUDA::cuda_driver ${ARG_LIBRARIES})
+  elseif (ARG_STABLE_LIBTORCH)
+    target_link_libraries(${MOD_NAME} PRIVATE torch ${ARG_LIBRARIES})
   else()
     target_link_libraries(${MOD_NAME} PRIVATE torch ${TORCH_LIBRARIES} ${ARG_LIBRARIES})
   endif()

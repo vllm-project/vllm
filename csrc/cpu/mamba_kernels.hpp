@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "cpu_types.hpp"
+#include "cpu/cpu_types.hpp"
 #include <cmath>
 #include <cstring>
 #include <cstdint>

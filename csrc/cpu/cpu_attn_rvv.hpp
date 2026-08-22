@@ -15,7 +15,7 @@
     (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)
 
   #include "cpu_attn_impl.hpp"
-  #include "cpu_types_riscv_defs.hpp"
+  #include "cpu/cpu_types_riscv_defs.hpp"
   #include <riscv_vector.h>
   #include <type_traits>
 

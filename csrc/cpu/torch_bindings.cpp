@@ -367,36 +367,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   ops.impl("dynamic_4bit_int_moe", torch::kCPU, &dynamic_4bit_int_moe_cpu);
 
-  // Activation ops
-
-  // Activation function used in SwiGLU.
-  ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("silu_and_mul", torch::kCPU, &silu_and_mul);
-
-  // Activation function used in GeGLU with `none` approximation.
-  ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_and_mul", torch::kCPU, &gelu_and_mul);
-
-  // Activation function used in GeGLU with `tanh` approximation.
-  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_tanh_and_mul", torch::kCPU, &gelu_tanh_and_mul);
-
-  // GELU tanh implementation.
-  ops.def("gelu_tanh(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_tanh", torch::kCPU, &gelu_tanh);
-
-  // GELU implementation used in GPT-2.
-  ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_new", torch::kCPU, &gelu_new);
-
-  // Approximate GELU implementation.
-  ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_fast", torch::kCPU, &gelu_fast);
-
-  // Quick GELU implementation.
-  ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_quick", torch::kCPU, &gelu_quick);
-
 #if (defined(__aarch64__) && !defined(__APPLE__))
 
   ops.def(
@@ -405,28 +375,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("activation_lut_bf16", torch::kCPU, &activation_lut_bf16);
 
 #endif  // (defined(__aarch64__) && !defined(__APPLE__))
-
-  // Layernorm
-  // Apply Root Mean Square (RMS) Normalization to the input tensor.
-  ops.def(
-      "rms_norm(Tensor! out, Tensor input, Tensor? weight, float epsilon) -> "
-      "()");
-  ops.impl("rms_norm", torch::kCPU, &rms_norm);
-
-  // In-place fused Add and RMS Normalization.
-  ops.def(
-      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor? weight, "
-      "float epsilon) -> ()");
-  ops.impl("fused_add_rms_norm", torch::kCPU, &fused_add_rms_norm);
-
-  // Rotary embedding
-  // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
-  ops.def(
-      "rotary_embedding(Tensor positions, Tensor! query,"
-      "                 Tensor!? key, int head_size,"
-      "                 Tensor cos_sin_cache, bool is_neox, int "
-      "rope_dim_offset=0, bool inverse=False) -> ()");
-  ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 
   // Quantization
 #if defined(__AVX512F__) || defined(__AVX2__) ||                               \

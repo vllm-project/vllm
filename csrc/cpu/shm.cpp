@@ -4,6 +4,8 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <torch/all.h>
+#include "dispatch_utils.h"
 
 #if defined(__aarch64__) || defined(__powerpc64__)
   #include <atomic>

@@ -1,6 +1,19 @@
 #ifndef CPU_TYPES_HPP
 #define CPU_TYPES_HPP
 
+#include <cstdint>
+#include <iostream>
+#include <mutex>
+#include <type_traits>
+#include <utility>
+
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/BFloat16.h>
+#include <torch/headeronly/util/Exception.h>
+#include <torch/headeronly/util/Half.h>
+
+#include "libtorch_stable/dispatch_utils.h"
+
 #if defined(__x86_64__)
   // x86 implementation
   #include "cpu_types_x86.hpp"
@@ -25,8 +38,6 @@
   #include <omp.h>
 #endif
 
-#include <c10/util/Exception.h>
-
 namespace cpu_utils {
 // Without OpenMP the omp pragmas compile to serial loops, so report 1: kernels
 // that barrier on the thread count would otherwise deadlock.
@@ -34,8 +45,11 @@ inline int get_max_threads() {
 #ifdef _OPENMP
   return omp_get_max_threads();
 #else
-  TORCH_WARN_ONCE(
-      "vLLM CPU was built without OpenMP; running single-threaded.");
+  static std::once_flag warn_once;
+  std::call_once(warn_once, [] {
+    std::cerr << "vLLM CPU was built without OpenMP; running single-threaded."
+              << std::endl;
+  });
   return 1;
 #endif
 }
