@@ -5,10 +5,10 @@
 import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import _custom_ops as ops
-from vllm.models.minimax_m3.common.indexer import (
-    MiniMaxM3IndexerBackend,
-)
+from vllm.config import CacheConfig
+from vllm.config.cache import _layout_from_name
 from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode,
     minimax_m3_index_score,
@@ -19,15 +19,15 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
-from vllm.models.minimax_m3.common.sparse_attention import (
-    MiniMaxM3SparseBackend,
-    MiniMaxM3SparseTritonImpl,
-)
+from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseTritonImpl
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
-from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.attention.backends.utils import record_kv_cache_layout
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    MLAAttentionSpec,
+    compute_layer_kv_cache_shape_bytes,
+)
 
 if not (current_platform.is_cuda() or current_platform.is_rocm()):
     pytest.skip(
@@ -37,35 +37,46 @@ if not (current_platform.is_cuda() or current_platform.is_rocm()):
 
 
 @pytest.fixture
-def kv_layout(request):
-    """Set the global KV cache layout for one test and restore it after."""
-    set_kv_cache_layout(request.param)
-    try:
-        yield request.param
-    finally:
-        set_kv_cache_layout(None)
+def kv_layout(request) -> KVCacheLayout:
+    """Resolve the requested layout name (legacy NHD/HND aliases included)."""
+    return _layout_from_name(request.param)
 
 
-def _stride_order_for(backend: type[MiniMaxM3SparseBackend], ndim: int) -> tuple:
-    """Mirror the allocator's stride-order resolution (identity fallback)."""
-    try:
-        stride_order = backend.get_kv_cache_stride_order()
-        assert len(stride_order) == ndim
-    except (AttributeError, NotImplementedError):
-        stride_order = tuple(range(ndim))
+def _layer_stride_order(layout: KVCacheLayout, ndim: int) -> tuple[int, ...]:
+    """Per-layer physical stride order for the given layout; the 3-dim
+    indexer side cache (H=1) is contiguous, so identity."""
+    if ndim == 3:
+        return (0, 1, 2)
+    stride_order = layout.layer_view_order
+    assert len(stride_order) == ndim
     return stride_order
 
 
+def _main_spec() -> FullAttentionSpec:
+    return FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_DIM,
+        head_size_v=HEAD_DIM,
+        dtype=DTYPE,
+    )
+
+
+def _main_kv_logical_shape(num_pages: int) -> tuple[int, ...]:
+    """Standardized per-layer logical shape [B, H, N, C] for the main cache,
+    derived the same way the production allocator does."""
+    shape_bytes = compute_layer_kv_cache_shape_bytes(_main_spec(), num_pages)
+    return (*shape_bytes[:-1], shape_bytes[-1] // DTYPE.itemsize)
+
+
 def _allocate_main_kv_via_contract(
-    num_pages: int, device: torch.device | str = "cuda"
+    num_pages: int, layout: KVCacheLayout, device: torch.device | str = "cuda"
 ) -> torch.Tensor:
     """Build the main KV cache exactly as the production allocator does for the
-    currently active layout: allocate the physical (permuted) tensor, then
-    expose the inverse-permuted logical-NHD view the backend sees."""
-    logical_shape = MiniMaxM3SparseBackend.get_kv_cache_shape(
-        num_pages, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
-    )
-    stride_order = _stride_order_for(MiniMaxM3SparseBackend, len(logical_shape))
+    given layout: allocate the physical (permuted) tensor, then expose the
+    inverse-permuted logical [B, H, N, C] view the backend sees."""
+    logical_shape = _main_kv_logical_shape(num_pages)
+    stride_order = _layer_stride_order(layout, len(logical_shape))
     physical_shape = tuple(logical_shape[i] for i in stride_order)
     inv_order = [stride_order.index(i) for i in range(len(stride_order))]
     raw = torch.randn(physical_shape, device=device, dtype=DTYPE)
@@ -817,7 +828,7 @@ def _reference_sparse_attn(
     ],
 )
 def test_prefill_sparse_attention_correctness(
-    kv_layout: str,
+    kv_layout: KVCacheLayout,
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
 ):
@@ -851,7 +862,7 @@ def test_prefill_sparse_attention_correctness(
     # Allocate the main KV cache through the backend layout contract so the
     # physical storage matches the active layout (contiguous NHD or strided
     # HND), while the kernels and reference see the logical-NHD view.
-    kv_cache = _allocate_main_kv_via_contract(num_pages)
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
 
     # Build sparse block indices with the same contract as the real M3 indexer:
     # one forced local block, then score-selected older causal blocks.
@@ -904,37 +915,30 @@ def test_prefill_sparse_attention_correctness(
     assert error.max().item() < 1.7e-2
 
 
-def test_main_backend_layout_contract():
-    """The main sparse backend exposes the logical-NHD shape and the
-    flash_attn-style stride order for each layout."""
+def test_main_cache_layout_contract():
+    """The standardized per-layer logical shape is [B, H, N, C] with packed
+    K/V content, and the legacy layout aliases resolve to the expected
+    per-layer stride orders."""
     nb, bs, h, d = 7, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
-    logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
+    logical = _main_kv_logical_shape(nb)
     assert logical == (nb, h, bs, 2 * d)
     # The old separate K/V-axis shape is no longer the logical shape.
     assert logical != (nb, 2, bs, h, d)
 
-    try:
-        set_kv_cache_layout("HND")
-        assert MiniMaxM3SparseBackend.get_kv_cache_stride_order() == (0, 1, 2, 3)
-        set_kv_cache_layout("NHD")
-        assert MiniMaxM3SparseBackend.get_kv_cache_stride_order() == (0, 2, 1, 3)
-    finally:
-        set_kv_cache_layout(None)
+    assert KVCacheLayout.LBHNC.layer_view_order == (0, 1, 2, 3)
+    assert KVCacheLayout.LBNHC.layer_view_order == (0, 2, 1, 3)
 
-    for layout in ("NHD", "HND"):
-        try:
-            set_kv_cache_layout(layout)
-            order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-        finally:
-            set_kv_cache_layout(None)
+    cache_config = CacheConfig()
+    record_kv_cache_layout(cache_config, "HND")
+    assert cache_config.get_resolved_kv_cache_layout() is KVCacheLayout.LBHNC
+    cache_config = CacheConfig()
+    record_kv_cache_layout(cache_config, "NHD")
+    assert cache_config.get_resolved_kv_cache_layout() is KVCacheLayout.LBNHC
+
+    for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
+        order = layout.layer_view_order
         # Valid permutation: no duplicates, covers every axis.
         assert set(order) == set(range(len(order)))
-
-    # M3 has no cross-layer KV blocks.
-    with pytest.raises(NotImplementedError):
-        MiniMaxM3SparseBackend.get_kv_cache_stride_order(
-            include_num_layers_dimension=True
-        )
 
 
 def test_aiter_sparse_pa_layout_contract(monkeypatch):
@@ -948,75 +952,53 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
         lambda: True,
     )
 
-    nb, bs, h, d = 7, BLOCK_SIZE, 1, HEAD_DIM
-    logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
-    order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-    assert logical == (nb, 2, bs, h, d)
-    assert order == (1, 0, 2, 3, 4)
+    backend = sparse_attn_mod.MiniMaxM3SparseBackend
+    assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
 
-    physical_shape = tuple(logical[i] for i in order)
-    inv_order = [order.index(i) for i in range(len(order))]
-    raw = torch.empty(physical_shape, device="cuda", dtype=DTYPE)
-    logical_view = raw.permute(*inv_order)
-    key_cache, value_cache = logical_view.unbind(1)
+    nb, h = 7, 1
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=h,
+        head_size=HEAD_DIM,
+        dtype=DTYPE,
+        num_head_slots=2,
+        state_content_bytes=h * HEAD_DIM * DTYPE.itemsize,
+    )
+    raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
+    view = dense_kv_cache_views(raw, spec, nb, 1, KVCacheLayout.LHBNC)[0]
+    key_cache, value_cache = view.unbind(1)
     assert key_cache.is_contiguous()
     assert value_cache.is_contiguous()
 
 
-def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
-    """Do not pair AITER's separated cache layout with the Triton fallback."""
-    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
-
-    monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
-    monkeypatch.setattr(
-        sparse_attn_mod.rocm_aiter_ops,
-        "is_shuffle_kv_cache_enabled",
-        lambda: True,
+def test_indexer_cache_squeezes_to_contiguous_3d():
+    """The indexer side cache is standardized 4D with H=1: under both layouts
+    the allocator's logical view stays contiguous and squeezes (as
+    `MiniMaxM3IndexerCache.bind_kv_cache` does) to the 3-dim
+    [num_blocks, block_size, head_dim] cache the kernels consume."""
+    nb = 5
+    ispec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
     )
+    shape_bytes = compute_layer_kv_cache_shape_bytes(ispec, nb)
+    assert shape_bytes == (nb, 1, BLOCK_SIZE, HEAD_DIM * DTYPE.itemsize)
+    assert _layer_stride_order(KVCacheLayout.LBNHC, 3) == (0, 1, 2)
 
-    with pytest.raises(ValueError, match="num_kv_heads == 1"):
-        MiniMaxM3SparseBackend.get_kv_cache_shape(7, BLOCK_SIZE, 2, HEAD_DIM)
-
-
-def test_main_backend_unknown_layout_raises(monkeypatch):
-    """An unrecognized layout (injected past env-var validation) is rejected."""
-    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
-
-    monkeypatch.setattr(sparse_attn_mod, "get_kv_cache_layout", lambda: "BOGUS")
-    with pytest.raises(ValueError, match="Unknown cache layout format"):
-        MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-
-
-def test_indexer_backend_stride_order_is_identity():
-    """The 3-dim indexer cache must not inherit the parent's 4-element stride
-    order; it overrides to the 3-element identity so the allocator keeps the
-    contiguous layout."""
-    assert MiniMaxM3IndexerBackend.get_kv_cache_stride_order() == (0, 1, 2)
-
-    # Cross-layer (per-layer-stacked) KV blocks are not supported.
-    with pytest.raises(NotImplementedError):
-        MiniMaxM3IndexerBackend.get_kv_cache_stride_order(
-            include_num_layers_dimension=True
-        )
-
-    # The stride order matches the 3-dim indexer shape rank.
-    indexer_shape = MiniMaxM3IndexerBackend.get_kv_cache_shape(
-        5, BLOCK_SIZE, 1, HEAD_DIM
-    )
-    assert len(indexer_shape) == 3
-    assert _stride_order_for(MiniMaxM3IndexerBackend, len(indexer_shape)) == (0, 1, 2)
+    for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
+        iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
+        view = dense_kv_cache_views(iraw, ispec, nb, 1, layout, BLOCK_SIZE)[0]
+        assert tuple(view.shape) == (nb, 1, BLOCK_SIZE, HEAD_DIM)
+        indexer_cache = view.squeeze(1)
+        assert tuple(indexer_cache.shape) == (nb, BLOCK_SIZE, HEAD_DIM)
+        assert indexer_cache.is_contiguous()
 
 
 def test_hnd_allocation_is_packed_head_major():
     """Under HND the backend-visible logical view is the packed head-major
     physical allocation."""
     nb, bs, h, d = 4, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
-    logical = MiniMaxM3SparseBackend.get_kv_cache_shape(nb, bs, h, d)
-    try:
-        set_kv_cache_layout("HND")
-        stride_order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-    finally:
-        set_kv_cache_layout(None)
+    logical = _main_kv_logical_shape(nb)
+    stride_order = KVCacheLayout.LBHNC.layer_view_order
 
     physical_shape = tuple(logical[i] for i in stride_order)
     assert physical_shape == (nb, h, bs, 2 * d)
@@ -1042,27 +1024,13 @@ def test_main_cache_is_block_first_and_unpadded():
     """The allocator's contiguous-view branch (not the padded-strided branch)
     is used for the main GQA cache: its spec is unpadded and the physical
     layout keeps num_blocks as the first dimension under both layouts."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
-    spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_DIM,
-        head_size_v=HEAD_DIM,
-        dtype=DTYPE,
-    )
+    spec = _main_spec()
     # Unpadded -> allocator uses kv_tensor.view(...) rather than as_strided().
     assert spec.page_size_padded is None
 
-    logical = MiniMaxM3SparseBackend.get_kv_cache_shape(
-        4, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
-    )
-    for layout in ("NHD", "HND"):
-        try:
-            set_kv_cache_layout(layout)
-            order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-        finally:
-            set_kv_cache_layout(None)
+    logical = _main_kv_logical_shape(4)
+    for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
+        order = layout.layer_view_order
         inv_order = [order.index(i) for i in range(len(order))]
         # Physical first dim is num_blocks (block-first); required by the
         # padded-strided branch's block-first assumption if it were ever taken.
@@ -1275,7 +1243,7 @@ def test_aiter_decode_sparse_block_table_supports_spec_decode():
 @pytest.mark.parametrize("decode_query_len", [1, 4])
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
 def test_decode_sparse_attention_correctness(
-    kv_layout: str,
+    kv_layout: KVCacheLayout,
     seq_lens_list: tuple[int, ...],
     decode_query_len: int,
     num_padded_reqs: int,
@@ -1287,7 +1255,7 @@ def test_decode_sparse_attention_correctness(
     q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(
         seq_lens_list, decode_query_len, num_padded_reqs
     )
-    kv_cache = _allocate_main_kv_via_contract(num_pages)
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
 
     actual = torch.empty_like(q)
     minimax_m3_sparse_attn_decode(
@@ -1364,92 +1332,19 @@ def test_decode_wrong_layout_breaks_parity():
     assert (actual.float() - expected.float()).abs().max().item() > 1.7e-2
 
 
-def _make_attn_group(backend, spec):
-    return AttentionGroup(
-        backend=backend,
-        layer_names=["main"],
-        kv_cache_spec=spec,
-        kv_cache_group_id=0,
-    )
-
-
 def test_main_cache_byte_identical_through_production_allocator():
-    """AC-2: drive the real allocator (`_reshape_kv_cache`) for the M3 main
+    """AC-2: drive the real allocator (`create_kv_cache_views`) for the M3 main
     `FullAttentionSpec` under HND and assert the backend-visible view has the
-    same shape, stride, and storage offset as the packed-HND allocation; the
-    indexer `MLAAttentionSpec` allocates through the same path to its 3-dim
-    shape."""
+    same shape, stride, and storage offset as the packed-HND allocation."""
     nb = 4
-    spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_DIM,
-        head_size_v=HEAD_DIM,
-        dtype=DTYPE,
-    )
+    spec = _main_spec()
     raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
-    group = _make_attn_group(MiniMaxM3SparseBackend, spec)
-    try:
-        set_kv_cache_layout("HND")
-        kv_caches = _reshape_kv_cache([group], {"main": raw}, "auto", [BLOCK_SIZE], {})
-    finally:
-        set_kv_cache_layout(None)
-    view = kv_caches["main"]
+    view = dense_kv_cache_views(raw, spec, nb, 1, KVCacheLayout.LBHNC, BLOCK_SIZE)[0]
 
     oracle = raw.view(DTYPE).view((nb, NUM_KV_HEADS, BLOCK_SIZE, 2 * HEAD_DIM))
     assert tuple(view.shape) == tuple(oracle.shape)
     assert view.stride() == oracle.stride()
     assert view.storage_offset() == oracle.storage_offset()
-
-    # Indexer cache allocates through the same path under both layouts.
-    ispec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
-    )
-    for layout in ("NHD", "HND"):
-        iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
-        igroup = AttentionGroup(
-            backend=MiniMaxM3IndexerBackend,
-            layer_names=["idx"],
-            kv_cache_spec=ispec,
-            kv_cache_group_id=0,
-        )
-        try:
-            set_kv_cache_layout(layout)
-            iout = _reshape_kv_cache([igroup], {"idx": iraw}, "auto", [BLOCK_SIZE], {})
-        finally:
-            set_kv_cache_layout(None)
-        assert tuple(iout["idx"].shape) == (nb, BLOCK_SIZE, HEAD_DIM)
-
-
-def test_indexer_inherited_stride_order_trips_allocator_assert():
-    """AC-4 negative: without the indexer override, the inherited 4-element
-    stride order trips the allocator's `len(stride_order) == len(shape)` assert
-    for the 3-dim indexer shape; the `AssertionError` is NOT swallowed by the
-    allocator's `(AttributeError, NotImplementedError)` fallback."""
-
-    class _BrokenIndexerBackend(MiniMaxM3IndexerBackend):
-        # Simulate inheriting the parent's 4-element stride order.
-        get_kv_cache_stride_order = staticmethod(
-            MiniMaxM3SparseBackend.get_kv_cache_stride_order
-        )
-
-    nb = 4
-    ispec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
-    )
-    iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
-    igroup = AttentionGroup(
-        backend=_BrokenIndexerBackend,
-        layer_names=["idx"],
-        kv_cache_spec=ispec,
-        kv_cache_group_id=0,
-    )
-    try:
-        set_kv_cache_layout("HND")
-        with pytest.raises(AssertionError):
-            _reshape_kv_cache([igroup], {"idx": iraw}, "auto", [BLOCK_SIZE], {})
-    finally:
-        set_kv_cache_layout(None)
 
 
 def test_padded_main_cache_is_flagged():
@@ -1465,11 +1360,7 @@ def test_padded_main_cache_is_flagged():
         )
         assert inv_order[0] == 0, "main GQA cache must remain block-first"
 
-    try:
-        set_kv_cache_layout("HND")
-        stride_order = MiniMaxM3SparseBackend.get_kv_cache_stride_order()
-    finally:
-        set_kv_cache_layout(None)
+    stride_order = KVCacheLayout.LBHNC.layer_view_order
 
     good = FullAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -1493,13 +1384,13 @@ def test_padded_main_cache_is_flagged():
 
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
-def test_reshape_and_cache_flash_write_persists(kv_layout: str):
+def test_reshape_and_cache_flash_write_persists(kv_layout: KVCacheLayout):
     """AC-5 write path: the `reshape_and_cache_flash` write site now consumes
     packed-content K/V split views. Writing through those views must persist
     into the bound storage under both layouts."""
     torch.manual_seed(0)
     num_pages = 4
-    kv_cache = _allocate_main_kv_via_contract(num_pages)
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
     with torch.no_grad():
         kv_cache.zero_()
 

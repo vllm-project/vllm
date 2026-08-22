@@ -1081,6 +1081,8 @@ class TestPushPipelineParallel:
             device_id=0,
             num_blocks=4,
             block_lens=[block_len] * 4,
+            # Non-interleaved: consecutive blocks abut, so stride == block length.
+            block_strides=[block_len] * 4,
             kv_cache_layout="HND",
             block_size=16,
             ssm_sizes=(0, 0),
