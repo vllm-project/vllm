@@ -437,7 +437,7 @@ def find_split_point(
     min_energy = math.inf
     quietest_idx = start_idx
 
-    for i in range(0, len(segment) - min_energy_window, min_energy_window):
+    for i in range(0, len(segment) - min_energy_window + 1, min_energy_window):
         window = segment[i : i + min_energy_window]
         energy = (window**2).mean() ** 0.5
         if not math.isnan(energy) and energy < min_energy:
