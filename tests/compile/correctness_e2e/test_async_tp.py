@@ -17,6 +17,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
 NVFP4_MODEL_ID = "nvidia/Llama-3.1-8B-Instruct-NVFP4"
+XPU_FP8_MODEL_ID = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
 NVFP4_HF_OVERRIDES = {
     "num_hidden_layers": 4,
     "hidden_size": 512,
@@ -158,6 +159,68 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
 
     compare_two_settings(
         NVFP4_MODEL_ID,
+        async_tp_args,
+        tp_args,
+        method="generate",
+        force_v1_runner=True,
+    )
+
+
+@create_new_process_for_each_test()
+def test_async_tp_pass_xpu_fp8_correctness(num_gpus_available: int):
+    if not current_platform.is_xpu():
+        pytest.skip("XPU W8A8 FP8 AsyncTP path requires XPU")
+
+    tp_size = 2
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Need at least {tp_size} GPUs")
+
+    common_args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "8",
+        # XPUW8A16FP8LinearKernel would otherwise win kernel selection and
+        # emit fp8_gemm_w8a16, which the AsyncTP patterns do not match.
+        "--linear-backend",
+        "xpu",
+    ]
+
+    compilation_config = {
+        "mode": CompilationMode.VLLM_COMPILE,
+        "compile_sizes": [2, 4, 8],
+        "splitting_ops": [],
+        "pass_config": {
+            "enable_sp": True,
+            "fuse_gemm_comms": True,
+            # Llama-3.2-1B's hidden_size is below the XPU SP heuristic
+            # threshold, which would disable both SP and AsyncTP.
+            "sp_min_token_num": 1,
+        },
+    }
+
+    async_tp_args = [
+        *common_args,
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--distributed-executor-backend",
+        "mp",
+        "--compilation_config",
+        json.dumps(compilation_config),
+    ]
+
+    tp_args = [
+        *common_args,
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--distributed-executor-backend",
+        "mp",
+    ]
+
+    compare_two_settings(
+        XPU_FP8_MODEL_ID,
         async_tp_args,
         tp_args,
         method="generate",

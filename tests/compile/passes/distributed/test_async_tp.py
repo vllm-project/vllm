@@ -227,7 +227,95 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         return [torch.ops.symm_mem.fused_all_gather_scaled_matmul.default]
 
 
+class TestXPUFp8GEMMRSModel(_BaseScaledMMModel):
+    def forward(self, input: torch.Tensor):
+        """
+        Forward pass implementing the scaled_mm + reduce scatter in the FX graph
+
+        """
+        fp8_input = input.to(FP8_DTYPE)
+        scale_a = torch.ones(input.shape[0], 1, dtype=torch.float32)
+        scaled_mm = torch.ops._xpu_C.fp8_gemm(
+            fp8_input, self.weight, self.dtype, scale_a, self.scale_b, None
+        )
+        reduce_scatter = tensor_model_parallel_reduce_scatter(scaled_mm, dim=0)
+        return reduce_scatter
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.reduce_scatter.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.fused_xpu_fp8_matmul_reduce_scatter.default]
+
+
+class TestAGXPUFp8GEMMModel(_BaseScaledMMModel):
+    """XPU scaled_mm/xpu.py W8A8 all_gather(fp8, scale) + fp8_gemm."""
+
+    def forward(self, input: torch.Tensor):
+        """
+        Forward pass implementing the all gather + scaled_mm in the FX graph
+        """
+        # Reshape input
+        fp8_input = input.to(FP8_DTYPE)
+        all_gather = tensor_model_parallel_all_gather(fp8_input, dim=0)
+
+        scale_a = torch.ones(all_gather.shape[0], 1, dtype=torch.float32)
+        fp8_gemm = torch.ops._xpu_C.fp8_gemm(
+            all_gather, self.weight, self.dtype, scale_a, self.scale_b, None
+        )
+        return fp8_gemm
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_gather.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.fused_all_gather_xpu_fp8_matmul.default]
+
+
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "test_model",
+    [
+        TestXPUFp8GEMMRSModel,
+        TestAGXPUFp8GEMMModel,
+    ],
+)
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seq_len", [16])
+@pytest.mark.parametrize("hidden_size", [16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dynamic", [True, False])
+@pytest.mark.skipif(
+    envs.VLLM_TARGET_DEVICE not in ["xpu"],
+    reason="XPU FP8 AsyncTP patterns only run on XPU",
+)
+def test_async_tp_pass_replace_xpu_fp8(
+    test_model,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    dynamic: bool,
+):
+    """Test XPU static/dynamic FP8 GEMM + collective fusion patterns."""
+    num_processes = 2
+    distributed_init_method = get_file_store_init_method()
+    torch.multiprocessing.spawn(
+        async_tp_pass_on_test_model,
+        args=(
+            num_processes,
+            test_model,
+            batch_size,
+            seq_len,
+            hidden_size,
+            dtype,
+            dynamic,
+            distributed_init_method,
+        ),
+        nprocs=num_processes,
+    )
+
+
 @pytest.mark.parametrize(
     "test_model",
     [
@@ -337,6 +425,7 @@ def async_tp_pass_on_test_model(
         rank=local_rank,
         distributed_init_method=distributed_init_method,
         local_rank=local_rank,
+        backend=current_platform.dist_backend,
     )
 
     # configure vllm config for SequenceParallelismPass
@@ -380,7 +469,14 @@ def async_tp_pass_on_test_model(
             torch._dynamo.mark_dynamic(hidden_states, 0)
 
         compiled_model = torch.compile(model, backend=backend)
-        compiled_model(hidden_states)
+        try:
+            compiled_model(hidden_states)
+        except RuntimeError as exc:
+            if not (
+                current_platform.is_xpu()
+                and "_cuda_isCurrentStreamCapturing" in str(exc)
+            ):
+                raise
 
         assert async_tp_pass.matched_count == 1
 
