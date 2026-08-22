@@ -108,10 +108,8 @@ _STUB_MODULES: dict[str, dict[str, object]] = {
     "vllm.entrypoints.openai.responses.serving": {
         "OpenAIServingResponses": _FakeOpenAIServingResponses,
     },
-    "vllm.entrypoints.openai.utils": {
+    "vllm.entrypoints.serve.utils.api_utils": {
         "validate_json_request": lambda: None,
-    },
-    "vllm.entrypoints.utils": {
         "load_aware_call": lambda f: f,
         "with_cancellation": lambda f: f,
     },
