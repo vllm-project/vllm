@@ -343,9 +343,9 @@ steps:
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
-- label: ":nvidia: (DGX) Spark B12X Linear Kernels Nightly"
+- label: ":nvidia: (DGX) Spark b12x Linear Kernels Nightly"
   key: b12x-linear-kernels-dgx-spark-nightly
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   device: dgx-spark
   optional: true
   num_devices: 1
@@ -353,17 +353,34 @@ steps:
   - arm64-image-build
   source_file_dependencies:
   - setup.py
+  - vllm/config/kernel.py
+  - vllm/envs.py
   - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/layers/fused_moe/b12x.py
+  - vllm/model_executor/layers/fused_moe/config.py
+  - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
+  - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
+  - vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/
+  - vllm/model_executor/layers/quantization/inc/schemes/inc_mxfp4_moe.py
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/b12x_moe.py
   - vllm/model_executor/warmup/b12x_warmup.py
   - vllm/utils/b12x.py
+  - tests/kernels/moe/test_b12x.py
+  - tests/kernels/quantization/nvfp4_utils.py
   - tests/model_executor/kernels/test_b12x_linear.py
   - tests/model_executor/test_b12x_warmup.py
   - tests/kernels/quantization/test_block_fp8.py
+  - tests/quantization/reference_mxfp4.py
+  - tests/quantization/test_auto_round.py
   commands:
-  - uv pip install --system b12x==1.2.4
+  - uv pip install --system b12x==1.2.6
   - pytest -v -s model_executor/kernels/test_b12x_linear.py
       model_executor/test_b12x_warmup.py
-      kernels/quantization/test_block_fp8.py -k b12x
+      kernels/quantization/test_block_fp8.py
+      kernels/moe/test_b12x.py
+      quantization/test_auto_round.py -k b12x
 
 - label: ":nvidia: (H100) Helion Kernels Shard %N"
   key: kernels-helion-test
@@ -451,56 +468,3 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
-
-- label: Kernels FusedMoE Layer Test (2xMI355)
-  key: kernels-fusedmoe-layer-test-2-mi355
-  depends_on:
-  - image-build-amd
-  timeout_in_minutes: 180
-  dind: false
-  device: mi355_2
-  soft_fail: true
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/moe/
-  - csrc/rocm/
-  - tests/kernels/moe
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/model_executor/layers/quantization/
-  - vllm/distributed/
-  - vllm/config/
-  - vllm/forward_context.py
-  - vllm/v1/worker/workspace.py
-  - vllm/utils/import_utils.py
-  - vllm/utils/math_utils.py
-  - vllm/utils/torch_utils.py
-  - vllm/platforms/
-  - vllm/_aiter_ops.py
-  commands:
-  - pytest -v -s kernels/moe/test_moe_layer.py
-
-- label: Kernels FP8 MoE Test (MI355)
-  key: kernels-fp8-moe-test-mi355
-  depends_on:
-  - image-build-amd
-  timeout_in_minutes: 180
-  dind: false
-  device: mi355_1
-  soft_fail: true
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/moe/
-  - vllm/model_executor/layers/fused_moe/
-  - tests/kernels/moe/test_deepep_moe.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - vllm/envs.py
-  commands:
-    - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
-    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
-    - pytest -v -s kernels/moe/test_moe.py
-    - pytest -v -s kernels/moe/test_block_int8.py
-    - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
-    - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
