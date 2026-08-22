@@ -31,8 +31,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BlobBlockHashes,
     ChunkedTokenDatabase,
-    HNDStoreLayout,
     KeyMetadata,
+    LBHNCStoreLayout,
     LoadSpec,
     PoolKey,
     RankLocalStoreLayout,
@@ -115,7 +115,7 @@ def _make_tp_shared_db(
         0,
         store_namespace=_TP_SHARED_NAMESPACE,
     )
-    layout = HNDStoreLayout(
+    layout = LBHNCStoreLayout(
         metadata,
         block_size,
         block_size,
@@ -401,7 +401,7 @@ def test_pool_key_store_tp_namespace():
     assert key.to_string() == f"{_tp_shared_prefix(2)}@deadbeef"
 
 
-def test_tp_shared_hnd_round_trips_prefill_shards_into_decode():
+def test_tp_shared_lbhnc_round_trips_prefill_shards_into_decode():
     block_size = 16
     shape = (1, 2, block_size, 4)
     producer_strides = (128, 64, 4, 1)
@@ -422,7 +422,7 @@ def test_tp_shared_hnd_round_trips_prefill_shards_into_decode():
             0,
             store_namespace=_TP_SHARED_NAMESPACE,
         )
-        layout = HNDStoreLayout(
+        layout = LBHNCStoreLayout(
             metadata,
             block_size,
             block_size,
@@ -453,7 +453,7 @@ def test_tp_shared_hnd_round_trips_prefill_shards_into_decode():
             0,
             store_namespace=_TP_SHARED_NAMESPACE,
         )
-        layout = HNDStoreLayout(
+        layout = LBHNCStoreLayout(
             metadata,
             block_size,
             block_size,
@@ -1999,7 +1999,7 @@ def test_requester_worker_init_skips_disk_budget_when_offload_disabled(
     assert w.disk_offload_buffer_budget_bytes is None
 
 
-def test_worker_enables_canonical_store_tp_layout(tmp_path, monkeypatch):
+def test_worker_enables_lbhnc_store_tp_layout(tmp_path, monkeypatch):
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
@@ -2024,12 +2024,12 @@ def test_worker_enables_canonical_store_tp_layout(tmp_path, monkeypatch):
 
     assert w.store_tp_size == 4
     assert w.token_dbs[0].metadata.store_namespace == _TP_SHARED_NAMESPACE
-    assert isinstance(w.token_dbs[0].store_layout, HNDStoreLayout)
+    assert isinstance(w.token_dbs[0].store_layout, LBHNCStoreLayout)
     assert w.token_dbs[0].store_layout.local_shard_ids == (0, 1)
     assert len(w._lookup_key_prefixes[0]) == 4
 
 
-def test_store_tp_nhd_falls_back_to_rank_local_namespace(tmp_path, monkeypatch):
+def test_store_tp_lbnhc_falls_back_to_rank_local_namespace(tmp_path, monkeypatch):
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
@@ -2130,7 +2130,7 @@ def test_lcm_store_tp_gives_prefill_and_decode_common_namespace(tmp_path, monkey
             _make_kv_cache_config(),
         )
         assert store_worker.store_tp_size == 4
-        assert isinstance(store_worker.token_dbs[0].store_layout, HNDStoreLayout)
+        assert isinstance(store_worker.token_dbs[0].store_layout, LBHNCStoreLayout)
         assert store_worker.token_dbs[0].store_layout.local_shard_ids == expected_shards
         workers.append(store_worker)
 
@@ -3091,7 +3091,7 @@ def test_lookup_key_prefixes_cover_canonical_store_tp_shards():
         ChunkedTokenDatabase(
             metadata,
             block_size=16,
-            store_layout=HNDStoreLayout(
+            store_layout=LBHNCStoreLayout(
                 metadata,
                 block_size=16,
                 hash_block_size=16,

@@ -170,7 +170,10 @@ class PoolKey:
         )
 
 
+# An integer selects a canonical Store TP shard. ``None`` denotes the legacy
+# rank-local object, which has no additional Store-level shard dimension.
 StoreShardId = int | None
+# Physical ranks encoded in a rank-local key: (TP, PCP, DCP, PP).
 RankNamespace = tuple[int, int, int, int]
 
 
@@ -327,7 +330,7 @@ class RankLocalStoreLayout(StoreLayout):
         )
 
 
-class HNDStoreLayout(StoreLayout):
+class LBHNCStoreLayout(StoreLayout):
     """Canonical head-major (LBHNC) layout shared by divisible TP sizes."""
 
     def __init__(
@@ -412,7 +415,7 @@ class HNDStoreLayout(StoreLayout):
                 and head_stride == self.block_size * content_bytes
             ):
                 raise ValueError(
-                    "TP-shared Mooncake store requires packed HND KV layout"
+                    "TP-shared Mooncake store requires packed LBHNC KV layout"
                 )
 
             for local_shard, (addr_bases, block_strides, sizes) in enumerate(templates):

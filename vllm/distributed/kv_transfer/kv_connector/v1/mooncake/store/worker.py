@@ -44,8 +44,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
     ChunkedTokenDatabase,
-    HNDStoreLayout,
     KeyMetadata,
+    LBHNCStoreLayout,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
     PoolKey,
@@ -1675,7 +1675,7 @@ class MooncakeStoreWorker:
                     group_metadata,
                     group.kv_cache_spec.block_size,
                     hash_block_size=self.hash_block_size,
-                    store_layout=HNDStoreLayout(
+                    store_layout=LBHNCStoreLayout(
                         group_metadata,
                         group.kv_cache_spec.block_size,
                         self.hash_block_size,
