@@ -317,6 +317,14 @@ void cpu_gemm_wna16(
   bool use_desc_act = g_idx.has_value();
   TORCH_CHECK(!(has_zp && use_desc_act));
 
+  if (use_desc_act && g_idx->numel() > 0) {
+    const auto g_min = g_idx->min().item<int64_t>();
+    const auto g_max = g_idx->max().item<int64_t>();
+    TORCH_CHECK(g_min >= 0 && g_max < group_num,
+                "cpu_gemm_wna16: g_idx values must be in [0, ", group_num,
+                "), got [", g_min, ", ", g_max, "]");
+  }
+
   ISA isa = [&]() {
     if (isa_hint == "amx") {
       return ISA::AMX;
