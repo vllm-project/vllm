@@ -55,6 +55,12 @@ class LMCacheKVEvents(KVConnectorKVEvents):
     def increment_workers(self, count: int = 1) -> None:
         self._aggregator.increment_workers(count)
 
+    def merge(self, other: KVConnectorKVEvents) -> "LMCacheKVEvents":
+        if not isinstance(other, LMCacheKVEvents):
+            raise TypeError("Can only merge LMCacheKVEvents.")
+        self._aggregator.merge(other._aggregator)
+        return self
+
     def get_all_events(self) -> list[KVCacheEvent]:
         return self._aggregator.get_all_events()
 
@@ -316,10 +322,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         if self._kv_cache_events is None:
             self._kv_cache_events = kv_cache_events
         else:
-            self._kv_cache_events.add_events(kv_cache_events.get_all_events())
-            self._kv_cache_events.increment_workers(
-                kv_cache_events.get_number_of_workers()
-            )
+            self._kv_cache_events.merge(kv_cache_events)
         return
 
     def request_finished(
