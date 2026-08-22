@@ -8,7 +8,6 @@ from enum import Enum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
-    ClassVar,
     Generic,
     NamedTuple,
     Protocol,
@@ -1177,12 +1176,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with `transformers.ProcessorMixin`.
     """
 
-    renderer_applies_updates: ClassVar[bool] = False
-    """
-    Only set to True if the tokenizer or chat template in the Renderer
-    (which are run before MM processing) inserts placeholder tokens.
-    """
-
     def __init__(
         self,
         info: _I,
@@ -1780,24 +1773,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt_ids: list[int],
         mm_kwargs: MultiModalKwargsOptionalItems,
         mm_prompt_updates: MultiModalPromptUpdates,
-        is_update_applied: bool,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
         self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
-        if is_update_applied:
-            mm_placeholders = self._find_mm_placeholders(
-                prompt_ids,
-                mm_prompt_updates,
-            )
-            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
-        else:
-            prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                prompt_ids,
-                mm_prompt_updates,
-            )
-            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+        prompt_ids, mm_placeholders = self._apply_prompt_updates(
+            prompt_ids,
+            mm_prompt_updates,
+        )
+
+        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         return prompt_ids, mm_placeholders
 
@@ -1829,7 +1815,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 prompt_ids=prompt_ids,
                 mm_kwargs=mm_info.kwargs,
                 mm_prompt_updates=mm_info.prompt_updates,
-                is_update_applied=self.renderer_applies_updates,
             )
 
         mm_placeholder_ranges = {
