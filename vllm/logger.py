@@ -218,8 +218,10 @@ def init_logger(name: str) -> _VllmLogger:
 def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
     current_level = logging.root.manager.disable
     logging.disable(level)
-    yield
-    logging.disable(current_level)
+    try:
+        yield
+    finally:
+        logging.disable(current_level)
 
 
 def current_formatter_type(logger: Logger) -> Literal["color", "newline", None]:
