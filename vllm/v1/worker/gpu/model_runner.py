@@ -150,6 +150,7 @@ from vllm.v1.worker.utils import (
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
 )
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.workspace import use_workspace_lane
 
 logger = init_logger(__name__)
@@ -1463,29 +1464,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             assert batch_req_state is not None
-            input_batch = self.prepare_inputs(
-                scheduler_output, batch_req_state, batch_desc
-            )
-            block_tables, slot_mappings = self.prepare_attn(input_batch)
-            # Mamba "align" pre-copy: migrate recurrent state across block
-            # boundaries before the forward. Runs only on real batches, and
-            # before model_state.prepare_attn gathers num_accepted_tokens so the
-            # boundary reset is visible to the attention metadata.
-            self.model_state.preprocess_state(
-                input_batch,
-                block_tables,
-                self.kv_cache_config,
-                self.req_states.num_computed_tokens.gpu,
-            )
-
-            if self.lora_config:
-                # Activate LoRA adapters.
-                lora_inputs = self.lora_state.make_lora_inputs(
-                    input_batch.req_ids,
-                    input_batch.idx_mapping_np,
-                    input_batch.num_scheduled_tokens,
+            with record_function_or_nullcontext("gpu_model_runner: preprocess"):
+                input_batch = self.prepare_inputs(
+                    scheduler_output, batch_req_state, batch_desc
                 )
-                self._set_active_loras(*lora_inputs)
+                block_tables, slot_mappings = self.prepare_attn(input_batch)
+                # Mamba "align" pre-copy: migrate recurrent state across block
+                # boundaries before the forward. Runs only on real batches, and
+                # before model_state.prepare_attn gathers num_accepted_tokens so the
+                # boundary reset is visible to the attention metadata.
+                self.model_state.preprocess_state(
+                    input_batch,
+                    block_tables,
+                    self.kv_cache_config,
+                    self.req_states.num_computed_tokens.gpu,
+                )
+
+                if self.lora_config:
+                    # Activate LoRA adapters.
+                    lora_inputs = self.lora_state.make_lora_inputs(
+                        input_batch.req_ids,
+                        input_batch.idx_mapping_np,
+                        input_batch.num_scheduled_tokens,
+                    )
+                    self._set_active_loras(*lora_inputs)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
@@ -1593,7 +1595,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             del intermediate_tensors
 
         # Update the EPLB meta.
-        self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
+        with record_function_or_nullcontext("gpu_model_runner: eplb"):
+            self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
 
         self.step_timing.record_batch(
             input_batch, batch_desc.cg_mode == CUDAGraphMode.FULL
@@ -1607,7 +1610,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(scheduler_output)
-            model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            with record_function_or_nullcontext("gpu_model_runner: forward"):
+                model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
@@ -1633,12 +1637,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # cudagraph, chosen inside run_pw_graph). cg_mode is only
                     # PIECEWISE after the cudagraph manager exists.
                     assert self.cudagraph_manager is not None
-                    model_output = self.cudagraph_manager.run_pw_graph(
-                        self.model, model_inputs
-                    )
+                    with record_function_or_nullcontext("gpu_model_runner: forward"):
+                        model_output = self.cudagraph_manager.run_pw_graph(
+                            self.model, model_inputs
+                        )
                 else:
                     # Eager (NONE): call the raw model directly.
-                    model_output = self.model(**model_inputs)
+                    with record_function_or_nullcontext("gpu_model_runner: forward"):
+                        model_output = self.model(**model_inputs)
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
@@ -1721,9 +1727,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.pcp_manager, hidden_states, input_batch
         )
 
-        sampler_output, num_sampled, num_rejected = self.sample(
-            hidden_states, input_batch, grammar_output
-        )
+        with record_function_or_nullcontext("gpu_model_runner: sample"):
+            sampler_output, num_sampled, num_rejected = self.sample(
+                hidden_states, input_batch, grammar_output
+            )
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
@@ -1745,24 +1752,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Prepare the model runner output.
-        model_runner_output = ModelRunnerOutput(
-            req_ids=input_batch.req_ids,
-            # NOTE(woosuk): req_id_to_index is unused in this model runner.
-            # Only for compatibility with the existing model runner and scheduler.
-            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
-            sampled_token_ids=None,  # type: ignore
-            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
-        )
-        # Start async output copy here so that it can overlap with speculator proposal.
-        async_output = AsyncOutput(
-            model_runner_output=model_runner_output,
-            sampler_output=sampler_output,
-            num_sampled_tokens=num_sampled,
-            main_stream=self.main_stream,
-            copy_stream=self.output_copy_stream,
-            check_ep_fault=self.check_ep_fault,
-            routed_experts=routed_experts,
-        )
+        with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            model_runner_output = ModelRunnerOutput(
+                req_ids=input_batch.req_ids,
+                # NOTE(woosuk): req_id_to_index is unused in this model runner.
+                # Only for compatibility with the existing model runner and scheduler.
+                req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
+                sampled_token_ids=None,  # type: ignore
+                prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            )
+            # Start async output copy here so that it can overlap with speculator proposal.
+            async_output = AsyncOutput(
+                model_runner_output=model_runner_output,
+                sampler_output=sampler_output,
+                num_sampled_tokens=num_sampled,
+                main_stream=self.main_stream,
+                copy_stream=self.output_copy_stream,
+                check_ep_fault=self.check_ep_fault,
+                routed_experts=routed_experts,
+            )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
         if self.speculator is not None and self.speculator.supports_mm_inputs:
@@ -1781,13 +1789,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # ensuring that `copy_event` is recorded before calling postprocess.
         # This sequencing may slightly reduce latency as async D2H copy does not
         # need to wait for the postprocess to finish.
-        self.postprocess_sampled(
-            input_batch.idx_mapping,
-            sampler_output.sampled_token_ids,
-            num_sampled,
-            num_rejected,
-            input_batch.query_start_loc,
-        )
+        with record_function_or_nullcontext("gpu_model_runner: postprocess"):
+            self.postprocess_sampled(
+                input_batch.idx_mapping,
+                sampler_output.sampled_token_ids,
+                num_sampled,
+                num_rejected,
+                input_batch.query_start_loc,
+            )
 
         if self.speculator is not None:
             assert self.sampler is not None
@@ -1799,7 +1808,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
-            with use_workspace_lane(self._draft_workspace_lane):
+            with use_workspace_lane(self._draft_workspace_lane), \
+                    record_function_or_nullcontext("gpu_model_runner: draft"):
                 draft_tokens = self.speculator.propose(
                     input_batch,
                     attn_metadata,
@@ -1820,18 +1830,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.speculator.draft_token_confidence_probs, input_batch
                 )
 
-        if self.num_speculative_steps > 0:
-            # Spec-decode and diffusion LLMs both use draft tokens but the latter does
-            # not have a speculator (i.e. self.speculator is None)
-            self.draft_tokens_handler.set_draft_tokens(
-                input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping],
-            )
+        with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
+            if self.num_speculative_steps > 0:
+                # Spec-decode and diffusion LLMs both use draft tokens but the latter does
+                # not have a speculator (i.e. self.speculator is None)
+                self.draft_tokens_handler.set_draft_tokens(
+                    input_batch,
+                    self.req_states.draft_tokens[input_batch.idx_mapping],
+                )
 
-        # Post-step KV connector related operations.
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
-        model_runner_output.kv_connector_output = kv_connector_output
-        model_runner_output.ec_connector_output = ec_connector_output
+            # Post-step KV connector related operations.
+            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+            model_runner_output.kv_connector_output = kv_connector_output
+            model_runner_output.ec_connector_output = ec_connector_output
 
         return async_output
 
