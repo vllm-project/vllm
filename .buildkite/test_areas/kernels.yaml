@@ -265,7 +265,8 @@ steps:
 
 - label: ":nvidia: (B200) Kernels"
   key: kernels-b200
-  timeout_in_minutes: 80
+  timeout_in_minutes: 30
+  parallelism: 3
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   # optional: true
@@ -309,39 +310,49 @@ steps:
   - tests/kernels/test_top_k_per_row.py
   commands:
     - nvidia-smi
-    - python3 examples/basic/offline_inference/chat.py
-    # Attention
-    # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
-    - pytest -v -s tests/kernels/attention/test_attention_selector.py
-    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
-    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
-    - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
-    - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
-    - pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
-    - pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
-    - pytest -v -s tests/kernels/test_top_k_per_row.py
-    # Quantization
-    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
-    - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
-    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
-    - pytest -v -s tests/kernels/moe/test_flashinfer.py
-    - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
-    - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
-    - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
-    - pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
-    - pytest -v -s tests/kernels/attention/test_minimax_m3.py
-    - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
-    # e2e
-    - pytest -v -s tests/models/quantization/test_nvfp4.py
+    - |
+      set -eu
+      case "$$BUILDKITE_PARALLEL_JOB" in
+        0)
+          pytest -v -s tests/kernels/attention/test_attention_selector.py
+          pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
+          pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
+          pytest -v -s tests/kernels/test_top_k_per_row.py
+          pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+          pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
+          pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
+          pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
+          pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
+          pytest -v -s tests/kernels/test_ll_bf16_gemm.py
+          ;;
+        1)
+          python3 examples/basic/offline_inference/chat.py
+          pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
+          pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+          pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+          pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
+          pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
+          pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
+          pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
+          pytest -v -s tests/models/quantization/test_nvfp4.py
+          ;;
+        2)
+          pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
+          pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
+          pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+          pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
+          pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+          pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
+          pytest -v -s tests/kernels/moe/test_flashinfer.py
+          pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
+          pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
+          pytest -v -s tests/kernels/attention/test_minimax_m3.py
+          ;;
+        *)
+          echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" >&2
+          exit 1
+          ;;
+      esac
 
 - label: ":nvidia: (DGX) Spark b12x Linear Kernels Nightly"
   key: b12x-linear-kernels-dgx-spark-nightly
