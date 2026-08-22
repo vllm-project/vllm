@@ -77,8 +77,8 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     model = TEST_MODEL
     num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
     max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "128"))
-    min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
-    max_random_prompt = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
+    min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "256"))
+    max_random_prompt = int(os.getenv("VLLM_MAX_PROMPT", "512"))
     assert max_batch_size >= 2, "Batch size should be >= 2 to mix needle."
 
     # Keep GPU memory usage low to avoid startup allocation failures.
@@ -204,6 +204,8 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         max_model_len=8192,
         dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=2048,
         attention_config={
             "backend": backend,
             "flex_attn_block_m": block_m,
@@ -211,16 +213,14 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         },
     )
 
-    # Use more realistic prompts for better token generation
-    prompts = [_random_prompt(10, 50) for _ in range(32)]
-
-    # TODO: Update prompts to have ragged lengths in order to test chunked prefill
-    #       The above tests are not currently long enough to exercise chunking.
-    # prompts = (
-    #     [_random_prompt(10, 50) for _ in range(28)]
-    #     + [_random_prompt(256, 512) for _ in range(50)]
-    #     + [_random_prompt(2048, 4096) for _ in range(50)]
-    # )
+    # Ragged lengths so the batched run exceeds max_num_batched_tokens (2048)
+    # and exercises chunked prefill, while each prompt alone stays below the
+    # chunk threshold and fits in a single step (~1.5 tokens/word).
+    prompts = (
+        [_random_prompt(10, 50) for _ in range(28)]
+        + [_random_prompt(256, 512) for _ in range(50)]
+        + [_random_prompt(1000, 1200) for _ in range(50)]
+    )
 
     sp = SamplingParams(
         temperature=0.6,
