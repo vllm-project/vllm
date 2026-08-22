@@ -52,6 +52,7 @@ class TieringOffloadingMetrics:
     PROMOTION_ALLOCATION_FAILURES = (
         "vllm:kv_offload_tiering_promotion_allocation_failures"
     )
+    HIT_PENDING_TIMEOUTS = "vllm:kv_offload_tiering_hit_pending_timeouts"
     ACTIVE_PROMOTION_JOBS = "vllm:kv_offload_tiering_active_promotion_jobs"
     ACTIVE_CASCADE_JOBS = "vllm:kv_offload_tiering_active_cascade_jobs"
 
