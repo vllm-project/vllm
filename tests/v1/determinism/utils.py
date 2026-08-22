@@ -103,14 +103,14 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
         max_words = min_words
     target_words = random.randint(min_words, max_words)
 
-    if target_words > 50:
-        # For longer prompts, repeat context
-        padding_text = (
-            " This is an interesting topic that deserves more explanation. "
-            # TODO: Update to * (target_words // 10) to better align with word ratio
-            * (target_words // 50)
-        )
-        base_prompt = padding_text + base_prompt
+    # Pad with repeated filler sentences until the prompt is roughly
+    # `target_words` words long, then prepend the chosen template.
+    filler = "This is an interesting topic that deserves more explanation."
+    filler_words = len(filler.split())
+    words_needed = target_words - len(base_prompt.split())
+    if words_needed > 0:
+        repeats = (words_needed + filler_words - 1) // filler_words
+        base_prompt = (filler + " ") * repeats + base_prompt
 
     return base_prompt
 
