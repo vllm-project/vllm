@@ -119,7 +119,7 @@ def _moe_forward(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
-    hidden_dim_unpadded: int,
+    out_hidden_dim: int,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return cast(
@@ -139,14 +139,16 @@ def _moe_forward_fake(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
-    hidden_dim_unpadded: int,
+    out_hidden_dim: int,
 ) -> torch.Tensor:
-    # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
-    # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
-    # as an op arg (not peeked from the layer registry) to keep the fake
-    # a pure shape function of its inputs and preserve subgraph dedup.
-    if hidden_dim_unpadded > 0:
-        return hidden_states.new_empty((*hidden_states.shape[:-1], hidden_dim_unpadded))
+    # `out_hidden_dim > 0` whenever the real kernel writes a different
+    # width than `hidden_states.shape[-1]`: narrower on the TRT-LLM MXFP4
+    # path, wider when the op pads activations internally to the kernel
+    # hidden dim. Plumbed as an op arg (not peeked from the layer registry)
+    # to keep the fake a pure shape function of its inputs and preserve
+    # subgraph dedup.
+    if out_hidden_dim > 0:
+        return hidden_states.new_empty((*hidden_states.shape[:-1], out_hidden_dim))
     return torch.empty_like(hidden_states)
 
 
@@ -156,7 +158,7 @@ def _moe_forward_shared(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
-    hidden_dim_unpadded: int,
+    out_hidden_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return cast(
@@ -176,15 +178,13 @@ def _moe_forward_shared_fake(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
-    hidden_dim_unpadded: int,
+    out_hidden_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # `fused_out`: see `_moe_forward_fake` for hidden_dim_unpadded semantics.
+    # `fused_out`: see `_moe_forward_fake` for out_hidden_dim semantics.
     # `shared_out`: matches `shared_experts_input` if provided (latent MoE),
     # else `hidden_states`.
-    if hidden_dim_unpadded > 0:
-        fused_out = hidden_states.new_empty(
-            (*hidden_states.shape[:-1], hidden_dim_unpadded)
-        )
+    if out_hidden_dim > 0:
+        fused_out = hidden_states.new_empty((*hidden_states.shape[:-1], out_hidden_dim))
     else:
         fused_out = torch.empty_like(hidden_states)
     if shared_experts_input is not None:
@@ -508,34 +508,29 @@ class MoERunner(MoERunnerInterface):
             return "from_forward_context"
         return self.layer_name
 
-    def _maybe_pad_hidden_states(
+    def _forward_padding_plan(
         self,
         shared_experts_input: torch.Tensor | None,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, int | None, int | None]:
-        """Pad hidden_states to moe_config.hidden_dim and compute the
-        original dimension for later truncation.
+    ) -> tuple[int | None, int | None]:
+        """Compute output-truncation sizes for kernel hidden-dim padding.
 
-        For latent MoE, the routed hidden_states may be smaller than
-        hidden_dim. Padding ensures uniform tensor sizes through the
-        fused MoE kernel. The returned trunc_size is used by
-        _maybe_reduce_final_output to strip the padding from the result.
+        The padding itself is applied inside the custom op (see
+        `_forward_impl`). Padding in the traced region gets optimized into
+        an aliased, stride-remapped view feeding the opaque MoE op, which
+        is not replay-safe under CUDA graph capture: the op's captured
+        kernels read a buffer the replayed graph never refreshes.
+        The returned trunc_size is used by _maybe_reduce_final_output to
+        strip the padding from the result.
         """
         shared_experts_hidden_dim = (
             shared_experts_input.shape[-1] if shared_experts_input is not None else 0
         )
         transformed_hidden_dim: int | None = hidden_states.shape[-1]
-        if (
+        will_pad = (
             not self._quant_method.skip_forward_padding
             and self.moe_config.hidden_dim != transformed_hidden_dim
-        ):
-            assert transformed_hidden_dim is not None
-            hidden_states = F.pad(
-                hidden_states,
-                (0, self.moe_config.hidden_dim - transformed_hidden_dim),
-                mode="constant",
-                value=0.0,
-            )
+        )
 
         # Truncation sizes for stripping kernel padding from the output.
         # None means no truncation needed (no padding was applied).
@@ -555,7 +550,7 @@ class MoERunner(MoERunnerInterface):
         # Standard MoE / MoE without transforms (GPT-OSS, Mixtral):
         #   - pre_xform is None (no early truncation)
         #   - post_xform strips padding after all-reduce (or None if unpadded)
-        if transformed_hidden_dim == hidden_states.shape[-1]:
+        if not will_pad:
             transformed_hidden_dim = None
 
         pre_xform_trunc_size = None
@@ -565,7 +560,22 @@ class MoERunner(MoERunnerInterface):
         if self.routed_output_transform is not None and shared_experts_hidden_dim > 0:
             post_xform_trunc_size = shared_experts_hidden_dim
 
-        return hidden_states, pre_xform_trunc_size, post_xform_trunc_size
+        return pre_xform_trunc_size, post_xform_trunc_size
+
+    def _moe_out_hidden_dim(self, hidden_states: torch.Tensor) -> int:
+        """Fused-output hidden dim when it differs from the op input's, else 0.
+
+        Plumbed as an op arg so the fake impls stay pure shape functions
+        of their inputs.
+        """
+        if self._quant_method.has_unpadded_output:
+            return self.moe_config.hidden_dim_unpadded or 0
+        if (
+            not self._quant_method.skip_forward_padding
+            and hidden_states.shape[-1] != self.moe_config.hidden_dim
+        ):
+            return self.moe_config.hidden_dim
+        return 0
 
     def _maybe_apply_shared_experts(
         self,
@@ -708,16 +718,15 @@ class MoERunner(MoERunnerInterface):
                 hidden_states
             )
 
-        # Record before `_maybe_pad_hidden_states` pads activations to match
-        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
-        # so routed output can be trimmed before
-        # shared+routed add / latent up proj if needed.
+        # Truncation plan for kernel hidden-dim padding (e.g. after
+        # `align_trtllm_fp4_moe_hidden_dim_for_fi`) so routed output can be
+        # trimmed before shared+routed add / latent up proj if needed. The
+        # padding itself happens inside the custom op; see
+        # `_forward_padding_plan` for why.
 
-        hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
-            self._maybe_pad_hidden_states(
-                shared_experts_input,
-                hidden_states,
-            )
+        og_hidden_dim_pre_xform, og_hidden_dim_post_xform = self._forward_padding_plan(
+            shared_experts_input,
+            hidden_states,
         )
 
         result = self._forward_entry(
@@ -726,9 +735,7 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input,
             input_ids,
             self._encode_layer_name(),
-            self.moe_config.hidden_dim_unpadded
-            if self._quant_method.has_unpadded_output
-            else 0,
+            self._moe_out_hidden_dim(hidden_states),
         )
 
         #
@@ -868,6 +875,23 @@ class MoERunner(MoERunnerInterface):
         Returns routed output, optionally paired with shared-expert output. A
         fused consumer may request the routed output in deferred-finalize form.
         """
+        # Pad activations to the kernel hidden dim here, inside the opaque
+        # custom op, rather than in the traced region: a traced F.pad feeding
+        # this op gets optimized into an aliased stride-remapped view whose
+        # buffer is not refreshed on CUDA graph replay, so the MoE kernels
+        # read stale capture-time data (vllm-project/vllm#52308).
+        target_hidden_dim = self.moe_config.hidden_dim
+        if (
+            not self._quant_method.skip_forward_padding
+            and hidden_states.shape[-1] != target_hidden_dim
+        ):
+            hidden_states = F.pad(
+                hidden_states,
+                (0, target_hidden_dim - hidden_states.shape[-1]),
+                mode="constant",
+                value=0.0,
+            )
+
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
 
