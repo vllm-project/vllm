@@ -1232,7 +1232,7 @@ class LMCacheConnectorV1Impl:
         """
         Update KVConnector state after temporary buffer alloc.
 
-        For SharedStorageConnector, update _request_needs_load
+        For ExampleConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
 
