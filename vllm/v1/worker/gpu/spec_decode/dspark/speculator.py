@@ -23,6 +23,7 @@ CUDA graphs (FULL, mirroring DFlash) cover the whole draft step: the parallel
 backbone forward AND the sequential Markov sampling.
 """
 
+import os
 from typing import Any
 
 import torch
@@ -35,6 +36,15 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
+
+# Which signal adaptive verification reads per-position acceptance from: the
+# checkpoint's trained confidence head (default), or the online estimator fed
+# from the draft logits, as every non-DSpark speculator uses. Temporary knob for
+# comparing the two on one checkpoint; the head needs no warmup but the
+# estimator calibrates to the live workload.
+_USE_ACCEPTANCE_ESTIMATOR = bool(
+    int(os.getenv("VLLM_DSPARK_USE_ACCEPTANCE_ESTIMATOR", "0"))
+)
 
 
 class DSparkSpeculator(DFlashSpeculator):
@@ -79,12 +89,15 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_model_config.hf_config, "dspark_draft_topk", None
         )
 
-        self.draft_token_confidence_probs = torch.empty_like(
-            self.draft_tokens, dtype=torch.float32
+        # Exactly one acceptance signal is live. The base class builds the
+        # estimator for every method; drop it when the head is in charge, which
+        # also keeps skip_adaptive_verification False -- the head is trained, so
+        # it trims from the first step rather than waiting out a warmup.
+        self.use_confidence_head = (
+            self.enable_adaptive_verification and not _USE_ACCEPTANCE_ESTIMATOR
         )
-        self.enable_adaptive_verification = (
-            self.speculative_config.enable_adaptive_verification
-        )
+        if self.use_confidence_head:
+            self.acceptance_estimator = None
 
     def load_draft_model(
         self,
@@ -108,12 +121,20 @@ class DSparkSpeculator(DFlashSpeculator):
                 dtype=self.draft_logits.dtype,
                 device=self.device,
             )
-        if self.enable_adaptive_verification and model.model.confidence_head is None:
+        if self.use_confidence_head and model.model.confidence_head is None:
             raise ValueError(
                 "Adaptive verification needs a DSpark checkpoint with a confidence "
-                "head, and this one has none. Pass "
-                "enable_adaptive_verification=false in the speculative config to verify"
-                " a fixed number of drafts instead."
+                "head, and this one has none. Set "
+                "VLLM_DSPARK_USE_ACCEPTANCE_ESTIMATOR=1 to estimate acceptance from "
+                "the draft logits instead, or pass enable_adaptive_verification=false "
+                "in the speculative config to verify a fixed number of drafts."
+            )
+        if self.acceptance_estimator is not None and self._draft_topk == 1:
+            raise ValueError(
+                "The acceptance estimator reads the top-2 logit margin, and "
+                "dspark_draft_topk=1 leaves a single finite logit per row, so every "
+                "margin saturates and the estimate carries no signal. Use "
+                "dspark_draft_topk >= 2, or the checkpoint's confidence head."
             )
         return model
 
@@ -125,7 +146,11 @@ class DSparkSpeculator(DFlashSpeculator):
         step: int,
     ) -> torch.Tensor:
         if self.draft_logits is None:
-            return self.model.map_draft_to_target(logits.argmax(dim=-1))
+            draft_ids = logits.argmax(dim=-1)
+            self._maybe_score_confidence(
+                logits, idx_map, self._step_cols[step], draft_ids
+            )
+            return self.model.map_draft_to_target(draft_ids)
 
         # Probabilistic sampling and rejection operate in target-vocabulary
         # space. A reduced draft vocabulary is scattered into its target rows.
@@ -137,7 +162,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
         # sample_pos is the predicted token's position Q; the target verifies
         # it with the predecessor's Gumbel key (Q-1). Pass Q-1.
-        return gumbel_sample(
+        draft_ids = gumbel_sample(
             logits,
             idx_map,
             self.temperature,
@@ -148,6 +173,12 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
         )
+        # Scored here rather than by the caller: the log q feature indexes the
+        # drafted token into the row it was drawn from, which is the scattered
+        # target-vocabulary row above when the draft vocabulary is reduced. The
+        # scatter leaves non-draft columns at -inf, so log q is unchanged by it.
+        self._maybe_score_confidence(logits, idx_map, self._step_cols[step], draft_ids)
+        return draft_ids
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:
@@ -175,7 +206,7 @@ class DSparkSpeculator(DFlashSpeculator):
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
-            if self.enable_adaptive_verification:
+            if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
@@ -185,14 +216,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
-        if self.enable_adaptive_verification:
-            confidence = self.model.compute_confidence(
-                sample_hidden,
-                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
-            )
-            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
-                num_reqs, n_spec
-            )
+        self._score_confidence_head(num_reqs, sample_hidden, confidence_markov_embeds)
 
     def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         """Apply the sequential Markov head only to top-k base-logit candidates.
@@ -220,7 +244,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
         for i in range(n_spec):
             markov_embed = self.model.markov_embed(prev)
-            if self.enable_adaptive_verification:
+            if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
             logits_i = self.model.apply_markov_bias_gathered(
                 markov_embed,
@@ -228,20 +252,33 @@ class DSparkSpeculator(DFlashSpeculator):
                 base_values[:, i],
                 draft_indices[:, i],
             )
+            # Top-2 over the truncated row: both entries are real candidates as
+            # long as _draft_topk >= 2, which load_draft_model enforces here.
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
             )
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
-        if self.enable_adaptive_verification:
-            confidence = self.model.compute_confidence(
-                sample_hidden,
-                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
-            )
-            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
-                num_reqs, n_spec
-            )
+        self._score_confidence_head(num_reqs, sample_hidden, confidence_markov_embeds)
+
+    def _score_confidence_head(
+        self,
+        num_reqs: int,
+        sample_hidden: torch.Tensor,
+        markov_embeds: list[torch.Tensor],
+    ) -> None:
+        """Per-position acceptance from the checkpoint's trained head, written in
+        batch order like the estimator's alternative."""
+        if not self.use_confidence_head:
+            return
+        confidence = self.model.compute_confidence(
+            sample_hidden,
+            torch.stack(markov_embeds, dim=1).flatten(0, 1),
+        )
+        self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+            num_reqs, self.num_speculative_steps
+        )
 
     def _generate_draft(
         self,
