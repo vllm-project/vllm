@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import msgspec
 import numpy as np
@@ -95,6 +95,27 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     block_strides = {cache.stride(0) * cache.element_size() for cache in caches}
     storage_ptrs = {cache.untyped_storage().data_ptr() for cache in caches}
     return len(block_strides) == len(storage_ptrs) == 1
+
+
+class ShardDescLayout(NamedTuple):
+    """Descriptor layout of one pipeline-parallel producer shard's dlist.
+
+    A stage registers only the layers it owns, so its descriptors run over that
+    shard's regions rather than over all local regions. With HMA a region is
+    pooled across KV groups: it holds one layer per group, and the group a
+    member belongs to selects which block ids address it. Descriptors are laid
+    out as ``[fa (all regions) | ssm (all regions x sub-regions)]``, mirroring
+    the whole-engine layout built by ``_compute_desc_ids``.
+
+    Attributes:
+        region_member_groups: KV group index of every layer pooled into each
+            region, in region order.
+        ssm_regions_per_layer: NIXL regions per SSM layer (conv sub-projections
+            plus the SSM temporal state); 0 when the shard has no Mamba layers.
+    """
+
+    region_member_groups: tuple[tuple[int, ...], ...]
+    ssm_regions_per_layer: int
 
 
 class NixlBaseConnectorWorker:
@@ -298,22 +319,78 @@ class NixlBaseConnectorWorker:
             occurrence = occurrences_by_name[layer_name]
             occurrences_by_name[layer_name] += 1
             matches = positions_by_name.get(layer_name, [])
-            if occurrence >= len(matches):
-                raise RuntimeError(
-                    "NIXL handshake failed: producer registered layer "
-                    f"{layer_name!r} occurrence {occurrence} has no matching "
-                    f"local region. Local registered layers: {local_names}"
-                )
-            local_indices.append(matches[occurrence])
+            if occurrence < len(matches):
+                local_indices.append(matches[occurrence])
+                continue
+            # HMA pools layers of different groups into one region, so a
+            # producer's representative may be a non-representative member here.
+            pooled_idx = self._member_to_local_region.get(layer_name)
+            if occurrence == 0 and pooled_idx is not None:
+                local_indices.append(pooled_idx)
+                continue
+            raise RuntimeError(
+                "NIXL handshake failed: producer registered layer "
+                f"{layer_name!r} occurrence {occurrence} has no matching "
+                f"local region. Local registered layers: {local_names}"
+            )
         return local_indices
 
-    def _region_group_ids_for_layer_names(
-        self, registered_layer_names: list[str]
-    ) -> tuple[int, ...]:
-        """KV group id backing each region of a producer shard."""
-        return tuple(
-            self._layer_name_to_kv_group_index[name] for name in registered_layer_names
+    def _shard_desc_layout(self, nixl_agent_meta: NixlAgentMetadata) -> ShardDescLayout:
+        """Descriptor layout of a pipeline-parallel producer shard's dlist.
+
+        Args:
+            nixl_agent_meta: Handshake metadata of the producer shard.
+
+        Returns:
+            Layout describing the shard's descriptor list.
+
+        Raises:
+            RuntimeError: A member layer is unknown locally.
+        """
+        region_member_groups: list[tuple[int, ...]] = []
+        for members in self._remote_region_members(nixl_agent_meta):
+            groups: list[int] = []
+            for member in members:
+                if member not in self._layer_name_to_kv_group_index:
+                    raise RuntimeError(
+                        "NIXL handshake failed: producer region member "
+                        f"{member!r} has no matching local KV cache group."
+                    )
+                groups.append(self._layer_name_to_kv_group_index[member])
+            region_member_groups.append(tuple(groups))
+
+        ssm_regions_per_layer = 0
+        if self._has_mamba:
+            assert self._conv_decomp is not None
+            ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
+        return ShardDescLayout(
+            region_member_groups=tuple(region_member_groups),
+            ssm_regions_per_layer=ssm_regions_per_layer,
         )
+
+    @staticmethod
+    def _remote_region_members(
+        nixl_agent_meta: NixlAgentMetadata,
+    ) -> list[list[str]]:
+        """Layers pooled into each of a producer shard's regions.
+
+        Falls back to the representative layer per region for a peer that does
+        not advertise membership (one layer per region, i.e. no pooling).
+
+        Raises:
+            RuntimeError: Advertised membership does not cover every region.
+        """
+        names = nixl_agent_meta.registered_layer_names
+        members = nixl_agent_meta.region_members
+        if not members:
+            return [[name] for name in names]
+        if len(members) != len(names):
+            raise RuntimeError(
+                "NIXL handshake failed: producer advertised "
+                f"{len(members)} region_members entries for "
+                f"{len(names)} registered regions."
+            )
+        return [list(region) for region in members]
 
     def _get_block_descs_ids_for_shard(
         self,
@@ -321,28 +398,60 @@ class NixlBaseConnectorWorker:
         remote_pp_rank: int,
         num_blocks: int,
         block_ids: BlockIds,
+        physical_blocks_per_logical: int = 1,
     ) -> np.ndarray:
         """Descriptor IDs relative to one producer stage's prepared dlist.
 
         A PP producer stage registers only its own layer slice, so descriptor
         ids run over that shard's regions rather than over all local regions.
+        With HMA a region is pooled across KV groups and holds one layer per
+        group, so every member's group contributes its own block ids to the
+        same region. Descriptors are laid out as
+        ``[fa (all regions) | ssm (all regions x sub-regions)]``, matching the
+        shard's dlist and the whole-engine layout of ``_compute_desc_ids``.
 
         Args:
             engine_id: Remote producer engine id.
             remote_pp_rank: Producer pipeline-parallel rank of the shard.
             num_blocks: Number of blocks per region in the shard's dlist.
             block_ids: Physical block ids per local KV group.
+            physical_blocks_per_logical: Physical blocks per logical block on
+                the side being described, the stride divisor for SSM
+                descriptors. P and D may differ.
 
         Returns:
             Flat descriptor ids into the shard's prepared dlist.
         """
-        region_group_ids = self._shard_region_group_ids[(engine_id, remote_pp_rank)]
-        desc_ids: list[np.ndarray] = []
-        for region_id, group_id in enumerate(region_group_ids):
-            group_arr = np.asarray(block_ids[group_id], dtype=np.int64)
-            if group_arr.size == 0:
-                continue
-            desc_ids.append(region_id * num_blocks + group_arr)
+        layout = self._shard_desc_layouts[(engine_id, remote_pp_rank)]
+        region_member_groups = layout.region_member_groups
+        num_fa_descs = len(region_member_groups) * num_blocks
+        logical_blocks = num_blocks // physical_blocks_per_logical
+        ssm_per_layer = layout.ssm_regions_per_layer
+
+        fa_descs: list[np.ndarray] = []
+        ssm_descs: list[np.ndarray] = []
+        for region_id, member_groups in enumerate(region_member_groups):
+            for group_id in member_groups:
+                group_arr = np.asarray(block_ids[group_id], dtype=np.int64)
+                if group_arr.size == 0:
+                    continue
+                spec_type = self._group_spec_types[group_id]
+                if _is_attention_spec(spec_type):
+                    fa_descs.append(region_id * num_blocks + group_arr)
+                elif _is_ssm_spec(spec_type):
+                    # SSM state of a region is described by conv sub-projections
+                    # plus the temporal state, each with logical-block stride.
+                    for sub_region in range(ssm_per_layer):
+                        offset = (region_id * ssm_per_layer + sub_region) * (
+                            logical_blocks
+                        )
+                        ssm_descs.append(num_fa_descs + offset + group_arr)
+                else:
+                    raise ValueError(
+                        f"Unknown spec type {spec_type} for KV group {group_id}"
+                    )
+
+        desc_ids = fa_descs + ssm_descs
         if not desc_ids:
             return np.empty(0, dtype=np.int64)
         return np.concatenate(desc_ids)
@@ -556,6 +665,9 @@ class NixlBaseConnectorWorker:
         # Layer name backing each local region, 1:1 with the list above. Lets a
         # PP producer's layer slice be mapped onto local regions by name.
         self.local_seen_layer_names: list[str] = []
+        # Local region index of every layer, including the non-representative
+        # members that HMA pools into a shared region.
+        self._member_to_local_region: dict[str, int] = {}
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -604,9 +716,9 @@ class NixlBaseConnectorWorker:
         self.src_xfer_handles_by_shard_tp_ratio: dict[
             tuple[EngineId, int, int], list[int]
         ] = {}
-        # KV group id backing each region of a PP producer shard, keyed by
+        # Descriptor layout of each PP producer shard's dlist, keyed by
         # (engine_id, remote_pp_rank).
-        self._shard_region_group_ids: dict[tuple[EngineId, int], tuple[int, ...]] = {}
+        self._shard_desc_layouts: dict[tuple[EngineId, int], ShardDescLayout] = {}
         # Map of engine_id -> {(pp_rank, tp_rank): nixl_prepped_dlist_handle}.
         self.dst_xfer_side_handles = defaultdict[EngineId, dict[tuple[int, int], int]](
             dict
@@ -1152,14 +1264,6 @@ class NixlBaseConnectorWorker:
             self.backend_name,
             transfer_mode=self._TRANSFER_MODE,
         )
-        if self.pp_size > 1 and self._has_mamba:
-            # Per-shard descriptor layouts for hybrid (Mamba/SSM) producers
-            # need mamba region tracking the consumer descriptor builder
-            # does not implement yet.
-            raise RuntimeError(
-                "Hybrid (Mamba/SSM) models are not yet supported with "
-                "pipeline_parallel_size > 1 over NIXL PD disaggregation."
-            )
         pp_rank = get_pp_group().rank_in_group
 
         if self.use_host_buffer:
@@ -1190,6 +1294,10 @@ class NixlBaseConnectorWorker:
         # Layer backing each region, so a consumer can map a PP producer's
         # layer slice onto its own regions by name.
         seen_layer_names: list[str] = []
+        # Every layer pooled into each region. With HMA a region is shared
+        # across KV groups, so the region holds more than one layer's cache and
+        # a consumer must transfer all of them, not just the representative.
+        region_members: list[list[str]] = []
 
         packed_storage = _share_storage_and_block_stride(list(xfer_buffers.values()))
 
@@ -1301,15 +1409,21 @@ class NixlBaseConnectorWorker:
 
             for base_addr, block_len, block_stride in region_specs:
                 if base_addr in seen_base_addresses:
+                    idx = seen_base_addresses.index(base_addr)
                     if is_mla_region:
                         # Dual-purpose HMA tensor: an MLA layer shares a region
                         # that a non-MLA layer registered first. MLA is not
                         # head-sharded, so the region must be flagged MLA.
-                        idx = seen_base_addresses.index(base_addr)
                         self._region_is_mla[idx] = True
+                    # This layer's cache is pooled into an already-registered
+                    # region; a consumer still has to transfer it.
+                    members = region_members[idx]
+                    if layer_name not in members:
+                        members.append(layer_name)
                     continue
                 seen_base_addresses.append(base_addr)
                 seen_layer_names.append(layer_name)
+                region_members.append([layer_name])
                 self.block_len_per_layer.append(block_len)
                 self.block_stride_per_layer.append(block_stride)
                 self._region_is_mla.append(is_mla_region)
@@ -1349,6 +1463,11 @@ class NixlBaseConnectorWorker:
         )
         self.local_kv_caches_base_addr = seen_base_addresses
         self.local_seen_layer_names = seen_layer_names
+        self._member_to_local_region = {
+            member: region_idx
+            for region_idx, members in enumerate(region_members)
+            for member in members
+        }
         self.num_regions = len(seen_base_addresses)
 
         if self.pp_size > 1:
@@ -1356,9 +1475,12 @@ class NixlBaseConnectorWorker:
                 self.vllm_config.parallel_config
             )
             num_local_layers = end_layer - start_layer
-            assert num_local_layers > 0 and self.num_regions % num_local_layers == 0
-            regions_per_layer = self.num_regions // num_local_layers
-            self._remote_region_offset = regions_per_layer * start_layer
+            if not self._is_hma_required:
+                # A uniform region count per layer only holds without pooling;
+                # HMA resolves a producer's regions by layer membership instead.
+                assert num_local_layers > 0 and self.num_regions % num_local_layers == 0
+                regions_per_layer = self.num_regions // num_local_layers
+                self._remote_region_offset = regions_per_layer * start_layer
             logger.info(
                 "Registering KV_Caches. pp_rank=%d/%d, layers=[%d, %d), num_regions=%d",
                 pp_rank,
@@ -1422,6 +1544,7 @@ class NixlBaseConnectorWorker:
             pp_rank=pp_rank,
             pp_size=self.pp_size,
             registered_layer_names=seen_layer_names,
+            region_members=region_members,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1431,7 +1554,11 @@ class NixlBaseConnectorWorker:
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
 
-    def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
+    def _build_mamba_local(
+        self,
+        base_addresses: list[int],
+        local_region_indices: list[int] | None = None,
+    ) -> np.ndarray:
         """Build desc regions (conv sub-projections + ssm) per layer for
         local mamba blocks with DS conv layout, as an Nx3 uint64 array.
 
@@ -1463,9 +1590,21 @@ class NixlBaseConnectorWorker:
         descriptors always use the local page geometry regardless of any
         attention block-size ratio; their desc ids are likewise never
         ratio-expanded (see _compute_desc_ids).
+
+        Args:
+            base_addresses: Base address of each region to describe.
+            local_region_indices: Local region index of each entry in
+                ``base_addresses``, used to look up per-region block lengths
+                when describing a producer shard's layer slice. Defaults to
+                the identity mapping over all local regions.
+
+        Returns:
+            Nx3 uint64 array of (address, length, device_id) descriptors.
         """
         assert base_addresses, "Local KV cache base addresses must not be empty."
         assert self._conv_decomp is not None
+        if local_region_indices is None:
+            local_region_indices = list(range(len(base_addresses)))
         conv_offsets = self._conv_decomp.local_conv_offsets
         conv_size, ssm_size = self._mamba_ssm_size
         num_blocks = self._logical_num_blocks
@@ -1474,7 +1613,7 @@ class NixlBaseConnectorWorker:
         block_arange = np.arange(num_blocks, dtype=np.uint64)
 
         parts: list[np.ndarray] = []
-        for i, base_addr in enumerate(base_addresses):
+        for i, base_addr in zip(local_region_indices, base_addresses):
             # Jump one page_size, but ssm page_size may be bigger when kernel
             # locks block size to a specific value (physical_per_logical scale).
             page_stride = self.block_len_per_layer[i] * physical_per_logical
@@ -1682,7 +1821,11 @@ class NixlBaseConnectorWorker:
             self.device_id,
         )
         if self._has_mamba:
-            assert self.num_descs * block_size_ratio == len(blocks_data)
+            # num_descs counts every local region; a PP producer shard's handler
+            # describes only the regions backing that stage's layers.
+            assert registered_layer_names is not None or (
+                self.num_descs * block_size_ratio == len(blocks_data)
+            )
             # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the 3-descs split
             # is unnecessary — a single conv desc per block suffices.  Consider
             # adding a fast path that falls back to the standard 2-region
@@ -1690,7 +1833,7 @@ class NixlBaseConnectorWorker:
             # remote has been seen.  Currently we always register 4 regions
             # because local descs are created before knowing the remote TP.
             logger.debug("Registering local Mamba descriptors (4 regions/layer)")
-            mamba = self._build_mamba_local(local_base_addresses)
+            mamba = self._build_mamba_local(local_base_addresses, local_region_indices)
             blocks_data = np.concatenate([blocks_data, mamba])
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
@@ -1784,6 +1927,17 @@ class NixlBaseConnectorWorker:
             # This worker holds a PP layer-slice; the PP=1 remote registered
             # the full model. Slice its regions to our layer window so the
             # logic below sees congruent local/remote lists.
+            if self._supports_pp_hma and self._is_hma_required:
+                # Residual gate: the window offset assumes a uniform region
+                # count per layer, which pooling breaks. A PP consumer needs a
+                # PP producer to resolve pooled regions by layer membership.
+                # Modes without _supports_pp_hma reject HMA at construction, so
+                # they never reach this.
+                raise RuntimeError(
+                    "NIXL does not support a pipeline-parallel consumer with "
+                    "hybrid KV cache layouts (HMA) reading from a "
+                    "pipeline_parallel_size == 1 producer yet."
+                )
             start = self._remote_region_offset
             end = start + num_local_regions
             assert len(nixl_agent_meta.kv_caches_base_addr) >= end
@@ -2012,6 +2166,14 @@ class NixlBaseConnectorWorker:
         )
 
         tp_ratio = transfer_topo.tp_ratio(remote_tp_size)
+        if self._is_hma_required and tp_ratio != 1:
+            # Residual gate: pooled regions plus a per-rank read offset need a
+            # hetero-TP x HMA x PP descriptor test we do not have yet.
+            raise RuntimeError(
+                "NIXL does not support heterogeneous TP with hybrid KV cache "
+                "layouts (HMA) and pipeline_parallel_size > 1 yet. Got "
+                f"tp_ratio={tp_ratio}."
+            )
         logger.debug(
             "Registering remote agent (%s, pp rank %s, tp rank %s) memory "
             "regions with tp_ratio %s",
@@ -2032,13 +2194,9 @@ class NixlBaseConnectorWorker:
             )
             self.src_xfer_handles_by_remote[local_handle_key] = handle
             self.src_blocks_data_by_remote[local_handle_key] = local_blocks_data
-            self._shard_region_group_ids[plan_key] = (
-                self._region_group_ids_for_layer_names(
-                    nixl_agent_meta.registered_layer_names
-                )
-            )
+        self._shard_desc_layouts[plan_key] = self._shard_desc_layout(nixl_agent_meta)
         src_blocks_data = self.src_blocks_data_by_remote[local_handle_key]
-        region_group_ids = self._shard_region_group_ids[plan_key]
+        num_shard_regions = len(nixl_agent_meta.registered_layer_names)
 
         ### (Optional) Register local agent memory regions. MLA is not split.
         split_handle_key = (engine_id, remote_pp_rank, tp_ratio)
@@ -2048,7 +2206,7 @@ class NixlBaseConnectorWorker:
             and split_handle_key not in self.src_xfer_handles_by_shard_tp_ratio
         ):
             self.src_xfer_handles_by_shard_tp_ratio[split_handle_key] = []
-            num_shard_descs = len(region_group_ids) * self.num_blocks * block_size_ratio
+            num_shard_descs = num_shard_regions * self.num_blocks * block_size_ratio
             for handle_data in self._build_local_splits_from_plan(
                 plan,
                 src_blocks_data,
@@ -2067,6 +2225,9 @@ class NixlBaseConnectorWorker:
             block_size_ratio,
             local_region_indices,
         )
+        if self._has_mamba:
+            mamba = self._build_mamba_remote(nixl_agent_meta, tp_ratio, transfer_info)
+            blocks_data = np.concatenate([blocks_data, mamba])
         logger.debug(
             "Created %s blocks for dst engine %s with remote pp rank %s, "
             "remote tp rank %s and local rank %s",
@@ -3065,8 +3226,8 @@ class NixlBaseConnectorWorker:
         ]:
             for handle in self.src_xfer_handles_by_shard_tp_ratio.pop(key):
                 self.nixl_wrapper.release_dlist_handle(handle)
-        for key in [k for k in self._shard_region_group_ids if k[0] == engine_id]:
-            del self._shard_region_group_ids[key]
+        for key in [k for k in self._shard_desc_layouts if k[0] == engine_id]:
+            del self._shard_desc_layouts[key]
 
         self.kv_caches_base_addr.pop(engine_id, None)
         self.dst_num_blocks.pop(engine_id, None)
@@ -3119,7 +3280,7 @@ class NixlBaseConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_dlist_handle(handle)
         self.src_xfer_handles_by_shard_tp_ratio.clear()
-        self._shard_region_group_ids.clear()
+        self._shard_desc_layouts.clear()
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()

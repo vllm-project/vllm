@@ -15,8 +15,13 @@ import zmq
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+    ShardDescLayout,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
+    NIXL_CONNECTOR_VERSION,
+    NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
     RemoteMeta,
@@ -27,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
     NixlPullConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 from .utils import make_kv_cache_config
 
@@ -213,17 +219,85 @@ def test_full_prefix_hit_under_pp_drops_pending_metadata():
     assert "decode-req" not in worker._recving_metadata
 
 
+def _make_desc_shard_worker(
+    region_member_groups: tuple[tuple[int, ...], ...],
+    group_spec_types: tuple[type, ...],
+    ssm_regions_per_layer: int = 0,
+) -> NixlPullConnectorWorker:
+    """Worker with only the state `_get_block_descs_ids_for_shard` reaches."""
+    worker = object.__new__(NixlPullConnectorWorker)
+    worker._group_spec_types = group_spec_types
+    worker._shard_desc_layouts = {
+        (REMOTE_ENGINE_ID, 1): ShardDescLayout(
+            region_member_groups=region_member_groups,
+            ssm_regions_per_layer=ssm_regions_per_layer,
+        )
+    }
+    return worker
+
+
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_for_shard_is_relative_to_the_shard():
     """A stage registers only its own layers, so descriptor ids run over that
     shard's regions starting at 0 rather than over all local regions."""
-    worker = object.__new__(NixlPullConnectorWorker)
-    worker._shard_region_group_ids = {(REMOTE_ENGINE_ID, 1): (0, 0)}
+    worker = _make_desc_shard_worker(((0,), (0,)), (FullAttentionSpec,))
 
     desc_ids = worker._get_block_descs_ids_for_shard(REMOTE_ENGINE_ID, 1, 4, ([0, 1],))
 
     # 2 regions x blocks [0, 1] over num_blocks=4: region 0 -> 0,1; region 1 -> 4,5.
     assert desc_ids.tolist() == [0, 1, 4, 5]
+
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_for_shard_covers_every_pooled_member():
+    """HMA pools a layer per KV group into one region, and each group indexes
+    that region with its own block ids. Emitting only the representative
+    group's ids leaves the other members' state never transferred."""
+    worker = _make_desc_shard_worker(
+        ((0, 1), (0, 2)),
+        (FullAttentionSpec, FullAttentionSpec, FullAttentionSpec),
+    )
+
+    desc_ids = worker._get_block_descs_ids_for_shard(
+        REMOTE_ENGINE_ID, 1, 10, ([1, 2], [7], [4, 5])
+    )
+
+    # region 0 holds group 0 blocks [1, 2] and group 1 block [7];
+    # region 1 (offset 10) holds group 0 blocks [1, 2] and group 2 blocks [4, 5].
+    assert desc_ids.tolist() == [1, 2, 7, 11, 12, 14, 15]
+
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_for_shard_emits_the_mamba_section():
+    """A hybrid shard's dlist is [fa | ssm], with the SSM half holding one
+    sub-region per conv projection plus the temporal state. Without the SSM
+    section a Mamba member's state is never read and decode goes stale."""
+    worker = _make_desc_shard_worker(
+        ((0, 1), (0, 1)),
+        (FullAttentionSpec, MambaSpec),
+        ssm_regions_per_layer=4,
+    )
+
+    desc_ids = worker._get_block_descs_ids_for_shard(
+        REMOTE_ENGINE_ID, 1, 10, ([1, 2], [3]), 2
+    )
+
+    # FA: 2 regions x num_blocks=10 -> ids 1,2 and 11,12 (num_fa_descs=20).
+    # SSM: logical_blocks = 10 // 2 = 5, 4 sub-regions per region, so region 0
+    # occupies 20,25,30,35 and region 1 40,45,50,55, each offset by block 3.
+    assert desc_ids.tolist() == [1, 2, 11, 12, 23, 28, 33, 38, 43, 48, 53, 58]
+
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_for_shard_skips_empty_groups():
+    """A group with no blocks for this request contributes no descriptors."""
+    worker = _make_desc_shard_worker(((0, 1),), (FullAttentionSpec, FullAttentionSpec))
+
+    desc_ids = worker._get_block_descs_ids_for_shard(
+        REMOTE_ENGINE_ID, 1, 10, ([1, 2], [])
+    )
+
+    assert desc_ids.tolist() == [1, 2]
 
 
 @pytest.mark.cpu_test
@@ -360,3 +434,136 @@ def test_handshake_listener_serves_a_requested_pp_stage():
     assert delimiter == b""
     decoded = msgspec.msgpack.decode(encoded_payload, type=NixlHandshakePayload)
     assert decoded == payloads[(1, 0)]
+
+
+def _agent_meta(**overrides: Any) -> NixlAgentMetadata:
+    """Handshake metadata of a single-region producer shard."""
+    kwargs: dict[str, Any] = dict(
+        engine_id=REMOTE_ENGINE_ID,
+        agent_metadata=b"",
+        kv_caches_base_addr=[0x1000],
+        device_id=0,
+        num_blocks=4,
+        block_lens=[128],
+        block_strides=[128],
+        kv_cache_layout="LBHNC",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name="FLASH_ATTN",
+        physical_blocks_per_logical_kv_block=1,
+        registered_layer_names=["layer0"],
+    )
+    kwargs.update(overrides)
+    return NixlAgentMetadata(**kwargs)
+
+
+@pytest.mark.cpu_test
+def test_nixl_agent_metadata_region_members_round_trip():
+    """A pooled region's non-representative members must survive the wire, or
+    the consumer cannot know they need transferring."""
+    meta = _agent_meta(
+        registered_layer_names=["layer0", "layer2"],
+        region_members=[["layer0", "mamba0"], ["layer2", "mamba1"]],
+    )
+
+    decoded = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(meta), type=NixlAgentMetadata
+    )
+
+    assert NIXL_CONNECTOR_VERSION == 10
+    assert decoded.region_members == [["layer0", "mamba0"], ["layer2", "mamba1"]]
+
+
+@pytest.mark.cpu_test
+def test_remote_region_members_defaults_to_one_layer_per_region():
+    """A peer that advertises no membership has no pooling, so each region
+    holds exactly its representative layer."""
+    meta = _agent_meta(registered_layer_names=["layer0", "layer2"])
+
+    members = NixlPullConnectorWorker._remote_region_members(meta)
+
+    assert members == [["layer0"], ["layer2"]]
+
+
+@pytest.mark.cpu_test
+def test_remote_region_members_rejects_a_partial_advertisement():
+    """Membership that does not cover every region would silently drop the
+    uncovered regions' non-representative members."""
+    meta = _agent_meta(
+        registered_layer_names=["layer0", "layer2"],
+        region_members=[["layer0", "mamba0"]],
+    )
+
+    with pytest.raises(RuntimeError, match="region_members"):
+        NixlPullConnectorWorker._remote_region_members(meta)
+
+
+@pytest.mark.cpu_test
+def test_shard_desc_layout_maps_members_to_their_kv_groups():
+    """The block ids addressing a pooled region are selected per member group,
+    so the layout must carry each member's group, not just the region's."""
+    worker = object.__new__(NixlPullConnectorWorker)
+    worker._layer_name_to_kv_group_index = {"layer0": 0, "mamba0": 1}
+    worker._has_mamba = False
+
+    layout = worker._shard_desc_layout(
+        _agent_meta(region_members=[["layer0", "mamba0"]])
+    )
+
+    assert layout.region_member_groups == ((0, 1),)
+    assert layout.ssm_regions_per_layer == 0
+
+
+@pytest.mark.cpu_test
+def test_shard_desc_layout_rejects_an_unknown_member():
+    """A member with no local KV group cannot be routed; failing the handshake
+    beats emitting descriptors that address the wrong region."""
+    worker = object.__new__(NixlPullConnectorWorker)
+    worker._layer_name_to_kv_group_index = {"layer0": 0}
+    worker._has_mamba = False
+
+    with pytest.raises(RuntimeError, match="no matching local KV cache group"):
+        worker._shard_desc_layout(_agent_meta(region_members=[["layer0", "ghost"]]))
+
+
+@pytest.mark.cpu_test
+def test_local_region_indices_resolve_a_pooled_member():
+    """A producer stage may advertise a layer that is a non-representative
+    member locally; it must still resolve to the region physically holding it."""
+    worker = object.__new__(NixlPullConnectorWorker)
+    worker.local_seen_layer_names = ["layer0", "layer2"]
+    worker._member_to_local_region = {
+        "layer0": 0,
+        "mamba0": 0,
+        "layer2": 1,
+        "mamba1": 1,
+    }
+
+    assert worker._local_region_indices_for_layer_names(["mamba1", "layer0"]) == [1, 0]
+
+
+@pytest.mark.cpu_test
+def test_local_region_indices_still_reject_an_unknown_layer():
+    worker = object.__new__(NixlPullConnectorWorker)
+    worker.local_seen_layer_names = ["layer0"]
+    worker._member_to_local_region = {"layer0": 0}
+
+    with pytest.raises(RuntimeError, match="no matching local region"):
+        worker._local_region_indices_for_layer_names(["ghost"])
+
+
+@pytest.mark.cpu_test
+def test_pull_declares_pp_hma_support_and_push_does_not():
+    """The constructor refuses pipeline parallelism with a hybrid KV cache
+    unless the transfer mode declares support. Pull resolves pooled regions by
+    layer membership; push slices regions per layer, which pooling breaks."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        NixlBaseConnectorWorker,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
+        NixlPushConnectorWorker,
+    )
+
+    assert NixlPullConnectorWorker._supports_pp_hma is True
+    assert NixlBaseConnectorWorker._supports_pp_hma is False
+    assert NixlPushConnectorWorker._supports_pp_hma is False

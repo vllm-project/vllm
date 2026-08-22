@@ -34,6 +34,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     # Reads are issued per producer stage, so a PP-sharded decode is supported.
     _supports_consumer_pp = True
 
+    # A shard's descriptors are emitted per (region x member group), so pooled
+    # (HMA) regions of a PP producer are fully covered.
+    _supports_pp_hma = True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -378,12 +382,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_pp_rank,
                 self.dst_num_blocks[dst_engine_id],
                 remote_block_ids,
+                remote_info.remote_physical_blocks_per_logical,
             )
             local_block_descs_ids = self._get_block_descs_ids_for_shard(
                 dst_engine_id,
                 remote_pp_rank,
                 self.num_blocks * block_size_ratio,
                 local_block_ids,
+                self._physical_blocks_per_logical_kv_block,
             )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)

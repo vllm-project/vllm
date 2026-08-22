@@ -45,7 +45,8 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   7: Include NIXL transfer mode (push vs pull) in the compatibility hash
 #   8: Add dcp_size and pcp_size to NixlAgentMetadata
 #   9: Add block_strides
-#   10: Add pipeline-parallel producer metadata and per-request pp_size
+#   10: Add pipeline-parallel producer metadata, per-request pp_size and the
+#       per-region layer membership of pooled (HMA) regions
 #
 NIXL_CONNECTOR_VERSION: int = 10
 
@@ -73,6 +74,11 @@ class NixlAgentMetadata:
     # Layer names backing each registered region, in registration order. Lets
     # a consumer map a PP producer's layer slice onto its own regions.
     registered_layer_names: list[str] = field(default_factory=list)
+    # Every layer whose cache lives in each registered region, in registration
+    # order. With HMA a region is pooled across KV groups, so only the first
+    # layer of the pool appears in registered_layer_names while all of them
+    # must be transferred. Empty means one layer per region.
+    region_members: list[list[str]] = field(default_factory=list)
 
 
 @dataclass

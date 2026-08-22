@@ -659,7 +659,7 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
     w.src_xfer_handles_by_remote = {}
     w.src_blocks_data_by_remote = {}
     w.src_xfer_handles_by_shard_tp_ratio = {}
-    w._shard_region_group_ids = {}
+    w._shard_desc_layouts = {}
     w._logical_to_kernel_block_ids = lambda blocks, ratio: blocks
     w.writes = []
     w._xfer_blocks_for_req = lambda req_id, meta: w.writes.append(req_id)
