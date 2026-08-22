@@ -553,6 +553,7 @@ class InternVLChatModel(
     SupportsEncoderCudaGraph,
 ):
     supports_encoder_tp_data = True
+    supports_tower_connector_lora = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix=dict.fromkeys(
