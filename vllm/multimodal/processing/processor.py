@@ -8,7 +8,6 @@ from enum import Enum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
-    ClassVar,
     Generic,
     NamedTuple,
     Protocol,
@@ -1177,12 +1176,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with `transformers.ProcessorMixin`.
     """
 
-    renderer_applies_updates: ClassVar[bool] = False
-    """
-    Only set to True if the tokenizer or chat template in the Renderer
-    (which are run before MM processing) inserts placeholder tokens.
-    """
-
     def __init__(
         self,
         info: _I,
@@ -1785,16 +1778,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
         self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
-        if self.renderer_applies_updates:
-            mm_placeholders = self._find_mm_placeholders(
-                prompt_ids,
-                mm_prompt_updates,
-            )
-        else:
-            prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                prompt_ids,
-                mm_prompt_updates,
-            )
+        prompt_ids, mm_placeholders = self._apply_prompt_updates(
+            prompt_ids,
+            mm_prompt_updates,
+        )
 
         self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
