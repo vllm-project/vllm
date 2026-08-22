@@ -3026,6 +3026,46 @@ def test_unify_kv_cache_spec_page_size_mamba():
     assert kv_cache_utils.unify_kv_cache_spec_page_size(specs) == specs
 
 
+def test_unify_kv_cache_page_size_scales_block_before_padding():
+    """A padded attention layer grows its block size by the whole ratio first.
+
+    Padding alone leaves the layer paying a full max-size page for a block
+    that still holds its original token count, so one request reserves far
+    more blocks than the page it claims can justify. Scaling first keeps the
+    block count proportional and pads only the remainder.
+    """
+    # 1024 bytes per token per layer, so the pages are 16 KiB and 40 KiB.
+    # 40 KiB is not a multiple of 16 KiB, which is what forces the pad branch.
+    small = new_kv_cache_spec(block_size=16)
+    large = new_kv_cache_spec(block_size=40)
+    assert small.page_size_bytes == 16384
+    assert large.page_size_bytes == 40960
+    assert large.page_size_bytes % small.page_size_bytes != 0
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"small_attn_layer": small, "large_attn_layer": large}
+    )
+
+    # The whole part of 40960 // 16384 is 2, so the block doubles and the page
+    # the layer actually fills grows to 32 KiB before the pad up to 40 KiB.
+    assert unified["small_attn_layer"].block_size == 32
+    assert unified["small_attn_layer"].page_size_padded == 40960
+    assert unified["small_attn_layer"].page_size_bytes == 40960
+    # The layer that already sets the maximum is untouched.
+    assert unified["large_attn_layer"] == large
+
+    # A ratio below 2 has no whole part to scale by, so the block size stays
+    # put and the page is padded exactly as before.
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "small_attn_layer": new_kv_cache_spec(block_size=24),
+            "large_attn_layer": new_kv_cache_spec(block_size=32),
+        }
+    )
+    assert unified["small_attn_layer"].block_size == 24
+    assert unified["small_attn_layer"].page_size_bytes == 32768
+
+
 def test_hma_not_disabled_when_kv_events_enabled():
     """
     Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
