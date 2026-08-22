@@ -78,6 +78,28 @@ ThinkingTokenBudget = Annotated[
 
 
 class SamplingType(IntEnum):
+    """Enum of sampling strategies used to select the next token.
+
+    Each member corresponds to a distinct decoding algorithm:
+
+    - ``GREEDY`` – always pick the single highest-probability token
+      (equivalent to ``temperature=0``).
+    - ``RANDOM`` – sample from the probability distribution, optionally
+      shaped by ``temperature``, ``top_p``, ``top_k``, etc.
+    - ``RANDOM_SEED`` – same as ``RANDOM`` but with a fixed random seed,
+      enabling reproducible outputs.
+
+    Example::
+
+        >>> from vllm.sampling_params import SamplingParams, SamplingType
+        >>> params = SamplingParams(temperature=0.0)
+        >>> params.sampling_type
+        <SamplingType.GREEDY: 0>
+        >>> params = SamplingParams(temperature=0.8)
+        >>> params.sampling_type
+        <SamplingType.RANDOM: 1>
+    """
+
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
