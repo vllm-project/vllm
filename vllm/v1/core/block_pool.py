@@ -713,6 +713,7 @@ class BlockPool:
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
+            block.is_hit = True
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
@@ -726,6 +727,7 @@ class BlockPool:
         """
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_to_evict_last = []
+        blocks_to_evict_second = []
         blocks_to_evict_first = []
         for block in ordered_blocks:
             block.ref_cnt -= 1
@@ -733,12 +735,16 @@ class BlockPool:
                 if block.block_hash is None or not self.enable_caching:
                     # LIFO reuse of non-cached blocks for better GPU locality.
                     blocks_to_evict_first.append(block)
+                elif not block.is_hit:
+                    blocks_to_evict_second.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
                     blocks_to_evict_last.append(block)
 
         # Blocks to reuse first are prepended to the front of the free queue.
         self.free_block_queue.prepend_n(blocks_to_evict_first)
+        # Blocks to reuse second are appended to the end of the free queue first.
+        self.free_block_queue.append_n(blocks_to_evict_second)
         # Blocks to reuse last are appended to the end of the free queue.
         self.free_block_queue.append_n(blocks_to_evict_last)
 
