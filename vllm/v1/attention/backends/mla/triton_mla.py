@@ -52,6 +52,10 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     # forward_mqa flattens each non-causal block to one decode row per token.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    # The common MLA DCP path gathers query heads, runs each local KV shard,
+    # then combines shard outputs with LSE. The flattened DSpark rows use the
+    # same path and therefore support non-causal multi-token decode with DCP.
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)

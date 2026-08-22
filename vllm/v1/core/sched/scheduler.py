@@ -426,6 +426,10 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit
             else 0
         )
+        eagle_replay_boundary = 0
+        if self.use_eagle and tail_boundary:
+            eagle_hit_boundary = tail_boundary - self.hash_block_size
+            eagle_replay_boundary = eagle_hit_boundary // block_size * block_size
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
             # rather than running past it.
@@ -437,6 +441,10 @@ class Scheduler(SchedulerInterface):
             tail_boundary
             if last_cache_position < tail_boundary < request.num_prompt_tokens
             else 0,
+            # Fine-grained EAGLE drops one hash unit from the dense-group hit.
+            # Materialize the Mamba state at the block boundary from which the
+            # reconciled hybrid hit can replay.
+            eagle_replay_boundary,
             # Marconi shared-prefix junction, block-floored (a sub-block
             # junction's state is not separately cacheable): cache its state
             # so sibling requests sharing the prefix can reuse it.

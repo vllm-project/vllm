@@ -37,6 +37,7 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
 from vllm.v1.attention.backends.mla import tokenspeed_mla as tokenspeed_mla_module
+from vllm.v1.attention.backends.mla import triton_mla as triton_mla_module
 from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackendEnum,
     get_mla_prefill_backend,
@@ -884,6 +885,16 @@ def test_tokenspeed_mla_noncausal_capability():
     assert builder.supports_non_causal_multi_token_decode
     assert builder.supports_non_causal_multi_token_dcp
     assert tokenspeed_mla_module.TokenspeedMLABackend.supports_non_causal()
+
+
+def test_triton_mla_noncausal_dcp_capability():
+    builder = triton_mla_module.TritonMLAMetadataBuilder
+    backend = triton_mla_module.TritonMLABackend
+
+    assert builder.supports_non_causal_multi_token_decode
+    assert builder.supports_non_causal_multi_token_dcp
+    assert backend.supports_non_causal()
+    assert backend.supports_non_causal_dcp()
 
 
 def test_flashinfer_mla_dspark_support_is_tp_only(monkeypatch):
