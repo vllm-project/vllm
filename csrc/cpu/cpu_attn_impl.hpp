@@ -12,7 +12,7 @@
 #include "cpu/utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16, NEON, VXE, RVV, VSX };
+enum class ISA { AMX, AMX_FP8, VEC, VEC16, NEON, VXE, RVV, VSX };
 
 // Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType exactly.
 enum class Fp8KVCacheDataType {
@@ -151,6 +151,9 @@ struct AttentionMetadata {
     switch (isa) {
       case ISA::AMX:
         ss << "AMX, ";
+        break;
+      case ISA::AMX_FP8:
+        ss << "AMX_FP8, ";
         break;
       case ISA::VEC:
         ss << "VEC, ";
@@ -885,6 +888,8 @@ struct AttentionInput {
   // FP8 KV cache scales (used by FP8 attention implementations)
   float k_scale_fp8 = 1.0f;
   float v_scale_fp8 = 1.0f;
+  // FP8 query scale (used by AMX_FP8 which quantizes query inside the kernel)
+  float q_scale_fp8 = 1.0f;
 };
 
 #define DEFINE_CPU_ATTENTION_PARAMS                                         \
@@ -1019,8 +1024,16 @@ class AttentionMainLoop {
           attention_impl_t::v_cache_token_group_stride(block_size);
       // v_cache_head_group_stride: stride of V cache when move to next
       // HeadDimAlignment head dims in a block
+      constexpr int64_t pv_headdim_alignment = []() {
+        if constexpr (requires { tile_gemm_t::PVHeadDimAlignment; }) {
+          return tile_gemm_t::PVHeadDimAlignment;
+        }
+        return headdim_alignment;
+      }();
       const int64_t v_cache_head_group_stride =
-          attention_impl_t::v_cache_head_group_stride(block_size);
+          pv_headdim_alignment == headdim_alignment
+              ? attention_impl_t::v_cache_head_group_stride(block_size)
+              : block_size * pv_headdim_alignment;
       const int32_t token_group_num = kv_tile_token_num / blocksize_alignment;
       const int32_t token_group_num_per_block =
           block_size / blocksize_alignment;
@@ -1125,32 +1138,40 @@ class AttentionMainLoop {
         // }
 
         apply_softmax(logits_buffer, partial_q_buffer, max_buffer, sum_buffer,
-                      kv_tile_token_num, q_head_num, kv_tile_token_num,
-                      is_first_iter, use_sink);
+                kv_tile_token_num, q_head_num, kv_tile_token_num,
+                is_first_iter, use_sink);
 
-        // if (debug_info){
-        //     print_logits("softmax logits",
-        //     reinterpret_cast<prob_buffer_t*>(logits_buffer), q_head_num,
-        //     kv_tile_token_num, kv_tile_token_num * sizeof(logits_buffer_t) /
-        //     sizeof(prob_buffer_t));
-        //     print_logits("new_max", max_buffer, 1, q_head_num, q_head_num);
-        //     print_logits("new_sum", sum_buffer, 1, q_head_num, q_head_num);
-        // }
       }
 
       // compute P@V
       {
+        constexpr bool prequantize_probabilities = []() {
+          if constexpr (requires {
+                          tile_gemm_t::prequantize_probabilities;
+                        }) {
+            return tile_gemm_t::prequantize_probabilities;
+          }
+          return false;
+        }();
         int32_t curr_group_offset =
             start_block_group_offset * v_cache_token_group_stride;
         int32_t curr_group_num_in_block =
             token_group_num_per_block - start_block_group_offset;
         int32_t remaining_group_num = token_group_num;
-        int32_t head_dim_group_num = head_dim / headdim_alignment;
-        prob_buffer_t* curr_prob_buffer =
-            reinterpret_cast<prob_buffer_t*>(logits_buffer);
-        int64_t prob_buffer_stride =
-            kv_tile_token_num *
-            (sizeof(logits_buffer_t) / sizeof(prob_buffer_t));
+        int32_t head_dim_group_num = head_dim / pv_headdim_alignment;
+        using pv_prob_buffer_t =
+          std::conditional_t<prequantize_probabilities, uint8_t,
+                     prob_buffer_t>;
+        pv_prob_buffer_t* curr_prob_buffer =
+          reinterpret_cast<pv_prob_buffer_t*>(logits_buffer);
+        const int64_t prob_buffer_stride =
+          prequantize_probabilities
+            ? kv_tile_token_num
+            : kv_tile_token_num *
+                (sizeof(logits_buffer_t) / sizeof(prob_buffer_t));
+        constexpr int64_t prob_buffer_elem_size =
+          prequantize_probabilities ? sizeof(uint8_t)
+                        : sizeof(prob_buffer_t);
         partial_output_buffer_t* curr_partial_q_buffer = partial_q_buffer;
         bool accum_c = !is_first_iter;
         for (int32_t block_idx = start_block_idx; block_idx < end_block_idx;
@@ -1176,7 +1197,7 @@ class AttentionMainLoop {
                 block_size, curr_token_num, accum_c);
 
             // Update
-            curr_partial_q_buffer += headdim_alignment;
+            curr_partial_q_buffer += pv_headdim_alignment;
             v_cache_block_ptr += v_cache_head_group_stride;
           }
 
@@ -1184,15 +1205,13 @@ class AttentionMainLoop {
           remaining_group_num -= curr_group_num_in_block;
           curr_group_offset = 0;
           curr_group_num_in_block = token_group_num_per_block;
-          curr_prob_buffer += curr_token_num;
+          curr_prob_buffer = reinterpret_cast<pv_prob_buffer_t*>(
+              reinterpret_cast<uint8_t*>(curr_prob_buffer) +
+              curr_token_num * prob_buffer_elem_size);
           curr_partial_q_buffer = partial_q_buffer;
           accum_c = true;
         }
       }
-      //   if (debug_info) {
-      //     print_logits("output", partial_q_buffer, q_head_num, head_dim,
-      //     head_dim);
-      //   }
     }
 
     void apply_mask(logits_buffer_t* __restrict__ logits_buffer,
@@ -1262,9 +1281,22 @@ class AttentionMainLoop {
 #endif
 
       using prob_buffer_vec_t = typename VecTypeTrait<prob_buffer_t>::vec_t;
+      constexpr bool prequantize_probabilities = []() {
+        if constexpr (requires {
+                        tile_gemm_t::prequantize_probabilities;
+                      }) {
+          return tile_gemm_t::prequantize_probabilities;
+        }
+        return false;
+      }();
+      using softmax_prob_buffer_t =
+          std::conditional_t<prequantize_probabilities, uint8_t,
+                             prob_buffer_t>;
       static_assert(sizeof(prob_buffer_t) <= sizeof(logits_buffer_t));
 
       logits_buffer_t* __restrict__ curr_logits_buffer = logits_buffer;
+        softmax_prob_buffer_t* __restrict__ curr_prob_buffer =
+          reinterpret_cast<softmax_prob_buffer_t*>(logits_buffer);
       float* __restrict__ curr_partial_q_buffer = partial_q_buffer;
       const int32_t vec_num = kv_tile_token_num / 16;
       const int32_t head_vec_num = head_dim / 16;
@@ -1302,8 +1334,8 @@ class AttentionMainLoop {
         {
           logits_buffer_t* __restrict__ curr_logits_buffer_iter =
               curr_logits_buffer;
-          prob_buffer_t* __restrict__ curr_prob_buffer_iter =
-              reinterpret_cast<prob_buffer_t*>(curr_logits_buffer);
+            softmax_prob_buffer_t* __restrict__ curr_prob_buffer_iter =
+              curr_prob_buffer;
           for (int32_t j = 0; j < vec_num; ++j) {
             vec_op::FP32Vec16 vec(curr_logits_buffer_iter);
             vec = vec - max_vec;
@@ -1320,8 +1352,12 @@ class AttentionMainLoop {
               vec = fast_exp(vec);
             }
 
-            prob_buffer_vec_t output_vec(vec);
-            output_vec.save(curr_prob_buffer_iter);
+            if constexpr (prequantize_probabilities) {
+              vec.save(curr_logits_buffer_iter);
+            } else {
+              prob_buffer_vec_t output_vec(vec);
+              output_vec.save(curr_prob_buffer_iter);
+            }
 #else
             vec.save(curr_logits_buffer_iter);
             for (int32_t k = 0; k < 16; ++k) {
@@ -1334,6 +1370,10 @@ class AttentionMainLoop {
 
             curr_logits_buffer_iter += 16;
             curr_prob_buffer_iter += 16;
+          }
+          if constexpr (prequantize_probabilities) {
+            tile_gemm_t::quantize_probability_row(
+                curr_logits_buffer, curr_prob_buffer, kv_tile_token_num);
           }
         }
         float new_sum_val = sum_vec.reduce_sum();
@@ -1366,6 +1406,7 @@ class AttentionMainLoop {
         sum_buffer[i] = new_sum_val;
 
         curr_logits_buffer += logits_buffer_stride;
+  curr_prob_buffer += kv_tile_token_num;
         curr_partial_q_buffer += head_dim;
       }
     }

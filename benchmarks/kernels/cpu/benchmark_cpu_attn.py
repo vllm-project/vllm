@@ -13,13 +13,26 @@ from vllm._custom_ops import (
     cpu_attn_reshape_and_cache,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
+from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    is_quantized_kv_cache,
+    set_random_seed,
+)
 from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend, _get_attn_isa
+
+# Enable AMX tile data registers so isolated runs don't rely on other operations
+# to trigger oneDNN's _init_amx() first (which can cause hangs otherwise).
+if torch.cpu._is_amx_tile_supported():
+    torch.cpu._init_amx()
+
+KV_CACHE_DTYPE_CHOICES = ["auto", "fp8_e4m3", "fp8_e5m2"]
 
 
 def get_attn_isa(
     block_size: int | None = None,
     dtype: torch.dtype | None = None,
+    head_size: int | None = None,
+    kv_cache_dtype: str = "auto",
 ):
     # Delegate to _get_attn_isa so the fallback path applies the same arch
     # gating (e.g. RISC-V RVV is only chosen when the build's hardcoded
@@ -28,6 +41,8 @@ def get_attn_isa(
     return _get_attn_isa(
         dtype if dtype is not None else torch.bfloat16,
         block_size if block_size else 32,
+        head_size=head_size,
+        kv_cache_dtype=kv_cache_dtype if kv_cache_dtype != "auto" else None,
     )
 
 
@@ -53,6 +68,7 @@ def main(
     use_sink: bool = False,
     enable_kv_split: bool = False,
     isa: str | None = None,
+    kv_cache_dtype: str = "auto",
     seed: int = 0,
     iters: int = 20,
 ) -> None:
@@ -68,8 +84,14 @@ def main(
     scale = head_size**-0.5
     token_num = sum(query_lens)
 
+    # Resolve kv_cache_dtype: "auto" means same as compute dtype (no quantization)
+    effective_kv_cache_dtype = kv_cache_dtype if kv_cache_dtype != "auto" else None
+    is_fp8_kv = is_quantized_kv_cache(effective_kv_cache_dtype) if effective_kv_cache_dtype else False
+    # FP8 KV cache is stored as uint8 (byte-level view of fp8 values)
+    kv_cache_torch_dtype = torch.uint8 if is_fp8_kv else dtype
+
     if isa is None:
-        isa = get_attn_isa(block_size, dtype)
+        isa = get_attn_isa(block_size, dtype, kv_cache_dtype)
 
     s_aux = (
         15 * torch.rand((num_query_heads,), dtype=torch.bfloat16) if use_sink else None
@@ -98,9 +120,9 @@ def main(
     )
     key_cache, value_cache = key_value.unbind(0)
 
-    # KV cache for CPU attention
+    # KV cache for CPU attention; FP8 variants store quantized values as uint8
     packed_key_cache = torch.empty(
-        num_blocks, num_kv_heads, block_size, head_size, dtype=dtype
+        num_blocks, num_kv_heads, block_size, head_size, dtype=kv_cache_torch_dtype
     )
     packed_value_cache = torch.empty_like(packed_key_cache)
 
@@ -122,6 +144,7 @@ def main(
         value_cache=packed_value_cache,
         slot_mapping=slot_mapping,
         isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     metadata = cpu_attn_get_scheduler_metadata(
@@ -159,6 +182,7 @@ def main(
                 softcap=0,
                 scheduler_metadata=metadata,
                 s_aux=s_aux,
+                kv_cache_dtype=kv_cache_dtype,
             )
             end_time = time.perf_counter_ns()
             times.append((end_time - start_time) / 1e6)
@@ -233,7 +257,19 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use-sink", action="store_true")
     parser.add_argument(
-        "--isa", type=str, choices=["vec", "neon", "amx", "vec16", "rvv"], default=None
+        "--isa",
+        type=str,
+        choices=["vec", "neon", "amx", "amx_fp8", "vec16", "rvv"],
+        default=None,
+    )
+    parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        choices=KV_CACHE_DTYPE_CHOICES,
+        default="auto",
+        help="KV cache dtype: 'auto' uses compute dtype (bfloat16), "
+             "'fp8_e4m3'/'fp8_e5m2' enables FP8 quantized KV cache "
+             "(requires AMX-FP8 capable hardware for amx_fp8 ISA).",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iters", type=int, default=20)
@@ -264,7 +300,13 @@ if __name__ == "__main__":
         enable_kv_split=args.enable_kv_split,
         isa=args.isa
         if args.isa is not None
-        else get_attn_isa(args.block_size, STR_DTYPE_TO_TORCH_DTYPE[args.dtype]),
+        else get_attn_isa(
+            args.block_size,
+            STR_DTYPE_TO_TORCH_DTYPE[args.dtype],
+            args.head_size,
+            args.kv_cache_dtype,
+        ),
+        kv_cache_dtype=args.kv_cache_dtype,
         seed=args.seed,
         iters=args.iters,
     )
