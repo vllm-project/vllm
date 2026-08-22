@@ -463,12 +463,17 @@ Flags: `--tool-call-parser gigachat3`
 
 ### Apertus Models (`apertus`)
 
-Use the chat template from the examples folder; it fixes several OpenAI compatibility issues: `--chat-template /vllm-workspace/examples/tool_chat_template_apertus.jinja`
+Use the chat template from the examples folder; it fixes several OpenAI compatibility issues:
+`--chat-template /vllm-workspace/examples/tool_chat_template_apertus.jinja`.
+
+For Apertus 1.5 models, use the chat template packaged with the checkpoint.
 
 Supported models:
 
 * `swiss-ai/Apertus-8B-Instruct-2509`
 * `swiss-ai/Apertus-70B-Instruct-2509`
+* `swiss-ai/Apertus-v1.5-8B`
+* `swiss-ai/Apertus-v1.5-70B`
 
 Flags: `--tool-call-parser apertus`
 

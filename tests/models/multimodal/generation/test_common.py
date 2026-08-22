@@ -14,6 +14,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    AutoModelForMultimodalLM,
     AutoModelForTextToWaveform,
 )
 from transformers import __version__ as TRANSFORMERS_VERSION
@@ -217,6 +218,19 @@ VLM_TEST_SETTINGS = {
                 reason="Custom model code is not compatible with Transformers v5"
             ),
         ],
+    ),
+    "apertus_1p5": VLMTestInfo(
+        models=["swiss-ai/Apertus-v1.5-8B"],
+        # The shared audio test resamples inputs to 16 kHz, but Apertus
+        # requires 24 kHz audio inputs, so it cannot cover Apertus audio.
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda prompt: (
+            f"<|user_start|>{prompt}<|user_end|><|assistant_start|>"
+        ),
+        img_idx_to_prompt=lambda idx: "<|image|>",
+        max_model_len=16384,
+        max_num_seqs=2,
+        auto_cls=AutoModelForMultimodalLM,
     ),
     #### Transformers fallback to test
     ## To reduce test burden, we only test batching arbitrary image size
