@@ -207,6 +207,31 @@ def if_aiter_supported(func: Callable) -> Callable:
     return wrapper
 
 
+def _validate_rocm_aiter_fused_moe_shared_expert_args(
+    shared_w1: torch.Tensor | None,
+    shared_w2: torch.Tensor | None,
+    shared_w1_scale: torch.Tensor | None,
+    shared_w2_scale: torch.Tensor | None,
+    shared_expert_id: int,
+) -> bool:
+    shared_tensors = (shared_w1, shared_w2, shared_w1_scale, shared_w2_scale)
+    has_shared_expert = any(tensor is not None for tensor in shared_tensors)
+    if has_shared_expert:
+        if not all(tensor is not None for tensor in shared_tensors):
+            raise ValueError(
+                "Heterogeneous fused MoE requires both shared weights and scales."
+            )
+        if shared_expert_id < 0:
+            raise ValueError(
+                "Heterogeneous fused MoE requires a non-negative shared expert ID."
+            )
+    elif shared_expert_id >= 0:
+        raise ValueError(
+            "A non-negative shared expert ID requires shared weights and scales."
+        )
+    return has_shared_expert
+
+
 def _rocm_aiter_fused_moe_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -232,7 +257,20 @@ def _rocm_aiter_fused_moe_impl(
     swiglu_limit: float = 0.0,
     beta: float | None = None,
     linear_beta: float | None = None,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
+    has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
+        shared_w1,
+        shared_w2,
+        shared_w1_scale,
+        shared_w2_scale,
+        shared_expert_id,
+    )
+
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
 
@@ -248,6 +286,15 @@ def _rocm_aiter_fused_moe_impl(
     ):
         extra_kwargs["beta"] = beta
         extra_kwargs["linear_beta"] = linear_beta
+
+    if has_shared_expert:
+        extra_kwargs.update(
+            shared_w1=shared_w1,
+            shared_w2=shared_w2,
+            shared_w1_scale=shared_w1_scale,
+            shared_w2_scale=shared_w2_scale,
+            shared_expert_id=shared_expert_id,
+        )
 
     return fused_moe(
         hidden_states,
@@ -300,6 +347,11 @@ def _rocm_aiter_fused_moe_fake(
     swiglu_limit: float = 0.0,
     beta: float | None = None,
     linear_beta: float | None = None,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -2024,6 +2076,44 @@ class rocm_aiter_ops:
         return "gate_mode" in inspect.signature(fused_moe).parameters
 
     @staticmethod
+    def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
+        """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
+        if type(num_tokens) is not int or num_tokens <= 0:
+            return False
+
+        try:
+            import inspect
+
+            import aiter.fhmoe as fhmoe
+            from aiter.fused_moe import fused_moe
+
+            params = inspect.signature(fused_moe).parameters
+            supports_dsv4_i384_fhmoe = getattr(fhmoe, "supports_dsv4_i384_fhmoe", None)
+            if not callable(supports_dsv4_i384_fhmoe):
+                return False
+            supports_num_tokens = supports_dsv4_i384_fhmoe(num_tokens)
+        except Exception:
+            return False
+
+        return supports_num_tokens is True and all(
+            name in params
+            for name in (
+                "shared_w1",
+                "shared_w2",
+                "shared_w1_scale",
+                "shared_w2_scale",
+                "shared_expert_id",
+            )
+        )
+
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_heterogeneous_shared_expert(cls, num_tokens: int) -> bool:
+        """Whether AITER has DSV4 native-I384 configs through the given M."""
+        return cls._probe_dsv4_i384_fhmoe_capability(num_tokens)
+
+    @staticmethod
     def register_ops_once() -> None:
         global _OPS_REGISTERED
 
@@ -2468,6 +2558,11 @@ class rocm_aiter_ops:
         swiglu_limit: float = 0.0,
         beta: float | None = None,
         linear_beta: float | None = None,
+        shared_w1: torch.Tensor | None = None,
+        shared_w2: torch.Tensor | None = None,
+        shared_w1_scale: torch.Tensor | None = None,
+        shared_w2_scale: torch.Tensor | None = None,
+        shared_expert_id: int = -1,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -2494,6 +2589,11 @@ class rocm_aiter_ops:
             swiglu_limit,
             beta,
             linear_beta,
+            shared_w1,
+            shared_w2,
+            shared_w1_scale,
+            shared_w2_scale,
+            shared_expert_id,
         )
 
     @staticmethod
@@ -3076,6 +3176,13 @@ class rocm_aiter_ops:
         from aiter.ops.shuffle import shuffle_scale_a16w4
 
         return shuffle_scale_a16w4(tensor, num_experts, gate_up)
+
+    @staticmethod
+    def shuffle_scale(tensor: torch.Tensor) -> torch.Tensor:
+        """Shuffle a non-gate/up E8M0 scale tensor for AITER."""
+        from aiter.ops.shuffle import shuffle_scale
+
+        return shuffle_scale(tensor)
 
     @staticmethod
     def shuffle_weights(
