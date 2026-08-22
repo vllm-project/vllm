@@ -21,7 +21,7 @@ from vllm.v1.kv_offload.cpu.common import (
     CPULoadStoreSpec,
     CPUOffloadingMetrics,
 )
-from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager, _AdmissionState
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 
 
@@ -920,6 +920,148 @@ class TestARCPolicy:
         assert len(events) > 0  # should have store and eviction events
 
 
+def test_filter_reused_manager_counts_store_candidates_once_per_request():
+    manager = make_cpu_manager(num_blocks=4, store_threshold=2)
+    keys = to_keys([1, 2, 3])
+
+    first_request = make_req_context("request-1")
+    prepare_store_output = manager.prepare_store(keys[:1], first_request)
+    assert prepare_store_output is not None
+    assert prepare_store_output.keys_to_store == []
+
+    prepare_store_output = manager.prepare_store(keys, first_request)
+    assert prepare_store_output is not None
+    assert prepare_store_output.keys_to_store == []
+    assert manager.counts == OrderedDict.fromkeys(keys, 1)
+
+    prepare_store_output = manager.prepare_store(keys, first_request)
+    assert prepare_store_output is not None
+    assert prepare_store_output.keys_to_store == []
+
+    assert manager.lookup(keys[0], first_request) is LookupResult.MISS
+    assert manager.counts == OrderedDict.fromkeys(keys, 1)
+
+    prepare_store_output = manager.prepare_store(keys, make_req_context("request-2"))
+    assert prepare_store_output is not None
+    assert prepare_store_output.keys_to_store == keys
+
+
+def test_filter_reused_manager_counts_only_materialized_store_candidates():
+    manager = make_cpu_manager(num_blocks=4, store_threshold=2)
+    keys = to_keys([1, 2, 3])
+
+    prepare_store_output = manager.prepare_store(
+        keys[:1], make_req_context("partial-request")
+    )
+    assert prepare_store_output is not None
+    assert prepare_store_output.keys_to_store == []
+    assert manager.counts == OrderedDict.fromkeys(keys[:1], 1)
+
+    prepare_store_output = manager.prepare_store(
+        keys, make_req_context("complete-request")
+    )
+    assert prepare_store_output is not None
+    assert prepare_store_output.keys_to_store == keys[:1]
+    assert manager.counts == OrderedDict([(keys[0], 2), (keys[1], 1), (keys[2], 1)])
+
+
+def test_filter_reused_manager_tracks_each_manager_independently():
+    managers = [
+        make_cpu_manager(num_blocks=4, store_threshold=2),
+        make_cpu_manager(num_blocks=4, store_threshold=2),
+    ]
+    keys = to_keys([1, 2])
+    request = make_req_context("shared-request")
+
+    for manager in managers:
+        prepare_store_output = manager.prepare_store(keys, request)
+        assert prepare_store_output is not None
+        assert prepare_store_output.keys_to_store == []
+        assert manager.counts == OrderedDict.fromkeys(keys, 1)
+
+
+def test_filter_reused_manager_counts_interleaved_requests_once():
+    manager = make_cpu_manager(num_blocks=4, store_threshold=3)
+    keys = to_keys([1, 2])
+    request_a = make_req_context("request-a")
+    request_b = make_req_context("request-b")
+
+    for request in (request_a, request_b, request_a):
+        prepare_store_output = manager.prepare_store(keys, request)
+        assert prepare_store_output is not None
+        assert prepare_store_output.keys_to_store == []
+
+    assert manager.counts == OrderedDict.fromkeys(keys, 2)
+    assert manager._observed_request_tokens is not None
+    assert all(len(tokens) == 2 for tokens in manager._observed_request_tokens.values())
+
+    prepare_store_output = manager.prepare_store(keys, make_req_context("request-c"))
+    assert prepare_store_output is not None
+    assert prepare_store_output.keys_to_store == keys
+    assert all(tokens is None for tokens in manager._observed_request_tokens.values())
+
+
+def test_filter_reused_manager_forgets_tokens_with_evicted_tracker_entries():
+    manager = make_cpu_manager(
+        num_blocks=4,
+        store_threshold=4,
+        max_tracker_size=2,
+    )
+
+    for request_idx in range(3):
+        prepare_store_output = manager.prepare_store(
+            to_keys([1, 2]), make_req_context(f"request-{request_idx}")
+        )
+        assert prepare_store_output is not None
+        assert prepare_store_output.keys_to_store == []
+
+    assert manager._observed_request_tokens is not None
+    assert all(len(tokens) == 3 for tokens in manager._observed_request_tokens.values())
+
+    prepare_store_output = manager.prepare_store(
+        to_keys([3]), make_req_context("evicting-request")
+    )
+    assert prepare_store_output is not None
+    assert prepare_store_output.keys_to_store == []
+    assert manager.counts is not None
+    assert set(manager._observed_request_tokens) == set(manager.counts)
+    assert len(manager._observed_request_tokens) == manager.max_tracker_size
+
+
+def test_filter_reused_manager_makes_progress_when_candidates_exceed_tracker():
+    manager = make_cpu_manager(
+        num_blocks=4,
+        store_threshold=2,
+        max_tracker_size=3,
+    )
+    keys = to_keys([1, 2, 3, 4])
+
+    first_request = make_req_context("request-1")
+    first = manager.prepare_store(keys, first_request)
+    assert first is not None
+    assert first.keys_to_store == []
+    admission_state = first_request.get_state(_AdmissionState)
+    assert admission_state is not None
+    assert len(admission_state.request_tokens_by_manager) == 1
+    assert manager._observed_request_tokens is not None
+    assert len(manager._observed_request_tokens) == 3
+
+    second = manager.prepare_store(keys, make_req_context("request-2"))
+    assert second is not None
+    assert second.keys_to_store == keys[:3]
+    manager.complete_store(second.keys_to_store, _EMPTY_REQ_CTX)
+
+    third = manager.prepare_store(keys, make_req_context("request-3"))
+    assert third is not None
+    assert third.keys_to_store == []
+
+    fourth = manager.prepare_store(keys, make_req_context("request-4"))
+    assert fourth is not None
+    assert fourth.keys_to_store == keys[3:]
+    manager.complete_store(fourth.keys_to_store, _EMPTY_REQ_CTX)
+    assert all(manager.lookup(key, _EMPTY_REQ_CTX) is LookupResult.HIT for key in keys)
+
+
 def test_filter_reused_manager():
     """
     Tests CPUOffloadingManager reuse filtering (store_threshold=2).
@@ -932,39 +1074,38 @@ def test_filter_reused_manager():
         max_tracker_size=3,
     )
 
-    # Lookup [1, 2] -> 1st time, added to tracker but not eligible for store yet
-    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
-    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
-
-    # prepare store [1, 2] -> should be filtered
-    prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    # Store candidates [1, 2] -> 1st request, not eligible for store yet
+    prepare_store_output = manager.prepare_store(
+        to_keys([1, 2]), make_req_context("request-1")
+    )
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
 
-    # Lookup [1] -> 2nd time, eligible now
-    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
-
-    # prepare store [1, 2] -> [1] should be eligible, [2] should be filtered
-    prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    # Store candidate [1] -> 2nd request, eligible now
+    prepare_store_output = manager.prepare_store(
+        to_keys([1]), make_req_context("request-2")
+    )
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == to_keys([1])
 
-    # Lookup [3, 4] -> 1st time
+    # Store candidates [3, 4] -> 1st request
     # (evicts [2] from tracker since max_size is 3 and tracker has [1])
-    assert manager.lookup(to_key(3), _EMPTY_REQ_CTX) is LookupResult.MISS
-    assert manager.lookup(to_key(4), _EMPTY_REQ_CTX) is LookupResult.MISS
+    prepare_store_output = manager.prepare_store(
+        to_keys([3, 4]), make_req_context("request-3")
+    )
+    assert prepare_store_output is not None
+    assert prepare_store_output.keys_to_store == []
     # Verify [2] was evicted from the tracker (tracker now has: [1], [3], [4])
     assert to_keys([2])[0] not in manager.counts
 
-    # Lookup [2] again -> (this adds [2] back to the tracker as 1st time)
-    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
-    # Verify [2] was re-added with count=1 (not eligible yet)
-    assert manager.counts.get(to_keys([2])[0]) == 1
-
-    # prepare store [2] -> should still be filtered out since count was reset
-    prepare_store_output = manager.prepare_store(to_keys([2]), _EMPTY_REQ_CTX)
+    # Store candidate [2] again -> adds [2] back to the tracker as 1st time
+    prepare_store_output = manager.prepare_store(
+        to_keys([2]), make_req_context("request-4")
+    )
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
+    # Verify [2] was re-added with count=1 (not eligible yet)
+    assert manager.counts.get(to_keys([2])[0]) == 1
 
     manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
 
