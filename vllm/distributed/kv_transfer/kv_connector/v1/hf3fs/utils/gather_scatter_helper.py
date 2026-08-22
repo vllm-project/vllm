@@ -12,10 +12,15 @@ def kv_cache_scatter_kernel(
     source_ptr,
     token_indices_ptr,
     num_tokens_in_block,
-    hidden_size,
     total_token_in_kvcache,
     num_layers,
-    is_mla,
+    tokens_per_block,
+    block_stride,
+    head_stride,
+    token_stride,
+    content_stride,
+    num_heads: tl.constexpr,
+    content_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     layer_idx = tl.program_id(0)
@@ -30,39 +35,25 @@ def kv_cache_scatter_kernel(
     if token_idx >= total_token_in_kvcache:
         return
 
-    if is_mla:
-        # MLA format: source [num_layers, num_tokens_in_block, hidden_size]
-        # MLA format: target [total_token_in_kvcache, hidden_size] (per layer)
-        source_offset = (layer_idx * num_tokens_in_block + token_pos) * hidden_size
-        target_offset = token_idx * hidden_size
-
-        for i in range(0, hidden_size, BLOCK_SIZE):
-            offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < hidden_size
-            val = tl.load(source_ptr + source_offset + offset, mask=mask)
-            tl.store(kv_cache_ptr + target_offset + offset, val, mask=mask)
-    else:
-        # MHA format: source [num_layers, 2, num_tokens_in_block, hidden_size]
-        # MHA format: target [2, total_token_in_kvcache, hidden_size]
-        source_offset_k = (
-            layer_idx * num_tokens_in_block * 2 + token_pos
-        ) * hidden_size
-        source_offset_v = (
-            layer_idx * num_tokens_in_block * 2 + num_tokens_in_block + token_pos
-        ) * hidden_size
-
-        target_offset_k = token_idx * hidden_size
-        target_offset_v = (total_token_in_kvcache + token_idx) * hidden_size
-
-        for i in range(0, hidden_size, BLOCK_SIZE):
-            offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < hidden_size
-
-            val_k = tl.load(source_ptr + source_offset_k + offset, mask=mask)
-            val_v = tl.load(source_ptr + source_offset_v + offset, mask=mask)
-
-            tl.store(kv_cache_ptr + target_offset_k + offset, val_k, mask=mask)
-            tl.store(kv_cache_ptr + target_offset_v + offset, val_v, mask=mask)
+    block_idx = token_idx // tokens_per_block
+    state_idx = token_idx % tokens_per_block
+    hidden_size = num_heads * content_size
+    for i in range(0, hidden_size, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        mask = offset < hidden_size
+        head_idx = offset // content_size
+        content_idx = offset % content_size
+        source_offset = (
+            (layer_idx * num_heads + head_idx) * num_tokens_in_block + token_pos
+        ) * content_size + content_idx
+        target_offset = (
+            block_idx * block_stride
+            + head_idx * head_stride
+            + state_idx * token_stride
+            + content_idx * content_stride
+        )
+        value = tl.load(source_ptr + source_offset, mask=mask)
+        tl.store(kv_cache_ptr + target_offset, value, mask=mask)
 
 
 @triton.jit
@@ -71,10 +62,15 @@ def kv_cache_gather_kernel(
     dst_ptr,
     token_indices_ptr,
     num_tokens_in_block,
-    hidden_size,
     total_token_in_kvcache,
     num_layers,
-    is_mla,
+    tokens_per_block,
+    block_stride,
+    head_stride,
+    token_stride,
+    content_stride,
+    num_heads: tl.constexpr,
+    content_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     layer_idx = tl.program_id(0)
@@ -89,37 +85,25 @@ def kv_cache_gather_kernel(
     if token_idx >= total_token_in_kvcache:
         return
 
-    if is_mla:
-        # MLA format: source [total_token_in_kvcache, hidden_size] (per layer)
-        # MLA format: dst [num_layers, num_tokens_in_block, hidden_size]
-        kvcache_offset = token_idx * hidden_size
-        dst_offset = (layer_idx * num_tokens_in_block + token_pos) * hidden_size
-
-        for i in range(0, hidden_size, BLOCK_SIZE):
-            offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < hidden_size
-            val = tl.load(kv_cache_ptr + kvcache_offset + offset, mask=mask)
-            tl.store(dst_ptr + dst_offset + offset, val, mask=mask)
-    else:
-        # MHA format: source [2, total_token_in_kvcache, hidden_size]
-        # MHA format: dst [num_layers, 2, num_tokens_in_block, hidden_size]
-        dst_offset_k = (layer_idx * num_tokens_in_block * 2 + token_pos) * hidden_size
-        dst_offset_v = (
-            layer_idx * num_tokens_in_block * 2 + num_tokens_in_block + token_pos
-        ) * hidden_size
-
-        kvcache_offset_k = token_idx * hidden_size
-        kvcache_offset_v = (total_token_in_kvcache + token_idx) * hidden_size
-
-        for i in range(0, hidden_size, BLOCK_SIZE):
-            offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < hidden_size
-
-            val_k = tl.load(kv_cache_ptr + kvcache_offset_k + offset, mask=mask)
-            val_v = tl.load(kv_cache_ptr + kvcache_offset_v + offset, mask=mask)
-
-            tl.store(dst_ptr + dst_offset_k + offset, val_k, mask=mask)
-            tl.store(dst_ptr + dst_offset_v + offset, val_v, mask=mask)
+    block_idx = token_idx // tokens_per_block
+    state_idx = token_idx % tokens_per_block
+    hidden_size = num_heads * content_size
+    for i in range(0, hidden_size, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        mask = offset < hidden_size
+        head_idx = offset // content_size
+        content_idx = offset % content_size
+        kvcache_offset = (
+            block_idx * block_stride
+            + head_idx * head_stride
+            + state_idx * token_stride
+            + content_idx * content_stride
+        )
+        dst_offset = (
+            (layer_idx * num_heads + head_idx) * num_tokens_in_block + token_pos
+        ) * content_size + content_idx
+        value = tl.load(kv_cache_ptr + kvcache_offset, mask=mask)
+        tl.store(dst_ptr + dst_offset, value, mask=mask)
 
 
 def scatter_kv_caches(
@@ -127,34 +111,33 @@ def scatter_kv_caches(
     total_token_in_kvcache: int,
     src_tensor: torch.Tensor,
     token_indices: list[int],
-    is_mla: bool = False,
+    tokens_per_block: int,
+    num_heads: int,
+    content_size: int,
+    kv_cache_strides: tuple[int, ...],
 ) -> None:
     """Scatter KV cache data from source tensor to KV cache storage.
 
     Args:
         kv_caches_ptrs: Tensor of KV cache pointers (one per layer)
         total_token_in_kvcache: Total number of tokens in KV cache
-        src_tensor: Source tensor containing data to scatter
-            - MHA format: [num_layers, 2, num_tokens_in_block, hidden_size]
-            - MLA format: [num_layers, num_tokens_in_block, hidden_size]
+        src_tensor: Source ``[L, H, N, C]`` tensor containing data to scatter
         token_indices: List of token positions to update
-        is_mla: Whether using MLA model format
+        tokens_per_block: Number of stored states in each cache block
+        num_heads: Size of the H axis
+        content_size: Size of the C axis
+        kv_cache_strides: Element strides of each ``[B, H, N, C]`` layer view
     """
     num_layers = len(kv_caches_ptrs)
     num_tokens_in_block = len(token_indices)
 
-    if is_mla:
-        # MLA: src_tensor is [num_layers, num_tokens_in_block, hidden_size]
-        assert len(src_tensor.shape) == 3, (
-            f"MLA src_tensor should be 3D, got {src_tensor.shape}"
-        )
-        hidden_size = src_tensor.shape[2]
-    else:
-        # MHA: src_tensor is [num_layers, 2, num_tokens_in_block, hidden_size]
-        assert len(src_tensor.shape) == 4, (
-            f"MHA src_tensor should be 4D, got {src_tensor.shape}"
-        )
-        hidden_size = src_tensor.shape[3]
+    assert src_tensor.shape == (
+        num_layers,
+        num_heads,
+        num_tokens_in_block,
+        content_size,
+    )
+    assert len(kv_cache_strides) == 4
 
     device = src_tensor.device
     token_indices_tensor = torch.tensor(
@@ -169,10 +152,12 @@ def scatter_kv_caches(
         src_tensor,
         token_indices_tensor,
         num_tokens_in_block,
-        hidden_size,
         total_token_in_kvcache,
         num_layers,
-        is_mla,
+        tokens_per_block,
+        *kv_cache_strides,
+        num_heads=num_heads,
+        content_size=content_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
@@ -182,49 +167,33 @@ def gather_kv_caches(
     total_token_in_kvcache: int,
     dst_tensor: torch.Tensor,
     token_indices: list[int],
-    is_mla: bool = False,
+    tokens_per_block: int,
+    num_heads: int,
+    content_size: int,
+    kv_cache_strides: tuple[int, ...],
 ) -> None:
     """Gather KV cache data from KV cache storage to destination tensor.
 
     Args:
         kv_caches_ptrs: Tensor of KV cache pointers (one per layer)
         total_token_in_kvcache: Total number of tokens in KV cache
-        dst_tensor: Destination tensor to store gathered data
-            - MHA format: [num_layers, 2, num_tokens_in_block, hidden_size]
-            - MLA format: [num_layers, num_tokens_in_block, hidden_size]
+        dst_tensor: Destination ``[L, H, N, C]`` tensor
         token_indices: List of token positions to gather
-        is_mla: Whether using MLA model format
+        tokens_per_block: Number of stored states in each cache block
+        num_heads: Size of the H axis
+        content_size: Size of the C axis
+        kv_cache_strides: Element strides of each ``[B, H, N, C]`` layer view
     """
     num_layers = kv_caches_ptrs.shape[0]
     num_tokens_in_block = len(token_indices)
 
-    if is_mla:
-        # MLA: dst_tensor is [num_layers, num_tokens_in_block, hidden_size]
-        assert len(dst_tensor.shape) == 3, (
-            f"MLA dst_tensor should be 3D, got {dst_tensor.shape}"
-        )
-        assert dst_tensor.shape[0] == num_layers, (
-            f"Layer count mismatch: {dst_tensor.shape[0]} vs {num_layers}"
-        )
-        assert dst_tensor.shape[1] == num_tokens_in_block, (
-            f"Token count mismatch: {dst_tensor.shape[1]} vs {num_tokens_in_block}"
-        )
-        hidden_size = dst_tensor.shape[2]
-    else:
-        # MHA: dst_tensor is [num_layers, 2, num_tokens_in_block, hidden_size]
-        assert len(dst_tensor.shape) == 4, (
-            f"MHA dst_tensor should be 4D, got {dst_tensor.shape}"
-        )
-        assert dst_tensor.shape[0] == num_layers, (
-            f"Layer count mismatch: {dst_tensor.shape[0]} vs {num_layers}"
-        )
-        assert dst_tensor.shape[1] == 2, (
-            f"MHA should have 2 (K,V) components, got {dst_tensor.shape[1]}"
-        )
-        assert dst_tensor.shape[2] == num_tokens_in_block, (
-            f"Token count mismatch: {dst_tensor.shape[2]} vs {num_tokens_in_block}"
-        )
-        hidden_size = dst_tensor.shape[3]
+    assert dst_tensor.shape == (
+        num_layers,
+        num_heads,
+        num_tokens_in_block,
+        content_size,
+    )
+    assert len(kv_cache_strides) == 4
 
     device = dst_tensor.device
     token_indices_tensor = torch.tensor(
@@ -239,10 +208,12 @@ def gather_kv_caches(
         dst_tensor,
         token_indices_tensor,
         num_tokens_in_block,
-        hidden_size,
         total_token_in_kvcache,
         num_layers,
-        is_mla,
+        tokens_per_block,
+        *kv_cache_strides,
+        num_heads=num_heads,
+        content_size=content_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 

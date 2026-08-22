@@ -39,11 +39,12 @@ pub use renderer::{
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
-    ChatToolChoice, GenerationPromptMode, ReasoningEffort, SamplingParams,
+    ChatToolChoice, GenerationPromptMode, ReasoningEffort, ResolvedToolContext, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
+pub use vllm_text::GenerationConfigMode;
 
 mod backend;
 mod error;
@@ -97,6 +98,10 @@ pub struct ChatRequestProcessor {
     /// Effective model dtype reported by the engine.
     /// Absent for text-only frontends without an engine handshake.
     model_dtype: Option<ModelDtype>,
+    /// Tool-call parser selection used when preparing generation requests.
+    tool_call_parser: ParserSelection,
+    /// Reasoning parser selection used when preparing generation requests.
+    reasoning_parser: ParserSelection,
 }
 
 impl ChatRequestProcessor {
@@ -106,6 +111,8 @@ impl ChatRequestProcessor {
         Self {
             backend,
             model_dtype: Some(model_dtype),
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
         }
     }
 
@@ -114,7 +121,20 @@ impl ChatRequestProcessor {
         Self {
             backend,
             model_dtype: None,
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
         }
+    }
+
+    /// Configure the parser selections used to prepare generation requests.
+    pub fn with_parser_selections(
+        mut self,
+        tool_call_parser: ParserSelection,
+        reasoning_parser: ParserSelection,
+    ) -> Self {
+        self.tool_call_parser = tool_call_parser;
+        self.reasoning_parser = reasoning_parser;
+        self
     }
 
     async fn finalize_rendered_prompt(
@@ -155,17 +175,9 @@ impl ChatRequestProcessor {
         Ok(Some(features))
     }
 
-    /// Prepare one chat request without submitting it to an engine.
-    pub async fn prepare(
-        &self,
-        mut request: ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
-    ) -> Result<(TextRequest, DynChatOutputProcessor)> {
-        request.validate()?;
-
+    async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
-        let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
         let rendered = self.backend.chat_renderer().render(&request)?;
         let reasoning_parser_kwargs =
             request
@@ -176,7 +188,7 @@ impl ChatRequestProcessor {
                     chat_template_kwargs: rendered.effective_template_kwargs.clone(),
                 });
         let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
-        let text_request = TextRequest {
+        Ok(TextRequest {
             request_id: request.request_id,
             prompt,
             mm_features,
@@ -191,7 +203,29 @@ impl ChatRequestProcessor {
             reasoning_parser_kwargs,
             lora_request: request.lora_request,
             arrival_time: Some(arrival_time),
-        };
+        })
+    }
+
+    /// Prepare one chat request for tokenization without constructing an output processor.
+    pub async fn prepare_for_tokenization(&self, request: ChatRequest) -> Result<TextRequest> {
+        request.validate()?;
+        self.prepare_text_request(request).await
+    }
+
+    /// Prepare one chat request without submitting it to an engine.
+    pub async fn prepare(
+        &self,
+        mut request: ChatRequest,
+    ) -> Result<(TextRequest, DynChatOutputProcessor)> {
+        request.validate()?;
+        let output_processor = self.backend.new_chat_output_processor(
+            &mut request,
+            NewChatOutputProcessorOptions {
+                tool_call_parser: &self.tool_call_parser,
+                reasoning_parser: &self.reasoning_parser,
+            },
+        )?;
+        let text_request = self.prepare_text_request(request).await?;
         Ok((text_request, output_processor))
     }
 }
@@ -204,10 +238,6 @@ impl ChatRequestProcessor {
 pub struct ChatLlm {
     text: TextLlm,
     processor: ChatRequestProcessor,
-    /// Tool-call parser selection.
-    tool_call_parser: ParserSelection,
-    /// Reasoning parser selection.
-    reasoning_parser: ParserSelection,
 }
 
 impl ChatLlm {
@@ -219,8 +249,6 @@ impl ChatLlm {
         Self {
             text,
             processor: ChatRequestProcessor::new(backend, model_dtype),
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
         }
     }
 
@@ -233,13 +261,13 @@ impl ChatLlm {
 
     /// Set tool-call parser selection.
     pub fn with_tool_call_parser(mut self, selection: ParserSelection) -> Self {
-        self.tool_call_parser = selection;
+        self.processor.tool_call_parser = selection;
         self
     }
 
     /// Set reasoning parser selection.
     pub fn with_reasoning_parser(mut self, selection: ParserSelection) -> Self {
-        self.reasoning_parser = selection;
+        self.processor.reasoning_parser = selection;
         self
     }
 
@@ -263,6 +291,11 @@ impl ChatLlm {
     /// `/v1/completions`.
     pub fn text(&self) -> &TextLlm {
         &self.text
+    }
+
+    /// Return the chat request processor.
+    pub fn request_processor(&self) -> &ChatRequestProcessor {
+        &self.processor
     }
 
     /// Return the model ID reported by the underlying text backend.
@@ -292,7 +325,7 @@ impl ChatLlm {
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
     pub fn tool_call_parser_name(&self) -> Option<&str> {
-        match &self.tool_call_parser {
+        match &self.processor.tool_call_parser {
             ParserSelection::Auto => {
                 ToolParserFactory::global().resolve_name_for_model(self.model_id())
             }
@@ -303,7 +336,7 @@ impl ChatLlm {
 
     /// Effective reasoning parser name for this model, if parsing is enabled.
     pub fn reasoning_parser_name(&self) -> Option<&str> {
-        match &self.reasoning_parser {
+        match &self.processor.reasoning_parser {
             ParserSelection::Auto => {
                 ReasoningParserFactory::global().resolve_name_for_model(self.model_id())
             }
@@ -314,44 +347,13 @@ impl ChatLlm {
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
-        let (text_request, output_processor) = self
-            .processor
-            .prepare(
-                request,
-                NewChatOutputProcessorOptions {
-                    tool_call_parser: &self.tool_call_parser,
-                    reasoning_parser: &self.reasoning_parser,
-                },
-            )
-            .await?;
+        let (text_request, output_processor) = self.processor.prepare(request).await?;
         let request_id = text_request.request_id.clone();
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
         let structured_stream = output_processor.process(decoded_stream)?;
 
         Ok(ChatEventStream::new(request_id, structured_stream))
-    }
-
-    /// Render through the chat template and tokenize, without submitting to the engine.
-    ///
-    /// Same render → [`multimodal::finalize_rendered_prompt`] → encode pipeline as
-    /// [`Self::chat`], but stops after token IDs so `/tokenize` counts match what
-    /// generation would see. Used by `POST /tokenize` (chat form).
-    pub async fn tokenize_chat(&self, request: ChatRequest) -> Result<Vec<u32>> {
-        request.validate()?;
-
-        let rendered = self.processor.backend.chat_renderer().render(&request)?;
-        let (prompt, _mm_features) =
-            self.processor.finalize_rendered_prompt(&request, rendered).await?;
-
-        let tokenizer = self.text.tokenizer();
-        let token_ids = match prompt {
-            // Rendered string from the template (usual chat path).
-            Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
-            // Already tokenized (e.g. multimodal path); pass through unchanged.
-            Prompt::TokenIds(ids) => ids,
-        };
-        Ok(token_ids)
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
@@ -413,6 +415,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, inkling, kimi, kimi_k2, kimi_k3, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, hy_v3, inkling, kimi, kimi_k2, kimi_k3, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
     }
 }

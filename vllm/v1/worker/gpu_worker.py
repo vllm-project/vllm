@@ -55,7 +55,11 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
+from vllm.profiler.wrapper import (
+    CudaProfilerWrapper,
+    ProtonProfilerWrapper,
+    TorchProfilerWrapper,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
@@ -63,7 +67,8 @@ from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
+from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -86,6 +91,16 @@ from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
+
+
+def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
+    spec_config = vllm_config.speculative_config
+    return (
+        2
+        if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
+        else 1
+    )
+
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
@@ -160,16 +175,13 @@ class Worker(WorkerBase):
         # is available, since the engine needs a reference to the model.
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
+        self._weight_update_is_draft = False
 
-        # Torch/CUDA profiler. Enabled and configured through profiler_config.
+        # Worker profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
-
-        # Only validate profiler config is valid, don't instantiate yet
-        if self.profiler_config.profiler not in ("torch", "cuda", None):
-            raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
         # pending non-blocking PP send work from the previous iteration
@@ -401,15 +413,24 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
-        # Initialize workspace manager
+        # DSpark target and draft CUDA graphs retain workspace views concurrently.
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
-        init_workspace_manager(self.device, num_ubatches)
+        init_workspace_manager(
+            self.device,
+            num_ubatches,
+            _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
+        )
 
         # Construct the model runner
         if self.use_v2_model_runner:
-            from vllm.v1.worker.gpu.model_runner import (
-                GPUModelRunner as GPUModelRunnerV2,
-            )
+            if self.vllm_config.is_mm_encoder_only:
+                from vllm.v1.worker.mm_encoder_model_runner import (
+                    MMEncoderModelRunner as GPUModelRunnerV2,
+                )
+            else:
+                from vllm.v1.worker.gpu.model_runner import (  # type: ignore[assignment]
+                    GPUModelRunner as GPUModelRunnerV2,
+                )
 
             # HACK(woosuk): This is a temporary fix to avoid type errors.
             self.model_runner: GPUModelRunner = GPUModelRunnerV2(  # type: ignore
@@ -654,6 +675,11 @@ class Worker(WorkerBase):
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
 
+        # Adopt the engine core's layout; workers spawned after resolution
+        # (e.g. elastic EP scale-up) only see it through the config.
+        if kv_cache_config.kv_cache_layout is not None:
+            record_kv_cache_layout(self.cache_config, kv_cache_config.kv_cache_layout)
+
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
@@ -847,6 +873,10 @@ class Worker(WorkerBase):
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
 
+        # Startup is done; steady-state serving gets no benefit from torch
+        # intra-op parallelism.
+        set_torch_threads_for_runtime()
+
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
@@ -863,6 +893,19 @@ class Worker(WorkerBase):
 
     def get_draft_model(self) -> nn.Module | None:
         return self.model_runner.get_draft_model()
+
+    def supports_draft_weight_updates(self) -> bool:
+        engine = self.weight_transfer_engine
+        speculative_config = self.speculative_config
+        get_draft_model = getattr(self.model_runner, "get_draft_model", None)
+        return (
+            engine is not None
+            and engine.supports_draft_weight_update
+            and callable(get_draft_model)
+            and get_draft_model() is not None
+            and speculative_config is not None
+            and speculative_config.draft_model_config is not None
+        )
 
     def _set_draft_weight_update_target(self) -> None:
         assert self.weight_transfer_engine is not None
@@ -904,6 +947,8 @@ class Worker(WorkerBase):
             return nullcontext()
 
         self.profiler.step()
+        if not self.profiler.is_running:
+            return nullcontext()
 
         iteration_details = compute_iteration_details(scheduler_output)
 
@@ -1120,6 +1165,7 @@ class Worker(WorkerBase):
             )
 
         if is_start:
+            profiler_type = self.profiler_config.profiler
             # Generate the trace name by combining prefix with comprehensive rank suffix
             from vllm.distributed.utils import get_worker_rank_suffix
 
@@ -1133,7 +1179,6 @@ class Worker(WorkerBase):
 
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
-                profiler_type = self.profiler_config.profiler
                 if profiler_type == "torch":
                     self.profiler = TorchProfilerWrapper(
                         self.profiler_config,
@@ -1147,20 +1192,31 @@ class Worker(WorkerBase):
                 elif profiler_type == "cuda":
                     self.profiler = CudaProfilerWrapper(self.profiler_config)
                     logger.debug("Starting CUDA profiler")
+                elif profiler_type == "proton":
+                    self.profiler = ProtonProfilerWrapper(
+                        self.profiler_config, worker_name=trace_name
+                    )
+                    logger.debug(
+                        "Starting Proton profiler with trace name: %s", trace_name
+                    )
                 else:
                     # Config validation should prevent this code being reached
                     raise ValueError(
                         f"Invalid profiler value of {self.profiler_config.profiler}"
                     )
 
-            # If profiler already initialized, restart profiling but keep
-            # the original trace name from the first initialization.
             self.profiler.start()
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
                 return
-            self.profiler.stop()
+            try:
+                self.profiler.stop()
+            finally:
+                if self.profiler_config.profiler == "proton":
+                    # Proton output names are fixed when the wrapper is constructed.
+                    # Recreate it so the next profile_prefix is honored.
+                    self.profiler = None
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
@@ -1268,6 +1324,7 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.reset_weight_update_target()
             raise
         self._weight_update_active = True
+        self._weight_update_is_draft = is_draft
 
     def update_weights(self, update_info: dict) -> None:
         """
@@ -1312,6 +1369,10 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
 
+        # Weight transfer bypasses GPUModelRunner.reload_weights().
+        if not self._weight_update_is_draft:
+            self.model_runner.reset_lora_state()
+
     def shutdown(self) -> None:
         gc.unfreeze()
 
@@ -1325,6 +1386,8 @@ class Worker(WorkerBase):
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
+
+        self.elastic_ep_executor.shutdown()
 
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process

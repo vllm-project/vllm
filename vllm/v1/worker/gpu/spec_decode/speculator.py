@@ -131,11 +131,16 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
-            self.draft_logits = torch.zeros(
-                self.max_num_reqs,
-                self.num_speculative_steps,
-                self.vocab_size,
-                dtype=torch.float32,
+            # Pre-temperature logits, cached from the previous decode step.
+            dtype, fill = self.draft_logits_spec(vllm_config)
+            self.draft_logits = torch.full(
+                (
+                    self.max_num_reqs,
+                    self.num_speculative_steps,
+                    self.vocab_size,
+                ),
+                fill,
+                dtype=dtype,
                 device=device,
             )
 
@@ -233,6 +238,7 @@ class DraftModelSpeculator(BaseSpeculator):
         num_query_per_req: int = 1,
         causal: bool | Mapping[int, bool] = True,
         query_start_loc_np: np.ndarray | None = None,
+        dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         if query_start_loc_np is not None:
             # Non-uniform query layout (e.g. multi-module MTP's mixed
@@ -277,6 +283,11 @@ class DraftModelSpeculator(BaseSpeculator):
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
+            dcp_local_seq_lens=(
+                None
+                if dcp_local_seq_lens is None
+                else dcp_local_seq_lens[:num_reqs_padded]
+            ),
             max_seq_len=self.draft_max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
@@ -285,6 +296,13 @@ class DraftModelSpeculator(BaseSpeculator):
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
         )
         return attn_metadata
+
+    def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
+        """Dtype and fill for the cached proposal distribution.
+
+        Speculators that write only a subset of columns each step override this.
+        """
+        return vllm_config.model_config.head_dtype, 0.0
 
     def _validate_local_argmax_reduction(self) -> None:
         if not self.use_local_argmax_reduction:
@@ -332,8 +350,8 @@ class DraftModelSpeculator(BaseSpeculator):
                 seeds,
                 positions + 1,
                 apply_temperature=True,
-                output_processed_logits=draft_logits,
-                output_processed_logits_col=draft_step,
+                logits_cache=draft_logits,
+                logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
         return self._greedy_sample_draft(hidden_states)

@@ -11,10 +11,17 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+    convert_flashinfer_moe_output,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
+from vllm.model_executor.layers.fused_moe.utils import (
+    fi_moe_largest_bucket,
+    trtllm_moe_pack_topk_ids_weights,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
     has_flashinfer_situ_activation,
@@ -112,8 +119,6 @@ class TrtLlmMxfp4ExpertsBase:
                 device=device,
             )
             self.gemm1_clamp_limit = None
-
-        self.max_capture_size = moe_config.max_capture_size
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -214,7 +219,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         from flashinfer import trtllm_fp4_block_scale_moe
 
         if a1q_scale is not None:
@@ -224,18 +229,22 @@ class TrtLlmMxfp4ExpertsMonolithic(
             assert hidden_states.dtype == torch.bfloat16
             x_quant = hidden_states
             x_scale = None
-        output = torch.empty(
-            *hidden_states.shape[:-1],
-            self.hidden_dim_unpadded,
-            dtype=torch.bfloat16,
-            device=hidden_states.device,
-        )
+        num_tokens = hidden_states.shape[0]
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        finalized_output = None
+        if not defer:
+            finalized_output = torch.empty(
+                *hidden_states.shape[:-1],
+                self.hidden_dim_unpadded,
+                dtype=torch.bfloat16,
+                device=hidden_states.device,
+            )
 
         routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
+            num_tokens=num_tokens,
             device=hidden_states.device,
         )
-        trtllm_fp4_block_scale_moe(
+        flashinfer_output = trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=x_quant,
@@ -261,16 +270,21 @@ class TrtLlmMxfp4ExpertsMonolithic(
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
-            do_finalize=True,
+            do_finalize=not defer,
             activation_type=self._flashinfer_activation_type(activation),
-            tune_max_num_tokens=max(self.max_capture_size, 1),
-            output=output,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            output=finalized_output,
             routing_replay_out=routing_replay_out,
         )
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=not defer,
+            num_tokens=num_tokens,
+            top_k=self.topk,
+            finalized_output=finalized_output,
         )
-        return output
+        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        return routed_output
 
 
 class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModular):
@@ -382,7 +396,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             enable_pdl=True,
             activation_type=self._flashinfer_activation_type(activation),
             output=output,
-            tune_max_num_tokens=max(self.max_capture_size, 1),
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
 
     def apply(
