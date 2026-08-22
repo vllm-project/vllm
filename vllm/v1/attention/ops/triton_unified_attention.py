@@ -995,6 +995,18 @@ def unified_attention(
         TILE_SIZE_PREFILL = min(TILE_SIZE_PREFILL, block_size)
         TILE_SIZE_DECODE = min(TILE_SIZE_DECODE, block_size)
 
+    # [PATCH-TURING-TILE] pre-Ampere(Turing sm_75 등)는 블록당 공유메모리가 64KB 로,
+    # head_size=512(gemma4 full-attn) 의 KV 타일(TILE x 512 x fp16 x 2)이 이를 넘겨
+    # triton OutOfResources(shared memory) 로 죽는다. TILE 을 16 으로 줄여 64KB 안에
+    # 맞춘다(정확도 무관, 처리량만 손해). Ampere+ 는 100KB+ 라 조건에 안 걸린다.
+    if head_size >= 512:
+        if (
+            torch.cuda.is_available()
+            and torch.cuda.get_device_capability()[0] < 8
+        ):
+            TILE_SIZE_PREFILL = min(TILE_SIZE_PREFILL, 16)
+            TILE_SIZE_DECODE = min(TILE_SIZE_DECODE, 16)
+
     # Tensor descriptors for Q load / output store require every element
     # of ``block_shape`` to be a power of 2.  ``num_queries_per_kv`` is
     # not always pow2 (e.g. Qwen2-7B: 28 / 4 = 7), so gate the Q/O paths
