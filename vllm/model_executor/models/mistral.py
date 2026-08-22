@@ -106,6 +106,18 @@ class MistralAttention(LlamaAttention):
         llama_4_scaling_config: dict[str, int | float | str] | None = getattr(
             config, "llama_4_scaling", None
         )
+        # Fall back to Transformers-native nested rope_parameters fields
+        # (e.g. Ministral3Config) when top-level llama_4_scaling is absent.
+        if llama_4_scaling_config is None:
+            rope_params = getattr(config, "rope_parameters", None) or {}
+            if "llama_4_scaling_beta" in rope_params:
+                llama_4_scaling_config = {
+                    "beta": rope_params["llama_4_scaling_beta"],
+                    "original_max_position_embeddings": rope_params.get(
+                        "original_max_position_embeddings",
+                        config.max_position_embeddings,
+                    ),
+                }
         self.do_llama_4_scaling = llama_4_scaling_config is not None
         if self.do_llama_4_scaling:
             assert llama_4_scaling_config is not None
