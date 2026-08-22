@@ -924,6 +924,8 @@ class GlmAsrForConditionalGeneration(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    supports_tower_connector_lora = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
