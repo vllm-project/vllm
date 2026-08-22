@@ -37,7 +37,9 @@ PROMPT_LEN = 2002
 MAMBA_GROUP_ID = 1
 
 
-def _make_hybrid_kv_cache_manager() -> KVCacheManager:
+def _make_hybrid_kv_cache_manager(
+    num_prefill_checkpoint_blocks: int = 0,
+) -> KVCacheManager:
     config = KVCacheConfig(
         num_blocks=10000,
         kv_cache_tensors=[],
@@ -59,6 +61,7 @@ def _make_hybrid_kv_cache_manager() -> KVCacheManager:
                     dtypes=(torch.float32,),
                     mamba_cache_mode="align",
                     num_speculative_blocks=NUM_SPEC,
+                    num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
                 ),
             ),
         ],
@@ -78,6 +81,7 @@ def _split(
     num_new_tokens: int,
     use_eagle: bool = True,
     partial_hit: bool = False,
+    num_prefill_checkpoint_blocks: int = 0,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     stub = SimpleNamespace(
@@ -88,8 +92,40 @@ def _split(
         # `prefix_match_unit` finer than the block size (#46384).
         mamba_partial_cache_hit=partial_hit,
         hash_block_size=ATTN_BLOCK_SIZE,
+        mamba_has_prefill_checkpoint_blocks=(
+            num_prefill_checkpoint_blocks > 0 and not use_eagle
+        ),
     )
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
+
+
+@pytest.mark.parametrize(
+    ("prompt_len", "num_new_tokens", "use_eagle", "expected"),
+    [
+        (2002, 2002, False, 2002),
+        (3602, 2000, False, 2000),
+        (3602, 3602, True, MAMBA_BLOCK_SIZE),
+    ],
+)
+def test_internal_checkpoint_split(
+    prompt_len: int, num_new_tokens: int, use_eagle: bool, expected: int
+) -> None:
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    assert (
+        _split(
+            request,
+            num_new_tokens,
+            use_eagle=use_eagle,
+            num_prefill_checkpoint_blocks=1,
+        )
+        == expected
+    )
+    if not use_eagle:
+        manager = _make_hybrid_kv_cache_manager(num_prefill_checkpoint_blocks=1)
+        assert manager.allocate_slots(request, expected) is not None
+        mamba_manager = manager.coordinator.single_type_managers[MAMBA_GROUP_ID]
+        blocks = mamba_manager.req_to_blocks[request.request_id]
+        assert all(not block.is_null for block in blocks)  # checkpoint + running state
 
 
 def _run_chunked_prefill(
@@ -211,8 +247,15 @@ def test_poisoning_is_block_size_independent(
 
 @pytest.mark.parametrize("partial_hit", [False, True])
 @pytest.mark.parametrize("resume_at", [331, 1599, 1601, 2531, 3011])
+@pytest.mark.parametrize(
+    ("num_prefill_checkpoint_blocks", "use_eagle"),
+    [(0, True), (1, False)],
+)
 def test_unaligned_resume_never_runs_past_its_block(
-    partial_hit: bool, resume_at: int
+    partial_hit: bool,
+    resume_at: int,
+    num_prefill_checkpoint_blocks: int,
+    use_eagle: bool,
 ) -> None:
     """A prefill resuming mid-block must re-align before crossing a boundary.
 
@@ -227,7 +270,13 @@ def test_unaligned_resume_never_runs_past_its_block(
     pos, ends = resume_at, []
     while pos < prompt_len:
         request.num_computed_tokens = pos
-        num_new = _split(request, prompt_len - pos, partial_hit=partial_hit)
+        num_new = _split(
+            request,
+            prompt_len - pos,
+            use_eagle=use_eagle,
+            partial_hit=partial_hit,
+            num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
+        )
         assert num_new > 0, f"no progress at {pos}"
         if pos % MAMBA_BLOCK_SIZE != 0:
             block_end = (pos // MAMBA_BLOCK_SIZE + 1) * MAMBA_BLOCK_SIZE
