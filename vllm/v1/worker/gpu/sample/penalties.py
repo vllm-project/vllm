@@ -35,10 +35,18 @@ class PenaltiesState:
             dtype=torch.int32,
             device=self.device,
         )
-        # TODO(woosuk): This tensor is rarely used but can be very large, taking up
-        # GBs of GPU memory. Optimize the memory usage.
+        # Two uint16 counts share one int32 atomic word during initialization.
+        # Fall back to int32 when a count could exceed the uint16 range.
+        use_uint16_counts = req_states.max_model_len <= torch.iinfo(torch.uint16).max
+        output_counts_dtype = torch.uint16 if use_uint16_counts else torch.int32
+        output_counts_width = (
+            cdiv(self.vocab_size, 2) * 2 if use_uint16_counts else self.vocab_size
+        )
         self.output_bin_counts = torch.zeros(
-            max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
+            max_num_reqs,
+            output_counts_width,
+            dtype=output_counts_dtype,
+            device=self.device,
         )
 
         self._new_penalties_reqs: list[int] = []
@@ -144,7 +152,7 @@ def _penalties_kernel(
         output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + block,
         mask=mask,
         other=0,
-    )
+    ).to(tl.int32)
 
     # Accumulate draft token counts from previous positions directly into
     # output_bin_counts (preserves its native tensor layout, avoiding an
@@ -227,6 +235,7 @@ def _bincount_kernel(
     output_bin_counts_ptr,
     output_bin_counts_stride,
     BLOCK_SIZE: tl.constexpr,
+    PACKED_OUTPUT_COUNTS: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
@@ -258,13 +267,20 @@ def _bincount_kernel(
         output_tokens = tl.load(
             all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask
         )
-        tl.atomic_add(
+        if PACKED_OUTPUT_COUNTS:
+            # Store even/odd token counts in the low/high uint16 lane.
+            # Counts below 2**16 cannot carry into the adjacent lane.
+            output_idx = output_tokens // 2
+            increment = 1 << ((output_tokens & 1) * 16)
+        else:
+            output_idx = output_tokens
+            increment = 1
+        output_ptr = (
             output_bin_counts_ptr
             + req_state_idx * output_bin_counts_stride
-            + output_tokens,
-            1,
-            mask=mask,
+            + output_idx
         )
+        tl.atomic_add(output_ptr, increment, mask=mask)
 
 
 def bincount(
@@ -276,10 +292,16 @@ def bincount(
     output_bin_counts: torch.Tensor,
     max_prefill_len: int,
 ) -> None:
+    packed_output_counts = output_bin_counts.dtype == torch.uint16
+    bincount_output = (
+        output_bin_counts.view(torch.int32)
+        if packed_output_counts
+        else output_bin_counts
+    )
     # Use index_fill_ instead of `tensor[idx] = 0` to avoid sync.
     idx_long = expanded_idx_mapping.long()
     prompt_bin_mask.index_fill_(0, idx_long, 0)
-    output_bin_counts.index_fill_(0, idx_long, 0)
+    bincount_output.index_fill_(0, idx_long, 0)
     num_tokens = expanded_idx_mapping.shape[0]
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
@@ -291,9 +313,10 @@ def bincount(
         prefill_len,
         prompt_bin_mask,
         prompt_bin_mask.stride(0),
-        output_bin_counts,
-        output_bin_counts.stride(0),
+        bincount_output,
+        bincount_output.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
+        PACKED_OUTPUT_COUNTS=packed_output_counts,
     )
 
 
