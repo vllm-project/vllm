@@ -12,6 +12,49 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
+def _is_stream_capturing() -> bool:
+    try:
+        return (
+            current_platform.is_cuda_alike()
+            and torch.cuda.is_current_stream_capturing()
+        )
+    except Exception:
+        return False
+
+
+def _trim_dispatch_output(
+    dispatch_a1: torch.Tensor,
+    dispatch_scale: torch.Tensor | None,
+    dispatch_ids: torch.Tensor,
+    dispatch_weights: torch.Tensor,
+    dispatch_recv_token_num: torch.Tensor,
+    ep_size: int,
+    topk: int,
+    input_num_tokens: int,
+) -> tuple[
+    torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor
+]:
+    orig_rows = dispatch_a1.shape[0]
+
+    if _is_stream_capturing():
+        valid_rows = input_num_tokens * topk * ep_size
+    elif dispatch_recv_token_num is not None and dispatch_recv_token_num.numel() > 0:
+        valid_rows = int(dispatch_recv_token_num.reshape(-1)[0].item())
+    else:
+        return dispatch_a1, dispatch_scale, dispatch_ids, dispatch_weights
+
+    valid_rows = max(0, min(valid_rows, orig_rows))
+    if valid_rows <= 0 or valid_rows >= orig_rows:
+        return dispatch_a1, dispatch_scale, dispatch_ids, dispatch_weights
+
+    dispatch_a1 = dispatch_a1[:valid_rows]
+    dispatch_ids = dispatch_ids[:valid_rows]
+    dispatch_weights = dispatch_weights[:valid_rows]
+    if dispatch_scale is not None:
+        dispatch_scale = dispatch_scale[:valid_rows]
+    return dispatch_a1, dispatch_scale, dispatch_ids, dispatch_weights
+
+
 class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     Prepare/Finalize using MoRI kernels.
@@ -93,6 +136,19 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             dispatch_ids,
             dispatch_recv_token_num,
         ) = self.mori_op.dispatch(a1, topk_weights, scale, topk_ids)
+
+        dispatch_a1, dispatch_scale, dispatch_ids, dispatch_weights = (
+            _trim_dispatch_output(
+                dispatch_a1,
+                dispatch_scale,
+                dispatch_ids,
+                dispatch_weights,
+                dispatch_recv_token_num,
+                ep_size=self.num_dispatchers_,
+                topk=topk_ids.shape[1],
+                input_num_tokens=a1.shape[0],
+            )
+        )
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=dispatch_recv_token_num, expert_num_tokens_cpu=None

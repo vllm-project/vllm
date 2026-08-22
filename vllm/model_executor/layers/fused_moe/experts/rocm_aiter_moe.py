@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -28,6 +29,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+from vllm.platforms import current_platform
 
 
 class QuantMethod(IntEnum):
@@ -51,6 +53,35 @@ class ActivationMethod(IntEnum):
     # without importing the ActivationType enum from AITER globally.
     SILU = 0
     GELU = 1
+
+
+def _is_uniform_full_graph_batch() -> bool:
+    # Under full-cudagraph capture/replay every rank is padded to the same
+    # static token count -- used below to pick a capture-safe trim bound
+    # instead of a live `.item()` count.
+    from vllm.config import CUDAGraphMode
+
+    if not is_forward_context_available():
+        return False
+    forward_context = get_forward_context()
+    batch_descriptor = forward_context.batch_descriptor
+    return (
+        forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+        and batch_descriptor is not None
+        and batch_descriptor.uniform
+    )
+
+
+def _is_stream_capturing() -> bool:
+    # torch.cuda.is_current_stream_capturing() is unavailable on non-CUDA
+    # (XPU) torch; guard the same way fused_batched_moe.py does.
+    try:
+        return (
+            current_platform.is_cuda_alike()
+            and torch.cuda.is_current_stream_capturing()
+        )
+    except Exception:
+        return False
 
 
 aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -543,22 +574,85 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         else:
             num_local_tokens = None
 
+        # AITER's fused_moe silently corrupts output (all-zero rows) when its
+        # input buffer is much larger than the real valid-token count --
+        # common with EP dispatchers like MoRI that pre-allocate worst-case
+        # buffers. Trim to the valid prefix before calling AITER, then
+        # scatter the result into a zero-filled full-size buffer (padding
+        # rows are never read downstream).
+        orig_num_tokens = hidden_states.shape[0]
+        if num_local_tokens is None:
+            valid_num_tokens = orig_num_tokens
+        elif _is_uniform_full_graph_batch():
+            # `.item()` is unsafe mid-capture and a live-count shape breaks
+            # replay, so use a static worst-case bound instead: each of this
+            # rank's `graph_bs` tokens can select up to `topk` experts, and
+            # each selection can land on any of `dispatch_group_size` peer
+            # ranks, so a rank can receive up to
+            # `graph_bs * topk * dispatch_group_size` rows. A narrower bound
+            # that dropped the `topk` factor (assuming multiple topk
+            # selections landing on the same destination rank always get
+            # deduplicated into one send) is not safe to assume in general
+            # and risks under-counting real traffic.
+            batch_descriptor = get_forward_context().batch_descriptor
+            dispatch_group_size = (
+                self.moe_config.ep_size
+                if self.moe_config.use_ep
+                else self.moe_config.dp_size
+            )
+            valid_num_tokens = min(
+                batch_descriptor.num_tokens
+                * self.moe_config.experts_per_token
+                * dispatch_group_size,
+                orig_num_tokens,
+            )
+        elif _is_stream_capturing():
+            # Mid-capture but not the uniform-full-graph case handled above
+            # (e.g. PIECEWISE cudagraphs, which can still wrap this call in a
+            # captured region): `.item()` is illegal here too, and there is no
+            # safe static bound available, so skip trimming for this call.
+            valid_num_tokens = orig_num_tokens
+        else:
+            valid_num_tokens = int(num_local_tokens[0].item())
+        needs_trim = valid_num_tokens < orig_num_tokens
+        if needs_trim:
+            hidden_states_in = hidden_states[:valid_num_tokens]
+            topk_weights_in = topk_weights[:valid_num_tokens]
+            topk_ids_in = topk_ids[:valid_num_tokens]
+            if (
+                a1q_scale is not None
+                and a1q_scale.dim() > 0
+                and a1q_scale.shape[0] == orig_num_tokens
+            ):
+                a1q_scale_in = a1q_scale[:valid_num_tokens]
+            else:
+                a1q_scale_in = a1q_scale
+        else:
+            hidden_states_in = hidden_states
+            topk_weights_in = topk_weights
+            topk_ids_in = topk_ids
+            a1q_scale_in = a1q_scale
+
         result = rocm_aiter_fused_experts(
-            hidden_states=hidden_states,
+            hidden_states=hidden_states_in,
             w1=w1,
             w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
+            topk_weights=topk_weights_in,
+            topk_ids=topk_ids_in,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_mask=expert_map,
             quant_config=self.quant_config,
             moe_config=self.moe_config,
-            a1q_scale=a1q_scale,
+            a1q_scale=a1q_scale_in,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
         )
+        if needs_trim:
+            output.zero_()
+            output[:valid_num_tokens] = result
+            return
         # avoid redundant copy when output is a view of the result
         if (
             output.shape == result.shape
