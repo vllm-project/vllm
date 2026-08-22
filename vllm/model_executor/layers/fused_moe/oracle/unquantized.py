@@ -301,7 +301,6 @@ def select_unquantized_moe_backend(
         skip_aiter_moe = (
             not envs.VLLM_ROCM_USE_AITER
             or not envs.VLLM_ROCM_USE_AITER_MOE
-            or rocm_aiter_ops.is_rdna_aiter_enabled()
         )
         if skip_aiter_moe:
             if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
