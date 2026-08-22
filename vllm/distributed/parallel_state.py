@@ -161,6 +161,22 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     return torch.empty_like(tensor)
 
 
+def all_reduce_out(
+    tensor: torch.Tensor, out: torch.Tensor, group_name: str
+) -> None:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    group._all_reduce_out(tensor, out)
+
+
+def all_reduce_out_fake(
+    tensor: torch.Tensor, out: torch.Tensor, group_name: str
+) -> None:
+    return
+
+
 def reduce_scatter(
     tensor: torch.Tensor, dim: int, world_size: int, group_name: str
 ) -> torch.Tensor:
@@ -353,6 +369,13 @@ direct_register_custom_op(
     op_name="all_reduce",
     op_func=all_reduce,
     fake_impl=all_reduce_fake,
+)
+
+direct_register_custom_op(
+    op_name="all_reduce_out",
+    op_func=all_reduce_out,
+    mutates_args=["out"],
+    fake_impl=all_reduce_out_fake,
 )
 
 direct_register_custom_op(
@@ -687,6 +710,26 @@ class GroupCoordinator:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_reduce(input_)
+
+    def all_reduce_out(self, input_: torch.Tensor, out: torch.Tensor) -> None:
+        if self.world_size == 1:
+            out.copy_(input_)
+            return
+        if self.use_custom_op_call:
+            torch.ops.vllm.all_reduce_out(
+                input_, out, group_name=self.unique_name
+            )
+        else:
+            self._all_reduce_out(input_, out)
+
+    def _all_reduce_out(self, input_: torch.Tensor, out: torch.Tensor) -> None:
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        all_reduce_out = getattr(self.device_communicator, "all_reduce_out", None)
+        if all_reduce_out is None:
+            out.copy_(self.device_communicator.all_reduce(input_))
+            return
+        all_reduce_out(input_, out)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
