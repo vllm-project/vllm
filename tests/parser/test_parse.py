@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.tool_parsers.abstract_tool_parser import ExtractedToolCallInformation
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 
@@ -140,6 +141,25 @@ def test_parse_plain_text_no_reasoning_parser(tokenizer, reasoning, tool):
     assert content == PLAIN_TEXT
     assert tool_calls is not None
     assert len(tool_calls) == 0
+
+
+def test_plain_tool_parser_no_call_keeps_original_content(tokenizer, monkeypatch):
+    parser = make_parser(tokenizer, tool=True)
+    request = make_request(tools=TOOLS, tool_choice="auto")
+    monkeypatch.setattr(
+        parser.tool_parser,
+        "extract_tool_calls",
+        lambda *_args, **_kwargs: ExtractedToolCallInformation(
+            tools_called=False,
+            tool_calls=[],
+            content="transformed content",
+        ),
+    )
+
+    _, content, tool_calls = parser.parse(PLAIN_TEXT, request, enable_auto_tools=True)
+
+    assert content == PLAIN_TEXT
+    assert tool_calls is None
 
 
 @pytest.mark.parametrize(

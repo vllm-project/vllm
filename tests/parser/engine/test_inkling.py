@@ -166,6 +166,15 @@ def _delegating(mock_tokenizer, tools=None):
     return parser_cls(mock_tokenizer, tools or [])
 
 
+def _tool_only_delegating(mock_tokenizer, tools=None):
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="inkling",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    return parser_cls(mock_tokenizer, tools or [])
+
+
 def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
     """Stream ``text`` through ``DelegatingParser.parse_delta``, ``chunk_size``
     tokens per delta; return ``(content, reasoning, ordered tool names,
@@ -595,6 +604,19 @@ class TestRegisteredAdapters:
         assert result.tools_called
         assert result.tool_calls[0].function.name == "f"
         assert json.loads(result.tool_calls[0].function.arguments) == {"a": 1}
+
+
+class TestDelegatingToolOnly:
+    def test_plain_text_non_streaming(self, mock_tokenizer, mock_request):
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        _, content, calls = _tool_only_delegating(mock_tokenizer, tools).parse(
+            f"{TEXT_START}The answer is 42.{END_MESSAGE}",
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert content == "The answer is 42."
+        assert not calls
 
 
 class TestDelegatingTwoPass:
