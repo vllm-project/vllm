@@ -180,6 +180,7 @@ class APIServerProcessManager:
         target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
         tensor_queue: Queue | None = None,
+        snapshot_monitor: object | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -199,6 +200,7 @@ class APIServerProcessManager:
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
+            snapshot_monitor: Optional monitor shared by API server processes
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -221,6 +223,10 @@ class APIServerProcessManager:
                 client_config["stats_update_address"] = stats_update_address
             if tensor_queue is not None:
                 client_config["tensor_queue"] = tensor_queue
+            if snapshot_monitor is not None:
+                # Pass the same monitor to every spawned API worker; its
+                # multiprocessing events and lock retain shared state.
+                client_config["snapshot_monitor"] = snapshot_monitor
 
             parent_recv, child_send = spawn_context.Pipe(duplex=False)
             self._address_pipes.append(parent_recv)

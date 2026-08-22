@@ -56,6 +56,7 @@ from vllm.config import (
     ProfilerConfig,
     ReasoningConfig,
     SchedulerConfig,
+    SnapshotConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
     UVAOffloadConfig,
@@ -607,6 +608,7 @@ class EngineArgs:
     structured_outputs_config: StructuredOutputsConfig = get_field(
         VllmConfig, "structured_outputs_config"
     )
+    snapshot_config: SnapshotConfig | None = get_field(VllmConfig, "snapshot_config")
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     reasoning_parser_plugin: str | None = None
 
@@ -1491,6 +1493,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
         )
+        vllm_group.add_argument("--snapshot-config", **vllm_kwargs["snapshot_config"])
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
@@ -2246,6 +2249,7 @@ class EngineArgs:
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
             reasoning_config=self.reasoning_config,
+            snapshot_config=self.snapshot_config,
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,

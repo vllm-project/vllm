@@ -12,6 +12,7 @@ from vllm.utils.network_utils import (
     join_host_port,
     make_zmq_path,
     make_zmq_socket,
+    replace_zmq_tcp_host,
     split_host_port,
     split_zmq_path,
 )
@@ -103,6 +104,18 @@ def test_make_zmq_socket_ipv6():
 def test_make_zmq_path():
     assert make_zmq_path("tcp", "127.0.0.1", "5555") == "tcp://127.0.0.1:5555"
     assert make_zmq_path("tcp", "::1", "5555") == "tcp://[::1]:5555"
+
+
+@pytest.mark.parametrize(
+    "path,host,expected",
+    [
+        ("tcp://10.0.0.1:5555", "10.0.0.2", "tcp://10.0.0.2:5555"),
+        ("tcp://10.0.0.1:5555", "::1", "tcp://[::1]:5555"),
+        ("ipc://some_path", "10.0.0.2", "ipc://some_path"),
+    ],
+)
+def test_replace_zmq_tcp_host(path, host, expected):
+    assert replace_zmq_tcp_host(path, host) == expected
 
 
 def test_get_tcp_uri():

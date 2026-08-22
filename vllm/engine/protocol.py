@@ -171,6 +171,25 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def suspend(self, model_save_path: str | None = None) -> None:
+        """Suspend the engine"""
+        ...
+
+    @abstractmethod
+    async def resume(
+        self,
+        data_parallel_master_ip: str | None = None,
+        model_path: str | None = None,
+    ) -> None:
+        """Resume the engine"""
+        ...
+
+    @abstractmethod
+    async def device_unlock(self) -> None:
+        """Unlock devices after snapshot checkpoint."""
+        ...
+
+    @abstractmethod
     async def is_sleeping(self) -> bool:
         """Check whether the engine is sleeping"""
         ...
