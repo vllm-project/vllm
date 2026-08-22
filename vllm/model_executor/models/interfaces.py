@@ -167,6 +167,12 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     `multimodal_config.mm_device_do_normalize`.
     """
 
+    supports_tower_connector_lora: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `lora_config.enable_tower_connector_lora`.
+    """
+
     requires_raw_input_tokens: ClassVar[bool] = False
     """
     A flag that indicates this model processes input id tokens
