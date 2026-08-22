@@ -7,13 +7,21 @@ Tests for HF3FS KV Connector high-level components:
 """
 
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
+    HF3FSKVConnector,
     HF3FSKVConnectorStats,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
+    HF3FSConnectorMetadata,
+    HF3FSRequestMetadata,
+    LoadBlockInfo,
+    RequestSchedulingState,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
     Hf3fsClient as MockHf3fsClient,
@@ -28,6 +36,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client 
 def hf3fs_stats():
     """Fresh HF3FSKVConnectorStats instance."""
     return HF3FSKVConnectorStats()
+
+
+def _make_hash_connector() -> HF3FSKVConnector:
+    connector = object.__new__(HF3FSKVConnector)
+    connector._block_size = 4
+    return connector
 
 
 def _make_cuda_event():
@@ -228,3 +242,104 @@ class TestHF3FSKVConnectorStats:
         clone = hf3fs_stats.clone_and_reset()
         assert clone.data["num_transfer_task"] == 2
         assert hf3fs_stats.is_empty()
+
+
+# ===========================================================================
+# TestHF3FSCacheSaltIsolation
+# ===========================================================================
+
+
+def _request_metadata(
+    cache_salt: str, load_op: LoadBlockInfo | None = None
+) -> HF3FSRequestMetadata:
+    state = RequestSchedulingState(
+        request_id=cache_salt,
+        token_ids=list(range(8)),
+        allocated_block_ids=[10, 11],
+        cache_salt=cache_salt,
+    )
+    request_metadata = HF3FSRequestMetadata.from_scheduling_state(
+        state, 4, load_op=load_op
+    )
+    assert request_metadata is not None
+    return request_metadata
+
+
+def _worker_hashes(
+    request_metadata: HF3FSRequestMetadata, *, load: bool = False
+) -> list[str]:
+    metadata = HF3FSConnectorMetadata()
+    metadata.add_request(request_metadata)
+
+    connector = _make_hash_connector()
+    connector._max_device_buffer_count = 8
+    connector._connector_metadata = metadata
+    connector._async_manager = MagicMock()
+
+    if load:
+        connector.start_load_kv(None)
+        submit = connector._async_manager.submit_load_operation
+    else:
+        connector.wait_for_save()
+        submit = connector._async_manager.submit_save_operation
+
+    submit.assert_called_once()
+    assert metadata.requests[0].cache_salt == request_metadata.cache_salt
+    return submit.call_args.args[2]
+
+
+class TestHF3FSCacheSaltIsolation:
+    """Verify cache_salt isolation through scheduler and worker paths."""
+
+    def test_scheduler_lookup_and_hash_chain_are_isolated_by_salt(self):
+        connector = _make_hash_connector()
+        prompt_token_ids = list(range(9))
+        tenant_a_keys = connector._generate_block_hashes(
+            prompt_token_ids[:8], 0, cache_salt="tenant-A"
+        )
+        tenant_b_keys = connector._generate_block_hashes(
+            prompt_token_ids[:8], 0, cache_salt="tenant-B"
+        )
+        assert connector._generate_block_hashes(list(range(4)), 0)[0] == (
+            "44aad182b5a8a40926162f81a84f091f"
+        )
+        assert all(a != b for a, b in zip(tenant_a_keys, tenant_b_keys))
+
+        stored_keys = set(tenant_a_keys)
+        connector._scheduling_states = {}
+        connector._metadata_client = MagicMock()
+        connector._metadata_client.batch_key_exists.side_effect = lambda hashes: [
+            block_hash in stored_keys for block_hash in hashes
+        ]
+
+        tenant_a = SimpleNamespace(
+            request_id="request-a",
+            prompt_token_ids=prompt_token_ids,
+            cache_salt="tenant-A",
+        )
+        tenant_b = SimpleNamespace(
+            request_id="request-b",
+            prompt_token_ids=prompt_token_ids,
+            cache_salt="tenant-B",
+        )
+
+        assert connector.get_num_new_matched_tokens(tenant_a, 0) == (8, True)
+        assert connector.get_num_new_matched_tokens(tenant_b, 0) == (0, False)
+
+    def test_salt_survives_worker_save_and_load_handoff(self):
+        tenant_a_save = _worker_hashes(_request_metadata("tenant-A"))
+        expected_hashes = _make_hash_connector()._generate_block_hashes(
+            list(range(8)), 0, cache_salt="tenant-A"
+        )
+        assert tenant_a_save == expected_hashes
+
+        load_op = LoadBlockInfo(
+            num_computed_blocks=1,
+            num_blocks_to_load=1,
+            need_fetch_block_ids=[11],
+        )
+        tenant_a_load = _worker_hashes(
+            _request_metadata("tenant-A", load_op), load=True
+        )
+
+        assert tenant_a_load == expected_hashes[1:]
