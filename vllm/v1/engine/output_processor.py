@@ -648,6 +648,13 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
+            if (
+                engine_core_output.remote_kv_wait_time is not None
+                and req_state.stats is not None
+            ):
+                req_state.stats.remote_kv_wait_time = (
+                    engine_core_output.remote_kv_wait_time
+                )
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
