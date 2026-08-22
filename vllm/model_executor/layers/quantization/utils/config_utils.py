@@ -32,6 +32,7 @@ def is_shared_expert_quant_fse_compatible(
     if quant_config is None:
         return True, None
 
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
 
@@ -143,6 +144,42 @@ def is_shared_expert_quant_fse_compatible(
             "Quark uses different quantization configurations for routed and "
             f"shared experts at {shared_expert_prefix}",
         )
+
+    # NOTE: must stay below the DeepseekV4FP8Config branch, which subclasses
+    # Fp8Config and needs its own MXFP4 handling.
+    if isinstance(quant_config, Fp8Config):
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            is_layer_skipped,
+        )
+
+        # Only fp8-serialized checkpoints have been validated with FSE.
+        if not quant_config.is_checkpoint_fp8_serialized:
+            return False, "FP8 FSE requires an fp8-serialized checkpoint"
+
+        # Fp8Config applies a single `weight_block_size` and `activation_scheme`
+        # to every layer it quantizes, so routed and shared experts share one
+        # quantization config as long as they are either both quantized or both
+        # listed in `ignored_layers`.
+        def is_fse_layer_skipped(prefix: str) -> bool:
+            return is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=quant_config.ignored_layers,
+                fused_mapping=quant_config.packed_modules_mapping,
+                match_mode=quant_config.ignored_layers_match_mode,
+            )
+
+        expert_skipped = is_fse_layer_skipped(expert_prefix)
+        if any(
+            is_fse_layer_skipped(f"{shared_expert_prefix}.{projection_name}")
+            != expert_skipped
+            for projection_name in projection_names
+        ):
+            return (
+                False,
+                "FP8 uses different quantization configurations for routed and "
+                f"shared experts at {shared_expert_prefix}",
+            )
+        return True, None
 
     # TODO: Extend FSE support detection to other quantization methods. Typically,
     # one would check that the experts and shared_experts use the same
