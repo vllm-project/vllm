@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
     tensor_model_parallel_gather,
 )
 from vllm.logger import init_logger
@@ -284,6 +285,202 @@ class LogitsProcessor(PluggableLayer):
         if self.soft_cap is not None:
             values = torch.tanh(values / self.soft_cap) * self.soft_cap
         return ids, values
+
+    def get_prompt_logprobs(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_states: torch.Tensor,
+        target_token_ids: torch.Tensor,
+        num_logprobs: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute prompt log probabilities from TP-local LM-head shards.
+
+        Args:
+            lm_head: Unquantized vocabulary-parallel LM head.
+            hidden_states: Prompt hidden states with shape ``[M, H]`` in BF16.
+            target_token_ids: Global prompt target token IDs with shape ``[M]``.
+            num_logprobs: Number of global top tokens to return, in ``[0, 32]``.
+
+        Returns:
+            Target and global top-K prompt log probabilities.
+        """
+        # The current register selection network and compact local state are
+        # specialized for at most 32 candidates per row.
+        if not 0 <= num_logprobs <= 32:
+            raise ValueError("num_logprobs must be in [0, 32]")
+
+        from vllm.model_executor.kernels.linear.cute_dsl.lm_head_logprobs import (
+            lm_head_logprobs,
+            merge_tp_prompt_logprobs,
+            prompt_target_logits,
+        )
+
+        hidden_states = hidden_states.contiguous()
+        target_token_ids = target_token_ids.contiguous()
+        shard_indices = lm_head.shard_indices
+        vocab_start = shard_indices.org_vocab_start_index
+        vocab_end = shard_indices.org_vocab_end_index
+        target_is_local = (target_token_ids >= vocab_start) & (
+            target_token_ids < vocab_end
+        )
+        local_target_ids = torch.where(
+            target_is_local,
+            target_token_ids - vocab_start,
+            -1,
+        )
+
+        target_logits = prompt_target_logits(
+            hidden_states,
+            lm_head.weight,
+            local_target_ids,
+        )
+        if lm_head.tp_size > 1 and hidden_states.shape[0] > 0:
+            target_logits = tensor_model_parallel_all_reduce(target_logits)
+
+        local_output = lm_head_logprobs(
+            hidden_states,
+            lm_head.weight,
+            local_target_ids,
+            target_logits,
+            num_logprobs,
+            valid_vocab_size=shard_indices.num_org_elements,
+            global_vocab_start=vocab_start,
+        )
+        if hidden_states.shape[0] == 0:
+            return merge_tp_prompt_logprobs(
+                local_output.topk_values.unsqueeze(0),
+                local_output.topk_ids.unsqueeze(0),
+                local_output.lse.unsqueeze(0),
+                local_output.rank_count.unsqueeze(0),
+                target_token_ids,
+                target_logits,
+                num_logprobs,
+            )
+
+        # INT32 IDs and ranks are bit-cast into FP32 words so all compact state
+        # can use one homogeneous all-gather without losing integer precision.
+        compact = torch.cat(
+            (
+                local_output.topk_values,
+                local_output.topk_ids.view(torch.float32),
+                local_output.lse[:, None],
+                local_output.rank_count.view(torch.float32)[:, None],
+            ),
+            dim=-1,
+        )
+        if lm_head.tp_size > 1:
+            compact = tensor_model_parallel_all_gather(compact, dim=0)
+
+        compact_width = 2 * num_logprobs + 2
+        tp_compact = compact.view(
+            lm_head.tp_size, hidden_states.shape[0], compact_width
+        )
+        tp_topk_values = tp_compact[..., :num_logprobs]
+        tp_topk_ids = tp_compact[..., num_logprobs : 2 * num_logprobs].view(torch.int32)
+        tp_local_lse = tp_compact[..., -2]
+        tp_rank_count = tp_compact[..., -1:].view(torch.int32).squeeze(-1)
+        return merge_tp_prompt_logprobs(
+            tp_topk_values,
+            tp_topk_ids,
+            tp_local_lse,
+            tp_rank_count,
+            target_token_ids,
+            target_logits,
+            num_logprobs,
+        )
+
+    def validate_prompt_logprobs(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_dtype: torch.dtype,
+    ) -> None:
+        """Validate static requirements of the compact prompt-logprobs path."""
+        # This path performs the LM-head projection itself. Precomputed logits
+        # have no hidden states or local weight shard for the fused kernels.
+        if self.logits_as_input:
+            raise ValueError("prompt logprobs require an LM-head projection")
+
+        # The fused projection currently emits the raw BF16 dot product. Match
+        # forward() semantics by rejecting post-projection transforms and FP32
+        # head overrides until the kernels implement them directly.
+        if self.scale != 1.0 or self.soft_cap is not None:
+            raise ValueError("prompt logprobs require unmodified LM-head logits")
+        if self.head_dtype not in (None, torch.bfloat16):
+            raise ValueError("prompt logprobs do not support an FP32 LM head")
+
+        # The CuTe mainloop consumes a dense BF16 weight shard and uses BF16
+        # Tensor Cores with FP32 accumulation. Quantized weight layouts and
+        # other input dtypes require separate kernel implementations.
+        if not isinstance(lm_head.quant_method, UnquantizedEmbeddingMethod):
+            raise TypeError("prompt logprobs require an unquantized LM head")
+        if hidden_dtype != torch.bfloat16 or lm_head.weight.dtype != torch.bfloat16:
+            raise TypeError("prompt logprobs require BF16 hidden states and LM head")
+
+        # Although the target-only kernel can add bias, the tiled LM-head
+        # kernel does not yet add it to every vocabulary logit. Allowing bias
+        # would therefore produce inconsistent top-K, LSE, and rank results.
+        if getattr(lm_head, "bias", None) is not None:
+            raise ValueError("prompt logprobs do not support an LM-head bias")
+
+        # Added vocabulary rows use a separate padded layout inside each shard.
+        # The current global-ID mapping assumes one contiguous original-vocab
+        # range per rank, so added rows must use the existing logits path.
+        if lm_head.num_added_embeddings != 0:
+            raise ValueError("prompt logprobs do not support added vocabulary entries")
+
+        # Both components must describe the same global token-ID space; otherwise
+        # padding removal and shard-local ID conversion would disagree.
+        if self.org_vocab_size != lm_head.org_vocab_size:
+            raise ValueError("logits processor and LM-head vocabulary sizes must match")
+
+    def warmup_prompt_logprobs(self, lm_head: VocabParallelEmbedding) -> None:
+        """Compile the compact prompt-logprobs CuTe specializations."""
+        try:
+            from vllm.model_executor.kernels.linear.cute_dsl.lm_head_logprobs import (
+                validate_lm_head_logprobs_environment,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "VLLM_USE_V2_COMPACT_PROMPT_LOGPROBS is enabled, but CuTe DSL "
+                "dependencies could not be imported"
+            ) from exc
+
+        try:
+            validate_lm_head_logprobs_environment(lm_head.weight)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(
+                f"VLLM_USE_V2_COMPACT_PROMPT_LOGPROBS is enabled, but {exc}"
+            ) from exc
+
+        # M is symbolic in the CuTe kernel. A single row therefore compiles the
+        # same shape specialization used by every runtime prompt chunk.
+        hidden_states = torch.zeros(
+            (1, lm_head.weight.shape[1]),
+            dtype=torch.bfloat16,
+            device=lm_head.weight.device,
+        )
+        target_token_ids = torch.zeros(
+            1,
+            dtype=torch.int64,
+            device=lm_head.weight.device,
+        )
+        try:
+            with torch.inference_mode():
+                # Positive K values share the top-32 CuTe specialization.
+                # Triton merge kernels remain lazily compiled per requested K.
+                for num_logprobs in (0, 32):
+                    self.get_prompt_logprobs(
+                        lm_head,
+                        hidden_states,
+                        target_token_ids,
+                        num_logprobs,
+                    )
+                torch.accelerator.synchronize(lm_head.weight.device)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(
+                "VLLM_USE_V2_COMPACT_PROMPT_LOGPROBS failed during startup "
+                "kernel compilation"
+            ) from exc
 
     def extra_repr(self) -> str:
         s = f"vocab_size={self.vocab_size}"
