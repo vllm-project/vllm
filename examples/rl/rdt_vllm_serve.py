@@ -13,6 +13,7 @@ driver — they are not shipped to or imported by the Ray actors.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -38,6 +39,8 @@ def launch_vllm_serve(
     editable vLLM install via the venv interpreter.
     """
     vllm_bin = os.path.join(os.path.dirname(sys.executable), "vllm")
+    if not os.path.exists(vllm_bin):
+        vllm_bin = shutil.which("vllm") or "vllm"
     cmd = [
         vllm_bin,
         "serve",
