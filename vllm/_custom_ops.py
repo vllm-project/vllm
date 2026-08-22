@@ -1495,6 +1495,60 @@ def cutlass_w4a8_moe_mm(
     )
 
 
+def cutlass_w4afp8_moe_mm(
+    out_tensors: torch.Tensor,
+    a_tensors: torch.Tensor,
+    b_tensors: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    a_strides: torch.Tensor,
+    b_strides: torch.Tensor,
+    d_strides: torch.Tensor,
+    s_strides: torch.Tensor,
+    chunk_size: int,
+    topk: int,
+) -> None:
+    """Run the static-FP8, packed-INT4 grouped MoE GEMM."""
+    torch.ops._C.cutlass_w4afp8_moe_mm(
+        out_tensors,
+        a_tensors,
+        b_tensors,
+        a_scales,
+        b_scales,
+        expert_offsets,
+        problem_sizes,
+        a_strides,
+        b_strides,
+        d_strides,
+        s_strides,
+        chunk_size,
+        topk,
+    )
+
+
+if hasattr(torch.ops._C, "cutlass_w4afp8_moe_mm"):
+
+    @register_fake("_C::cutlass_w4afp8_moe_mm")
+    def cutlass_w4afp8_moe_mm_fake(
+        out_tensors: torch.Tensor,
+        a_tensors: torch.Tensor,
+        b_tensors: torch.Tensor,
+        a_scales: torch.Tensor,
+        b_scales: torch.Tensor,
+        expert_offsets: torch.Tensor,
+        problem_sizes: torch.Tensor,
+        a_strides: torch.Tensor,
+        b_strides: torch.Tensor,
+        d_strides: torch.Tensor,
+        s_strides: torch.Tensor,
+        chunk_size: int,
+        topk: int,
+    ) -> None:
+        return None
+
+
 def cutlass_encode_and_reorder_int4b_grouped(
     b_tensors: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
