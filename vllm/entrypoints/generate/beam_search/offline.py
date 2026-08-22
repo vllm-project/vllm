@@ -25,6 +25,7 @@ from .utils import (
     BeamSearchInstance,
     BeamSearchOutput,
     BeamSearchSequence,
+    check_beam_search_stop,
     create_sort_beams_key_function,
 )
 
@@ -82,6 +83,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+        include_stop_str_in_output = params.include_stop_str_in_output
+        stop_strings = params.stop_strings
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -164,6 +167,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         base_sampling_params=base_sampling_params,
                         eos_token_id=eos_token_id,
                         ignore_eos=ignore_eos,
+                        tokenizer=tokenizer,
+                        stop_strings=stop_strings,
+                        include_stop_str_in_output=include_stop_str_in_output,
                         beam_width=beam_width,
                         sort_beams_key=sort_beams_key,
                         structured_output_backend=structured_output_backend,
@@ -185,7 +191,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             best_beams = sorted_completed[:beam_width]
 
             for beam in best_beams:
-                beam.text = tokenizer.decode(beam.tokens)
+                if beam.text is None:
+                    beam.text = tokenizer.decode(beam.tokens)
 
             outputs.append(BeamSearchOutput(sequences=best_beams))
 
@@ -197,6 +204,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         base_sampling_params: SamplingParams,
         eos_token_id: int | None,
         ignore_eos: bool,
+        tokenizer: TokenizerLike,
+        stop_strings: list[str],
+        include_stop_str_in_output: bool,
         beam_width: int,
         sort_beams_key: Callable,
         structured_output_backend: StructuredOutputBackend | None,
@@ -316,8 +326,31 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
                         if token_id == eos_token_id and not ignore_eos:
                             instance.completed.append(new_beam)
-                        else:
-                            instance_new_beams.append(new_beam)
+                            continue
+
+                        if stop_strings:
+                            stop_result = check_beam_search_stop(
+                                tokenizer,
+                                new_beam.orig_prompt,
+                                new_beam.tokens,
+                                stop_strings,
+                                include_stop_str_in_output,
+                            )
+                            if stop_result is not None:
+                                full_text = tokenizer.decode(new_beam.tokens)
+                                if stop_result.removed_char_count:
+                                    # Offline beam text includes the prompt, so
+                                    # apply the generated-text suffix trim to it.
+                                    full_text = full_text[
+                                        : -stop_result.removed_char_count
+                                    ]
+                                new_beam.text = full_text
+                                new_beam.finish_reason = "stop"
+                                new_beam.stop_reason = stop_result.stop_reason
+                                instance.completed.append(new_beam)
+                                continue
+
+                        instance_new_beams.append(new_beam)
             sorted_beams = sorted(
                 instance_new_beams,
                 key=sort_beams_key,
@@ -325,7 +358,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             )
             instance.beams = sorted_beams[:beam_width]
 
-        return False
+        return not any(instance.beams for instance in instances_batch)
 
     def _init_beam_search_structured_output(
         self,

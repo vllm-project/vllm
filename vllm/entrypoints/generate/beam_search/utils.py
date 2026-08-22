@@ -13,6 +13,8 @@ from vllm.inputs import (
 )
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
+from vllm.tokenizers import TokenizerLike
+from vllm.v1.engine.detokenizer import check_stop_strings
 
 
 @dataclass
@@ -97,6 +99,44 @@ class BeamSearchSequence:
             encoder_prompt=prompt["encoder_prompt"],
             decoder_prompt=new_dec_prompt,
         )
+
+
+@dataclass(frozen=True)
+class BeamSearchStopResult:
+    output_text: str
+    stop_reason: str
+    removed_char_count: int
+
+
+def check_beam_search_stop(
+    tokenizer: TokenizerLike,
+    prompt: TokensInput | MultiModalInput | EncoderDecoderInput,
+    token_ids: list[int],
+    stop_strings: list[str],
+    include_stop_str_in_output: bool,
+) -> BeamSearchStopResult | None:
+    """Check stop strings against the generated portion of a beam."""
+    decoder_prompt = prompt if prompt["type"] != "enc_dec" else prompt["decoder_prompt"]
+    prompt_length = len(decoder_prompt["prompt_token_ids"])
+    output_text = tokenizer.decode(token_ids[prompt_length:])
+    stop = check_stop_strings(
+        output_text,
+        len(output_text),
+        stop_strings,
+        include_stop_str_in_output,
+    )
+    if stop is None:
+        return None
+
+    stop_reason, truncate_to = stop
+    if truncate_to == -1:
+        return BeamSearchStopResult(output_text, stop_reason, 0)
+
+    return BeamSearchStopResult(
+        output_text=output_text[:truncate_to],
+        stop_reason=stop_reason,
+        removed_char_count=len(output_text) - truncate_to,
+    )
 
 
 @dataclass

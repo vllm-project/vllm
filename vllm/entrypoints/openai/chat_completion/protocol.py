@@ -30,7 +30,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionDefinition,
     OpenAIBaseModel,
     PerRequestMetrics,
-    StopParam,
     StreamOptions,
     ToolCall,
     UsageInfo,
@@ -47,6 +46,7 @@ from vllm.sampling_params import (
     RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
+    StopParam,
     StructuredOutputsParams,
     ThinkingTokenBudget,
 )
@@ -649,6 +649,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             temperature=temperature,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
+            stop=self.stop,
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
