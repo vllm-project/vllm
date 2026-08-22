@@ -51,12 +51,32 @@ encode_session: aiohttp.ClientSession | None = None
 prefill_session: aiohttp.ClientSession | None = None
 decode_session: aiohttp.ClientSession | None = None
 
+# Cursor for round-robin encoder assignment, shared across requests so the
+# fan-out doesn't restart from e_urls[0] every time.
+encoder_rr_idx = 0
+encoder_rr_lock = asyncio.Lock()
+
 ###############################################################################
 # Utils
 ###############################################################################
 
 
 MM_TYPES = {"image_url", "audio_url", "input_audio"}
+
+
+def encoder_rr_assignment(
+    e_urls: list[str], start: int, count: int
+) -> tuple[list[str], int]:
+    """Assign `count` items to encoder URLs starting from cursor `start`.
+
+    Returns the per-item URL list and the cursor value the next call should
+    start from, so the assignment is contiguous across calls instead of
+    restarting at e_urls[0] every time.
+    """
+    urls = [e_urls[(start + i) % len(e_urls)] for i in range(count)]
+    next_start = (start + count) % len(e_urls)
+    return urls, next_start
+
 
 # Diagnostic switch: forward the original request to the decoder so the
 # only difference from the rewrite path is the rewrite itself.
@@ -189,8 +209,14 @@ async def fanout_encoder_primer(
     item_uuids: dict[int, str] = {}
     item_meta: dict[int, dict] = {}
 
-    # Round-robin over encode servers to distribute load a bit
-    url_cycle = (e_urls[i % len(e_urls)] for i in range(len(mm_items)))
+    # Round-robin over encode servers to distribute load a bit. The cursor
+    # persists across requests so fan-out doesn't restart at e_urls[0] every
+    # time (which would hot-spot the first encoder for single-item requests).
+    global encoder_rr_idx
+    async with encoder_rr_lock:
+        url_cycle, encoder_rr_idx = encoder_rr_assignment(
+            e_urls, encoder_rr_idx, len(mm_items)
+        )
 
     for idx, (item, target_url) in enumerate(zip(mm_items, url_cycle)):
         # Derive a *child* request id:  <parent>:<index>:<random-short>

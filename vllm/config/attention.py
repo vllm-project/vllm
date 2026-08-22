@@ -7,10 +7,13 @@ from typing import Any, Literal
 from pydantic import field_validator
 
 from vllm.config.utils import config
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
+logger = init_logger(__name__)
+
+IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 
@@ -65,12 +68,15 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
-    use_fp4_indexer_cache: bool = False
-    """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
+    use_fp4_indexer_cache: bool | None = None
+    """Deprecated alias for `indexer_kv_dtype`; use that instead. True maps to
+    `mxfp4`, False is a no-op (it selected the model default already)."""
 
-    indexer_kv_dtype: IndexerKVDType = "bf16"
-    """Data type for the sparse-attention indexer K cache. Quantized formats
-    (fp8, mxfp4, nvfp4) require indexer kernel support in the backend."""
+    indexer_kv_dtype: IndexerKVDType = "auto"
+    """Data type for the sparse-attention indexer K cache. "auto" picks the
+    model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
+    indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
+    support in the backend."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
@@ -114,6 +120,26 @@ class AttentionConfig:
             # layers still use the platform's normal automatic backend.
             self.backend = None
 
+        if self.use_fp4_indexer_cache is not None:
+            logger.warning(
+                "use_fp4_indexer_cache is deprecated and will be removed in "
+                "v0.19. Use indexer_kv_dtype instead (True -> 'mxfp4')."
+            )
+            if self.use_fp4_indexer_cache:
+                if self.indexer_kv_dtype not in ("auto", "mxfp4"):
+                    raise ValueError(
+                        "use_fp4_indexer_cache=True conflicts with "
+                        f"indexer_kv_dtype={self.indexer_kv_dtype!r}. Set only "
+                        "indexer_kv_dtype."
+                    )
+                self.indexer_kv_dtype = "mxfp4"
+
+    def resolve_indexer_kv_dtype(self, default: IndexerKVDType) -> IndexerKVDType:
+        """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""
+        if self.indexer_kv_dtype == "auto":
+            return default
+        return self.indexer_kv_dtype
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
@@ -124,7 +150,8 @@ class AttentionConfig:
         """
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        ignored_factors: set[str] = set()
+        # Folded into indexer_kv_dtype by __post_init__.
+        ignored_factors: set[str] = {"use_fp4_indexer_cache"}
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 

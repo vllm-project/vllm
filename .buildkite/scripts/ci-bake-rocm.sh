@@ -15,16 +15,16 @@ set -euo pipefail
 
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils"
+DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh rust-toolchain.toml tests/vllm_test_utils"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl build_rocshmem build_deepep mori_base ci_base"
+DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl lmcache_source build_lmcache build_rocshmem build_deepep mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="3"
 # ROCm CI forces REMOTE_VLLM=0, so content identity covers only the selected
 # local-source stages rather than unreachable remote-fetch alternatives.
 DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
 DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm build_vllm_dependencies rocm-triton-kernels csrc-build"
-DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py tools/install_protoc.sh build_rust.sh"
-DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
+DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py build_rust.sh"
+DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm vllm-version rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
 # Docker's 128-character tag limit minus the longest cache prefix
 # ("csrc-rocm-branch-" and "rust-rocm-branch-", both 17 characters).
 ROCM_CACHE_BRANCH_TAG_MAX_LEN=111
@@ -199,11 +199,13 @@ get_buildkite_target_repo_url() {
 
 git_fetch_with_timeout() {
     local timeout_secs="${ROCM_CACHE_GIT_FETCH_TIMEOUT:-60}"
+    local -a fetch_command=(git fetch --no-auto-maintenance)
 
+    # Detached maintenance can race a later shallow fetch on .git/shallow.
     if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeout_secs}s" git fetch "$@"
+        timeout "${timeout_secs}s" "${fetch_command[@]}" "$@"
     else
-        git fetch "$@"
+        "${fetch_command[@]}" "$@"
     fi
 }
 
@@ -302,6 +304,8 @@ validate_ci_build_context_source() {
     local mode=""
     local stage=""
     local path=""
+    local worktree_diff_status=0
+    local staged_diff_status=0
     local index_modes_file="${SCRIPT_TMP_DIR}/git-index-modes"
     local info_attributes=""
 
@@ -319,15 +323,46 @@ validate_ci_build_context_source() {
         return 1
     fi
     ROCM_BUILD_CONTEXT_COMMIT="${context_commit}"
-    if ! git -C "${source_root}" diff \
-        --quiet --no-ext-diff --ignore-submodules=none --; then
+    # Shared AMD workspaces may present tracked files with inflated executable
+    # bits. Context modes come from the pinned Git tree, so ignore only that
+    # filesystem drift while continuing to reject content changes.
+    git -C "${source_root}" -c core.fileMode=false diff \
+        --quiet --no-ext-diff --ignore-submodules=none -- \
+        || worktree_diff_status=$?
+    if (( worktree_diff_status != 0 )); then
+        if (( worktree_diff_status > 1 )); then
+            printf 'Failed to inspect tracked CI worktree changes (git diff exited %s)\n' \
+                "${worktree_diff_status}" >&2
+            return 1
+        fi
         echo "Tracked worktree changes cannot be omitted from the CI Docker context" \
             >&2
+        echo "Tracked worktree diff (first 50 entries):" >&2
+        git -C "${source_root}" -c core.fileMode=false diff \
+            --no-ext-diff --ignore-submodules=none --name-status -- \
+            | sed -n '1,50p' >&2 || true
+        git -C "${source_root}" -c core.fileMode=false diff \
+            --no-ext-diff --ignore-submodules=none --summary -- \
+            | sed -n '1,50p' >&2 || true
         return 1
     fi
-    if ! git -C "${source_root}" diff --cached \
-        --quiet --no-ext-diff --ignore-submodules=none HEAD --; then
+    git -C "${source_root}" diff --cached \
+        --quiet --no-ext-diff --ignore-submodules=none HEAD -- \
+        || staged_diff_status=$?
+    if (( staged_diff_status != 0 )); then
+        if (( staged_diff_status > 1 )); then
+            printf 'Failed to inspect staged CI changes (git diff exited %s)\n' \
+                "${staged_diff_status}" >&2
+            return 1
+        fi
         echo "Staged changes cannot be omitted from the CI Docker context" >&2
+        echo "Staged diff (first 50 entries):" >&2
+        git -C "${source_root}" diff --cached \
+            --no-ext-diff --ignore-submodules=none --name-status HEAD -- \
+            | sed -n '1,50p' >&2 || true
+        git -C "${source_root}" diff --cached \
+            --no-ext-diff --ignore-submodules=none --summary HEAD -- \
+            | sed -n '1,50p' >&2 || true
         return 1
     fi
     # Untracked and ignored worker outputs are intentionally absent: the
@@ -490,8 +525,8 @@ prepare_ci_build_context() {
         return 1
     fi
 
-    # setuptools-scm understands Git's stable archive format, so full-source
-    # wheels retain their exact version without copying mutable Git history.
+    # setuptools-scm understands Git's stable archive format, so wheels and
+    # Rust artifacts retain their exact version without copying Git history.
     if ! is_ci_base_target; then
         write_ci_git_archival_metadata "${source_root}" "${context_root}" \
             || return $?
