@@ -102,7 +102,7 @@ class Scheduler(SchedulerInterface):
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
-        self.is_encoder_only = vllm_config.is_encoder_only
+        self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -1904,7 +1904,7 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
             elif (
-                self.is_encoder_only
+                self.is_mm_encoder_only
                 and request.num_computed_tokens >= request.num_prompt_tokens
             ):
                 # An encoder instance runs the encoder and publishes the
