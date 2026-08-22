@@ -51,6 +51,7 @@ impl Llm {
     }
 
     /// Enable or disable periodic stats logging.
+    #[must_use]
     pub fn with_log_stats(mut self, enabled: bool) -> Self {
         if enabled {
             let stats_logger = StatsLogger::start(
@@ -66,6 +67,7 @@ impl Llm {
 
     /// Control whether external request ids are randomized before reaching
     /// engine-core.
+    #[must_use]
     pub fn with_request_id_randomization(mut self, enabled: bool) -> Self {
         self.randomize_request_id = enabled;
         self
