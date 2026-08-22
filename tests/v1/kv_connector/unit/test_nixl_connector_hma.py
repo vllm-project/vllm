@@ -314,7 +314,10 @@ def test_apply_prefix_caching_mamba_hybrid(
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
     aligned_local, aligned_remote = worker._apply_prefix_caching(
-        local_block_ids, remote_block_ids, remote_physical_per_logical
+        local_block_ids,
+        remote_block_ids,
+        local_physical_per_logical,
+        remote_physical_per_logical,
     )
 
     assert aligned_local == expected_local, (
@@ -413,7 +416,10 @@ def test_apply_prefix_caching_ssm_prefix_cache_hit(
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
     aligned_local, aligned_remote = worker._apply_prefix_caching(
-        local_block_ids, remote_block_ids, remote_physical_per_logical
+        local_block_ids,
+        remote_block_ids,
+        local_physical_per_logical,
+        remote_physical_per_logical,
     )
 
     assert aligned_local == expected_local, (
@@ -442,7 +448,7 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
 
     with pytest.raises(AssertionError, match="unpairable SSM state slots"):
         worker._apply_prefix_caching(
-            [list(range(10)), [4, 5, 6, 7]], [list(range(10)), [8, 9]], 10
+            [list(range(10)), [4, 5, 6, 7]], [list(range(10)), [8, 9]], 10, 10
         )
 
 
@@ -527,6 +533,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
     aligned_local, aligned_remote = worker._apply_prefix_caching(
         local_block_ids,
         remote_block_ids,
+        local_physical_per_logical,
         remote_physical_per_logical,
     )
 
@@ -1498,14 +1505,19 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )
     assert kda_spec.page_size_bytes == unified_page
+    # The three groups overlay each other, so layer i of every group aliases the same
+    # region: mla.i, kda_a.i and kda_b.i all live at i * layer_stride.
+    layer_stride = num_blocks * unified_page
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=num_blocks * unified_page,
-                shared_by=[f"mla.{i}", f"kda_a.{i}", f"kda_b.{i}"],
+                size=2 * layer_stride,
+                layers=[f"{prefix}.0", f"{prefix}.1"],
+                layer_stride=layer_stride,
+                block_stride=unified_page,
             )
-            for i in range(2)
+            for prefix in ("mla", "kda_a", "kda_b")
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(["mla.0", "mla.1"], mla_spec),

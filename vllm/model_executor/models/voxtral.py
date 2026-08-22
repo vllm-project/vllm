@@ -47,12 +47,10 @@ from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    MultiModalProcessingInfo,
     PlaceholderFeaturesInfo,
     ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
-    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -204,6 +202,9 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
 
 
 class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]):
+    # The tokens are already inserted by the chat template
+    renderer_applies_updates = True
+
     def _get_mm_fields_config(
         self,
         hf_inputs: Mapping[str, NestedTensors],
@@ -220,13 +221,14 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
         # skip validation here
         pass
 
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
 
@@ -234,19 +236,23 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
             # MistralCommonVoxtralProcessor accepts "audio"
             mm_data["audio"] = audios
 
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            # Avoid padding issue
-            tok_kwargs={**tok_kwargs, "return_tensors": None},
-        )
+        # Avoid padding issue
+        hf_processor_mm_kwargs = dict(**hf_processor_mm_kwargs, return_tensors=None)
 
+        return mm_data, hf_processor_mm_kwargs
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         # Missing batch dimension
-        if is_list_of(outputs["input_ids"], int):
-            outputs["input_ids"] = [outputs["input_ids"]]
+        input_ids = processed_data.get("input_ids")
+        if is_list_of(input_ids, int):
+            processed_data["input_ids"] = [input_ids]
 
-        return outputs
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -288,16 +294,6 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
                 replacement=get_replacement,
             ),
         ]
-
-    def _cached_apply_hf_processor(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
-        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(inputs, timing_ctx)
-
-        # NOTE: The tokens are already inserted by the chat template
-        return prompt_ids, mm_info, True
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -773,15 +769,11 @@ class VoxtralEncoderModel(nn.Module):
         if global_log_mel_max := self.config.global_log_mel_max:
             if not isinstance(global_log_mel_max, float):
                 raise TypeError(f"{global_log_mel_max=} needs to be of type float.")
-            log_spec_max = torch.tensor(
-                global_log_mel_max,
-                device=log_spec.device,
-                dtype=log_spec.dtype,
-            )
+            # Use `clamp` to avoid gpu<->cpu sync.
+            log_spec = torch.clamp(log_spec, min=global_log_mel_max - 8.0)
         else:
             log_spec_max = log_spec.max()
-
-        log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
+            log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
         log_spec = (log_spec + 4.0) / 4.0
         return log_spec.to(input_dtype)
 

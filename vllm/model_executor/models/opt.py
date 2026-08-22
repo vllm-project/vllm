@@ -349,14 +349,13 @@ class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.model = OPTModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.word_embed_proj_dim,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if self.config.tie_word_embeddings:
-            self.lm_head = self.model.decoder.embed_tokens
-        else:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.word_embed_proj_dim,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.model.decoder.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -385,10 +384,5 @@ class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(
-                ["lm_head.weight"] if self.config.tie_word_embeddings else None
-            ),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
