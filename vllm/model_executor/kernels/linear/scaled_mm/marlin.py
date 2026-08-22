@@ -95,8 +95,8 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             weight=layer.weight,
             weight_scale=weight_scale,
             workspace=layer.workspace,
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
+            size_n=self.config.weight_shape[0],
+            size_k=x.shape[-1],
             input_dtype=self.marlin_input_dtype,
             bias=bias,
         )
