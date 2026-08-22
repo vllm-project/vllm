@@ -16,12 +16,14 @@ call id. The function name is the final component before ``:N``.
 from __future__ import annotations
 
 import functools
+import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+import partial_json_parser
 import regex as re
+from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.engine.protocol import DeltaFunctionCall, DeltaToolCall
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -34,6 +36,7 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
     )
+    from vllm.entrypoints.openai.engine.protocol import DeltaToolCall
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
@@ -47,6 +50,36 @@ TOOL_CALL_END = "<|tool_call_end|>"
 TOOL_ARG_START = "<|tool_call_argument_begin|>"
 
 _TOOL_ID_RE = re.compile(r"(?P<id>.+:\d+)")
+
+
+def _kimi_k2_arg_converter(raw_args: str, partial: bool) -> str:
+    """Normalise Kimi K2's raw JSON arguments to canonical JSON.
+
+    Kimi emits tool-call arguments as JSON text directly.  Re-serialising
+    through ``json.dumps`` (completing incomplete objects with
+    :mod:`partial_json_parser` while ``partial`` is True) gives the parser
+    engine a stable, coercible representation on every streaming tick, so
+    the schema type coercion in ``_fix_arg_types`` applies identically to
+    the streaming and non-streaming paths.  Unparsable text is returned
+    unchanged so no argument bytes are lost.
+    """
+    raw_args = raw_args.strip()
+    if not raw_args:
+        return ""
+
+    obj: object | None
+    try:
+        obj = json.loads(raw_args)
+    except (json.JSONDecodeError, ValueError):
+        try:
+            obj = partial_json_parser.loads(raw_args, Allow.ALL)
+        except Exception:
+            obj = None
+
+    if not isinstance(obj, dict):
+        return raw_args
+
+    return json.dumps(obj, ensure_ascii=False)
 
 
 @functools.cache
@@ -140,6 +173,7 @@ def kimi_k2_config(thinking: bool = True) -> ParserEngineConfig:
         },
         stream_arg_deltas=True,
         tool_args_json=True,
+        arg_converter=_kimi_k2_arg_converter,
         strip_trailing_reasoning_whitespace=True,
         drop_whitespace_only_content_before_tools=True,
         strip_content_whitespace_with_tools=False,
@@ -213,25 +247,6 @@ class KimiK2Parser(ParserEngine):
                 self._tool_slots[idx].id = tool_id or ""
                 self._tool_slots[idx].name = tool_name
         super()._handle_tool_end(event, deltas)
-
-    def _handle_arg_chunk(self, event, deltas) -> None:
-        idx = event.tool_index
-        name_sent_before = (
-            0 <= idx < len(self._tool_slots) and self._tool_slots[idx].name_sent
-        )
-        super()._handle_arg_chunk(event, deltas)
-        if (
-            event.value
-            and not name_sent_before
-            and 0 <= idx < len(self._tool_slots)
-            and self._tool_slots[idx].name_sent
-        ):
-            deltas.append(
-                DeltaToolCall(
-                    index=idx,
-                    function=DeltaFunctionCall(arguments=event.value),
-                )
-            )
 
     def _extract_args_json(self, raw_args: str, func_name: str) -> str:
         return raw_args.strip() or "{}"
