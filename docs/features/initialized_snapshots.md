@@ -17,6 +17,9 @@ Snapshots currently require:
 - Linux on x86-64 with one NVIDIA GPU.
 - TP1 with one unauthenticated plaintext HTTP server. Other parallel sizes,
   TLS, middleware, Unix sockets, and speculative decoding are unsupported.
+- Because snapshot mode requires an unauthenticated plaintext HTTP server, use
+  a trusted host or network boundary, or external controls. See the vLLM
+  [Security guide](../usage/security.md).
 - [CRIU](https://github.com/checkpoint-restore/criu), its CUDA plugin, a
   `cuda-checkpoint`-compatible helper, and `nvidia-smi` on `PATH`.
 - Root or passwordless `sudo` for CRIU.
@@ -27,6 +30,8 @@ Snapshots currently require:
   directories and mutable revisions are not supported.
 - Enough disk for the artifact, with the same installed vLLM package, model
   files, container filesystem, and generated-cache paths available at restore.
+  Generated-cache files are neither copied into the artifact nor inventoried;
+  removing or replacing one can permanently invalidate the artifact.
 
 The official `vllm/vllm-openai` Linux x86-64 image includes the snapshot
 runtime. It still requires a compatible host driver, kernel, and privileges.
@@ -89,6 +94,9 @@ the process tree, vLLM releases the saved engine to bind the requested HTTP
 address and checks the first generated token and sampled-token log probability
 against the snapshot canary. The command returns only after that check passes.
 The restored API server continues to run as a detached process.
+
+The pre-release port probe is best-effort only. It neither reserves the port
+nor authenticates the listener that appears afterward.
 
 The artifact is reusable after its previous restored tree stops. Only one
 snapshot or external CRIU operation may use a shared `/dev/shm` mount at a time.
