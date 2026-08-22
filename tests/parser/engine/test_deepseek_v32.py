@@ -158,6 +158,32 @@ class TestNonStreaming:
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"location": "Beijing"}
 
+    def test_identical_raw_args_use_current_slot_schema(
+        self, mock_tokenizer, mock_request
+    ):
+        city_tool = _make_tool("tool_a", {"city": {"type": "string"}})
+        tz_tool = _make_tool("tool_b", {"tz": {"type": "string"}})
+        tools = [city_tool, tz_tool]
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=tools)
+        mock_request.tools = tools
+
+        raw_args = '{"city": "Tokyo"}'
+        text = _func_calls(
+            _invoke("tool_a", _param("arguments", "false", raw_args)),
+            _invoke("tool_b", _param("arguments", "false", raw_args)),
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        assert result.tool_calls[0].function.name == "tool_a"
+        args0 = json.loads(result.tool_calls[0].function.arguments)
+        assert args0 == {"city": "Tokyo"}
+        assert result.tool_calls[1].function.name == "tool_b"
+        args1 = json.loads(result.tool_calls[1].function.arguments)
+        assert args1 == {"arguments": {"city": "Tokyo"}}
+
 
 # ── Initial state ────────────────────────────────────────────────────
 
@@ -253,6 +279,37 @@ class TestStreaming:
         assert json.loads(final_args) == {"location": "NYC"}
         assert '"arguments"' not in streamed_args
         assert final_args.startswith(streamed_args)
+
+    def test_streaming_identical_raw_args_use_current_slot_schema(
+        self, mock_tokenizer, mock_request
+    ):
+        city_tool = _make_tool("tool_a", {"city": {"type": "string"}})
+        tz_tool = _make_tool("tool_b", {"tz": {"type": "string"}})
+        tools = [city_tool, tz_tool]
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=tools)
+        mock_request.tools = tools
+
+        raw_args = '{"city": "Tokyo"}'
+        chunks = [
+            DSML_FUNC_START,
+            _invoke("tool_a", _param("arguments", "false", raw_args)),
+            _invoke("tool_b", _param("arguments", "false", raw_args)),
+            DSML_FUNC_END,
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+        final_delta, _ = results[-1]
+        finish_delta = parser.finish_streaming()
+        extracted = parser._build_extracted_result(final_delta, finish_delta)
+
+        assert extracted.tools_called is True
+        assert len(extracted.tool_calls) == 2
+        assert extracted.tool_calls[0].function.name == "tool_a"
+        args0 = json.loads(extracted.tool_calls[0].function.arguments)
+        assert args0 == {"city": "Tokyo"}
+        assert extracted.tool_calls[1].function.name == "tool_b"
+        args1 = json.loads(extracted.tool_calls[1].function.arguments)
+        assert args1 == {"arguments": {"city": "Tokyo"}}
 
     def test_missing_invoke_end(self, mock_tokenizer, mock_request):
         text = (
