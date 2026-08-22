@@ -76,7 +76,9 @@ def test_engine_core():
     """Test basic request lifecycle."""
 
     # First request.
-    engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
+    request, wave = engine_core.preprocess_add_request(make_request())
+    engine_core.add_request(request, wave)
+    assert request.weight_version == "default"
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 0
 
@@ -85,7 +87,10 @@ def test_engine_core():
     assert len(engine_core.scheduler.running) == 1
 
     # Second request.
-    engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
+    engine_core.set_weight_version("step-7")
+    request, wave = engine_core.preprocess_add_request(make_request())
+    engine_core.add_request(request, wave)
+    assert request.weight_version == "step-7"
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 1
 
