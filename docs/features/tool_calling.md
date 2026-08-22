@@ -154,6 +154,64 @@ If your favorite tool-calling model is not supported, please feel free to contri
 !!! note
     With `tool_choice="auto"`, schema-level constraint requires both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`. When these conditions are met and the selected parser supports structural tags, vLLM constrains tool-call arguments. Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
+### Readiness checklist for a new tool-calling model
+
+Tool-calling support has historically been added per model as one-off patches, which is a large
+part of why a new model can take a long time to become reliable. The steps below are what make a
+model ship with tool calling *working*, in the order they are normally done.
+
+1. **Add the parser.** Create `vllm/tool_parsers/<model>_tool_parser.py` and register it under a
+   stable `--tool-call-parser` name in `vllm/tool_parsers/__init__.py`. (For an out-of-tree parser,
+   see [How to Write a Tool Parser Plugin](#how-to-write-a-tool-parser-plugin) instead.)
+
+2. **Add tests using the shared parser test suite.** Create
+   `tests/tool_parsers/test_<model>_tool_parser.py` that subclasses `ToolParserTests` and supplies a
+   `ToolParserTestConfig`, rather than hand-writing cases:
+
+    ```python
+    import pytest
+
+    from tests.tool_parsers.common_tests import ToolParserTestConfig, ToolParserTests
+    from vllm.tokenizers import TokenizerLike, get_tokenizer
+
+    class TestMyModelToolParser(ToolParserTests):
+        @pytest.fixture(scope="class")
+        def tokenizer(self) -> TokenizerLike:
+            return get_tokenizer("org/my-model")
+
+        @pytest.fixture
+        def test_config(self) -> ToolParserTestConfig:
+            return ToolParserTestConfig(
+                parser_name="my_model",
+                no_tool_calls_output=...,
+                single_tool_call_output=...,
+                parallel_tool_calls_output=...,
+                various_data_types_output=...,
+                empty_arguments_output=...,
+                surrounding_text_output=...,
+                escaped_strings_output=...,
+                malformed_input_outputs=[...],
+            )
+    ```
+
+    Subclassing gives the model the whole common suite for free — no-tool-call text, single and
+    parallel calls, varied argument types, empty arguments, text surrounding a call, escaped
+    strings, and malformed input — in both streaming and non-streaming modes. Use the config's
+    `xfail_streaming` / `xfail_nonstreaming` fields to record a known gap explicitly rather than
+    omitting a case.
+
+3. **Provide a chat template if the tokenizer lacks one.** Tool-role and assistant-tool-call
+   messages must render correctly; add `examples/tool_chat_template_<model>.jinja` and reference it
+   with `--chat-template` where the model's `tokenizer_config.json` does not already carry one.
+
+4. **Document the model here.** Add a short section below with the model's `--tool-call-parser`
+   name, any required `--chat-template`, and known limitations, so operators can find the flags
+   without reading the parser source.
+
+5. **Check it end to end.** Serve the model with `--enable-auto-tool-choice --tool-call-parser
+   <name>` and confirm a tool-eliciting request returns a well-formed call, including with any
+   feature the deployment will run alongside tool calling (for example speculative decoding).
+
 ### Hermes Models (`hermes`)
 
 All Nous Research Hermes-series models newer than Hermes 2 Pro should be supported.
