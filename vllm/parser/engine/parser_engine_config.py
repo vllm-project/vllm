@@ -33,6 +33,8 @@ class ParserState(Enum):
     TOOL_NAME = auto()
     TOOL_ARGS = auto()
     TOOL_BETWEEN = auto()
+    FOREIGN_BLOCK = auto()
+    FOREIGN_REASONING_BLOCK = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +42,14 @@ class Transition:
     next_state: ParserState
     events: tuple[EventType, ...] = field(default_factory=tuple)
     skip_in_token_id_mode: bool = False
+    # Treat this transition as a provisional tool-call recovery path. The
+    # engine buffers its semantic events, validates the completed tool name
+    # through a parser-supplied callback, and commits only after the call ends.
+    provisional_tool_call: bool = False
+    # Commit a buffered provisional call at this transition. Recovery paths
+    # that leave tool arguments through any other transition are restored as
+    # ordinary text.
+    commit_provisional_tool_call: bool = False
 
 
 @dataclass(frozen=True)
