@@ -2100,6 +2100,50 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     assert actual_model == s3_url
 
 
+def test_ngram_prompt_lookup_global_scope_is_accepted():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        prompt_lookup_cache_scope="global",
+    )
+
+    assert speculative_config.prompt_lookup_cache_scope == "global"
+    assert speculative_config.prompt_lookup_global_branch_length == 6
+    assert speculative_config.prompt_lookup_global_max_entries == 100000
+
+
+def test_ngram_prompt_lookup_cache_scope_defaults_to_local():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+
+    assert speculative_config.prompt_lookup_cache_scope == "local"
+    assert speculative_config.prompt_lookup_global_branch_length is None
+    assert speculative_config.prompt_lookup_global_max_entries is None
+
+
+def test_prompt_lookup_cache_scope_requires_ngram():
+    with pytest.raises(ValidationError, match="prompt_lookup_cache_scope"):
+        SpeculativeConfig(
+            method="ngram_gpu",
+            num_speculative_tokens=1,
+            prompt_lookup_cache_scope="global",
+        )
+    with pytest.raises(ValidationError, match="prompt_lookup_global"):
+        SpeculativeConfig(
+            method="ngram_gpu",
+            num_speculative_tokens=1,
+            prompt_lookup_global_max_entries=100,
+        )
+    with pytest.raises(ValidationError, match="prompt_lookup_cache_scope"):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            prompt_lookup_global_max_entries=100,
+        )
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig
