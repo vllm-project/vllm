@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from typing import Any
 
 import pytest
 import torch
@@ -16,6 +17,14 @@ from vllm.utils.mem_constants import GiB_bytes
 from ..utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
+
+GEMMA3N_SLEEP_MODEL = "google/gemma-3n-E2B-it"
+GEMMA3N_SLEEP_TENSOR_NAMES = (
+    "embed_scale",
+    "embed_scale_per_layer",
+    "per_layer_input_scale",
+    "per_layer_projection_scale",
+)
 
 
 def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
@@ -32,6 +41,56 @@ def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
         allocator.wake_up()
     finally:
         cumem.create_and_map = original_create_and_map
+
+
+def _set_poisoned_cumem_remap(_worker: Any, enabled: bool) -> None:
+    """Install or remove a worker-local test wrapper around CuMem remapping."""
+    saved_name = "_sleep_e2e_original_create_and_map"
+    if enabled:
+        assert not hasattr(cumem, saved_name)
+        original_create_and_map = cumem.create_and_map
+        setattr(cumem, saved_name, original_create_and_map)
+
+        def create_and_map_with_poison(handle) -> None:
+            original_create_and_map(handle)
+            _, size, ptr, _ = handle
+            cumem.libcudart.cudaMemset(ptr, 0xA5, size)
+
+        cumem.create_and_map = create_and_map_with_poison
+    else:
+        cumem.create_and_map = getattr(cumem, saved_name)
+        delattr(cumem, saved_name)
+
+
+def _gemma3n_sleep_tensor_snapshot(model) -> dict[str, tuple[int, float]]:
+    """Return addresses and values for Gemma 3n sleep-sensitive tensors."""
+    from vllm.model_executor.models.gemma3n import Gemma3nSelfDecoder
+
+    decoder = next(
+        (
+            module
+            for module in model.modules()
+            if isinstance(module, Gemma3nSelfDecoder)
+        ),
+        None,
+    )
+    assert decoder is not None
+    return {
+        name: (tensor.data_ptr(), tensor.float().item())
+        for name in GEMMA3N_SLEEP_TENSOR_NAMES
+        if (tensor := getattr(decoder, name, None)) is not None
+    }
+
+
+def _generation_signature(output) -> tuple[tuple[int, ...], tuple[float, ...]]:
+    completion = output[0].outputs[0]
+    token_ids = tuple(completion.token_ids)
+    assert completion.logprobs is not None
+    chosen_logprobs = tuple(
+        step[token_id].logprob
+        for token_id, step in zip(token_ids, completion.logprobs, strict=True)
+    )
+    return token_ids, chosen_logprobs
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -358,6 +417,61 @@ def test_deep_sleep():
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test()
+@pytest.mark.slow_test
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Deterministic CuMem remap poisoning requires CUDA",
+)
+def test_gemma3n_level2_sleep_restores_runtime_tensors(monkeypatch):
+    """Reproduce Gemma 3n runtime-tensor corruption after level-2 sleep."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    llm = LLM(
+        model=GEMMA3N_SLEEP_MODEL,
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        attention_backend="TRITON_ATTN",
+        max_model_len=256,
+        max_num_seqs=1,
+        seed=0,
+    )
+    prompt = "Explain why the sky is blue in one short sentence."
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=16, logprobs=1)
+
+    before_output = llm.generate(prompt, sampling_params)
+    before_tensors = llm.apply_model(_gemma3n_sleep_tensor_snapshot)
+    assert all(
+        set(snapshot) == set(GEMMA3N_SLEEP_TENSOR_NAMES)
+        for snapshot in before_tensors
+    )
+
+    llm.sleep(level=2)
+    poison_installed = False
+    try:
+        llm.collective_rpc(_set_poisoned_cumem_remap, args=(True,))
+        poison_installed = True
+
+        llm.wake_up(tags=["weights"])
+        llm.collective_rpc("reload_weights")
+        after_tensors = llm.apply_model(_gemma3n_sleep_tensor_snapshot)
+        llm.wake_up(tags=["kv_cache"])
+    finally:
+        if poison_installed:
+            llm.collective_rpc(_set_poisoned_cumem_remap, args=(False,))
+
+    after_output = llm.generate(prompt, sampling_params)
+    before_token_ids, before_logprobs = _generation_signature(before_output)
+    after_token_ids, after_logprobs = _generation_signature(after_output)
+
+    assert after_token_ids == before_token_ids
+    assert after_logprobs == pytest.approx(before_logprobs, rel=1e-5, abs=1e-5)
+    # CuMem preserves virtual addresses. The model owner must restore the
+    # original semantic values into those addresses after remapping.
+    assert after_tensors == before_tensors
 
 
 @create_new_process_for_each_test()
