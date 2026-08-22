@@ -559,6 +559,8 @@ def make_nvfp4_moe_quant_config(
             gemm1_alpha=swiglu_alpha,
             gemm1_beta=swiglu_beta,
             gemm1_clamp_limit=swiglu_limit,
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
         )
 
     if backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
