@@ -207,6 +207,10 @@ class ParserEngineToolAdapter(ToolParser):
     def finish_streaming(self) -> DeltaMessage | None:
         return self._parser_engine.finish_streaming()
 
+    def set_reasoning_consumer_attached(self, attached: bool) -> None:
+        """See :meth:`ParserEngine.set_reasoning_consumer_attached`."""
+        self._parser_engine.set_reasoning_consumer_attached(attached)
+
 
 def make_adapters(
     parser_engine_cls: type[ParserEngine],

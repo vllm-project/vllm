@@ -8,6 +8,7 @@ import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 
 
 @pytest.fixture()
@@ -51,3 +52,18 @@ def mock_request():
     req.tool_choice = "auto"
     req.include_reasoning = True
     return req
+
+
+def make_unpaired_tool_parser(tool_adapter_cls, tokenizer) -> DelegatingParser:
+    """Compose an engine-backed tool parser with no reasoning parser.
+
+    Mirrors passing ``--tool-call-parser`` without ``--reasoning-parser``:
+    nothing consumes the reasoning segment, so the engine is told there is no
+    reasoning consumer attached.
+    """
+
+    class _Unpaired(DelegatingParser):
+        tool_parser_cls = tool_adapter_cls
+        reasoning_parser_cls = None
+
+    return _Unpaired(tokenizer)
