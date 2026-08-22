@@ -345,3 +345,67 @@ def test_sparse_not_supported(mock_vllm_config):
         RocmPlatform.get_attn_backend_cls(
             selected_backend=None, attn_selector_config=attn_selector_config
         )
+
+
+_TRITON_HINT = (
+    "Set FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE to enable "
+    "Flash Attention Triton backend on ROCm."
+)
+_FLASH_ATTN_LOG = "Using Flash Attention backend for ViT model."
+
+
+@pytest.mark.parametrize(
+    "is_cdna, available, triton_env, expected_info",
+    [
+        (False, True, None, (_FLASH_ATTN_LOG, _TRITON_HINT)),
+        (True, True, "TRUE", (_FLASH_ATTN_LOG,)),
+        (False, False, None, ()),
+    ],
+    ids=[
+        "available",
+        "triton-enabled",
+        "unavailable",
+    ],
+)
+def test_vit_flash_attn_selection(
+    is_cdna,
+    available,
+    triton_env,
+    expected_info,
+    monkeypatch,
+):
+    """Test ViT FlashAttention selection across ROCm architectures."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    if triton_env is None:
+        monkeypatch.delenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", raising=False)
+    else:
+        monkeypatch.setenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", triton_env)
+
+    with (
+        patch("vllm.platforms.rocm.on_cdna", return_value=is_cdna),
+        patch("vllm.platforms.rocm.on_rdna", return_value=not is_cdna),
+        patch("vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled", return_value=False),
+        patch(
+            "vllm.v1.attention.backends.fa_utils.is_flash_attn_varlen_func_available",
+            return_value=available,
+        ),
+        patch("vllm.platforms.rocm.logger.info_once") as mock_info,
+        patch("vllm.platforms.rocm.logger.warning_once") as mock_warning,
+    ):
+        backend = RocmPlatform.get_vit_attn_backend(128, torch.float16)
+
+    expected_backend = (
+        AttentionBackendEnum.FLASH_ATTN
+        if available
+        else AttentionBackendEnum.TORCH_SDPA
+    )
+    assert backend == expected_backend
+    assert tuple(call.args[0] for call in mock_info.call_args_list) == expected_info
+    if available:
+        mock_warning.assert_not_called()
+    else:
+        mock_warning.assert_called_once_with(
+            "Flash Attention is unavailable for ViT attention. "
+            "Falling back to Torch SDPA."
+        )
