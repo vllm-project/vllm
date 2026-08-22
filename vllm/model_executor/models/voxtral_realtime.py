@@ -3,7 +3,14 @@
 
 import asyncio
 import math
-from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 
 import numpy as np
 import torch
@@ -12,6 +19,7 @@ from mistral_common.protocol.transcription.request import (
     TranscriptionRequest,
 )
 from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
+from mistral_common.tokens.tokenizers.base import SpecialTokens
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -19,7 +27,11 @@ from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.engine.protocol import StreamingInput
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    RealtimeSegmentTimestamper,
+    SupportsRealtime,
+)
 from vllm.model_executor.models.voxtral import (
     VoxtralDummyInputsBuilder,
     VoxtralForConditionalGeneration,
@@ -125,6 +137,74 @@ def _expand_tensor(input_tensor: torch.Tensor, scaling: int) -> torch.Tensor:
     return (base.unsqueeze(1) + offsets).view(-1)
 
 
+def _realtime_prompt_tokens(tokenizer) -> list[int]:
+    """Streaming prefix fed before any real audio: BOS + left pad + delay."""
+    return (
+        tokenizer.instruct.start()
+        + tokenizer.instruct.audio_encoder.encode_streaming_tokens()
+    )
+
+
+class VoxtralRealtimeSegmentTimestamper(RealtimeSegmentTimestamper):
+    """Maps `[STREAMING_WORD]` positions in the output stream to audio time.
+
+    Voxtral realtime generates exactly one token per 80 ms audio frame, so the
+    index of an output token is an index into the audio. `[STREAMING_WORD]`
+    marks the *onset* of a text emission and is followed by that emission's
+    subwords (arXiv 2602.11298 section 3.1). So a boundary closes the segment
+    accumulated since the previous boundary, timed at the previous boundary's
+    frame.
+
+    That frame is not itself the end of the audio: the marker is emitted once
+    the group has been observed *and* the target delay has elapsed, so the end
+    time is `n_delay` frames earlier. `offset_frames` carries that subtraction
+    - it is not a constant to be simplified away.
+    """
+
+    def __init__(
+        self,
+        boundary_token_id: int,
+        frame_duration_ms: float,
+        offset_frames: int,
+        decode: Callable[[list[int]], str],
+    ) -> None:
+        self._boundary_token_id = boundary_token_id
+        self._frame_duration_ms = frame_duration_ms
+        self._offset_frames = offset_frames
+        self._decode = decode
+
+        self._index = 0
+        self._pending_ids: list[int] = []
+        self._pending_index: int | None = None
+
+    def _end_s(self, index: int) -> float:
+        return (self._offset_frames + index) * self._frame_duration_ms / 1000
+
+    def _close_pending(self) -> list[tuple[str, float]]:
+        if not self._pending_ids or self._pending_index is None:
+            return []
+        text = self._decode(self._pending_ids)
+        self._pending_ids = []
+        if not text:
+            return []
+        return [(text, self._end_s(self._pending_index))]
+
+    def process_token_ids(self, token_ids: Sequence[int]) -> list[tuple[str, float]]:
+        segments: list[tuple[str, float]] = []
+        for token_id in token_ids:
+            if token_id == self._boundary_token_id:
+                segments.extend(self._close_pending())
+                self._pending_index = self._index
+            elif self._pending_index is not None:
+                # Tokens before the first boundary belong to no segment.
+                self._pending_ids.append(token_id)
+            self._index += 1
+        return segments
+
+    def flush(self) -> list[tuple[str, float]]:
+        return self._close_pending()
+
+
 class VoxtralRealtimeBuffer:
     def __init__(self, config: AudioConfig, prompt_tokens: list[int]) -> None:
         self._config = config
@@ -214,6 +294,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
     # transformers' currently has limited support for MistralCommon backend
     # and cached_get_processor. Let's skip until fixed
     skip_warmup_audio_preprocessing = True
+    supports_realtime_segment_timestamps = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -229,6 +310,54 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         audio_config = self.tokenizer.instruct.audio_encoder.audio_config
         self.n_delay_tokens = audio_config.get_num_delay_tokens()
 
+    @classmethod
+    def get_realtime_segment_timestamper(
+        cls, model_config: ModelConfig
+    ) -> RealtimeSegmentTimestamper:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio_encoder = tokenizer.instruct.audio_encoder
+        config = audio_encoder.audio_config
+
+        if not tokenizer.tokenizer.is_special(SpecialTokens.streaming_word):
+            raise ValueError(
+                f"Tokenizer of `{model_config.model}` has no "
+                f"`{SpecialTokens.streaming_word.value}` token, so segment "
+                "boundaries cannot be located in the output stream."
+            )
+        boundary_token_id = tokenizer.tokenizer.get_special_token(
+            SpecialTokens.streaming_word
+        )
+
+        # The left pad is audio, the delay tokens are not, so the token index
+        # of a generated token leads its content frame by
+        # `len(prompt) - n_pad_frames - n_delay`. Derive the pad from the pad
+        # audio rather than from `n_left_pad_tokens`: mistral-common builds one
+        # from the other today, and a change that decoupled them would silently
+        # shift every timestamp by the pad duration.
+        left_pad, _ = audio_encoder.get_padding_audio()
+        n_pad_frames = len(left_pad.audio_array) // config.raw_audio_length_per_tok
+        if n_pad_frames != config.n_left_pad_tokens:
+            raise ValueError(
+                f"Left padding audio is {n_pad_frames} frames but the prompt "
+                f"reserves {config.n_left_pad_tokens} pad tokens. Realtime "
+                "segment timestamps would be misaligned."
+            )
+        offset_frames = (
+            len(_realtime_prompt_tokens(tokenizer))
+            - n_pad_frames
+            - config.get_num_delay_tokens()
+        )
+
+        def decode(token_ids: list[int]) -> str:
+            return tokenizer.decode(token_ids, skip_special_tokens=True)
+
+        return VoxtralRealtimeSegmentTimestamper(
+            boundary_token_id=boundary_token_id,
+            frame_duration_ms=1000 / config.frame_rate,
+            offset_frames=offset_frames,
+            decode=decode,
+        )
+
     # for realtime transcription
     @classmethod
     async def buffer_realtime_audio(
@@ -242,9 +371,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         config = audio_encoder.audio_config
 
         # Get prompt tokens (streaming prefix tokens) without encoding audio
-        prompt_tokens = (
-            tokenizer.instruct.start() + audio_encoder.encode_streaming_tokens()
-        )
+        prompt_tokens = _realtime_prompt_tokens(tokenizer)
 
         # Get left/right padding audio
         left_pad, right_pad = audio_encoder.get_padding_audio()

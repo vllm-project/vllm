@@ -181,7 +181,8 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 
 1. Client connects to `ws://host/v1/realtime`
 2. Server sends `session.created` event
-3. Client optionally sends `session.update` with model/params
+3. Client optionally sends `session.update` with model/params, and the server
+    acknowledges with `session.updated`
 4. Client sends `input_audio_buffer.commit` when ready
 5. Client sends `input_audio_buffer.append` events with base64 PCM16 chunks
 6. Server sends `transcription.delta` events with incremental text
@@ -196,16 +197,60 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 | ----- | ----------- |
 | `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
 | `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
-| `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
+| `session.update` | Configure session: `{"type": "session.update", "model": "model-name", "timestamp_granularities": ["segment"]}` |
 
 ### Server → Client Events
 
 | Event | Description |
 | ----- | ----------- |
 | `session.created` | Connection established with session ID and timestamp |
+| `session.updated` | Acknowledgement of `session.update`, echoing the configuration that took effect |
 | `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text"}` |
 | `transcription.done` | Final transcription with usage stats |
 | `error` | Error notification with message and optional code |
+
+#### Segment-level timestamps
+
+Models that emit one output token per audio frame can report when each piece
+of transcribed audio ended. Opt in per connection:
+
+```json
+{"type": "session.update", "model": "mistralai/Voxtral-Mini-4B-Realtime-2602", "timestamp_granularities": ["segment"]}
+```
+
+If the request was honoured the server replies with `session.updated`, echoing
+`"timestamp_granularities": ["segment"]`. If it cannot be, the server replies
+with `error` instead and the session stays unconfigured, so the opt-in is
+never silently dropped. Once enabled, `transcription.delta` and
+`transcription.done` carry a `segments` array:
+
+```json
+{"type": "transcription.done", "text": " Mary had a little lamb", "segments": [{"text": " Mary had", "end": 1.36}, {"text": " a little lamb", "end": 2.08}]}
+```
+
+Points worth knowing before building on this:
+
+- **End only.** The model marks where a group of audio ends, not where it
+  starts. Deriving a start from the previous `end` is wrong across pauses.
+- **Segments are emission groups, not words.** The model may commit several
+  words at once, and then they share one entry. Expect at most one entry per
+  spoken word.
+- **Granularity is one audio frame**, 80 ms for Voxtral realtime.
+- **The clock is relative to the utterance**, and restarts on every non-final
+  `input_audio_buffer.commit`.
+- **Timestamps trail their text by one event.** The boundary marker itself
+  decodes to no text, so a delta carrying `segments` has an empty `delta`. A
+  client that skips events with empty text will drop them.
+- `transcription.done` repeats every segment of the utterance, including the
+  trailing one, which no delta can carry because generation ends first.
+- Requires `--stream-interval 1` (the default), and the opt-in is rejected
+  otherwise. Batched streaming stalls realtime transcription entirely - the
+  server withholds an output until `stream-interval` tokens accumulate, but
+  the next token cannot be generated until the previous one is fed back - so
+  omitting `timestamp_granularities` is not a way to keep such a server
+  usable.
+- Clients that do not opt in see byte-identical payloads: the `segments` key
+  is omitted entirely.
 
 #### Example Clients
 
