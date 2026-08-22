@@ -79,13 +79,13 @@ Creation is offline preparation and is not part of restore latency.
 
 The private `0700` artifact contains process memory, CUDA state, engine
 arguments, compatibility identity, and canary output; its manifest is `0600`.
-Literal Hugging Face tokens are redacted from the manifest's engine arguments.
-The manifest records selected environment names plus deterministic name-bound
-fingerprints, not their values. The protected CRIU artifact can still contain
-process secrets, so treat it as sensitive data. Restore reloads model files and
-KV cache before binding HTTP, then reproduces the canary or tears down the
-restored tree. The inspect command prints that identity and canary without
-executing the saved process.
+Literal API keys and Hugging Face tokens are redacted from the manifest's engine
+arguments. The manifest records selected environment names plus deterministic
+name-bound fingerprints, not their values. The protected CRIU artifact can
+still contain process secrets, so treat it as sensitive data. Restore reloads
+model files and KV cache before binding HTTP, then reproduces the canary or
+tears down the restored tree. The inspect command prints that identity and
+canary without executing the saved process.
 
 ## Restore behavior
 
