@@ -107,6 +107,11 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         if info.can_load():
             continue
 
+        quant_method = getattr(layer, "quant_method", None)
+        prepare_for_reload = getattr(quant_method, "prepare_for_reload", None)
+        if prepare_for_reload is not None:
+            prepare_for_reload(layer)
+
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
         # snapshot now: restore_layer_on_meta drops alias buffers from the live set
@@ -406,6 +411,10 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
         buffer.data.copy_(getattr(layer, name))
 
     _place_kernel_tensors(layer, info)
+    quant_method = getattr(layer, "quant_method", None)
+    post_weights_reload = getattr(quant_method, "post_weights_reload", None)
+    if post_weights_reload is not None:
+        post_weights_reload(layer)
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
