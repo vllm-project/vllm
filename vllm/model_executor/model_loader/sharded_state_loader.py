@@ -133,6 +133,8 @@ class ShardedStateLoader(BaseModelLoader):
                 f"Could not find checkpoint files '{pattern}', only "
                 f"pre-sharded checkpoints are currently supported!"
             )
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
         state_dict = self._filter_subtensors(model.state_dict())
         counter_before_loading_weights = time.perf_counter()
         for key, tensor in self.iterate_over_files(filepaths):

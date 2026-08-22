@@ -424,6 +424,9 @@ class DefaultModelLoader(BaseModelLoader):
 
         self._init_ep_weight_filter(model_config)
 
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
