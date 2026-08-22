@@ -31,6 +31,11 @@ logger = init_logger(__name__)
 
 class BaseSpeculator(ABC):
     @abstractmethod
+    def load_model(self, target_model: nn.Module) -> None:
+        """Bind the loaded target model and initialize proposal weights."""
+        pass
+
+    @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass
 
