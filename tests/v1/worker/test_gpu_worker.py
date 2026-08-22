@@ -5,9 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.worker import startup_plan
+from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
@@ -77,3 +78,31 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+def test_scoped_allocator_max_split_preserves_alloc_conf(monkeypatch):
+    """torch's parseArgs resets garbage_collection_threshold and
+    roundup_power2_divisions to defaults whenever a settings string omits
+    them, so the scoped max_split_size_mb override must carry the full
+    settings string through both the override and the restore."""
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda", lambda: True)
+    get_settings = torch._C._accelerator_getAllocatorSettings
+    set_settings = torch._C._accelerator_setAllocatorSettings
+
+    user_conf = "garbage_collection_threshold:0.8,roundup_power2_divisions:4"
+    original = get_settings()
+    try:
+        set_settings(user_conf)
+        with gpu_worker.Worker._scoped_allocator_max_split(None, max_split_size_mb=20):
+            inside = get_settings()
+            assert "max_split_size_mb:20" in inside
+            assert "garbage_collection_threshold:0.8" in inside
+            assert "roundup_power2_divisions:4" in inside
+        assert get_settings() == user_conf
+
+        set_settings("")
+        with gpu_worker.Worker._scoped_allocator_max_split(None, max_split_size_mb=20):
+            assert get_settings() == "max_split_size_mb:20"
+        assert get_settings() == ""
+    finally:
+        set_settings(original)
