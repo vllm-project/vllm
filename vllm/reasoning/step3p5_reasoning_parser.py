@@ -140,11 +140,15 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
             self.start_token_id not in previous_token_ids
             and self.start_token_id not in delta_token_ids
         ):
-            if self.end_token_id in delta_token_ids:
+            if self.end_token in delta_text:
                 end_index = delta_text.find(self.end_token)
                 reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 ret = DeltaMessage(reasoning=reasoning, content=content or None)
+            elif self.end_token_id in delta_token_ids:
+                # end token ID arrived but text is still buffered
+                # (output_text_buffer_length delay); wait for text flush
+                return None
             elif self.end_token_id in previous_token_ids:
                 ret = DeltaMessage(content=delta_text)
             else:
