@@ -55,4 +55,5 @@ steps:
   - tests/distributed/
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - pytest -v -s distributed/test_elastic_ep_execute.py
   - pytest -v -s distributed/test_elastic_ep.py

@@ -3,6 +3,7 @@
 import torch
 
 from vllm.distributed.parallel_state import (
+    _init_stateless_eplb_group,
     _init_stateless_group,
     _node_count,
     get_pp_group,
@@ -42,6 +43,7 @@ def create_standby_groups(
     use_all2all: bool,
     enable_eplb: bool = True,
     backend: str | None = None,
+    eplb_communicator: str | None = None,
 ) -> None:
     global \
         _STANDBY_WORLD, \
@@ -91,12 +93,12 @@ def create_standby_groups(
     )
 
     if enable_eplb:
-        _STANDBY_EPLB = _init_stateless_group(
+        _STANDBY_EPLB = _init_stateless_eplb_group(
             standby_ep_ranks,
-            "eplb",
             master_ip,
             backend,
             coord_store=coord_store,
+            communicator=eplb_communicator,
         )
 
 

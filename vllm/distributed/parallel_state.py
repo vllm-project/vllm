@@ -1359,6 +1359,24 @@ def _init_stateless_group(
     )
 
 
+def _init_stateless_eplb_group(
+    group_ranks: list[list[int]],
+    host: str,
+    backend: str,
+    coord_store: Store,
+    communicator: str | None,
+) -> "StatelessGroupCoordinator":
+    # NIXL uses the CPU group for metadata and handles device transfers itself.
+    return _init_stateless_group(
+        group_ranks,
+        "eplb",
+        host,
+        backend,
+        coord_store=coord_store,
+        use_device_communicator=communicator != "nixl",
+    )
+
+
 def _replace_active_groups(
     *,
     world: GroupCoordinator | None,
@@ -1962,12 +1980,12 @@ def initialize_model_parallel(
         assert _EPLB is None, "EPLB group is already initialized"
         if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
-                _EPLB = _init_stateless_group(
+                _EPLB = _init_stateless_eplb_group(
                     group_ranks,
-                    "eplb",
                     parallel_config.data_parallel_master_ip,
                     backend,
                     coord_store=coord_store,
+                    communicator=parallel_config.eplb_config.communicator,
                 )
             else:
                 _EPLB = init_model_parallel_group(
