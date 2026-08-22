@@ -563,6 +563,7 @@ def _fused_moe_lora_small_batch_kernel(
     BLOCK_K: tl.constexpr,
     NUM_SLICES: tl.constexpr,
     EVEN_K: tl.constexpr,
+    THREAD_LOCAL_SHRINK: tl.constexpr,
 ):
     """Persistent fused MoE-LoRA kernel for naive_block_assignment inputs.
 
@@ -629,6 +630,14 @@ def _fused_moe_lora_small_batch_kernel(
             # SHRINK GEMV (once per program; reused across n_tiles_per_program
             # expand tiles below). Sum-reduction over BLOCK_K with fp32
             # accumulator — same precision path as the one_shot kernel.
+            # Accumulate a 2D partial and reduce once after the loop. The
+            # cross-thread reduction for `tl.sum(..., axis=1)` costs a warp
+            # shuffle tree per iteration, and reducing inside the loop pays
+            # it `K / BLOCK_K` times; keeping the partial in registers pays
+            # it once. Triton's thread-locality pass does not do this for us
+            # here -- it only rewrites reductions whose operand comes
+            # straight from a load, not from the `a_tile * x_tile` product.
+            rank_partial = tl.zeros((BLOCK_R, BLOCK_K), dtype=tl.float32)
             rank_vec = tl.zeros((BLOCK_R,), dtype=tl.float32)
             if EVEN_K:
                 for kb in range(0, K, BLOCK_K):
@@ -641,7 +650,10 @@ def _fused_moe_lora_small_batch_kernel(
                         mask=rank_mask[:, None],
                         other=0.0,
                     ).to(tl.float32)
-                    rank_vec += tl.sum(a_tile * x_tile[None, :], axis=1)
+                    if THREAD_LOCAL_SHRINK:
+                        rank_partial += a_tile * x_tile[None, :]
+                    else:
+                        rank_vec += tl.sum(a_tile * x_tile[None, :], axis=1)
             else:
                 for kb in range(0, K, BLOCK_K):
                     cur_k = kb + offs_k
@@ -656,7 +668,12 @@ def _fused_moe_lora_small_batch_kernel(
                         mask=rank_mask[:, None] & k_mask[None, :],
                         other=0.0,
                     ).to(tl.float32)
-                    rank_vec += tl.sum(a_tile * x_tile[None, :], axis=1)
+                    if THREAD_LOCAL_SHRINK:
+                        rank_partial += a_tile * x_tile[None, :]
+                    else:
+                        rank_vec += tl.sum(a_tile * x_tile[None, :], axis=1)
+            if THREAD_LOCAL_SHRINK:
+                rank_vec = tl.sum(rank_partial, axis=1)
 
             # EXPAND: walk n_tiles_per_program consecutive output-N tiles
             # using the same rank_vec. The loop is a runtime range (not
@@ -808,6 +825,16 @@ def _run_fused_moe_lora_small_batch(
     grid_size = min(work_total, max(1, 2 * sm_count))
     grid = (grid_size,)
 
+    # Shrink accumulation strategy. Reducing `tl.sum(..., axis=1)` inside the
+    # K-loop pays a warp-shuffle tree every trip; holding a (BLOCK_R, BLOCK_K)
+    # partial in registers pays it once. That is worth 1.2-3.2x at BLOCK_R=64,
+    # which is the only width where it never loses: below it the shuffles
+    # saved do not cover the extra register pressure, and whether that nets
+    # out is K-dependent in a way nothing here can predict (rank 8 and 16
+    # share BLOCK_R=16 yet land on opposite sides at the same K and batch).
+    # Restrict it to the width that is measurably always a win.
+    THREAD_LOCAL_SHRINK = BLOCK_R >= 64
+
     _fused_moe_lora_small_batch_kernel[grid](
         qcurr_hidden_states,
         A_ptrs,
@@ -842,6 +869,7 @@ def _run_fused_moe_lora_small_batch(
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         ADD_INPUTS=add_inputs,
         BLOCK_R=BLOCK_R,
+        THREAD_LOCAL_SHRINK=THREAD_LOCAL_SHRINK,
         actual_rank=rank,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
