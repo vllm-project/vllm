@@ -133,14 +133,14 @@ After a successful build, you will find a populated build directory (e.g., `cmak
 
 ```console
 > ls cmake-build-release/
-bin             cmake_install.cmake      _deps                                machete_generation.log
-build.ninja     CPackConfig.cmake        detect_cuda_compute_capabilities.cu  marlin_generation.log
-_C.abi3.so      CPackSourceConfig.cmake  detect_cuda_version.cc               _moe_C.abi3.so
-CMakeCache.txt  ctest                    _flashmla_C.abi3.so                  moe_marlin_generation.log
-CMakeFiles      cumem_allocator.abi3.so  install_local_manifest.txt           vllm-flash-attn
+bin                         cmake_install.cmake      _deps                                machete_generation.log
+build.ninja                 CPackConfig.cmake        detect_cuda_compute_capabilities.cu  marlin_generation.log
+_C_stable_libtorch.abi3.so  CPackSourceConfig.cmake  detect_cuda_version.cc               _moe_C_stable_libtorch.abi3.so
+CMakeCache.txt              ctest                    _flashmla_C.abi3.so                  moe_marlin_generation.log
+CMakeFiles                  cumem_allocator.abi3.so  install_local_manifest.txt           vllm-flash-attn
 ```
 
-The `cmake --build ... --target install` command copies the compiled shared libraries (like `_C.abi3.so`, `_moe_C.abi3.so`, etc.) into the appropriate `vllm` package directory within your source tree. This updates your editable installation with the newly compiled kernels.
+The `cmake --build ... --target install` command copies the compiled shared libraries (like `_C_stable_libtorch.abi3.so`, `_moe_C_stable_libtorch.abi3.so`, etc.) into the appropriate `vllm` package directory within your source tree. This updates your editable installation with the newly compiled kernels.
 
 ## Additional Tips
 
