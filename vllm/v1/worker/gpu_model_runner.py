@@ -6836,17 +6836,11 @@ class GPUModelRunner(
         # initializes its dedicated stream, torch returns the per-thread default
         # stream (cuda_stream=0), which cannot be used for cudagraph capture.
         # cap_ctx=None keeps the side-stream path on CUDA.
-        cap_ctx = None
-        if current_platform.is_rocm():
-            profiling_stream = current_stream()
-            # Some model-specific graph setup can restore the thread-local
-            # stream to the default stream before this profiling pass. HIP
-            # rejects capture there, so retain the normal dedicated-stream
-            # path when available and fall back to a fresh side stream only
-            # when necessary.
-            if profiling_stream == torch.cuda.default_stream(self.device):
-                profiling_stream = torch.cuda.Stream(device=self.device)
-            cap_ctx = GraphCaptureContext(profiling_stream)
+        cap_ctx = (
+            GraphCaptureContext(current_stream())
+            if current_platform.is_rocm()
+            else None
+        )
 
         # Cleanup-only guard: CUDA graph capture errors should still propagate
         # because encoder graph capture is opt-in.
