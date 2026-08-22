@@ -67,9 +67,10 @@ class SpeechToTextConfig:
     `None` means audio duration can be unlimited and won't be chunked."""
 
     overlap_chunk_second: int = 1
-    """Overlap duration in seconds between consecutive audio chunks when
-    splitting long audio. This helps maintain context across chunk boundaries
-    and improves transcription quality at split points."""
+    """Size in seconds of the search window before each nominal chunk boundary
+    within which the best (lowest-energy) split point is selected when splitting
+    long audio. Chunks are consecutive and do not overlap; this window only lets
+    the split point move slightly earlier to avoid cutting through speech."""
 
     min_energy_split_window_size: int | None = 1600
     """Window size in samples for finding low-energy (quiet) regions to split

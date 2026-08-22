@@ -332,16 +332,19 @@ def split_audio(
     """Split audio into chunks with intelligent split points.
 
     Splits long audio into smaller chunks at low-energy regions to minimize
-    cutting through speech. Uses overlapping windows to find quiet moments
-    for splitting.
+    cutting through speech. A search window before each chunk boundary is
+    scanned for quiet moments; the resulting chunks are consecutive and do
+    not overlap.
 
     Args:
         audio_data: 1D mono audio array to split. ASR models consume mono, so
                    callers must downmix before chunking.
         sample_rate: Sample rate of the audio in Hz.
         max_clip_duration_s: Maximum duration of each chunk in seconds.
-        overlap_duration_s: Overlap duration in seconds between consecutive chunks.
-                           Used to search for optimal split points.
+        overlap_duration_s: Size in seconds of the search window before each
+                           nominal chunk boundary in which the optimal
+                           (lowest-energy) split point is chosen. Chunks do not
+                           overlap; this only lets a split point move earlier.
         min_energy_window_size: Window size in samples for finding low-energy regions.
 
     Returns:
@@ -378,7 +381,7 @@ def split_audio(
             chunks.append(audio_data[..., i:])
             break
 
-        # Find the best split point in the overlap region
+        # Find the best split point in the search window before the boundary
         search_start = i + chunk_size - overlap_size
         search_end = min(i + chunk_size, audio_data.shape[-1])
         split_point = find_split_point(
