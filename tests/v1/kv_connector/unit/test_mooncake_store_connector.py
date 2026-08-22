@@ -5,6 +5,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import torch
+
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -29,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -62,6 +65,32 @@ def _make_block_stored() -> BlockStored:
         lora_id=None,
         medium="cpu",
         lora_name=None,
+    )
+
+
+def test_validate_accepts_dcp_hybrid_full_attention_and_mamba():
+    vllm_config = MagicMock()
+    vllm_config.cache_config.block_size = 1536
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
+    vllm_config.parallel_config.decode_context_parallel_size = 8
+    full_spec = FullAttentionSpec(
+        block_size=192, num_kv_heads=8, head_size=64, dtype=None
+    )
+    mamba_spec = MambaSpec(
+        block_size=1536,
+        shapes=((2, 512), (3, 32, 32)),
+        dtypes=(torch.float32, torch.float32),
+        mamba_cache_mode="align",
+        num_speculative_blocks=1,
+    )
+    kv_cache_config = MagicMock()
+    kv_cache_config.kv_cache_groups = [
+        KVCacheGroupSpec(["attention"], full_spec),
+        KVCacheGroupSpec(["mamba"], mamba_spec),
+    ]
+
+    mooncake_store_connector.MooncakeStoreConnector._validate_kv_cache_config(
+        vllm_config, kv_cache_config
     )
 
 

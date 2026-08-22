@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
+    effective_kv_cache_groups,
     partial_hash_hits_enabled,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
@@ -74,8 +75,11 @@ class MooncakeStoreScheduler:
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.enable_partial_hash_hits = partial_hash_hits_enabled(
-            kv_cache_config.kv_cache_groups, self._hash_block_size
+            effective_kv_cache_groups(kv_cache_config.kv_cache_groups, dcp_world_size),
+            self._hash_block_size,
+            dcp_world_size,
         )
 
         # Per-request state

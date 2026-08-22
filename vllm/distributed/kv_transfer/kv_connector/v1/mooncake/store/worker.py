@@ -12,6 +12,7 @@ and MooncakeDistributedStore integration.
 
 import dataclasses
 import json
+import logging
 import os
 import queue
 import socket
@@ -39,6 +40,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
+    effective_kv_cache_groups,
+    unwrap_kv_cache_spec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
@@ -65,6 +68,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -108,6 +112,10 @@ def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
 
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
 DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES = 1280 * 1024 * 1024
+# Bound each rank's PUT wave so concurrent TP ranks fit in a standalone
+# owner's registered memory while completed waves are offloaded to disk.
+_MOONCAKE_SAVE_BATCH_BYTES = 64 * 1024 * 1024
+_MOONCAKE_SAVE_PRESSURE_RETRIES = 5
 
 # Mirrors DirectIO alignment in Mooncake's AllocateBatch.
 _DIRECT_IO_ALIGNMENT = 4096
@@ -680,6 +688,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys: list[str] = []
         addrs: list[list[int]] = []
         sizes: list[list[int]] = []
+        seen_keys: set[str] = set()
         group_ids: list[str] | None = (
             [] if self.enable_group_semantics and self.supports_group_ids else None
         )
@@ -698,38 +707,67 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 if block_idx % put_step != put_step_rank:
                     continue
                 valid_end = min((block_idx + 1) * db.block_size, boundary)
-                key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
+                spec = unwrap_kv_cache_spec(
+                    self.coord.kv_cache_groups[g_idx].kv_cache_spec
+                )
+                key_ends: Sequence[tuple[int, bool]] = ((valid_end, False),)
                 if (
-                    g_idx in mamba_offloads
+                    isinstance(spec, FullAttentionSpec)
+                    and db.block_size > hash_block_size
+                    and g_idx in self.coord.eagle_group_ids
                     and valid_end == boundary
                     and boundary % db.block_size != 0
+                    and valid_end > hash_block_size
                 ):
-                    block_id = mamba_offloads[g_idx]
-                else:
-                    if block_idx >= len(group_blocks):
-                        continue
-                    block_id = group_blocks[block_idx]
-                if block_id == NULL_BLOCK_ID:
-                    logger.debug(
-                        "Skipping unavailable partial-tail source block "
-                        "(req=%s, group=%d, block=%d)",
-                        req_meta.req_id,
-                        g_idx,
-                        block_idx,
+                    # Only the incomplete boundary block needs Eagle's marker.
+                    # Emitting markers for earlier complete blocks aliases
+                    # their real block-end keys and can poison future loads.
+                    key_ends = (
+                        (valid_end - hash_block_size, False),
+                        (valid_end, True),
                     )
-                    continue
-                addr, size = db.prepare_value_for_block(block_id)
-                key = db.key_for(key_hash)
-                keys.append(key)
-                addrs.append(addr)
-                sizes.append(size)
-                if group_ids is not None:
-                    group_ids.append(
-                        _make_mooncake_group_id(
-                            db.metadata,
-                            key.rsplit("@", 1)[-1],
+                for key_end, marker_only in key_ends:
+                    key_hash = req_meta.block_hashes[key_end // hash_block_size - 1]
+                    if (
+                        g_idx in mamba_offloads
+                        and key_end == boundary
+                        and boundary % db.block_size != 0
+                    ):
+                        block_id = mamba_offloads[g_idx]
+                    else:
+                        source_block_idx = (key_end - 1) // db.block_size
+                        if source_block_idx >= len(group_blocks):
+                            continue
+                        block_id = group_blocks[source_block_idx]
+                    if block_id == NULL_BLOCK_ID:
+                        logger.debug(
+                            "Skipping unavailable partial-tail source block "
+                            "(req=%s, group=%d, block=%d)",
+                            req_meta.req_id,
+                            g_idx,
+                            block_idx,
                         )
-                    )
+                        continue
+                    addr, size = db.prepare_value_for_block(block_id)
+                    if marker_only:
+                        addr = addr[:1]
+                        size = [1]
+                    key = db.key_for(key_hash)
+                    # The Eagle load boundary can equal the previous complete
+                    # block's normal key. Keep the first full-data entry once.
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    keys.append(key)
+                    addrs.append(addr)
+                    sizes.append(size)
+                    if group_ids is not None:
+                        group_ids.append(
+                            _make_mooncake_group_id(
+                                db.metadata,
+                                key.rsplit("@", 1)[-1],
+                            )
+                        )
 
         if not keys:
             return True
@@ -751,6 +789,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
             )
             return False
         self._record_operation("save_exists", exists_start, len(keys))
+        logger.debug(
+            "Partial-tail existence check req=%s keys=%d present=%d "
+            "states=%s first_key=%s",
+            req_meta.req_id,
+            len(keys),
+            sum(e == 1 for e in exists),
+            sorted(set(exists)),
+            keys[0],
+        )
         missing = [i for i, e in enumerate(exists) if e != 1]
         if not missing:
             return True
@@ -762,52 +809,124 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if req_meta.current_event is not None:
             # Fence the CoW block copy enqueued earlier this step.
             req_meta.current_event.synchronize()
-        if group_ids is not None:
-            assert len(group_ids) == len(keys)
-            self.replicate_config.group_ids = group_ids
-        batch_bytes = _sum_batch_bytes(sizes)
-        put_start = time.perf_counter()
-        try:
-            res = self.store.batch_put_from_multi_buffers(
-                keys, addrs, sizes, self.replicate_config
-            )
-        except Exception as e:
-            self._record_operation(
-                "save_put",
-                put_start,
-                len(keys),
-                num_bytes=batch_bytes,
-                status="error",
-                num_failed_keys=len(keys),
-            )
+        raw_put_budget = max(
+            _MOONCAKE_SAVE_BATCH_BYTES,
+            max(_estimate_disk_offload_staging_bytes(size) for size in sizes),
+        )
+        put_batches, oversized_key = _split_disk_offload_load_batches(
+            keys,
+            addrs,
+            sizes,
+            _MOONCAKE_SAVE_BATCH_BYTES,
+            raw_put_budget,
+        )
+        if oversized_key is not None:
             logger.error(
-                "Failed to put partial-tail keys for request %s: %s",
-                req_meta.req_id,
-                e,
+                "Failed to create partial-tail PUT batches; key %s exceeds "
+                "the computed raw budget",
+                oversized_key,
             )
             return False
 
-        failed = [i for i, value in enumerate(res) if value < 0]
-        self._record_operation(
-            "save_put",
-            put_start,
-            len(keys),
-            num_bytes=batch_bytes,
-            status="partial_failure" if failed else "ok",
-            num_failed_keys=len(failed),
-        )
-        if failed:
-            failed_codes = {res[i] for i in failed}
-            logger.warning(
-                "Partial-tail put failed for request %s: %d/%d keys failed (codes=%s)",
-                req_meta.req_id,
-                len(failed),
-                len(keys),
-                failed_codes,
+        group_id_offset = 0
+        for batch_keys, batch_addrs, batch_sizes in put_batches:
+            batch_group_ids = (
+                None
+                if group_ids is None
+                else group_ids[group_id_offset : group_id_offset + len(batch_keys)]
             )
-            if MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes:
-                self._mark_request_skipped_for_pressure(req_meta)
-            return False
+            group_id_offset += len(batch_keys)
+            pending_keys = batch_keys
+            pending_addrs = batch_addrs
+            pending_sizes = batch_sizes
+            pending_group_ids = batch_group_ids
+
+            for attempt in range(_MOONCAKE_SAVE_PRESSURE_RETRIES + 1):
+                if pending_group_ids is not None:
+                    self.replicate_config.group_ids = pending_group_ids
+                batch_bytes = _sum_batch_bytes(pending_sizes)
+                put_start = time.perf_counter()
+                try:
+                    res = self.store.batch_put_from_multi_buffers(
+                        pending_keys,
+                        pending_addrs,
+                        pending_sizes,
+                        self.replicate_config,
+                    )
+                except Exception as e:
+                    self._record_operation(
+                        "save_put",
+                        put_start,
+                        len(pending_keys),
+                        num_bytes=batch_bytes,
+                        status="error",
+                        num_failed_keys=len(pending_keys),
+                    )
+                    logger.error(
+                        "Failed to put partial-tail keys for request %s: %s",
+                        req_meta.req_id,
+                        e,
+                    )
+                    return False
+
+                if len(res) != len(pending_keys):
+                    # A per-key status is the only thing that makes the retry
+                    # subset below well defined, so a mismatched response is a
+                    # failure rather than something to index into.
+                    self._record_operation(
+                        "save_put",
+                        put_start,
+                        len(pending_keys),
+                        num_bytes=batch_bytes,
+                        status="error",
+                        num_failed_keys=len(pending_keys),
+                    )
+                    logger.error(
+                        "Mooncake returned %d partial-tail statuses for %d keys "
+                        "(request %s); treating the batch as failed",
+                        len(res),
+                        len(pending_keys),
+                        req_meta.req_id,
+                    )
+                    return False
+
+                failed = [i for i, value in enumerate(res) if value < 0]
+                self._record_operation(
+                    "save_put",
+                    put_start,
+                    len(pending_keys),
+                    num_bytes=batch_bytes,
+                    status="partial_failure" if failed else "ok",
+                    num_failed_keys=len(failed),
+                )
+                if not failed:
+                    break
+
+                failed_codes = {res[i] for i in failed}
+                if (
+                    failed_codes == {MOONCAKE_NO_AVAILABLE_HANDLE}
+                    and attempt < _MOONCAKE_SAVE_PRESSURE_RETRIES
+                ):
+                    pending_keys = [pending_keys[i] for i in failed]
+                    pending_addrs = [pending_addrs[i] for i in failed]
+                    pending_sizes = [pending_sizes[i] for i in failed]
+                    if pending_group_ids is not None:
+                        pending_group_ids = [pending_group_ids[i] for i in failed]
+                    time.sleep(0.02 * (attempt + 1))
+                    continue
+
+                logger.warning(
+                    "Partial-tail put failed for request %s: %d/%d keys "
+                    "failed after %d attempt(s) (codes=%s)",
+                    req_meta.req_id,
+                    len(failed),
+                    len(pending_keys),
+                    attempt + 1,
+                    failed_codes,
+                )
+                if MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes:
+                    self._mark_request_skipped_for_pressure(req_meta)
+                return False
 
         if self._clear_store_pressure():
             logger.info(
@@ -988,17 +1107,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 addrs.extend(group_addrs)
                 sizes.extend(group_sizes)
 
+            token_ids_end = token_ids_start + len(event_token_ids or ())
             if self.enable_kv_event:
-                new_block_hashes = [
-                    maybe_convert_block_hash(bh) for bh in kv_event_block_hashes
-                ]
-                token_ids_end = token_ids_start + len(event_token_ids or ())
-
-            for idx, (s, e, g_idx) in enumerate(
-                zip(starts, ends, group_indices, strict=True)
-            ):
-                db = self.token_databases[g_idx]
-                if self.enable_kv_event:
+                for idx, (s, e, g_idx) in enumerate(
+                    zip(starts, ends, group_indices, strict=True)
+                ):
+                    db = self.token_databases[g_idx]
                     token_ids = (
                         event_token_ids[s - token_ids_start : e - token_ids_start]
                         if event_token_ids is not None
@@ -1007,7 +1121,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         else []
                     )
                     stored_event = BlockStored(
-                        block_hashes=[new_block_hashes[idx]],
+                        block_hashes=[
+                            maybe_convert_block_hash(kv_event_block_hashes[idx])
+                        ],
                         # Derive the direct predecessor from the unfiltered
                         # request chain. Adjacent PUTs need not be adjacent in
                         # that chain after Store dedup, masks, or TP striding.
@@ -1030,81 +1146,137 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if current_event is not None:
                 current_event.synchronize()
 
-            if group_ids is not None:
-                assert len(group_ids) == len(keys)
-                self.replicate_config.group_ids = group_ids
-
-            batch_bytes = _sum_batch_bytes(sizes)
-            put_start = time.perf_counter()
-            try:
-                res = self.store.batch_put_from_multi_buffers(
-                    keys,
-                    addrs,
-                    sizes,
-                    self.replicate_config,
+            raw_put_budget = max(
+                _MOONCAKE_SAVE_BATCH_BYTES,
+                max(_estimate_disk_offload_staging_bytes(size) for size in sizes),
+            )
+            put_batches, oversized_key = _split_disk_offload_load_batches(
+                keys,
+                addrs,
+                sizes,
+                _MOONCAKE_SAVE_BATCH_BYTES,
+                raw_put_budget,
+            )
+            if oversized_key is not None:
+                logger.error(
+                    "Failed to create PUT batches; key %s exceeds the "
+                    "computed raw budget",
+                    oversized_key,
                 )
+                return
+
+            all_succeeded = True
+            group_id_offset = 0
+            event_offset = 0
+            for batch_keys, batch_addrs, batch_sizes in put_batches:
+                batch_group_ids = (
+                    None
+                    if group_ids is None
+                    else group_ids[group_id_offset : group_id_offset + len(batch_keys)]
+                )
+                group_id_offset += len(batch_keys)
+                if batch_group_ids is not None:
+                    self.replicate_config.group_ids = batch_group_ids
+
+                batch_bytes = _sum_batch_bytes(batch_sizes)
+                put_start = time.perf_counter()
+                try:
+                    res = self.store.batch_put_from_multi_buffers(
+                        batch_keys,
+                        batch_addrs,
+                        batch_sizes,
+                        self.replicate_config,
+                    )
+                except Exception as e:
+                    self._record_operation(
+                        "save_put",
+                        put_start,
+                        len(batch_keys),
+                        num_bytes=batch_bytes,
+                        status="error",
+                        num_failed_keys=len(batch_keys),
+                    )
+                    logger.error("Failed to put key %s, error: %s", batch_keys, e)
+                    all_succeeded = False
+                    break
+
+                if len(res) != len(batch_keys):
+                    # Statuses are matched to keys positionally, including when
+                    # deciding which KV events may be published, so a
+                    # mismatched response cannot be interpreted per key.
+                    self._record_operation(
+                        "save_put",
+                        put_start,
+                        len(batch_keys),
+                        num_bytes=batch_bytes,
+                        status="error",
+                        num_failed_keys=len(batch_keys),
+                    )
+                    logger.error(
+                        "Mooncake returned %d statuses for %d keys (request %s); "
+                        "treating the batch as failed",
+                        len(res),
+                        len(batch_keys),
+                        req_id,
+                    )
+                    all_succeeded = False
+                    break
+
                 failed = [i for i, v in enumerate(res) if v < 0]
+                if self.enable_kv_event and stored_events:
+                    batch_events = stored_events[
+                        event_offset : event_offset + len(batch_keys)
+                    ]
+                    successful_events = [
+                        event for i, event in enumerate(batch_events) if i not in failed
+                    ]
+                    if successful_events:
+                        self.update_kv_event(successful_events)
+                event_offset += len(batch_keys)
                 self._record_operation(
                     "save_put",
                     put_start,
-                    len(keys),
+                    len(batch_keys),
                     num_bytes=batch_bytes,
                     status="partial_failure" if failed else "ok",
                     num_failed_keys=len(failed),
                 )
-                if failed:
-                    failed_codes = set(res[i] for i in failed)
-                    if self.enable_kv_event:
-                        failed_indices = set(failed)
-                        stored_events = [
-                            event
-                            for i, event in enumerate(stored_events)
-                            if i not in failed_indices
-                        ]
-                    logger.warning(
-                        "batch_put failed: %d/%d keys failed "
-                        "(codes=%s, batch_bytes=%d, num_keys=%d), "
-                        "first_key=%s",
-                        len(failed),
-                        len(keys),
-                        failed_codes,
-                        batch_bytes,
-                        len(keys),
-                        keys[0] if keys else "N/A",
-                    )
-                    if (
-                        MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes
-                        and not self._mark_request_skipped_for_pressure(req_meta)
-                    ):
-                        logger.warning(
-                            "Detected Mooncake CPU/disk offloading pressure "
-                            "(NO_AVAILABLE_HANDLE); skipping future store "
-                            "batches for request %s until a later store "
-                            "batch succeeds",
-                            req_id,
-                        )
-                else:
-                    self._record_saved(req_meta, token_len)
-                    save_completed = True
-                    if self._clear_store_pressure():
-                        logger.info(
-                            "Mooncake CPU/disk offloading pressure cleared "
-                            "after a successful store batch"
-                        )
-            except Exception as e:
-                self._record_operation(
-                    "save_put",
-                    put_start,
-                    len(keys),
-                    num_bytes=batch_bytes,
-                    status="error",
-                    num_failed_keys=len(keys),
-                )
-                logger.error("Failed to put key %s, error: %s", keys, e)
-                stored_events.clear()
+                if not failed:
+                    continue
 
-            if self.enable_kv_event and stored_events:
-                self.update_kv_event(stored_events)
+                all_succeeded = False
+                failed_codes = {res[i] for i in failed}
+                logger.warning(
+                    "batch_put failed: %d/%d keys failed "
+                    "(codes=%s, batch_bytes=%d, num_keys=%d), first_key=%s",
+                    len(failed),
+                    len(batch_keys),
+                    failed_codes,
+                    batch_bytes,
+                    len(batch_keys),
+                    batch_keys[0] if batch_keys else "N/A",
+                )
+                if (
+                    MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes
+                    and not self._mark_request_skipped_for_pressure(req_meta)
+                ):
+                    logger.warning(
+                        "Detected Mooncake CPU/disk offloading pressure "
+                        "(NO_AVAILABLE_HANDLE); skipping future store batches "
+                        "for request %s until a later store batch succeeds",
+                        req_id,
+                    )
+                break
+
+            if all_succeeded:
+                self._record_saved(req_meta, token_len)
+                save_completed = True
+                if self._clear_store_pressure():
+                    logger.info(
+                        "Mooncake CPU/disk offloading pressure cleared after "
+                        "a successful store batch"
+                    )
+
         finally:
             if self.enable_kv_event and token_len:
                 self._update_retry_token_ids(
@@ -1492,10 +1664,12 @@ class MooncakeStoreWorker:
             )
             return
 
-        # Single-group + PCP/DCP > 1: scale the lone group's spec.block_size to
-        # self.block_size (= scheduler_block_size) so the coordinator's
-        # ``block_size % hash_block_size == 0`` invariant holds.
-        groups = list(kv_cache_config.kv_cache_groups)
+        # Match the core cache manager's effective block geometry.
+        groups = effective_kv_cache_groups(
+            kv_cache_config.kv_cache_groups, self.dcp_size
+        )
+        # A single group's effective block is exactly the scheduler block. Keep
+        # the existing fallback for PCP and custom spec geometries.
         if len(groups) == 1 and groups[0].kv_cache_spec.block_size != self.block_size:
             g = groups[0]
             groups = [
@@ -1519,6 +1693,15 @@ class MooncakeStoreWorker:
             hash_block_size=self.hash_block_size,
             use_eagle=use_eagle,
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
+            dcp_world_size=self.dcp_size,
+        )
+        logger.info(
+            "Mooncake cache geometry: scheduler_block=%d hash_block=%d "
+            "partial_hash_hits=%s group_blocks=%s",
+            self.block_size,
+            self.hash_block_size,
+            self.coord.enable_partial_hash_hits,
+            [g.kv_cache_spec.block_size for g in self._kv_cache_groups],
         )
         # One ChunkedTokenDatabase per group; addresses populated in
         # register_kv_caches once the kv-cache layout is known. Each group's
@@ -1652,6 +1835,7 @@ class MooncakeStoreWorker:
         addrs: list[int] = []
         block_lens: list[int] = []
 
+        unregistered: list[int] = []
         for value in kv_caches.values():
             cache = _repr_tensor(value)
             cache_storage = cache.untyped_storage()
@@ -1669,6 +1853,7 @@ class MooncakeStoreWorker:
                     region_len,
                     ret,
                 )
+                unregistered.append(region_len)
 
             # Detect layout via stride: a dim whose byte-stride exceeds
             # page_size_bytes is an outer segment dim (e.g. the K/V dim of
@@ -1696,6 +1881,22 @@ class MooncakeStoreWorker:
             len(addrs),
             self.num_blocks,
         )
+
+        if unregistered:
+            # An unregistered region is one the transfer engine cannot read or
+            # write, so every store and load touching it fails (TRANSFER_FAIL)
+            # while the engine still reports itself healthy and simply serves
+            # zero external hits. Fail here instead: a store that can never
+            # transfer is worse than a refused start. The usual cause is a
+            # client-side cap below the largest KV region, so name it.
+            raise RuntimeError(
+                f"Mooncake could not register {len(unregistered)} of "
+                f"{len(seen_ptrs)} KV cache regions (largest failure "
+                f"{max(unregistered)} bytes). The store cannot transfer "
+                "unregistered memory, so the external tier would silently "
+                "never hit. Check that max_mr_size (MC_MAX_MR_SIZE) is at "
+                "least the largest KV region."
+            )
 
         for db in self.token_dbs:
             db.set_kv_caches_base_addr(addrs)
@@ -1978,6 +2179,19 @@ class MooncakeStoreWorker:
             token_len,
             cached_block_pool,
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            # Summarizing ``res`` costs a pass over every candidate key, so keep
+            # it off the lookup hot path unless debug logging is on.
+            logger.debug(
+                "Mooncake lookup result tokens=%d keys=%d present=%d "
+                "group_hashes=%d hit=%d states=%s",
+                token_len,
+                len(candidate_keys),
+                sum(e == 1 for e in res),
+                len(exists_set),
+                hit_length,
+                sorted(set(res)),
+            )
         if hit_length >= num_tokens:
             usable_length = self.coord.align_lookup_length(num_tokens - 1)
             if usable_length <= 0:

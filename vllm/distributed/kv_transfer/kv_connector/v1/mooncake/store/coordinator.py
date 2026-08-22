@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
+import dataclasses
 from collections.abc import Sequence
 from typing import cast
 
@@ -14,6 +15,7 @@ from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    dcp_world_size_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -67,6 +69,7 @@ class MooncakeStoreCoordinator:
         hash_block_size: int,
         use_eagle: bool = False,
         retention_interval: int | None = None,
+        dcp_world_size: int = 1,
     ) -> None:
         assert all(
             g.kv_cache_spec.block_size % hash_block_size == 0 for g in kv_cache_groups
@@ -83,7 +86,7 @@ class MooncakeStoreCoordinator:
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
         self.enable_partial_hash_hits = partial_hash_hits_enabled(
-            kv_cache_groups, hash_block_size
+            kv_cache_groups, hash_block_size, dcp_world_size
         )
         self.use_eagle = use_eagle
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
@@ -104,7 +107,7 @@ class MooncakeStoreCoordinator:
         """
         attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
-            spec = _unwrap_spec(g.kv_cache_spec)
+            spec = unwrap_kv_cache_spec(g.kv_cache_spec)
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None, (
                 f"No manager registered for KVCacheSpec {spec}"
@@ -242,7 +245,7 @@ class MooncakeStoreCoordinator:
         )
         masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
-            spec = _unwrap_spec(g.kv_cache_spec)
+            spec = unwrap_kv_cache_spec(g.kv_cache_spec)
             end_chunk = aligned_token_len // spec.block_size
             start_chunk = min(end_chunk, max(0, cdiv(start_token, spec.block_size)))
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
@@ -391,22 +394,75 @@ class MooncakeStoreCoordinator:
         )
 
 
-def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
+def unwrap_kv_cache_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
 
 
-def partial_hash_hits_enabled(
-    kv_cache_groups: list[KVCacheGroupSpec], hash_block_size: int
-) -> bool:
-    """Mirror of core's ``HybridKVCacheCoordinator.enable_partial_hash_hits``
-    (its dcp == 1 clause holds: the connector rejects hybrid + DCP/PCP > 1).
-    Single copy on purpose — scheduler and coordinator must not disagree.
+def effective_kv_cache_groups(
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    dcp_world_size: int,
+) -> list[KVCacheGroupSpec]:
+    """Rewrite each group's block size to the core cache manager's geometry.
+
+    DCP shards full-attention KV across ranks, so one externally addressable
+    block spans ``dcp_world_size`` physical blocks, exactly as
+    ``SingleTypeKVCacheManager.block_size`` does. Mamba state stays replicated
+    and keeps its own block size. Every mirror of core's geometry must start
+    from this, or the scheduler and the worker can disagree.
+
+    The rewrite lands on the group's own spec, which is what the token
+    databases and the coordinator read. A ``UniformTypeKVCacheSpecs`` wrapper
+    keeps its per-layer specs untouched, so geometry must always be taken from
+    ``group.kv_cache_spec``, never from an unwrapped layer spec.
     """
-    return any(
-        isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)
-        and spec.mamba_cache_mode == "align"
-        and spec.block_size > hash_block_size
+    if dcp_world_size <= 1:
+        return list(kv_cache_groups)
+    return [
+        dataclasses.replace(
+            g,
+            kv_cache_spec=dataclasses.replace(
+                g.kv_cache_spec,
+                block_size=(
+                    g.kv_cache_spec.block_size
+                    * dcp_world_size_for_kv_cache_spec(g.kv_cache_spec, dcp_world_size)
+                ),
+            ),
+        )
         for g in kv_cache_groups
-    )
+    ]
+
+
+def partial_hash_hits_enabled(
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    hash_block_size: int,
+    dcp_world_size: int = 1,
+) -> bool:
+    """Mirror of core's ``HybridKVCacheCoordinator.enable_partial_hash_hits``.
+
+    ``kv_cache_groups`` must already carry the effective block geometry from
+    ``effective_kv_cache_groups``, so the comparisons here read the same
+    ``block_size`` core compares against. Single copy on purpose -- scheduler
+    and coordinator must not disagree.
+    """
+    for g in kv_cache_groups:
+        spec = unwrap_kv_cache_spec(g.kv_cache_spec)
+        # Geometry comes from the group's spec: an unwrapped layer spec keeps
+        # its unscaled block size.
+        block_size = g.kv_cache_spec.block_size
+        if isinstance(spec, MambaSpec):
+            # TP needs hashing finer than the Mamba block; DCP accepts equality
+            # because it scales the full-attention block instead.
+            if spec.mamba_cache_mode == "align" and (
+                block_size > hash_block_size
+                or (dcp_world_size > 1 and block_size == hash_block_size)
+            ):
+                return True
+        elif (
+            dcp_world_size > 1
+            and isinstance(spec, FullAttentionSpec)
+            and block_size > hash_block_size
+        ):
+            return True
+    return False

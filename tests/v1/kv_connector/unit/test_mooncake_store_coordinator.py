@@ -8,6 +8,8 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
+    effective_kv_cache_groups,
+    partial_hash_hits_enabled,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
@@ -43,6 +45,54 @@ def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=Non
         use_eagle=use_eagle,
         retention_interval=retention_interval,
     )
+
+
+def test_partial_hash_hits_enabled_for_dcp_full_attention_geometry():
+    groups = [
+        KVCacheGroupSpec(["attention"], _full(block_size=3072)),
+        KVCacheGroupSpec(["mamba"], _mamba_align(block_size=1536)),
+    ]
+
+    assert not partial_hash_hits_enabled(
+        effective_kv_cache_groups(groups, 1), hash_block_size=1536
+    )
+    assert partial_hash_hits_enabled(
+        effective_kv_cache_groups(groups, 8),
+        hash_block_size=1536,
+        dcp_world_size=8,
+    )
+
+
+def test_partial_hash_hits_enabled_scales_dcp_geometry_exactly_once():
+    # The scheduler passes the raw config groups and the worker passes the
+    # groups it already scaled for the coordinator. Both must agree, so the
+    # predicate reads the effective block size instead of scaling again.
+    raw = [KVCacheGroupSpec(["attention"], _full(block_size=8))]
+    scaled = effective_kv_cache_groups(raw, 8)
+
+    assert scaled[0].kv_cache_spec.block_size == 64
+    # One effective block is exactly one hash block, so there is no sub-block
+    # tail to hit.
+    assert not partial_hash_hits_enabled(scaled, hash_block_size=64, dcp_world_size=8)
+    assert not partial_hash_hits_enabled(
+        effective_kv_cache_groups(raw, 8), hash_block_size=64, dcp_world_size=8
+    )
+    # Two hash blocks per effective block does leave a tail.
+    wider = effective_kv_cache_groups(
+        [KVCacheGroupSpec(["attention"], _full(block_size=16))], 8
+    )
+    assert partial_hash_hits_enabled(wider, hash_block_size=64, dcp_world_size=8)
+
+
+def test_effective_kv_cache_groups_replicates_mamba():
+    groups = [
+        KVCacheGroupSpec(["attention"], _full(block_size=16)),
+        KVCacheGroupSpec(["mamba"], _mamba_align(block_size=128)),
+    ]
+
+    scaled = effective_kv_cache_groups(groups, 8)
+
+    assert [g.kv_cache_spec.block_size for g in scaled] == [128, 128]
 
 
 # ----- ExternalCachedBlockPool -----
