@@ -33,7 +33,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
     get_sliding_window_size_in_chunks,
-    is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
@@ -43,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LookupResult,
@@ -308,55 +308,6 @@ def test_scheduler_reports_lookup_sync_delay(request_runner):
     reduced = _reduce_kv_connector_stats(runner)
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_count"] == 1
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
-
-
-@pytest.mark.parametrize(
-    (
-        "absolute_chunk_index",
-        "storable_chunk_count",
-        "alignment_chunk_count",
-        "sliding_window_chunks",
-        "is_eagle_group",
-        "expected",
-    ),
-    [
-        # Full 64-chunk segment: ordinary SWA keeps 62-63; EAGLE also keeps 61.
-        (61, 64, 64, 2, False, False),
-        (62, 64, 64, 2, False, True),
-        (60, 64, 64, 2, True, False),
-        (61, 64, 64, 2, True, True),
-        # Partial 48-of-64 segment: the reachable tail ends at chunk 47.
-        (45, 48, 64, 2, False, False),
-        (46, 48, 64, 2, False, True),
-        (44, 48, 64, 2, True, False),
-        (45, 48, 64, 2, True, True),
-        # A later partial segment uses its own actual end (chunks 64-79).
-        (76, 80, 64, 3, False, False),
-        (77, 80, 64, 3, False, True),
-        # No alignment means no store-pruning optimization.
-        (0, 1, None, None, False, True),
-        # A tail at least as large as the segment keeps every chunk.
-        (0, 2, 64, 2, False, True),
-    ],
-)
-def test_is_store_reachable_swa_chunk(
-    absolute_chunk_index: int,
-    storable_chunk_count: int,
-    alignment_chunk_count: int | None,
-    sliding_window_chunks: int | None,
-    is_eagle_group: bool,
-    expected: bool,
-):
-    assert (
-        is_store_reachable_swa_chunk(
-            absolute_chunk_index,
-            storable_chunk_count,
-            alignment_chunk_count,
-            sliding_window_chunks,
-            is_eagle_group,
-        )
-        is expected
-    )
 
 
 def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
@@ -2113,7 +2064,7 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
       - Group 0: full attention (MLA-like), block_size=16
       - Group 1: SWA, block_size=4, sliding_window=8
 
-    alignment_chunk_count = 16 / 4 = 4 SWA blocks per alignment segment.
+    alignment_tokens = 16, so 16 / 4 = 4 SWA blocks per alignment segment.
     sliding_window_size_in_chunks = ceil(8 / 4) = 2.
     Within each segment of 4 SWA blocks, only the trailing 2 are stored.
 
@@ -2157,17 +2108,17 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
         kv_cache_groups=kv_cache_groups,
     )
 
-    # Verify config: alignment_chunk_count computed correctly
+    # Verify config
     kv_group_configs = runner.connector_scheduler.config.kv_group_configs
     assert len(kv_group_configs) == 2
-    # Group 0: full attention -> no alignment skip
-    assert kv_group_configs[0].alignment_chunk_count is None
+    # Group 0: full attention
     assert kv_group_configs[0].sliding_window_size_in_chunks is None
     assert kv_group_configs[0].tokens_per_chunk == full_attn_block_size
-    # Group 1: SWA -> alignment_chunk_count = 16/4 = 4, tail = 2
-    assert kv_group_configs[1].alignment_chunk_count == 4
+    # Group 1: SWA with sliding_window_size of 2 chunks
     assert kv_group_configs[1].sliding_window_size_in_chunks == 2
     assert kv_group_configs[1].tokens_per_chunk == swa_block_size
+    # alignment_tokens = full_attn_block_size = 16
+    assert runner.connector_scheduler.config.alignment_tokens == full_attn_block_size
 
     # Send 32 tokens = 2 full-attn blocks (block_size=16) = 8 SWA blocks
     # (block_size=4). Decode 1 token to kick off processing (stores are
@@ -3363,3 +3314,225 @@ def test_chunked_local_attention_reports_its_chunk_window():
     assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=1024) == 8
     # Partial chunks round up, so the reachable tail is never understated.
     assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=3000) == 3
+
+
+@pytest.mark.parametrize("blocks_per_chunk", [1, 2, 3])
+def test_reachable_block_mask_chunk_to_block_index_conversion(
+    blocks_per_chunk: int,
+):
+    """reachable_block_mask operates in KV-block coordinates, but the
+    offloading scheduler works in chunk coordinates. Verify that the
+    index conversion (chunk -> block -> chunk) produces the same
+    filtering result regardless of blocks_per_chunk.
+
+    Uses a SWA spec with alignment_tokens large enough to create
+    unreachable blocks (alignment_tokens > sliding_window).
+    """
+    block_size = 4
+    sliding_window = 8
+    alignment_tokens = 16 * blocks_per_chunk
+
+    swa_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+
+    num_chunks = 8
+    start_chunk_idx = 0
+
+    manager_cls = KVCacheSpecRegistry.get_manager_class(swa_spec)
+    assert manager_cls is not None
+
+    block_mask = manager_cls.reachable_block_mask(
+        start_block=start_chunk_idx * blocks_per_chunk,
+        end_block=num_chunks * blocks_per_chunk,
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=swa_spec,
+        use_eagle=False,
+    )
+
+    if block_mask is None:
+        return
+
+    assert len(block_mask) == num_chunks * blocks_per_chunk
+
+    reachable_chunks = []
+    for chunk_idx in range(num_chunks):
+        if any(
+            block_mask[chunk_idx * blocks_per_chunk + b]
+            for b in range(blocks_per_chunk)
+        ):
+            reachable_chunks.append(chunk_idx)
+
+    # The tail of each alignment segment should be reachable.
+    # sliding_window=8 with block_size=4 -> need=2 blocks.
+    # With blocks_per_chunk=1: alignment has 16 blocks, tail 2 reachable.
+    # With blocks_per_chunk=2: alignment has 16 blocks, tail 2 -> 1 chunk.
+    # With blocks_per_chunk=3: alignment has 16 blocks, tail 2 -> 1 chunk.
+    assert len(reachable_chunks) > 0
+    assert len(reachable_chunks) < num_chunks
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_retention_interval_sparsifies_swa_stores(
+    request_runner, async_scheduling: bool
+):
+    """retention_interval reduces the number of SWA chunks stored.
+
+    Uses the same hybrid architecture as test_swa_alignment_skip but with
+    retention_interval=32 (read from kv_connector_extra_config).  With
+    alignment_tokens=16 the default stores a 2-block SWA tail per 16-token
+    segment.  retention_interval=32 widens segments to 32 tokens (8 SWA
+    blocks), so only the trailing 2 of each 8-block segment are stored.
+
+    With 64 tokens (4 full-attn blocks, 16 SWA blocks):
+      - Group 0 (full attn): stores all 4 blocks
+      - Group 1 (SWA) without retention: 4 segments of 4 -> 8 stored
+      - Group 1 (SWA) with retention_interval=32: 2 segments of 8 -> 4 stored
+    """
+    full_attn_block_size = 16
+    swa_block_size = 4
+    sliding_window = 8
+    num_gpu_blocks = 200
+
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["layer0"],
+            FullAttentionSpec(
+                block_size=full_attn_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["layer1"],
+            SlidingWindowSpec(
+                block_size=swa_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=sliding_window,
+            ),
+        ),
+    ]
+
+    runner = request_runner(
+        block_size=swa_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+        kv_cache_groups=kv_cache_groups,
+        retention_interval=32,
+    )
+
+    assert runner.connector_scheduler.config.retention_interval == 32
+
+    num_tokens = 64
+    runner.new_request(token_ids=[0] * num_tokens)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0])
+
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        # Group 0 (full attn, block_size=16): 4 blocks stored
+        # Group 1 (SWA, block_size=4): 16 blocks total, retention_interval=32
+        #   Dense segment tails (per_segment=32/4=8, need=2):
+        #     blocks 6, 7 and 14, 15
+        #   Replay boundary (num_prompt_tokens-1=63, aligned to 48):
+        #     end=48/4=12, tail blocks 10, 11
+        expected_stored=(
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 6),
+            (1, 7),
+            (1, 10),
+            (1, 11),
+            (1, 14),
+            (1, 15),
+        ),
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_retention_interval_zero_stores_only_replay_boundary(
+    request_runner, async_scheduling: bool
+):
+    """retention_interval=0 stores only the replay boundary SWA blocks.
+
+    Same hybrid architecture.  With retention_interval=0, no dense segment
+    tails are stored — only blocks reachable from the replay boundary
+    (num_prompt_tokens - 1).
+    """
+    full_attn_block_size = 16
+    swa_block_size = 4
+    sliding_window = 8
+    num_gpu_blocks = 200
+
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["layer0"],
+            FullAttentionSpec(
+                block_size=full_attn_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["layer1"],
+            SlidingWindowSpec(
+                block_size=swa_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=sliding_window,
+            ),
+        ),
+    ]
+
+    runner = request_runner(
+        block_size=swa_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+        kv_cache_groups=kv_cache_groups,
+        retention_interval=0,
+    )
+
+    assert runner.connector_scheduler.config.retention_interval == 0
+
+    num_tokens = 64
+    runner.new_request(token_ids=[0] * num_tokens)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(decoded_tokens=[0])
+
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        # Group 0 (full attn): all 4 blocks stored
+        # Group 1 (SWA): retention_interval=0 -> only replay boundary
+        #   replay boundary = num_prompt_tokens - 1 = 63
+        #   aligned to alignment_tokens=16 -> 48, end=48/4=12
+        #   tail = ceil(8/4) = 2 blocks -> blocks 10, 11
+        expected_stored=(
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 10),
+            (1, 11),
+        ),
+    )
