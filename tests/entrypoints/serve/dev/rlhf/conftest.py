@@ -28,9 +28,6 @@ import requests
 # ---------------------------------------------------------------------------
 
 
-MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
-
-
 _BASE_ARGS = [
     "--dtype",
     "bfloat16",
@@ -40,8 +37,6 @@ _BASE_ARGS = [
     "32",
     "--gpu-memory-utilization",
     "0.75",
-    "--enable-sleep-mode",
-    "--enforce-eager",
 ]
 
 
@@ -56,8 +51,6 @@ _DUMMY_ARGS = [
     "8",
     "--gpu-memory-utilization",
     "0.5",
-    "--enable-sleep-mode",
-    "--enforce-eager",
     "--load-format",
     "dummy",
 ]
@@ -70,6 +63,7 @@ _DUMMY_ARGS = [
 
 @contextmanager
 def server(
+    model: str,
     extra_args=None,
     port: int = 8770,
     timeout: float = 180.0,
@@ -78,10 +72,15 @@ def server(
     """Launch a vLLM server with the dev router; yield its base URL.
 
     Args:
+        model:           Model to serve; each test module passes its own.
         extra_args:      Additional CLI flags appended after the base args.
         port:            HTTP port to bind (caller is responsible for uniqueness).
         timeout:         Seconds to wait for /health before giving up.
         dummy_weights:   If True, use --load-format dummy (fast, no real weights).
+
+    The vLLM defaults apply unless the caller opts in via ``extra_args``
+    (e.g. pass ``--enforce-eager`` for eager execution; otherwise the
+    default ``-O2`` CUDA-graph configuration is used).
     """
     env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
@@ -90,7 +89,7 @@ def server(
         "-m",
         "vllm.entrypoints.openai.api_server",
         "--model",
-        MODEL_NAME,
+        model,
         "--port",
         str(port),
         "--served-model-name",

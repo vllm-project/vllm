@@ -23,6 +23,8 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     start_stream,
 )
 
+MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
+
 
 @pytest.fixture(scope="module", params=[False, True], ids=["MRV1", "MRV2"])
 def use_v2(request):
@@ -38,9 +40,12 @@ def server_url(use_v2):
     with (
         patch.dict(os.environ, env_vars),
         server(
+            MODEL_NAME,
             extra_args=[
                 "--enable-prefix-caching",
                 "--enable-prompt-tokens-details",
+                "--enable-sleep-mode",
+                "--enforce-eager",
             ]
         ) as url,
     ):
