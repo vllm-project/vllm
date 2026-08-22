@@ -29,9 +29,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOError,
     MoRIIOTransferAck,
     RemoteAllocInfo,
+    TransferBatchState,
     TransferError,
     TransferId,
     WriteTask,
+    as_attn_mamba,
     get_port_offset,
     get_role,
     zmq_ctx,
@@ -57,6 +59,13 @@ try:
     logger.info("MoRIIO is available")
 except ImportError:
     logger.error("MoRIIO is not available")
+
+try:
+    from mori.io import StatusCode
+except ImportError:
+    # Older mori builds expose neither StatusCode nor IOEngine.WaitAll, so the
+    # Python polling path has to stay reachable.
+    StatusCode = None
 
 
 """Write task execution logic for MoRIIO connector."""
@@ -175,6 +184,14 @@ class MoRIIOWriter:
 
         for transfer_id, request_info in pending:
             self._finalize_if_complete(transfer_id, request_info)
+
+    def has_outstanding_writes(self) -> bool:
+        """True while any transfer still has scheduled writes that have not
+        been finalized/cleared. Drives MoRIIOConnector.has_pending_push_work so
+        the engine keeps stepping until all WRITE transfers (including KDA
+        conv+ssm, which fire only from wait_for_save) complete."""
+        with self._write_state_lock:
+            return bool(self._scheduled_writes)
 
     def _write_worker_loop(self) -> None:
         """Main loop for the write worker thread."""
@@ -376,21 +393,28 @@ class MoRIIOWriter:
         Returns:
             The transfer plan
         """
+        if self.worker._is_mamba_layer(task.layer_name):
+            return self._prepare_mamba_transfer_plan(task, request_info)
+
         layer_cache = self.worker.kv_caches[task.layer_name]
         geometry_key = _get_write_geometry_key(layer_cache)
         offsets = request_info.transfer_offsets.get(geometry_key)
         if offsets is None:
+            # local/remote block ids carry [attn, mamba]; attention layers use
+            # the attention half.
+            local_attn, _ = as_attn_mamba(task.local_block_ids)
+            remote_attn, _ = as_attn_mamba(request_info.block_ids)
             offsets = self.worker._compute_block_transfer_offsets(
                 task.layer_name,
-                task.local_block_ids,
-                request_info.block_ids,
+                local_attn,
+                remote_attn,
                 remote_moriio_meta,
             )
             request_info.transfer_offsets[geometry_key] = offsets
 
-        # Get session index
-        layer_names = list(self.worker.layer_name_to_local_kv_cache_metadata.keys())
-        sess_idx = layer_names.index(task.layer_name)
+        # One session per registered region; attention layers map to a single
+        # index (see MoRIIOConnectorWorker._region_session_indices).
+        sess_idx = self.worker._region_session_indices(task.layer_name)[0]
 
         local_off, remote_off, sizes = offsets
 
@@ -405,6 +429,44 @@ class MoRIIOWriter:
             use_batch=True,
         )
 
+    def _prepare_mamba_transfer_plan(
+        self,
+        task: WriteTask,
+        request_info: RemoteAllocInfo,
+    ) -> LayerTransferPlan:
+        """Build a conv+ssm write plan for a KDA layer.
+
+        The layer has two registered regions (conv, ssm) -> two sessions. Both
+        are issued as one scheduled write (seal_pending_transfers counts one
+        write per (transfer_id, layer_name), and writes_done is incremented once
+        per task regardless of how many session writes fire), so no attention-
+        layer-count threshold is needed.
+        """
+        # KDA layers use the mamba half of the carried [attn, mamba] block ids.
+        _, local_mamba = as_attn_mamba(task.local_block_ids)
+        _, remote_mamba = as_attn_mamba(request_info.block_ids)
+        local, remote, sizes, n_conv = self.worker._compute_mamba_transfer_offsets(
+            task.layer_name,
+            local_mamba,
+            remote_mamba,
+        )
+        region_sessions = self.worker._region_session_indices(task.layer_name)
+        return LayerTransferPlan(
+            request_id=task.request_id,
+            transfer_id=task.transfer_id,
+            layer_name=task.layer_name,
+            sess_idx=region_sessions[0],
+            transfer_local_offsets=local[:n_conv],
+            transfer_remote_offsets=remote[:n_conv],
+            transfer_sizes=sizes[:n_conv],
+            use_batch=True,
+            is_mamba=True,
+            ssm_sess_idx=region_sessions[1],
+            ssm_local_offsets=local[n_conv:],
+            ssm_remote_offsets=remote[n_conv:],
+            ssm_sizes=sizes[n_conv:],
+        )
+
     def _do_layer_write(self, plan: LayerTransferPlan, sessions: list) -> list[Any]:
         """Perform the actual layer write.
 
@@ -412,6 +474,32 @@ class MoRIIOWriter:
             plan: The transfer plan
             sessions: List of transfer sessions
         """
+        if plan.is_mamba:
+            # KDA layer: batched conv write on the conv session and batched ssm
+            # write on the ssm session (two regions), collected as this task's
+            # transfer statuses.
+            mamba_statuses: list[Any] = []
+            if plan.transfer_sizes:
+                mamba_statuses.append(
+                    self.worker.moriio_wrapper.write_remote_data(
+                        plan.transfer_sizes,
+                        plan.transfer_local_offsets,
+                        plan.transfer_remote_offsets,
+                        sessions[plan.sess_idx],
+                    )
+                )
+            if plan.ssm_sizes:
+                assert plan.ssm_sess_idx is not None
+                mamba_statuses.append(
+                    self.worker.moriio_wrapper.write_remote_data(
+                        plan.ssm_sizes,
+                        plan.ssm_local_offsets,
+                        plan.ssm_remote_offsets,
+                        sessions[plan.ssm_sess_idx],
+                    )
+                )
+            return mamba_statuses
+
         if plan.use_batch:
             return [
                 self.worker.moriio_wrapper.write_remote_data(
@@ -536,6 +624,7 @@ class MoRIIOWrapper:
         self.notify_thread: threading.Thread | None = None
         self.sessions: list[IOEngine.Session] = []
         self.paths: dict[str, zmq.Socket] = {}
+        self._wait_all_supported: bool | None = None
 
     def set_moriio_engine(self, moriio_engine):
         assert moriio_engine is not None, (
@@ -653,6 +742,42 @@ class MoRIIOWrapper:
         )
         return transfer_status
 
+    def _batch_wait_available(self) -> bool:
+        """True if this mori build exposes the batched wait.
+
+        Probed once and cached, because an image may pin a mori without it and
+        must fall back rather than raise on the first transfer.
+        """
+        if self._wait_all_supported is None:
+            self._wait_all_supported = StatusCode is not None and hasattr(
+                self.moriio_engine, "wait_all"
+            )
+            logger.info(
+                "MoRIIO batched transfer wait (wait_all) available: %s",
+                self._wait_all_supported,
+            )
+        return self._wait_all_supported
+
+    def poll_transfer_batch(self, transfer_statuses: list[Any]) -> TransferBatchState:
+        """Non-blocking verdict over every status of one request.
+
+        Judging a request by its newest status alone calls it done while an
+        earlier layer is unfinished or already failed; failures do land on
+        layers other than the last, because _post_read_with_backoff returns a
+        failed status when the send queue never drains.
+
+        Stays a Python scan even where wait_all exists: mori's zero-timeout wait
+        runs PollProgress on the calling thread, which would drive the backend's
+        progress callback from the engine thread alongside its own poller.
+        """
+        state = TransferBatchState.DONE
+        for status in transfer_statuses:
+            if status.Failed():
+                return TransferBatchState.FAILED
+            if not status.Succeeded():
+                state = TransferBatchState.PENDING
+        return state
+
     def waiting_for_transfer_complete(self, transfer_statuses: list[Any] | None = None):
         if transfer_statuses is None:
             with self.lock:
@@ -664,6 +789,56 @@ class MoRIIOWrapper:
         if not transfers_to_wait:
             return
 
+        if self._batch_wait_available():
+            self._wait_all_transfers(transfers_to_wait)
+        else:
+            self._poll_transfers_until_done(transfers_to_wait)
+
+    def _wait_all_transfers(self, transfers_to_wait: list[Any]) -> None:
+        """Block on the whole batch inside mori, with the GIL released.
+
+        The READ barrier waits here on the forward thread, so a Python spin
+        would hold the GIL for the length of the transfer and starve the very
+        threads it waits on. mori blocks on a condition variable, shares one
+        deadline across the batch, and gives failure precedence over pending.
+        """
+        timeout = self._transfer_timeout
+        # timeout_ms == 0 means "poll once" to mori, so never round down to it.
+        timeout_ms = max(int(timeout * 1000), 1)
+        rc = self.moriio_engine.wait_all(transfers_to_wait, timeout_ms=timeout_ms)
+        if rc == StatusCode.SUCCESS:
+            return
+        raise TransferError(self._describe_transfer_failure(transfers_to_wait, rc))
+
+    def _describe_transfer_failure(self, transfers_to_wait: list[Any], rc) -> str:
+        """Recover the per-status detail a batch return code loses.
+
+        Runs only on the failure path, so it costs nothing in steady state.
+        """
+        timeout = self._transfer_timeout
+        errors: list[str] = []
+        for status in transfers_to_wait:
+            if status.Succeeded():
+                continue
+            if status.Failed():
+                errors.append(
+                    f"RDMA transfer failed: {status.Message()} (code={status.Code()})"
+                )
+            else:
+                errors.append(
+                    f"RDMA transfer timed out after {timeout:.0f}s. "
+                    f"Check NIC queue depth or reduce concurrency; "
+                    f"adjust with kv_connector_extra_config.transfer_timeout."
+                )
+        if not errors:
+            errors.append(f"batch wait returned {rc} with every status terminal")
+        return (
+            f"{len(errors)}/{len(transfers_to_wait)} transfers failed "
+            f"(batch wait rc={rc}):\n" + "\n".join(errors)
+        )
+
+    def _poll_transfers_until_done(self, transfers_to_wait: list[Any]) -> None:
+        """Fallback for mori builds without the batched wait."""
         timeout = self._transfer_timeout
         deadline = time.monotonic() + timeout
         remaining = list(transfers_to_wait)
@@ -788,7 +963,8 @@ class MoRIIOWrapper:
                 )
                 return
             self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
-                block_ids=block_notify_list, decode_dp_rank=decode_dp_rank
+                block_ids=block_notify_list,
+                decode_dp_rank=decode_dp_rank,
             )
 
     def _handle_write_done_message(self, data: dict):
