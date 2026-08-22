@@ -41,6 +41,10 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
+from vllm.tool_parsers.utils import (
+    ResponsesToolCallName,
+    resolve_responses_tool_call_name,
+)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -307,10 +311,16 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
 
 
 def _parse_function_call(
-    message: Message, recipient: str, incomplete: bool = False
+    message: Message,
+    recipient: str,
+    incomplete: bool = False,
+    tool_call_name_map: dict[str, ResponsesToolCallName] | None = None,
 ) -> list[ResponseOutputItem]:
     """Parse function calls into function tool call items."""
     function_name = extract_function_from_recipient(recipient)
+    call_name = resolve_responses_tool_call_name(
+        function_name, tool_call_name_map=tool_call_name_map
+    )
     output_items = []
     for content in message.content:
         random_id = random_uuid()
@@ -318,7 +328,8 @@ def _parse_function_call(
             arguments=content.text,
             call_id=f"call_{random_id}",
             type="function_call",
-            name=function_name,
+            name=call_name.name,
+            namespace=call_name.namespace,
             id=f"fc_{random_id}",
             status="incomplete" if incomplete else "completed",
         )
@@ -436,6 +447,7 @@ def harmony_to_response_output(
     message: Message,
     function_tool_names: frozenset[str],
     incomplete: bool = False,
+    tool_call_name_map: dict[str, ResponsesToolCallName] | None = None,
 ) -> list[ResponseOutputItem]:
     """Parse a Harmony message into a list of output response items.
 
@@ -459,7 +471,12 @@ def harmony_to_response_output(
         # Function calls (with or without "functions." prefix)
         elif is_function_recipient(recipient, function_tool_names):
             output_items.extend(
-                _parse_function_call(message, recipient, incomplete=incomplete)
+                _parse_function_call(
+                    message,
+                    recipient,
+                    incomplete=incomplete,
+                    tool_call_name_map=tool_call_name_map,
+                )
             )
 
         # Built-in MCP tools (python, browser, container)

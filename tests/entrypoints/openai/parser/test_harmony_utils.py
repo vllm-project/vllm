@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from openai.types.responses import FunctionTool
+from openai.types.responses import FunctionTool, NamespaceTool
 from openai_harmony import DeveloperContent, Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
     create_tool_definition,
     extract_function_from_recipient,
+    get_developer_message,
     get_system_message,
     has_custom_tools,
     is_function_recipient,
@@ -1065,3 +1066,117 @@ class TestResponseInputToHarmonyReasoningItem:
         msg = response_input_to_harmony(item, prev_responses=[])
 
         assert msg is None
+
+
+class TestGetDeveloperMessageNamespaceTools:
+    """Tests for get_developer_message handling of namespace tools."""
+
+    def test_namespace_tool_accepted(self):
+        """Namespace tools should not raise ValueError."""
+        namespace_tool = NamespaceTool(
+            type="namespace",
+            name="mcp__computer_use",
+            description="Computer control tools.",
+            tools=[
+                FunctionTool(
+                    type="function",
+                    name="get_app_state",
+                    description="Get the current state of an app.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "app": {"type": "string"},
+                        },
+                        "required": ["app"],
+                    },
+                ),
+            ],
+        )
+        msg = get_developer_message(tools=[namespace_tool])
+        assert msg.author.role == Role.DEVELOPER
+        content = msg.content[0]
+        assert isinstance(content, DeveloperContent)
+        tool_names = [t.name for t in content.function_tools]
+        assert "mcp__computer_use__get_app_state" in tool_names
+
+    def test_namespace_tool_with_multiple_functions(self):
+        """Namespace tool with multiple inner functions should flatten all."""
+        namespace_tool = NamespaceTool(
+            type="namespace",
+            name="codex",
+            description="Codex tools.",
+            tools=[
+                FunctionTool(
+                    type="function",
+                    name="shell",
+                    description="Run a shell command.",
+                    parameters={
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                        "required": ["cmd"],
+                    },
+                ),
+                FunctionTool(
+                    type="function",
+                    name="read_file",
+                    description="Read a file.",
+                    parameters={
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                ),
+            ],
+        )
+        msg = get_developer_message(tools=[namespace_tool])
+        content = msg.content[0]
+        tool_names = [t.name for t in content.function_tools]
+        assert "codex__shell" in tool_names
+        assert "codex__read_file" in tool_names
+
+    def test_mixed_function_and_namespace_tools(self):
+        """Mix of function and namespace tools should all be included."""
+        function_tool = FunctionTool(
+            type="function",
+            name="get_weather",
+            description="Get weather.",
+            parameters=_TOOL_PARAMETERS,
+        )
+        namespace_tool = NamespaceTool(
+            type="namespace",
+            name="mcp",
+            description="MCP tools.",
+            tools=[
+                FunctionTool(
+                    type="function",
+                    name="search",
+                    description="Search.",
+                    parameters=_TOOL_PARAMETERS,
+                ),
+            ],
+        )
+        msg = get_developer_message(tools=[function_tool, namespace_tool])
+        content = msg.content[0]
+        tool_names = [t.name for t in content.function_tools]
+        assert "get_weather" in tool_names
+        assert "mcp__search" in tool_names
+
+    def test_namespace_tool_none_description(self):
+        """Namespace inner tool with None description defaults to empty."""
+        namespace_tool = NamespaceTool(
+            type="namespace",
+            name="ns",
+            description="Namespace.",
+            tools=[
+                FunctionTool(
+                    type="function",
+                    name="tool_a",
+                    description=None,
+                    parameters=_TOOL_PARAMETERS,
+                ),
+            ],
+        )
+        msg = get_developer_message(tools=[namespace_tool])
+        content = msg.content[0]
+        tool_descs = {t.name: t for t in content.function_tools}
+        assert tool_descs["ns__tool_a"].description == ""

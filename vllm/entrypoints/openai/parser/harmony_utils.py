@@ -25,6 +25,7 @@ from openai_harmony import (
 from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.logger import init_logger
+from vllm.tool_parsers.utils import flat_namespace_tool_name
 
 logger = init_logger(__name__)
 
@@ -169,7 +170,7 @@ def get_developer_message(
     if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         dev_msg_content = dev_msg_content.with_instructions(instructions)
     if tools is not None:
-        function_tools: list[Tool | ChatCompletionToolsParam] = []
+        function_tool_descriptions: list[ToolDescription] = []
         for tool in tools:
             if tool.type in (
                 "web_search_preview",
@@ -177,15 +178,25 @@ def get_developer_message(
                 "container",
             ):
                 pass
-
             elif tool.type == "function":
-                function_tools.append(tool)
+                function_tool_descriptions.append(create_tool_definition(tool))
+            elif tool.type == "namespace":
+                for namespaced_tool in tool.tools:
+                    if namespaced_tool.type != "function":
+                        continue
+                    flat_name = flat_namespace_tool_name(
+                        tool.name, namespaced_tool.name
+                    )
+                    function_tool_descriptions.append(
+                        ToolDescription.new(
+                            name=flat_name,
+                            description=namespaced_tool.description or "",
+                            parameters=namespaced_tool.parameters,
+                        )
+                    )
             else:
                 raise ValueError(f"tool type {tool.type} not supported")
-        if function_tools:
-            function_tool_descriptions = [
-                create_tool_definition(tool) for tool in function_tools
-            ]
+        if function_tool_descriptions:
             dev_msg_content = dev_msg_content.with_function_tools(
                 function_tool_descriptions
             )
