@@ -198,6 +198,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return
 
+    def supports_deferred_moe_finalize(self) -> bool:
+        """Whether ``finalize`` can be skipped for a deferring consumer.
+
+        An implementation opts in only if everything it does in ``finalize``
+        -- the top-k reduction, and any combine or reduce-scatter -- is work
+        the consumer takes over.
+        """
+        return False
+
     @property
     @abstractmethod
     def activation_format(self) -> FusedMoEActivationFormat:
@@ -1083,7 +1092,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """
         Same as apply(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
@@ -1524,8 +1533,12 @@ class FusedMoEKernelModularImpl:
         if isinstance(fused_out, UnfinalizedMoEOutput):
             # Nothing below can run on an unfinalized output: finalize is the
             # local top-k reduction (and, for DP/EP, the combine) that the
-            # consumer takes over. The producer only gets here when
-            # `use_deferred_moe_finalize` already vetted that.
+            # consumer takes over.
+            if not self.prepare_finalize.supports_deferred_moe_finalize():
+                raise RuntimeError(
+                    f"{type(self.prepare_finalize).__name__} cannot pass through "
+                    "a deferred MoE output."
+                )
             return fused_out
 
         return self._finalize(
@@ -1565,7 +1578,7 @@ class FusedMoEKernelMonolithicImpl:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """
         Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
@@ -1596,9 +1609,14 @@ class FusedMoEKernelMonolithicImpl:
             topk_group=topk_group,
         )
 
-        output = self.prepare_finalize.finalize(fused_out)
-
-        return output
+        if isinstance(fused_out, UnfinalizedMoEOutput):
+            if not self.prepare_finalize.supports_deferred_moe_finalize():
+                raise RuntimeError(
+                    f"{type(self.prepare_finalize).__name__} cannot pass through "
+                    "a deferred MoE output."
+                )
+            return fused_out
+        return self.prepare_finalize.finalize(fused_out)
 
 
 @final
@@ -1681,6 +1699,9 @@ class FusedMoEKernel:
         """
         return self.prepare_finalize.output_is_reduced()
 
+    def supports_deferred_moe_finalize(self) -> bool:
+        return self.prepare_finalize.supports_deferred_moe_finalize()
+
     def apply_monolithic(
         self,
         hidden_states: torch.Tensor,
@@ -1696,7 +1717,7 @@ class FusedMoEKernel:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
             hidden_states=hidden_states,

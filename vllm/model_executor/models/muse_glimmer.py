@@ -262,23 +262,11 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
 class MuseGlimmerMultiModalProcessor(
     BaseMultiModalProcessor[MuseGlimmerProcessingInfo]
 ):
-    def _apply_hf_processor_text_only(
-        self,
-        prompt_text: str,
-        tokenization_kwargs: Mapping[str, object],
-    ) -> list[int]:
-        tokenizer = self.info.get_tokenizer()
-        return tokenizer.encode(
-            prompt_text,
-            **{"add_special_tokens": False, **tokenization_kwargs},
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processor = self.info.get_hf_processor(**mm_kwargs)
         tokenizer = processor.tokenizer
@@ -366,7 +354,6 @@ class MuseGlimmerMultiModalProcessor(
                 video_pixel_values=video_pixels,
                 video_feature_sizes=torch.tensor(video_sizes),
             )
-        del tok_kwargs
         return BatchFeature(data=data, tensor_type=None)
 
     def _get_mm_fields_config(

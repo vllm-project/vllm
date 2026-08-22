@@ -406,9 +406,9 @@ class NemotronParseMultiModalProcessor(
 ):
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         return [0]
 
     def _call_hf_processor(
@@ -416,12 +416,9 @@ class NemotronParseMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            processed_outputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs, tok_kwargs
-            )
+            processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
         else:
             hf_processor = self.info.get_hf_processor()
             tokenizer = hf_processor.tokenizer

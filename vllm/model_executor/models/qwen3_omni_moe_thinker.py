@@ -1200,7 +1200,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
@@ -1230,7 +1229,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             # released and Transformers version update:
             # https://github.com/huggingface/transformers/pull/41473
             mm_kwargs = dict(mm_kwargs)
-            tok_kwargs = dict(tok_kwargs)
             mm_kwargs["audio_kwargs"] = dict(mm_kwargs.get("audio_kwargs") or {})
             mm_kwargs["text_kwargs"] = dict(mm_kwargs.get("text_kwargs") or {})
         elif mm_kwargs.get("use_audio_in_video") and mm_data.get("videos"):
@@ -1245,7 +1243,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         if (
@@ -1279,7 +1276,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         mm_kwargs: MultiModalKwargsItems,
         mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """
         Qwen3-Omni reimplements this function to handle `use_audio_in_video`.
         """

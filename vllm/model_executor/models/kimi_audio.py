@@ -231,7 +231,6 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """Call the HuggingFace processor."""
         # Convert mm_data format: {'audios': [...]} -> {'audio': ...}
@@ -256,7 +255,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            mm_kwargs,
         )
 
     def _get_mm_fields_config(

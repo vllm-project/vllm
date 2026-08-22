@@ -38,6 +38,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 from vllm.model_executor.layers.fused_moe_finalize_norm import (
     fused_moe_finalize_allreduce_rms_norm,
+    moe_tail_fusion_applies,
 )
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -276,8 +277,18 @@ class MiniMaxM3MoE(nn.Module):
         )
 
         # The RMSNorm that takes this block's deferred all-reduce takes its
-        # top-k reduction too, where the experts can leave it open.
-        self.experts.moe_config.defer_moe_finalize = defer_finalize
+        # top-k reduction too, where the experts can leave it open -- and only
+        # where the consumer can close it out: a hidden dim it need not
+        # truncate, and a fused tail that can actually run here. The kernel's
+        # own capability is not knowable yet; it resolves in
+        # process_weights_after_loading, and every prepare/finalize reachable
+        # under `use_deferred_moe_finalize` supports the deferred form.
+        moe_config = self.experts.moe_config
+        moe_config.defer_moe_finalize = (
+            defer_finalize
+            and moe_config.hidden_dim == moe_config.hidden_dim_unpadded
+            and moe_tail_fusion_applies(moe_config.in_dtype)
+        )
 
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:

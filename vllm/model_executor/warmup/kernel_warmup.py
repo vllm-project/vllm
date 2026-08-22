@@ -6,6 +6,7 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import sys
 import time
 from typing import TYPE_CHECKING
 
@@ -95,6 +96,18 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _warmup_kimi_k3_gemm_rs_ar() -> None:
+    # Kimi-K3 model construction imports this module only when GEMM-RS/AR is
+    # enabled and initializes its singleton before kernel_warmup runs. Avoid
+    # importing it here so other models do not compile the RS/AR variants.
+    module = sys.modules.get("vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar")
+    if module is None:
+        return
+    compiled = module.warmup_gemm_rs_ar()
+    if compiled:
+        logger.info_once("Warmed up %d Kimi-K3 GEMM-RS/AR variants.", compiled)
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -145,6 +158,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
+
+    _warmup_kimi_k3_gemm_rs_ar()
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated

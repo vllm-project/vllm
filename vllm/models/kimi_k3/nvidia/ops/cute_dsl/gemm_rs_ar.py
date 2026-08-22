@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""SM100 BF16 GEMM with a fused tensor-parallel reduce-scatter."""
+"""SM100 BF16 GEMM with fused tensor-parallel reduce-scatter/all-reduce."""
 
 # Based on CUTLASS's Blackwell distributed GEMM-RS example at dcf215a.
 # See https://github.com/NVIDIA/cutlass/issues/3117 for memory semantics.
@@ -32,7 +32,7 @@ def nanosleep(ns: int, *, loc=None, ip=None) -> None:
 
 @dsl_user_op
 def multimem_ld_reduce_16B(x: cute.Tensor, *, loc=None, ip=None) -> cute.Tensor:
-    # NOTE: assume x is contiguous
+    # The vector instruction assumes x is contiguous and 16-byte aligned.
     assert x.element_type == BFloat16
     vec_type = ".v4.bf16x2"
 
@@ -66,15 +66,40 @@ def multimem_ld_reduce_16B(x: cute.Tensor, *, loc=None, ip=None) -> cute.Tensor:
     return cute.recast_tensor(y, x.element_type)
 
 
-class Sm100GemmRsBF16:
+@dsl_user_op
+def multimem_st_16B(dst: cute.Tensor, value: cute.Tensor, *, loc=None, ip=None) -> None:
+    # The vector instruction assumes dst and value are contiguous BF16x8 vectors
+    # and dst is 16-byte aligned.
+    assert dst.element_type == BFloat16
+    assert value.element_type == BFloat16
+    ptr = dst.iterator.toint(loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
+    regs = cute.recast_tensor(value, Int32, loc=loc, ip=ip)
+    llvm.inline_asm(
+        None,
+        [ptr] + [regs[i].ir_value(loc=loc, ip=ip) for i in range(4)],
+        "multimem.st.relaxed.sys.global.v4.f32 [$0], {$1, $2, $3, $4};",
+        "l,r,r,r,r",
+        has_side_effects=True,
+        loc=loc,
+        ip=ip,
+    )
+
+
+class Sm100GemmRsArBF16:
     def __init__(
-        self, rank: int, num_ranks: int, BN: int = 128, cta_group: int = 1
+        self,
+        rank: int,
+        num_ranks: int,
+        BN: int = 128,
+        cta_group: int = 1,
+        all_reduce: bool = False,
     ) -> None:
         self.rank = rank
         self.num_ranks = num_ranks
         BM, BK = 128, 64
         self.cta_tile = (BM, BN, BK)
         self.cta_group = cta_group
+        self.all_reduce = all_reduce
 
         smem_bytes = get_smem_capacity_in_bytes()
         self.stage_size = (BM + (BN // cta_group)) * BK * 2
@@ -190,6 +215,9 @@ class Sm100GemmRsBF16:
 
         M, K = A_tma.tma_tensor.shape
         N, _ = B_tma.tma_tensor.shape
+        local_M = (
+            partial_uc.shape[0] // num_ranks if self.all_reduce else output.shape[0]
+        )
         grid_m = cute.ceil_div(M, BM)
         # Keep 2-CTA clusters within a single N tile.
         grid_m = cute.ceil_div(grid_m, cta_group) * cta_group
@@ -322,7 +350,6 @@ class Sm100GemmRsBF16:
             # Keep epilogue in warps 0-3 and communication in warps 4-7.
             # Swapping the warpgroups can hang due to warp scheduling.
             tid_ = tid % 128
-            local_M = output.shape[0]
 
             # Offset in the [M, N] GEMM result.
             rank_start = self.rank * local_M
@@ -338,7 +365,8 @@ class Sm100GemmRsBF16:
             max_tile_rows = BM // num_ranks
             vecs_per_tile = max_tile_rows * vec_cols
             partial_vecs = cute.zipped_divide(partial_mc, (1, vec_width))
-            output_vecs = cute.zipped_divide(output, (1, vec_width))
+            if cutlass.const_expr(not self.all_reduce):
+                output_vecs = cute.zipped_divide(output, (1, vec_width))
 
             for tile_id in range(raw_bid, total_tiles, num_bids):
                 rs_bid_m = tile_id % grid_m
@@ -400,7 +428,6 @@ class Sm100GemmRsBF16:
                             reduced_vec.store(tmp.load())
                         reduced_vecs.append(reduced_vec)
 
-                    # Store the result to local L2.
                     for vec_iter in cutlass.range_constexpr(vecs_per_tile // 128):
                         vec_idx = tid_ + vec_iter * 128
 
@@ -409,11 +436,19 @@ class Sm100GemmRsBF16:
                         col = bid_n * vec_cols + vec_idx % vec_cols
 
                         if local_row < local_row_end and global_row < M:
-                            cute.copy(
-                                st_atom,
-                                reduced_vecs[vec_iter],
-                                output_vecs[None, (local_row, col)],
-                            )
+                            if cutlass.const_expr(self.all_reduce):
+                                # Broadcast the result to all ranks.
+                                multimem_st_16B(
+                                    partial_vecs[None, (global_row, col)],
+                                    reduced_vecs[vec_iter],
+                                )
+                            else:
+                                # Store the result to local L2.
+                                cute.copy(
+                                    st_atom,
+                                    reduced_vecs[vec_iter],
+                                    output_vecs[None, (local_row, col)],
+                                )
                     cute.arch.barrier(barrier_id=BAR_COMM, number_of_threads=128)
 
                     # Release each GEMM tile consumed by this RS tile. The last
@@ -481,19 +516,21 @@ class Sm100GemmRsBF16:
                             num_ranks,
                         )
 
-            # Exit barrier. GPU scope is sufficient because the kernel writes
-            # local global memory and only needs to flush it to local L2.
+            # Exit barrier. GPU scope is sufficient for RS because the kernel
+            # writes local global memory and only needs to flush it to local L2.
+            # AR uses system scope to flush the multimem stores to remote L2.
             cute.arch.barrier(barrier_id=BAR_COMM, number_of_threads=128)
             if tid_ == 0:
                 exit_flag = total_tiles + raw_bid
+                scope = "sys" if self.all_reduce else "gpu"
                 utils.distributed.multimem_red_add1(
-                    flags_mc_ptr + exit_flag, order="release", scope="gpu"
+                    flags_mc_ptr + exit_flag, order="release", scope=scope
                 )
                 utils.distributed.spin_lock_atom_cas_acquire_wait(
                     flags_uc_ptr + exit_flag,
                     expected_val=num_ranks,
                     reset_val=0,
-                    scope="gpu",
+                    scope=scope,
                 )
 
         else:
@@ -564,8 +601,8 @@ class Sm100GemmRsBF16:
                 if tid_ == 0 and bid_m * BM < M:
                     gemm_start = bid_m * BM
                     gemm_end = min(gemm_start + BM, M)
-                    first_owner = gemm_start // output.shape[0]
-                    last_owner = (gemm_end - 1) // output.shape[0]
+                    first_owner = gemm_start // local_M
+                    last_owner = (gemm_end - 1) // local_M
 
                     # signal to all consuming ranks (can be more than 1)
                     for rank in cutlass.range_constexpr(num_ranks):
@@ -595,7 +632,13 @@ class Sm100GemmRsBF16:
 
     @cache
     @staticmethod
-    def compile(rank: int, num_ranks: int, BN: int, cta_group: int):
+    def compile(
+        rank: int,
+        num_ranks: int,
+        BN: int,
+        cta_group: int,
+        all_reduce: bool = False,
+    ):
         M = cute.sym_int()
         padded_M = cute.sym_int()
         N = cute.sym_int()
@@ -616,18 +659,24 @@ class Sm100GemmRsBF16:
             assumed_align=32,
         )
         partial_mc_ptr = nullptr(BFloat16, cute.AddressSpace.gmem, assumed_align=32)
-        output = make_fake_tensor(
-            BFloat16,
-            (local_M, N),
-            (cute.sym_int64(divisibility=16), 1),
-            assumed_align=32,
+        output = (
+            None
+            if all_reduce
+            else make_fake_tensor(
+                BFloat16,
+                (local_M, N),
+                (cute.sym_int64(divisibility=16), 1),
+                assumed_align=32,
+            )
         )
         flags = make_fake_tensor(Int32, (num_flags,), (1,), assumed_align=16)
         flags_mc_ptr = nullptr(Int32, cute.AddressSpace.gmem, assumed_align=16)
         peer_flag_ptr = nullptr(Int64, cute.AddressSpace.gmem, assumed_align=8)
 
         stream = make_fake_stream(use_tvm_ffi_env_stream=True)
-        kernel = Sm100GemmRsBF16(rank, num_ranks, BN, cta_group)
+        kernel = Sm100GemmRsArBF16(
+            rank, num_ranks, BN, cta_group, all_reduce=all_reduce
+        )
         return cute.compile(
             kernel,
             A,
@@ -644,13 +693,20 @@ class Sm100GemmRsBF16:
         )
 
 
-class GemmRS:
-    """Own the max-sized symmetric workspace for Kimi-K3 GEMM-RS launches.
+class GemmRsAr:
+    """Own the symmetric workspace for Kimi-K3 GEMM-RS/AR launches.
 
     All TP ranks must belong to one NVLink domain for multimem instructions.
+
+    Each instance is bound to either RS or AR. A vLLM worker has one static
+    sequence-parallel topology, so the process-wide singleton only needs one
+    mode. Two independent mode-specific singletons would lift that restriction
+    but duplicate the large symmetric workspace. A future mixed-mode design
+    should instead use lightweight RS/AR frontends over one shared multicast
+    workspace; that is outside this integration's current scope.
     """
 
-    def __init__(self, *, max_M: int, N: int) -> None:
+    def __init__(self, *, max_M: int, N: int, all_reduce: bool = False) -> None:
         tp_group = get_tp_group()
         group = tp_group.device_group
         rank = tp_group.rank_in_group
@@ -667,9 +723,12 @@ class GemmRS:
         self.max_M = max_M
         self.N = N
         self.device = device
+        self.all_reduce = all_reduce
 
         self.partial = symm_mem.empty((max_M, N), dtype=torch.bfloat16, device=device)
         self.partial_handle = symm_mem.rendezvous(self.partial, group)
+        if self.partial_handle.multicast_ptr == 0:
+            raise RuntimeError("GEMM-RS/AR requires NVLink multicast memory")
         self.partial_mc_ptr = make_ptr(
             BFloat16,
             self.partial_handle.multicast_ptr,
@@ -684,6 +743,8 @@ class GemmRS:
         max_flags = grid_m * (N // 128) + self.num_sms
         self.flags = symm_mem.empty(max_flags, dtype=torch.int32, device=device)
         self.flags_handle = symm_mem.rendezvous(self.flags, group)
+        if self.flags_handle.multicast_ptr == 0:
+            raise RuntimeError("GEMM-RS/AR requires NVLink multicast memory")
         self.flags.zero_()
         self.flags_mc_ptr = make_ptr(
             Int32,
@@ -698,8 +759,6 @@ class GemmRS:
             assumed_align=8,
         )
 
-        assert self.partial_handle.multicast_ptr != 0
-        assert self.flags_handle.multicast_ptr != 0
         torch.accelerator.synchronize(device)
         tp_group.barrier()
 
@@ -721,7 +780,8 @@ class GemmRS:
         )
 
     def should_run(self, x: torch.Tensor) -> bool:
-        # Small-M shapes are supported but faster on the existing LL path.
+        # Use the same threshold for RS and AR for now. Small-M shapes are
+        # supported but faster on the existing LL path.
         return x.shape[0] >= 128
 
     def __call__(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
@@ -752,12 +812,15 @@ class GemmRS:
         num_ctas = num_ctas // cta_group * cta_group
         assert self.flags.numel() >= num_tiles + num_ctas
 
-        output = torch.empty((local_M, N), dtype=torch.bfloat16, device=self.device)
-        compiled = Sm100GemmRsBF16.compile(
+        output = None
+        if not self.all_reduce:
+            output = torch.empty((local_M, N), dtype=torch.bfloat16, device=self.device)
+        compiled = Sm100GemmRsArBF16.compile(
             self.rank,
             self.world_size,
             BN,
             cta_group,
+            self.all_reduce,
         )
         compiled(
             x,
@@ -770,21 +833,52 @@ class GemmRS:
             self.peer_flag_ptr,
             num_ctas,
         )
+        if self.all_reduce:
+            # AttnRes may retain output past the next workspace reuse.
+            # A future kernel could overlap this copy using an extra warp or
+            # the communication warp.
+            return self.partial[:M].clone()
+        assert output is not None
         return output
 
 
-_gemm_rs: GemmRS | None = None
+_gemm_rs_ar: GemmRsAr | None = None
 
 
-def init_gemm_rs(max_M: int, N: int) -> None:
-    """Collectively initialize the process-wide GEMM-RS state."""
-    global _gemm_rs
-    if _gemm_rs is not None:
-        assert _gemm_rs.max_M >= max_M and _gemm_rs.N == N
+def init_gemm_rs_ar(max_M: int, N: int, *, all_reduce: bool = False) -> None:
+    """Collectively initialize the process-wide, mode-bound GEMM-RS/AR state."""
+    global _gemm_rs_ar
+    if _gemm_rs_ar is not None:
+        if _gemm_rs_ar.all_reduce != all_reduce:
+            current = "AR" if _gemm_rs_ar.all_reduce else "RS"
+            requested = "AR" if all_reduce else "RS"
+            raise RuntimeError(
+                f"GEMM-RS/AR is already initialized for {current}; "
+                f"a worker cannot reinitialize it for {requested}"
+            )
+        assert _gemm_rs_ar.max_M >= max_M and _gemm_rs_ar.N == N
         return
-    _gemm_rs = GemmRS(max_M=max_M, N=N)
+    _gemm_rs_ar = GemmRsAr(max_M=max_M, N=N, all_reduce=all_reduce)
 
 
-def get_gemm_rs() -> GemmRS:
-    assert _gemm_rs is not None, "GEMM-RS is not initialized"
-    return _gemm_rs
+def warmup_gemm_rs_ar() -> int:
+    """Compile every reachable dispatch for the initialized GEMM-RS/AR mode."""
+    # Initialization can be disabled or fail when multicast is unavailable.
+    if _gemm_rs_ar is None:
+        return 0
+    # Keep these profiles in sync with the dispatch in GemmRsAr.__call__.
+    profiles = ((128, 1), (128, 2), (256, 2))
+    for BN, cta_group in profiles:
+        Sm100GemmRsArBF16.compile(
+            _gemm_rs_ar.rank,
+            _gemm_rs_ar.world_size,
+            BN,
+            cta_group,
+            _gemm_rs_ar.all_reduce,
+        )
+    return len(profiles)
+
+
+def get_gemm_rs_ar() -> GemmRsAr:
+    assert _gemm_rs_ar is not None, "GEMM-RS/AR is not initialized"
+    return _gemm_rs_ar

@@ -147,13 +147,11 @@ class Phi4SiglipMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         # The HF processor's tokenizer_image_token() replaces the "<image>"
@@ -169,20 +167,6 @@ class Phi4SiglipMultiModalProcessor(
         processed["input_ids"] = torch.tensor([new_ids])
 
         return processed
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        # The HF processor replaces "<image>" with a single -200 placeholder
-        # but does NOT expand it into N vision-encoder tokens.  Since we also
-        # re-tokenize the prompt (see _call_hf_processor), prompt updates are
-        # never applied by the HF processor — vLLM handles the expansion via
-        # _apply_prompt_updates.
-        return False
 
     def _get_mm_fields_config(
         self,

@@ -476,19 +476,27 @@ async def download_bytes_from_url(
             if "base64" in header:
                 return base64.b64decode(data)
             else:
-                raise ValueError(f"Unsupported data URL encoding: {header}")
+                raise VLLMValidationError(
+                    f"Unsupported data URL encoding: {header}",
+                    parameter="url",
+                )
         else:
-            raise ValueError(f"Invalid data URL format: {url}")
+            raise VLLMValidationError(
+                f"Invalid data URL format: {url}",
+                parameter="url",
+            )
 
     # Handle HTTP/HTTPS URLs
     elif parsed.scheme in ("http", "https"):
         if allowed_media_domains is not None:
             url_spec = parse_url(url)
             if url_spec.hostname not in allowed_media_domains:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The URL must be from one of the allowed domains: "
                     f"{allowed_media_domains}. Input URL domain: "
-                    f"{url_spec.hostname}"
+                    f"{url_spec.hostname}",
+                    parameter="url",
+                    value=url_spec.hostname,
                 )
             # Use the normalized URL to prevent parsing discrepancies
             # between urllib3 and aiohttp (e.g. backslash-@ attacks).
@@ -499,9 +507,11 @@ async def download_bytes_from_url(
         )
 
     else:
-        raise ValueError(
+        raise VLLMValidationError(
             f"Unsupported URL scheme: {parsed.scheme}. "
-            "Supported schemes: http, https, data"
+            "Supported schemes: http, https, data",
+            parameter="url",
+            value=parsed.scheme,
         )
 
 

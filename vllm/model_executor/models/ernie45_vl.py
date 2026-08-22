@@ -1115,7 +1115,6 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # when the prompt is not empty but the multimodal data is empty,
         # directly invoke the tokenizer.
@@ -1151,7 +1150,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         processor_output = self.info.ctx.call_hf_processor(
             hf_processor,
             dict(text=[prompt], images=mm_data["images"], videos=mm_data["videos"]),
-            dict(**mm_kwargs, **tok_kwargs),
+            mm_kwargs,
         )
 
         # Divide the processor_output into two modalities: image and video.

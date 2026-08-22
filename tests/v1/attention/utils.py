@@ -32,7 +32,12 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     FullAttentionSpec,
+    KVCacheLayout,
+    KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
+    compute_layout_strides,
+    create_kv_cache_views,
     get_kv_quant_mode,
 )
 
@@ -215,6 +220,9 @@ def create_vllm_config(
     #   (these may be set during initialization normally)
     cache_config.num_gpu_blocks = num_gpu_blocks
     cache_config.num_cpu_blocks = 0
+    # Builders read the resolved layout from the config; tests that exercise a
+    # different layout overwrite this field.
+    cache_config.kv_cache_layout = "LBNHC"
 
     parallel_config = ParallelConfig(
         tensor_parallel_size=tensor_parallel_size,
@@ -417,3 +425,31 @@ class MockMambaBuilder(BaseMambaAttentionMetadataBuilder[BaseMambaAttentionMetad
             is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool)
         )
         return builder.build(0, common_metadata)
+
+
+def dense_kv_cache_views(
+    raw: torch.Tensor,
+    spec: KVCacheSpec,
+    num_blocks: int,
+    num_layers: int,
+    layout: KVCacheLayout,
+    kernel_block_size: int | None = None,
+) -> list[torch.Tensor]:
+    """``create_kv_cache_views`` for a dense allocation of ``num_layers`` layers."""
+    layer_stride, block_stride, _, _, _ = compute_layout_strides(
+        spec, num_blocks, num_layers, layout
+    )
+    tensor = KVCacheTensor(
+        size=raw.numel(),
+        layers=[str(i) for i in range(num_layers)],
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+    return create_kv_cache_views(
+        raw,
+        spec,
+        num_blocks,
+        layout,
+        tensor,
+        kernel_block_size=kernel_block_size,
+    )

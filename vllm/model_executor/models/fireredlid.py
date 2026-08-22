@@ -445,9 +445,9 @@ class FireRedLIDMultiModalProcessor(
 ):
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         # Dummy encoder prompt for profiling (encoder only processes audio).
         return [0]
 
@@ -456,7 +456,6 @@ class FireRedLIDMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
@@ -469,7 +468,6 @@ class FireRedLIDMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")

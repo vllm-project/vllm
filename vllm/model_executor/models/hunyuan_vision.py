@@ -736,7 +736,6 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         # HunYuanVLProcessor requires image placeholders wrapped with start/end tokens.
@@ -751,7 +750,7 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         return self.info.ctx.call_hf_processor(
             hf_processor,
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            mm_kwargs,
         )
 
     def _get_prompt_updates(

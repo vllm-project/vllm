@@ -6,6 +6,7 @@ import atexit
 import os
 import random
 import threading
+from functools import cache
 from typing import Any
 
 import torch
@@ -385,6 +386,26 @@ def _moe_finalize_cutedsl_config(
     )
 
 
+@cache
+def has_fi_ar_moe_finalize_backend() -> bool:
+    """Whether flashinfer ships the mnnvl CuTe DSL allreduce the fused tail needs.
+
+    A layer asks before declaring that its experts may leave the MoE output
+    unfinalized, so a build without the backend never gets that far.
+    """
+    try:
+        from flashinfer.comm.mnnvl_cutedsl_ar import (  # noqa: F401
+            MNNVLCuteDSLAllReduceFusionWorkspace,
+        )
+    except ImportError:
+        logger.warning_once(
+            "FlashInfer has no mnnvl CuTe DSL allreduce; MoE tail fusion needs "
+            "flashinfer >= 0.6.18."
+        )
+        return False
+    return True
+
+
 def _create_moe_finalize_cutedsl_workspace(
     world_size: int,
     rank: int,
@@ -406,16 +427,9 @@ def _create_moe_finalize_cutedsl_workspace(
     tp 8/16 with hidden_size 8192, top_k 10, bf16, so anything else raises and
     lands the caller back on finalizing inside the MoE kernel.
     """
-    try:
-        from flashinfer.comm.mnnvl_cutedsl_ar import (
-            MNNVLCuteDSLAllReduceFusionWorkspace,
-        )
-    except ImportError:
-        logger.warning_once(
-            "FlashInfer has no mnnvl CuTe DSL allreduce; MoE tail fusion needs "
-            "flashinfer >= 0.6.18."
-        )
+    if not has_fi_ar_moe_finalize_backend():
         return None
+    from flashinfer.comm.mnnvl_cutedsl_ar import MNNVLCuteDSLAllReduceFusionWorkspace
 
     try:
         config = _moe_finalize_cutedsl_config(world_size, hidden_dim, top_k, dtype)

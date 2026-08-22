@@ -8,7 +8,7 @@ routed half is still unfinalized, the whole tail (top-k reduction over the
 permuted GEMM2 rows, shared-expert add, all-reduce, residual add, norm)
 collapses into flashinfer's ``kMoEFinalizeARResidualRMSNorm``.
 
-A batch the fused kernel cannot take -- one over its token ceiling, or any at
+A batch the fused kernel cannot take -- an idle rank's empty one, or any at
 all on a deployment without the workspace -- is finalized in the MoE kernel as
 it always was. Nothing reaches this consumer then: the routed half is a plain
 tensor, so the layer closes out its tail the way a layer without deferral does.
@@ -37,10 +37,12 @@ try:
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (
         flashinfer_comm,
         get_fi_ar_moe_finalize_workspace,
+        has_fi_ar_moe_finalize_backend,
     )
 except (ImportError, AttributeError):
     flashinfer_comm = None  # type: ignore[assignment]
     get_fi_ar_moe_finalize_workspace = None  # type: ignore[assignment]
+    has_fi_ar_moe_finalize_backend = None  # type: ignore[assignment]
 
 # The CuTe DSL tail is a bf16 backend.
 _FI_SUPPORTED_DTYPES = (torch.bfloat16,)
@@ -54,13 +56,15 @@ def moe_tail_fusion_available() -> bool:
 
     The consumer is a Blackwell CuTe DSL kernel, and only the TRTLLM-Gen MoE
     experts ever hand back an unfinalized output, so all that is left to check
-    is the switch, the hardware, and that there is a tensor-parallel all-reduce
-    for the reduction to fuse into.
+    is the switch, that flashinfer ships the backend, the hardware, and that
+    there is a tensor-parallel all-reduce for the reduction to fuse into.
     """
     if not envs.VLLM_ENABLE_MOE_TAIL_FUSION:
         return False
-    if flashinfer_comm is None:
+    if flashinfer_comm is None or has_fi_ar_moe_finalize_backend is None:
         logger.debug_once("MoE tail fusion off: flashinfer.comm is unavailable")
+        return False
+    if not has_fi_ar_moe_finalize_backend():
         return False
     if not current_platform.is_device_capability_family(100):
         logger.debug_once("MoE tail fusion off: the fused tail is Blackwell-only")
@@ -113,18 +117,16 @@ def _finalize_workspace(
     return workspace
 
 
-def moe_tail_fusion_applies(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype
-) -> bool:
-    """Whether this consumer can take an unfinalized MoE output of this shape.
+def moe_tail_fusion_applies(dtype: torch.dtype) -> bool:
+    """Whether this consumer can take unfinalized MoE output at all.
 
-    The producer's gate. There is no token ceiling to respect -- the backend
-    covers decode and prefill alike -- so this is the switch, the hardware, the
-    dtype it has kernels for, and a batch that is not an idle rank's empty one.
+    A layer calls this at build time to decide whether to ask its experts to
+    defer (``FusedMoEConfig.defer_moe_finalize``); the per-batch gate is
+    ``FusedMoEConfig.should_defer_moe_finalize``. There is no token ceiling to
+    declare -- the backend covers decode and prefill alike -- so this is the
+    switch, the hardware, and the dtype it has kernels for.
     """
-    return (
-        num_tokens > 0 and dtype in _FI_SUPPORTED_DTYPES and moe_tail_fusion_available()
-    )
+    return dtype in _FI_SUPPORTED_DTYPES and moe_tail_fusion_available()
 
 
 def _moe_finalize_allreduce_rms_norm(

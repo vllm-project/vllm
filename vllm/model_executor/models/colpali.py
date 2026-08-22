@@ -64,7 +64,6 @@ class ColPaliMultiModalProcessor(PaliGemmaMultiModalProcessor):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
             # The ColPali tokenizer_config.json ships with a small default
@@ -72,13 +71,12 @@ class ColPaliMultiModalProcessor(PaliGemmaMultiModalProcessor):
             # by PaliGemmaProcessor, causing a token-count mismatch.
             # vLLM enforces its own max_model_len, so we disable HF
             # truncation to keep all image + text tokens intact.
-            tok_kwargs = dict(tok_kwargs, truncation=False)
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+            return self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**mm_kwargs),
+                dict(text=prompt, **mm_data),
+                dict(**mm_kwargs, truncation=False),
+            )
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
 
 
 @default_pooling_type(seq_pooling_type="CLS", tok_pooling_type="ALL")

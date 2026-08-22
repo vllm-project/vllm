@@ -154,7 +154,6 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (images := mm_data.get("images")) is None:
             return {}
@@ -221,7 +220,6 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (videos := mm_data.get("videos")) is None:
             return {}

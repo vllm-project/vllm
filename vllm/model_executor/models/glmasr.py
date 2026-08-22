@@ -755,7 +755,6 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         prompt: str,
         mm_data: dict[str, object],
         mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Normalize input: handle deprecated key and list conversion.
         if "audios" in mm_data:
@@ -782,7 +781,6 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         # Postprocess: rename mask and add chunk counts

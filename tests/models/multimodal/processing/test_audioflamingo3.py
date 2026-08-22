@@ -107,7 +107,7 @@ def test_audio_chunk_counting(mock_ctx):
     mm_data = {"audio": [audio_1, audio_2]}
     prompt = "<|user|>Listen.<|end|>"
 
-    processed = processor._call_hf_processor(prompt, mm_data, {}, {})
+    processed = processor._call_hf_processor(prompt, mm_data, {})
 
     chunk_counts = processed["chunk_counts"]
 

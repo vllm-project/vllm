@@ -1948,7 +1948,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
 
@@ -2008,7 +2007,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 video_outputs = self.info.ctx.call_hf_processor(
                     patched_call,
                     dict(text=VIDEO_PROMPT, **video_mm_data),
-                    dict(**video_mm_kwargs, **tok_kwargs),
+                    video_mm_kwargs,
                 )
 
                 input_ids = video_outputs.pop("input_ids")
@@ -2058,7 +2057,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         processed_outputs = self.info.ctx.call_hf_processor(
             patched_call,
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            mm_kwargs,
         )
 
         if (images := mm_data.get("images")) is not None:

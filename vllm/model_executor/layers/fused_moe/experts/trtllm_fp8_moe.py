@@ -14,7 +14,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
-    can_defer_moe_finalize,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -459,7 +458,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             selected_topk_group = topk_group or 0
 
         num_tokens = hidden_states.shape[0]
-        defer = can_defer_moe_finalize(self.moe_config, num_tokens)
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
 
         routing_replay_out = self._maybe_make_routing_replay_buffer(
             num_tokens=num_tokens,

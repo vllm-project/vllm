@@ -292,7 +292,6 @@ class DeepseekOCRMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
             processed_outputs = self.info.ctx.call_hf_processor(
