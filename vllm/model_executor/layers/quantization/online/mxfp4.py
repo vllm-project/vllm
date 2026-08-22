@@ -134,6 +134,8 @@ class Mxfp4OnlineLinearMethod(_Fp8OnlineLinearBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # x may be a QuantizedActivation when a fused producer already
+        # quantized to MXFP4; the kernel narrows via as_quantized_activation.
         return self.kernel.apply_weights(layer, x, bias)
 
 
