@@ -4,6 +4,7 @@
 import math
 import time
 
+import msgspec
 import pytest
 
 from tests.v1.engine.utils import (
@@ -22,6 +23,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -651,6 +653,95 @@ def test_logprobs_processor(
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
+
+
+def test_terminal_streaming_output_finishes_request_without_applying_queued_update():
+    output_processor = OutputProcessor(None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-int",
+        external_req_id="request",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(max_tokens=1, detokenize=False),
+        pooling_params=None,
+        resumable=True,
+    )
+    output_processor.add_request(request, None)
+    output_processor.add_request(
+        EngineCoreRequest(
+            request_id="request-int",
+            external_req_id="request",
+            prompt_token_ids=[4, 5],
+            mm_features=None,
+            arrival_time=1,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(max_tokens=1, detokenize=False),
+            pooling_params=None,
+            resumable=True,
+        ),
+        None,
+    )
+
+    processed_outputs = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-int",
+                new_token_ids=[],
+                finish_reason=FinishReason.LENGTH,
+            )
+        ],
+        finished_request_ids={"request-int"},
+    )
+
+    assert len(processed_outputs.request_outputs) == 1
+    request_output = processed_outputs.request_outputs[0]
+    assert request_output.finished
+    assert request_output.outputs[0].finish_reason == "length"
+    assert processed_outputs.reqs_to_abort == ["request-int"]
+    assert not output_processor.has_unfinished_requests()
+
+
+def test_engine_core_output_stop_reason_wire_position_remains_compatible():
+    # Mirror the preexisting Rust tuple order so inserting a field before
+    # stop_reason fails at the real wire boundary.
+    # mypy does not model msgspec's metaclass subclass options.
+    class LegacyEngineCoreOutput(  # type: ignore[call-arg]
+        msgspec.Struct,
+        array_like=True,
+        omit_defaults=True,
+    ):
+        request_id: str
+        new_token_ids: list[int]
+        new_logprobs: object | None = None
+        new_prompt_logprobs_tensors: object | None = None
+        pooling_output: object | None = None
+        finish_reason: FinishReason | None = None
+        stop_reason: int | str | None = None
+        events: object | None = None
+        kv_transfer_params: object | None = None
+        trace_headers: object | None = None
+        prefill_stats: object | None = None
+        routed_experts: object | None = None
+        num_nans_in_logits: int = 0
+
+    payload = msgspec.msgpack.encode(
+        EngineCoreOutput(
+            request_id="request-int",
+            new_token_ids=[],
+            finish_reason=FinishReason.LENGTH,
+            stop_reason="streaming-length-cap",
+        )
+    )
+
+    decoded = msgspec.msgpack.decode(payload, type=LegacyEngineCoreOutput)
+
+    assert decoded.stop_reason == "streaming-length-cap"
 
 
 @pytest.mark.parametrize(
