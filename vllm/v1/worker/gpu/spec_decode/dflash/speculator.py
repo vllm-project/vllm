@@ -138,12 +138,19 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
     def capture(self) -> None:
+        # DFlash skips CUDA-graph capture in some configurations (draft
+        # attention does not support full cudagraphs, etc.). The log line
+        # below is the only externally visible signal for whether the
+        # drafter is captured, so guard it on needs_capture() to avoid
+        # logging "Capturing model ..." when nothing is captured. See #53031.
+        assert self.query_cudagraph_manager is not None
+        if not self.query_cudagraph_manager.needs_capture():
+            return
         logger.info("Capturing model for %s speculator...", self._speculator_name)
         # Padded sample rows must not scatter into a live request during capture.
         self.sample_indices.zero_()
         self.sample_pos.zero_()
         self.sample_idx_mapping.fill_(-1)
-        assert self.query_cudagraph_manager is not None
         self.query_cudagraph_manager.capture(
             self._generate_draft,
             self.input_buffers,
