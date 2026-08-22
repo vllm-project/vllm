@@ -240,15 +240,12 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub hf_overrides: Option<Unsupported>,
 
-    /// The folder path to the generation config. Defaults to `"auto"`, the
-    /// generation config will be loaded from model path. If set to `"vllm"`, no
-    /// generation config is loaded, vLLM defaults will be used. If set to a
-    /// folder path, the generation config will be loaded from the specified
-    /// folder path. If `max_new_tokens` is specified in generation config,
-    /// then it sets a server-wide limit on the number of output tokens for
-    /// all requests.
+    /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
+    /// used with `--generation-config auto`, the override parameters will be
+    /// merged with the default config from the model. If used with
+    /// `--generation-config vllm`, only the override parameters are used.
     #[arg(long)]
-    pub generation_config: Option<Unsupported>,
+    pub override_generation_config: Option<Unsupported>,
 
     /// IOProcessor plugin name to load at model startup
     #[arg(long)]
@@ -298,11 +295,6 @@ pub struct EngineUnsupportedArgs {
         num_args = 0..=1
     )]
     pub kv_sharing_fast_prefill: Option<Unsupported>,
-
-    /// The maximum number of input items and options allowed per
-    /// prompt for each modality.
-    #[arg(long)]
-    pub limit_mm_per_prompt: Option<Unsupported>,
 
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]

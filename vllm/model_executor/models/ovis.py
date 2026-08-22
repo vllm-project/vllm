@@ -341,43 +341,30 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         # -300 is image_atom token, filter them out
         return [vte_vocab_size + x + 300 for x in image_indicators if x < -300]
 
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
         if not mm_data:
-            # Avoid warning from HF logger for text-only input
-            tokenizer = self.info.get_tokenizer()
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+            return processed_data
 
         hf_processor = self.info.get_hf_processor()
         image_indicators = [
             hf_processor.construct_image_indicators(grid)
-            for grid in processed_outputs["grids"]
+            for grid in processed_data["grids"]
         ]
         indicator_tokens = [
             self.image_indicators_to_visual_tokens(indicator)
             for indicator in image_indicators
         ]
-        processed_outputs["indicator_tokens"] = torch.tensor(indicator_tokens)
-        return processed_outputs
+        processed_data["indicator_tokens"] = torch.tensor(indicator_tokens)
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
-        return prompt_tokens
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -386,7 +373,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            grids=MultiModalFieldConfig.batched("image"),
+            grids=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             indicator_tokens=MultiModalFieldConfig.batched("image"),
         )
 

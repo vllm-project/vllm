@@ -344,7 +344,7 @@ class Gemma3Model(nn.Module):
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None,
+        intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
@@ -442,8 +442,5 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

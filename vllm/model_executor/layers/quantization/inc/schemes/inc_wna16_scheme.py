@@ -3,11 +3,11 @@
 
 from typing import TYPE_CHECKING
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.platforms import current_platform
-from vllm.scalar_type import scalar_types
 
 from ..inc_linear import INCLinearMethod
 from .inc_scheme import INCScheme
@@ -21,6 +21,32 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 XPU_WNA16_SUPPORTED_BITS = {2, 4}
+
+# Backends selectable through VLLM_XPU_INC_WNA16_BACKEND that are served by the
+# oneDNN int4 GEMMs rather than by ARK. These only cover int4.
+XPU_ONEDNN_BACKENDS = ("w4a16", "w4a8")
+
+
+def _check_xpu_w4a8_supported(layer_config: "INCLayerConfig", prefix: str) -> None:
+    """Raise unless ``int4_gemm_w4a8`` can serve this layer.
+
+    The backend is requested explicitly, so an unusable configuration is an
+    error rather than something to silently fall back from.
+    """
+    import torch
+
+    if not hasattr(torch.ops._xpu_C, "int4_gemm_w4a8"):
+        raise NotImplementedError(
+            "VLLM_XPU_INC_WNA16_BACKEND=w4a8 requires the int4_gemm_w4a8 op, "
+            "which this build of vllm-xpu-kernels does not provide. "
+            f"Layer: {prefix}."
+        )
+    if layer_config.group_size <= 0 or layer_config.group_size % 32 != 0:
+        raise NotImplementedError(
+            "VLLM_XPU_INC_WNA16_BACKEND=w4a8 requires a group size that is a "
+            f"positive multiple of 32, got {layer_config.group_size}. "
+            f"Layer: {prefix}."
+        )
 
 
 class INCWna16Scheme(INCScheme):
@@ -39,12 +65,31 @@ class INCWna16Scheme(INCScheme):
         if current_platform.is_xpu():
             if layer_config.bits in XPU_WNA16_SUPPORTED_BITS and layer_config.sym:
                 from .inc_ark_ops import get_ark_state
+                from .inc_w4a8_linear import INCXPUW4A8LinearMethod
                 from .inc_wna16_linear import (
                     INCARKLinearMethod,
                     INCXPULinearMethod,
                 )
 
+                backend = envs.VLLM_XPU_INC_WNA16_BACKEND
+                if backend in XPU_ONEDNN_BACKENDS:
+                    if layer_config.bits != 4:
+                        raise NotImplementedError(
+                            f"VLLM_XPU_INC_WNA16_BACKEND={backend} only supports "
+                            f"int4, got int{layer_config.bits}. Layer: {prefix}."
+                        )
+                    if backend == "w4a8":
+                        _check_xpu_w4a8_supported(layer_config, prefix)
+                        return INCLinearMethod(INCXPUW4A8LinearMethod(layer_config))
+                    return INCLinearMethod(INCXPULinearMethod(layer_config))
+
                 is_ark_available, ark_error, _, _ = get_ark_state()
+                if backend == "ark" and not is_ark_available:
+                    raise NotImplementedError(
+                        "VLLM_XPU_INC_WNA16_BACKEND=ark was requested but "
+                        f"auto_round_kernel is unavailable: "
+                        f"{ark_error or 'unknown error'}. Layer: {prefix}."
+                    )
                 if is_ark_available:
                     return INCLinearMethod(INCARKLinearMethod(layer_config))
                 elif layer_config.bits == 2:
@@ -97,8 +142,8 @@ class INCWna16Scheme(INCScheme):
         layer_config: "INCLayerConfig",
     ):
         del config, prefix
-        # XPU and CPU do not support MoE quantization yet
-        if current_platform.is_xpu() or current_platform.is_cpu():
+        # CPU does not support quantized MoE yet.
+        if current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import (
                 UnquantizedFusedMoEMethod,
             )
@@ -120,21 +165,17 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         MoeWNA16Method,
     )
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        check_marlin_supported,
         check_moe_marlin_supports_layer,
     )
 
-    gptq_type_map = {
-        (4, True): scalar_types.uint4b8,
-        (8, True): scalar_types.uint8b128,
-    }
-    use_marlin = (layer_config.bits, layer_config.sym) in gptq_type_map
-    if use_marlin:
-        use_marlin = check_marlin_supported(
-            gptq_type_map[(layer_config.bits, layer_config.sym)],
-            layer_config.group_size,
-            has_zp=not layer_config.sym,
-        ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
+    # AutoGPTQMoEMethod selects its fused-MoE backend through the WNA16 oracle
+    # (Marlin on CUDA, XPUExpertsWNA16 on XPU). Gate only on the layer-shape
+    # check like compressed-tensors does; the capability-based
+    # check_marlin_supported is skipped so the XPU path is reachable.
+    use_marlin = (layer_config.bits, layer_config.sym) in {
+        (4, True),
+        (8, True),
+    } and check_moe_marlin_supports_layer(layer, layer_config.group_size)
 
     if use_marlin:
         return AutoGPTQMoEMethod(
@@ -169,21 +210,12 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         MoeWNA16Method,
     )
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        check_marlin_supported,
         check_moe_marlin_supports_layer,
     )
 
-    awq_type_map = {
-        4: scalar_types.uint4,
-        8: scalar_types.uint8,
-    }
-    use_marlin = layer_config.bits in awq_type_map
-    if use_marlin:
-        use_marlin = check_marlin_supported(
-            awq_type_map[layer_config.bits],
-            layer_config.group_size,
-            not layer_config.sym,
-        ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
+    use_marlin = layer_config.bits in (4, 8) and check_moe_marlin_supports_layer(
+        layer, layer_config.group_size
+    )
 
     if use_marlin:
         return AutoAWQMoEMethod(

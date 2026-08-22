@@ -57,9 +57,11 @@ th:not(:first-child) {
 | Multimodal | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ |
 | Encoder-Decoder | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
-<sup>1</sup> P and D instances must use the same speculation configuration.
+<sup>1</sup> P and D instances must use compatible speculation configurations.
+See [Configuration Notes](#configuration-notes) below for what must match and
+what may differ.
 
-<sup>2</sup> Requires `FLASH_ATTN` or `FLASHINFER` backend **and** `HND` KV cache layout. Enable via `--kv-transfer-config '{"kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'`.
+<sup>2</sup> Cross-layer contiguity is achieved by using a `BLHNC` layout (set via `VLLM_KV_CACHE_LAYOUT=BLHNC`).
 
 <sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported.
 
@@ -79,6 +81,9 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Model (architecture, dtype, number of KV heads, head size, number of hidden layers)
 - Attention backend
 - KV cache dtype (`cache_dtype`)
+- EAGLE/MTP-style speculative method and draft-model configuration
+- NIXL transfer mode (push vs pull) — a push (WRITE) connector and a pull (READ)
+  connector use incompatible transfer protocols and must never be paired
 
 !!! warning
     Disable the hash check with `--kv-transfer-config '{"kv_connector_extra_config": {"enforce_handshake_compat": false}}'` at your own risk.
@@ -88,12 +93,16 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - `tensor-parallel-size` (heterogeneous TP, subject to model restrictions above)
 - `block-size` (heterogeneous block size, subject to restrictions above)
 - Number of KV cache blocks (determined by available memory on each instance)
+- `num_speculative_tokens` (prefill and decode may use different draft depths)
+- Draft-model `attention_backend` (each instance auto-selects independently; the
+  resulting KV block layout is validated at handshake time rather than via the
+  compatibility hash)
 
 ### KV cache layout
 
-- NixlConnector defaults to **`HND`** layout for optimal transfer performance (non-MLA models).
-- `NHD` layout is supported but does **not** allow heterogeneous TP head splitting.
-- Experimental `HND` ↔ `NHD` permute: enable via `--kv-transfer-config '{"enable_permute_local_kv": true}'`. Not supported with HMA.
+- NixlConnector defaults to **`LBHNC`** (head-major, formerly `HND`) layout for optimal transfer performance (non-MLA models).
+- `LBNHC` (token-major, formerly `NHD`) layout is supported but does **not** allow heterogeneous TP head splitting.
+- Experimental `LBHNC` ↔ `LBNHC` permute: enable via `--kv-transfer-config '{"enable_permute_local_kv": true}'`. Not supported with HMA.
 
 ### Quantized KV cache
 
