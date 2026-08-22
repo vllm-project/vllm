@@ -242,10 +242,6 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
-from vllm.model_executor.layers.attention.pcp import (
-    finalize_mla_pcp_decode,
-    maybe_gather_mla_latent_cache_inputs,
-)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -293,8 +289,12 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.dcp_utils import MLADCPManager
+from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.pcp import (
+    finalize_mla_pcp_decode,
+    maybe_gather_mla_latent_cache_inputs,
+)
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -371,8 +371,17 @@ def _get_kv_b_proj_input_dtype(
         return kv_b_proj.params_dtype
     if weight_dtype == torch.uint8:
         return None
-    if weight_dtype == current_platform.fp8_dtype() and not use_fp8_prefill:
-        return None
+    if weight_dtype == current_platform.fp8_dtype():
+        from vllm.model_executor.layers.quantization.modelopt import (
+            ModelOptFp8PbWoLinearMethod,
+        )
+
+        quant_method = getattr(kv_b_proj, "quant_method", None)
+        # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
+        if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
+            return quant_method.input_dtype
+        if not use_fp8_prefill:
+            return None
     return weight_dtype
 
 
@@ -639,6 +648,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
 
     @property
     def chunked_prefill_workspace_size(self) -> int:
@@ -1441,27 +1454,6 @@ class MLACommonBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
         return MLACommonMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            # Default to identity permutation to signal cross-layer allocation
-            # is unsupported. Each MLA backend must opt in to support cross-layer
-            # allocation by overriding this method.
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:

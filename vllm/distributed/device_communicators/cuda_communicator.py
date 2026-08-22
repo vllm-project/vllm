@@ -58,7 +58,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
-            use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
+            # FlashInfer all-reduce does not provide a fixed reduction order.
+            use_flashinfer_allreduce = (
+                envs.VLLM_ALLREDUCE_USE_FLASHINFER and not envs.VLLM_BATCH_INVARIANT
+            )
             use_aiter_allreduce = use_custom_allreduce and bool(
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )
@@ -448,7 +451,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output = torch.empty(
                 output_shape, dtype=input_tensor.dtype, device=input_tensor.device
             )
-            if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+            use_deterministic_rs = envs.VLLM_BATCH_INVARIANT and world_size > 2
+            if use_deterministic_rs:
+                # Reduce to a fixed root (0) for determinism
+                reduced = torch.empty_like(input_tensor)
+                sizes = sizes if sizes else [chunk_size] * world_size
+                pynccl_comm.reduce(reduced, input_tensor, root=0)
+                pynccl_comm.scatter(output, reduced, sizes, root=0)
+            elif sizes is not None and sizes.count(sizes[0]) != len(sizes):
                 pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
             else:
                 pynccl_comm.reduce_scatter(output, input_tensor)

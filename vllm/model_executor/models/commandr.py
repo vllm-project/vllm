@@ -415,6 +415,7 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         # (e.g. "*.weight_quantizer._double_scale"); drop them before loading.
         # See #41925.
         orig_to_new_substr={"_quantizer.": None},
+        orig_to_new_prefix={"lm_head": None},
     )
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -429,9 +430,6 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        # currently all existing command R models have `tie_word_embeddings`
-        # enabled
-        assert config.tie_word_embeddings
 
         self.quant_config = quant_config
         self.logits_processor = LogitsProcessor(
@@ -475,7 +473,5 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self, skip_prefixes=["lm_head", "rotary_emb.inv_freq"]
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

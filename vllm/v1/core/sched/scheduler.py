@@ -55,7 +55,11 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    PrefixCacheStats,
+    RequestSpecDecodeMetrics,
+    SchedulerStats,
+)
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
@@ -82,11 +86,15 @@ class Scheduler(SchedulerInterface):
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.model_uses_mrope = vllm_config.model_config.uses_mrope
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
+        self.spec_decode_metrics_level = (
+            self.observability_config.per_request_spec_decode_metrics
+        )
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(
@@ -94,7 +102,7 @@ class Scheduler(SchedulerInterface):
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
-        self.is_encoder_only = vllm_config.is_encoder_only
+        self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -1199,13 +1207,16 @@ class Scheduler(SchedulerInterface):
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
+                    uses_mrope=self.model_uses_mrope,
                 )
                 for req in scheduled_new_reqs
             ]
         else:
             new_reqs_data = [
                 NewRequestData.from_request(
-                    req, req_to_new_blocks[req.request_id].get_block_ids()
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    uses_mrope=self.model_uses_mrope,
                 )
                 for req in scheduled_new_reqs
             ]
@@ -1853,6 +1864,20 @@ class Scheduler(SchedulerInterface):
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
                 )
+                if request.spec_decode_metrics is not None:
+                    # Exclude grammar-invalidated drafts from the proposed
+                    # count, mirroring make_spec_decoding_stats; the accepted
+                    # bucket (j) is unaffected.
+                    adj_draft_tokens = num_draft_tokens
+                    if scheduler_output.num_invalid_spec_tokens:
+                        adj_draft_tokens -= (
+                            scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
+                        )
+                    request.spec_decode_metrics.observe(
+                        num_draft_tokens=adj_draft_tokens,
+                        num_accepted=num_accepted,
+                        detailed=self.spec_decode_metrics_level == "detailed",
+                    )
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
@@ -1879,7 +1904,7 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
             elif (
-                self.is_encoder_only
+                self.is_mm_encoder_only
                 and request.num_computed_tokens >= request.num_prompt_tokens
             ):
                 # An encoder instance runs the encoder and publishes the
@@ -2016,6 +2041,11 @@ class Scheduler(SchedulerInterface):
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         prefill_stats=prefill_stats,
+                        spec_decode_metrics=(
+                            request.spec_decode_metrics
+                            if finish_reason is not None
+                            else None
+                        ),
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
@@ -2317,6 +2347,10 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            if self.spec_decode_metrics_level != "none":
+                request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
+                    self.num_spec_tokens
+                )
             if self.connector is not None:
                 self.connector.on_new_request(request)
             if self.log_stats:
