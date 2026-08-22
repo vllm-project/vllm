@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 mod abort_requests;
+pub(crate) mod anthropic;
 mod cache;
 mod collective_rpc;
 mod health;
@@ -83,6 +84,8 @@ fn build_router_with_options(
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/chat/completions", post(openai::chat_completions))
+        // Anthropic
+        .route("/v1/messages/count_tokens", post(anthropic::count_tokens))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize))
