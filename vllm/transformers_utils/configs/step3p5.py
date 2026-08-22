@@ -80,10 +80,11 @@ class Step3p5Config(PretrainedConfig):
 
         self.att_impl_type = att_impl_type
         self.use_head_wise_attn_gate = use_head_wise_attn_gate
-        # For some reason the checkpoint has longer layer_types than num_hidden_layers
-        if layer_types is not None:
-            layer_types = layer_types[: self.num_hidden_layers]
-        self.layer_types = layer_types
+        # HF requires len(layer_types) == num_hidden_layers. Checkpoints also
+        # store MTP entries after the decoder; trim for validation then restore.
+        self.layer_types = (
+            layer_types[: self.num_hidden_layers] if layer_types is not None else None
+        )
         self.use_rope_layers = use_rope_layers
         self.yarn_only_types = yarn_only_types
         self.attention_other_setting = attention_other_setting
@@ -101,3 +102,4 @@ class Step3p5Config(PretrainedConfig):
             eos_token_id=resolved_eos_token_id,
             **kwargs,
         )
+        self.layer_types = layer_types
