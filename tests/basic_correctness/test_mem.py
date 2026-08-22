@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from typing import Any
+import os
 
 import pytest
 import torch
@@ -19,6 +19,7 @@ from ..utils import create_new_process_for_each_test, requires_fp8
 DEVICE_TYPE = current_platform.device_type
 
 GEMMA3N_SLEEP_MODEL = "google/gemma-3n-E2B-it"
+GEMMA3N_SLEEP_WAKE_CYCLES = int(os.getenv("VLLM_SLEEP_WAKE_REPRO_CYCLES", "3"))
 GEMMA3N_SLEEP_TENSOR_NAMES = (
     "embed_scale",
     "embed_scale_per_layer",
@@ -41,25 +42,6 @@ def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:
         allocator.wake_up()
     finally:
         cumem.create_and_map = original_create_and_map
-
-
-def _set_poisoned_cumem_remap(_worker: Any, enabled: bool) -> None:
-    """Install or remove a worker-local test wrapper around CuMem remapping."""
-    saved_name = "_sleep_e2e_original_create_and_map"
-    if enabled:
-        assert not hasattr(cumem, saved_name)
-        original_create_and_map = cumem.create_and_map
-        setattr(cumem, saved_name, original_create_and_map)
-
-        def create_and_map_with_poison(handle) -> None:
-            original_create_and_map(handle)
-            _, size, ptr, _ = handle
-            cumem.libcudart.cudaMemset(ptr, 0xA5, size)
-
-        cumem.create_and_map = create_and_map_with_poison
-    else:
-        cumem.create_and_map = getattr(cumem, saved_name)
-        delattr(cumem, saved_name)
 
 
 def _gemma3n_sleep_tensor_snapshot(model) -> dict[str, tuple[int, float]]:
@@ -423,10 +405,10 @@ def test_deep_sleep():
 @pytest.mark.slow_test
 @pytest.mark.skipif(
     not current_platform.is_cuda(),
-    reason="Deterministic CuMem remap poisoning requires CUDA",
+    reason="Reproduces the CUDA CuMemAllocator level-2 sleep path",
 )
-def test_gemma3n_level2_sleep_restores_runtime_tensors(monkeypatch):
-    """Reproduce Gemma 3n runtime-tensor corruption after level-2 sleep."""
+def test_gemma3n_level2_sleep_wake_preserves_generation(monkeypatch):
+    """Detect naturally occurring Gemma 3n corruption after level-2 sleep."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -438,40 +420,50 @@ def test_gemma3n_level2_sleep_restores_runtime_tensors(monkeypatch):
         max_model_len=256,
         max_num_seqs=1,
         seed=0,
+        enable_prefix_caching=False,
+        disable_log_stats=True,
     )
     prompt = "Explain why the sky is blue in one short sentence."
     sampling_params = SamplingParams(temperature=0.0, max_tokens=16, logprobs=1)
 
     before_output = llm.generate(prompt, sampling_params)
+    before_token_ids, before_logprobs = _generation_signature(before_output)
+    control_token_ids, control_logprobs = _generation_signature(
+        llm.generate(prompt, sampling_params)
+    )
+    assert control_token_ids == before_token_ids
+    assert control_logprobs == pytest.approx(before_logprobs, rel=1e-5, abs=1e-5)
+
     before_tensors = llm.apply_model(_gemma3n_sleep_tensor_snapshot)
     assert all(
         set(snapshot) == set(GEMMA3N_SLEEP_TENSOR_NAMES)
         for snapshot in before_tensors
     )
 
-    llm.sleep(level=2)
-    poison_installed = False
-    try:
-        llm.collective_rpc(_set_poisoned_cumem_remap, args=(True,))
-        poison_installed = True
-
+    for cycle in range(1, GEMMA3N_SLEEP_WAKE_CYCLES + 1):
+        # Do not poison, zero, or allocate test-side GPU memory between sleep
+        # and wake. Repeated cycles only increase the chance that the CUDA
+        # driver naturally returns cleared or reused physical pages.
+        llm.sleep(level=2)
         llm.wake_up(tags=["weights"])
         llm.collective_rpc("reload_weights")
         after_tensors = llm.apply_model(_gemma3n_sleep_tensor_snapshot)
         llm.wake_up(tags=["kv_cache"])
-    finally:
-        if poison_installed:
-            llm.collective_rpc(_set_poisoned_cumem_remap, args=(False,))
 
-    after_output = llm.generate(prompt, sampling_params)
-    before_token_ids, before_logprobs = _generation_signature(before_output)
-    after_token_ids, after_logprobs = _generation_signature(after_output)
-
-    assert after_token_ids == before_token_ids
-    assert after_logprobs == pytest.approx(before_logprobs, rel=1e-5, abs=1e-5)
-    # CuMem preserves virtual addresses. The model owner must restore the
-    # original semantic values into those addresses after remapping.
-    assert after_tensors == before_tensors
+        after_token_ids, after_logprobs = _generation_signature(
+            llm.generate(prompt, sampling_params)
+        )
+        assert after_token_ids == before_token_ids, (
+            f"cycle {cycle}: generated tokens changed after sleep/wake"
+        )
+        assert after_logprobs == pytest.approx(
+            before_logprobs, rel=1e-5, abs=1e-5
+        ), f"cycle {cycle}: selected-token logprobs changed after sleep/wake"
+        # CuMem preserves virtual addresses. The model owner must restore the
+        # original semantic values into those addresses after remapping.
+        assert after_tensors == before_tensors, (
+            f"cycle {cycle}: Gemma 3n runtime tensors changed after sleep/wake"
+        )
 
 
 @create_new_process_for_each_test()
