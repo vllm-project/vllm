@@ -11,6 +11,7 @@ AsyncLLMEngine are working correctly.
 import asyncio
 import io
 import time
+from functools import cache
 from statistics import mean, median
 
 import pytest
@@ -53,14 +54,17 @@ def load_audio_sample(audio):
     raise ValueError("Audio sample did not contain array, path, or bytes data")
 
 
-# not all models have a normalizer so use the one from whisper as a standard option
-normalizer_model_info = HF_EXAMPLE_MODELS.find_hf_info("openai/whisper-large-v3")
-normalizer_tokenizer = get_tokenizer(
-    "openai/whisper-large-v3",
-    tokenizer_mode=normalizer_model_info.tokenizer_mode,
-    trust_remote_code=normalizer_model_info.trust_remote_code,
-)
-normalizer = EnglishTextNormalizer(normalizer_tokenizer.english_spelling_normalizer)
+@cache
+def get_normalizer():
+    # Not all models have a normalizer, so use Whisper's as a standard option.
+    model = "openai/whisper-large-v3"
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    tokenizer = get_tokenizer(
+        model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+    )
+    return EnglishTextNormalizer(tokenizer.english_spelling_normalizer)
 
 
 async def transcribe_audio(client, tokenizer, y, sr, extra_body=None):
@@ -93,6 +97,7 @@ async def bound_transcribe(
             client, tokenizer, audio, sr, extra_body=extra_body
         )
         # Normalize *english* output/reference for evaluation.
+        normalizer = get_normalizer()
         out = normalizer(result[2])
         ref = normalizer(reference)
         return result[:2] + (out, ref)
@@ -247,6 +252,7 @@ async def bound_transcribe_path(
         result = await transcribe_audio_path(
             client, tokenizer, audio_path, extra_body=extra_body
         )
+        normalizer = get_normalizer()
         out = normalizer(result[2])
         ref = normalizer(reference)
         return result[:2] + (out, ref)

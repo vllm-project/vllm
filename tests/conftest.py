@@ -18,6 +18,7 @@ import json
 import math
 import mimetypes
 import os
+import shutil
 import socket
 import tempfile
 import threading
@@ -31,7 +32,6 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.transformers_utils.repo_utils import hf_api
 from PIL import Image
 from transformers import (
     AutoConfig,
@@ -66,7 +66,7 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
-from vllm.transformers_utils.repo_utils import with_retry
+from vllm.transformers_utils.repo_utils import hf_api, with_retry
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -1507,78 +1507,114 @@ def num_gpus_available():
     return current_platform.device_count()
 
 
-temp_dir = tempfile.gettempdir()
-_dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
-_dummy_llava_path = os.path.join(temp_dir, "dummy_llava")
-_dummy_gemma2_embedding_path = os.path.join(temp_dir, "dummy_gemma2_embedding")
+PHI4_MULTIMODAL_MODEL_ID = "microsoft/Phi-4-multimodal-instruct"
 
 
-@pytest.fixture
-def dummy_opt_path():
-    json_path = os.path.join(_dummy_opt_path, "config.json")
-    if not os.path.exists(_dummy_opt_path):
-        hf_api().snapshot_download(
-            repo_id="facebook/opt-125m",
-            local_dir=_dummy_opt_path,
-            ignore_patterns=["*.bin", "*.bin.index.json", "*.pt", "*.h5", "*.msgpack"],
-        )
-        assert os.path.exists(json_path)
-        with open(json_path) as f:
-            config = json.load(f)
-        config["architectures"] = ["MyOPTForCausalLM"]
-        with open(json_path, "w") as f:
-            json.dump(config, f)
-    return _dummy_opt_path
+@pytest.fixture(scope="session")
+def phi4_multimodal_model_path():
+    return hf_api().snapshot_download(PHI4_MULTIMODAL_MODEL_ID)
 
 
-@pytest.fixture
-def dummy_llava_path():
-    json_path = os.path.join(_dummy_llava_path, "config.json")
-    if not os.path.exists(_dummy_llava_path):
-        hf_api().snapshot_download(
-            repo_id="llava-hf/llava-1.5-7b-hf",
-            local_dir=_dummy_llava_path,
-            ignore_patterns=[
-                "*.bin",
-                "*.bin.index.json",
-                "*.pt",
-                "*.h5",
-                "*.msgpack",
-                "*.safetensors",
-            ],
-        )
-        assert os.path.exists(json_path)
-        with open(json_path) as f:
-            config = json.load(f)
-        config["architectures"] = ["MyLlava"]
-        with open(json_path, "w") as f:
-            json.dump(config, f)
-    return _dummy_llava_path
+@pytest.fixture(scope="session")
+def phi4_multimodal_audio_lora_path(phi4_multimodal_model_path):
+    return os.path.join(phi4_multimodal_model_path, "speech-lora")
 
 
-@pytest.fixture
-def dummy_gemma2_embedding_path():
-    json_path = os.path.join(_dummy_gemma2_embedding_path, "config.json")
-    if not os.path.exists(_dummy_gemma2_embedding_path):
-        hf_api().snapshot_download(
-            repo_id="BAAI/bge-multilingual-gemma2",
-            local_dir=_dummy_gemma2_embedding_path,
-            ignore_patterns=[
-                "*.bin",
-                "*.bin.index.json",
-                "*.pt",
-                "*.h5",
-                "*.msgpack",
-                "*.safetensors",
-            ],
-        )
-        assert os.path.exists(json_path)
-        with open(json_path) as f:
-            config = json.load(f)
-        config["architectures"] = ["MyGemma2Embedding"]
-        with open(json_path, "w") as f:
-            json.dump(config, f)
-    return _dummy_gemma2_embedding_path
+@pytest.fixture(scope="session")
+def phi4_multimodal_vision_lora_path(phi4_multimodal_model_path):
+    return os.path.join(phi4_multimodal_model_path, "vision-lora")
+
+
+@pytest.fixture(scope="session")
+def phi4_multimodal_speech_question_path(phi4_multimodal_model_path):
+    return os.path.join(
+        phi4_multimodal_model_path,
+        "examples",
+        "what_is_shown_in_this_image.wav",
+    )
+
+
+@pytest.fixture(scope="session")
+def dummy_model_cache_dir(tmp_path_factory):
+    return tmp_path_factory.mktemp("dummy-models")
+
+
+def _create_dummy_model_path(
+    cache_dir: pathlib.Path,
+    model_name: str,
+    repo_id: str,
+    architecture: str,
+    ignore_patterns: list[str],
+) -> str:
+    model_path = cache_dir / model_name
+    json_path = model_path / "config.json"
+
+    snapshot_path = hf_api().snapshot_download(
+        repo_id=repo_id,
+        ignore_patterns=ignore_patterns,
+    )
+    # A shared snapshot may already contain weights downloaded by another test,
+    # so apply the filter again while creating the mutable session-local copy.
+    shutil.copytree(
+        snapshot_path,
+        model_path,
+        ignore=shutil.ignore_patterns(*ignore_patterns),
+    )
+    assert json_path.exists()
+    with open(json_path) as f:
+        config = json.load(f)
+    config["architectures"] = [architecture]
+    with open(json_path, "w") as f:
+        json.dump(config, f)
+
+    return str(model_path)
+
+
+@pytest.fixture(scope="session")
+def dummy_opt_path(dummy_model_cache_dir):
+    return _create_dummy_model_path(
+        dummy_model_cache_dir,
+        "dummy_opt",
+        "facebook/opt-125m",
+        "MyOPTForCausalLM",
+        ["*.bin", "*.bin.index.json", "*.pt", "*.h5", "*.msgpack"],
+    )
+
+
+@pytest.fixture(scope="session")
+def dummy_llava_path(dummy_model_cache_dir):
+    return _create_dummy_model_path(
+        dummy_model_cache_dir,
+        "dummy_llava",
+        "llava-hf/llava-1.5-7b-hf",
+        "MyLlava",
+        [
+            "*.bin",
+            "*.bin.index.json",
+            "*.pt",
+            "*.h5",
+            "*.msgpack",
+            "*.safetensors",
+        ],
+    )
+
+
+@pytest.fixture(scope="session")
+def dummy_gemma2_embedding_path(dummy_model_cache_dir):
+    return _create_dummy_model_path(
+        dummy_model_cache_dir,
+        "dummy_gemma2_embedding",
+        "BAAI/bge-multilingual-gemma2",
+        "MyGemma2Embedding",
+        [
+            "*.bin",
+            "*.bin.index.json",
+            "*.pt",
+            "*.h5",
+            "*.msgpack",
+            "*.safetensors",
+        ],
+    )
 
 
 # Add the flag `--optional` to allow run tests

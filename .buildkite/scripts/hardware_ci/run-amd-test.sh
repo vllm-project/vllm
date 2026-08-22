@@ -58,6 +58,8 @@ amd_diagnostics_collected=0
 amd_diagnostics_memory_events_path=""
 amd_diagnostics_probe_budget_seconds=25
 amd_diagnostics_command_timeout_seconds=5
+amd_native_test_cache=""
+amd_test_cache_only="${VLLM_CI_TEST_CACHE_ONLY:-0}"
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
   PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
 fi
@@ -96,8 +98,16 @@ clear_ci_orchestration_env() {
   unset -v \
     VLLM_TEST_GROUP_NAME \
     VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE \
+    VLLM_CI_PERSISTENT_CACHE_ROOT \
+    VLLM_CI_HF_CACHE \
+    VLLM_CI_MODELSCOPE_CACHE \
+    VLLM_CI_TEST_CACHE \
+    VLLM_CI_TEST_CACHE_ONLY \
     VLLM_CI_ARTIFACT_STEP \
     VLLM_TEST_CACHE \
+    VLLM_TEST_CACHE_ONLY \
+    _VLLM_TEST_CACHE \
+    _VLLM_TEST_CACHE_ONLY \
     VLLM_CI_EXECUTION_MODE \
     VLLM_CI_WORKSPACE \
     VLLM_CI_REQUIRE_WORKSPACE_MOUNT \
@@ -469,6 +479,7 @@ initialize_native_environment() {
   local job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-local}}"
   local job_id_suffix=""
   local native_root=""
+  local persistent_cache_root=""
   local hf_fstype=""
   local hf_mount=""
 
@@ -487,7 +498,10 @@ initialize_native_environment() {
   TRITON_CACHE_DIR="${native_root}/cache/triton"
   VLLM_CACHE_ROOT="${native_root}/cache/vllm"
   XDG_CACHE_HOME="${native_root}/cache/xdg"
-  : "${HF_HOME:=/home/buildkite-agent/huggingface}"
+  HF_HOME="${VLLM_CI_HF_CACHE:-${HF_HOME:-/home/buildkite-agent/huggingface}}"
+  persistent_cache_root="${VLLM_CI_PERSISTENT_CACHE_ROOT:-${HF_HOME}}"
+  MODELSCOPE_CACHE="${VLLM_CI_MODELSCOPE_CACHE:-${persistent_cache_root}/modelscope}"
+  amd_native_test_cache="${VLLM_CI_TEST_CACHE:-${persistent_cache_root}/vllm-test-cache}"
   # datasets uses POSIX locks that are unsupported by the shared HF NFS cache.
   # Keep processed datasets job-local while retaining the persistent Hub cache.
   HF_DATASETS_CACHE="${native_root}/cache/huggingface/datasets"
@@ -505,6 +519,7 @@ initialize_native_environment() {
   export TMPDIR VLLM_RPC_BASE_PATH
   export TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR VLLM_CACHE_ROOT XDG_CACHE_HOME
   export HF_HOME HF_DATASETS_CACHE HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
+  export MODELSCOPE_CACHE
   export TIKTOKEN_RS_CACHE_DIR
   export PYTORCH_ROCM_ARCH=""
 
@@ -514,6 +529,8 @@ initialize_native_environment() {
     "${VLLM_CACHE_ROOT}" \
     "${XDG_CACHE_HOME}" \
     "${HF_HOME}" \
+    "${MODELSCOPE_CACHE}" \
+    "${amd_native_test_cache}" \
     "${TIKTOKEN_RS_CACHE_DIR}" \
     "${HF_DATASETS_CACHE}" || return 1
 
@@ -1366,6 +1383,8 @@ if is_native_runtime; then
   echo "--- Test log"
   # Keep AMD CI orchestration variables out of vLLM's runtime environment.
   clear_ci_orchestration_env
+  export _VLLM_TEST_CACHE="${amd_native_test_cache}"
+  export _VLLM_TEST_CACHE_ONLY="${amd_test_cache_only}"
   /bin/bash -o pipefail -c "${commands}"
   handle_pytest_exit "$?"
 fi
@@ -1424,9 +1443,18 @@ fi
 # --- Prepare commands ---
 echo "--- Running container"
 
-HF_CACHE="$(realpath ~)/huggingface"
-mkdir -p "${HF_CACHE}"
+PERSISTENT_CACHE_ROOT="${VLLM_CI_PERSISTENT_CACHE_ROOT:-$(realpath ~)}"
+
+HF_CACHE="${VLLM_CI_HF_CACHE:-${PERSISTENT_CACHE_ROOT}/huggingface}"
 HF_MOUNT="/root/.cache/huggingface"
+
+MODELSCOPE_CACHE="${VLLM_CI_MODELSCOPE_CACHE:-${PERSISTENT_CACHE_ROOT}/modelscope}"
+MODELSCOPE_MOUNT="/root/.cache/modelscope"
+
+VLLM_TEST_CACHE_HOST="${VLLM_CI_TEST_CACHE:-${PERSISTENT_CACHE_ROOT}/vllm-test-cache}"
+VLLM_TEST_CACHE_MOUNT="/root/.cache/vllm-test-cache"
+
+mkdir -p "${HF_CACHE}" "${MODELSCOPE_CACHE}" "${VLLM_TEST_CACHE_HOST}"
 
 # Hugging Face Hub defaults to 10s request/download timeouts, while the ROCm
 # CI image currently raises downloads to 60s. AMD model-test jobs routinely
@@ -1612,6 +1640,7 @@ else
     -e HF_TOKEN \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
     -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
+    -e "_VLLM_TEST_CACHE_ONLY=${amd_test_cache_only}" \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \
     -e BUILDKITE_PARALLEL_JOB \
@@ -1624,7 +1653,11 @@ else
     -e PYTEST_ADDOPTS \
     -e PYTEST_TIMEOUT \
     -v "${HF_CACHE}:${HF_MOUNT}" \
+    -v "${MODELSCOPE_CACHE}:${MODELSCOPE_MOUNT}" \
+    -v "${VLLM_TEST_CACHE_HOST}:${VLLM_TEST_CACHE_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
+    -e "MODELSCOPE_CACHE=${MODELSCOPE_MOUNT}" \
+    -e "_VLLM_TEST_CACHE=${VLLM_TEST_CACHE_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
     -e "TMPDIR=${CONTAINER_TMPDIR}/tmp" \
     -e "TIKTOKEN_RS_CACHE_DIR=${HF_MOUNT}/tiktoken-rs-cache" \

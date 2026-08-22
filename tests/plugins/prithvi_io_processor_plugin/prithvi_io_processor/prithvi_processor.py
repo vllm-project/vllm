@@ -4,7 +4,6 @@
 import datetime
 import os
 import tempfile
-import urllib.request
 from collections.abc import Sequence
 from typing import Any
 
@@ -17,6 +16,7 @@ import torch
 from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
 
+from tests.cache_utils import download_to_vllm_test_cache
 from vllm.config import VllmConfig
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
@@ -27,6 +27,15 @@ from vllm.renderers import BaseRenderer
 from .types import DataModuleConfig, ImagePrompt, ImageRequestOutput
 
 logger = init_logger(__name__)
+
+_KNOWN_ASSET_SHA256 = {
+    "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/e316d702e07c0ed84548bb05b0c74dc8a1673ed8/valencia_example_2024-10-26.tiff": (  # noqa: E501
+        "bbfcc59f2fdb812b843d74f5f9b8fad553965ee1ba8d3135d10e6f8a1a029545"
+    ),
+    "https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-BurnScars/resolve/a3f2c410e45b8ac7417976614528a872f024d831/examples/subsetted_512x512_HLS.S30.T10SEH.2018190.v1.4_merged.tif": (  # noqa: E501
+        "13bc592a5e569d837bd8bb3524bb0d2f28418830bcc7b0750e74033078f8b17e"
+    ),
+}
 
 NO_DATA = -9999
 NO_DATA_FLOAT = 0.0001
@@ -113,11 +122,13 @@ def read_geotiff(
 
         write_to_file = file_data
     elif file_path is not None and path_type == "url":
-        resp = urllib.request.urlopen(file_path)
-        # with tempfile.NamedTemporaryFile() as tmpfile:
-        #     tmpfile.write(resp.read())
-        #     path = tmpfile.name
-        write_to_file = resp.read()
+        path = str(
+            download_to_vllm_test_cache(
+                file_path,
+                "prithvi",
+                expected_sha256=_KNOWN_ASSET_SHA256.get(file_path),
+            )
+        )
     elif file_path is not None and path_type == "path":
         path = file_path
     elif file_path is not None and path_type == "b64_json":

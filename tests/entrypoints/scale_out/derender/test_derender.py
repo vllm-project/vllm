@@ -7,6 +7,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from tests.cache_utils import download_url_to_file
 from tests.utils import RemoteLaunchRenderServer
 from vllm.tokenizers import get_tokenizer
 
@@ -1008,21 +1009,31 @@ def _ensure_harmony_vocab():
     """Pre-cache the o200k_base BPE file needed by openai-harmony.
 
     The Rust tiktoken-rs backend downloads from Azure Blob Storage, which
-    may be unreachable in some environments.  When the cache is cold we
-    fetch the file ourselves and place it in ``/tmp/tiktoken-rs-cache/``
-    using the SHA-1(URL) filename that tiktoken-rs expects.
+    may be unreachable in some environments. When the cache is cold, fetch
+    the file atomically into ``TIKTOKEN_RS_CACHE_DIR`` (or its default
+    location) using the SHA-1(URL) filename that tiktoken-rs expects.
     """
     import hashlib
-    import urllib.request
+    import os
+    import tempfile
     from pathlib import Path
 
     url = "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
-    cache_dir = Path("/tmp/tiktoken-rs-cache")
     cache_key = hashlib.sha1(url.encode()).hexdigest()
-    cache_file = cache_dir / cache_key
-    if not cache_file.exists():
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(url, cache_file)
+
+    runtime_cache_dir = Path(
+        os.environ.get(
+            "TIKTOKEN_RS_CACHE_DIR",
+            str(Path(tempfile.gettempdir()) / "tiktoken-rs-cache"),
+        )
+    )
+    download_url_to_file(
+        url,
+        runtime_cache_dir / cache_key,
+        expected_sha256=(
+            "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
+        ),
+    )
 
 
 @pytest.fixture(scope="module")

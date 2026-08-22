@@ -19,12 +19,12 @@ pytestmark = pytest.mark.skipif(
 
 models_config = {
     "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11": {
-        "image_url": "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/valencia_example_2024-10-26.tiff",  # noqa: E501
+        "image_url": "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/e316d702e07c0ed84548bb05b0c74dc8a1673ed8/valencia_example_2024-10-26.tiff",  # noqa: E501
         "out_hash": "aa6d92ad25926a5e",
         "plugin": "prithvi_to_tiff",
     },
     "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-BurnScars": {
-        "image_url": "https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-BurnScars/resolve/main/examples/subsetted_512x512_HLS.S30.T10SEH.2018190.v1.4_merged.tif",  # noqa: E501
+        "image_url": "https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-BurnScars/resolve/a3f2c410e45b8ac7417976614528a872f024d831/examples/subsetted_512x512_HLS.S30.T10SEH.2018190.v1.4_merged.tif",  # noqa: E501
         "out_hash": "c07f4f602da73552",
         "plugin": "prithvi_to_tiff",
     },
