@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import queue
 import threading
 import time
@@ -379,7 +380,8 @@ class ZmqEventPublisher(EventPublisher):
     def shutdown(self) -> None:
         """Stop the publisher thread and clean up resources."""
         self._running = False
-        self._event_queue.put_nowait(None)
+        with contextlib.suppress(queue.Full):
+            self._event_queue.put_nowait(None)
 
         start = time.time()
         pending_items = True
