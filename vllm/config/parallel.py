@@ -205,6 +205,13 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    enable_shm_tensor_arena: bool = False
+    """Route large CPU tensors (e.g. multimodal ``pixel_values``) in the
+    engine→worker broadcast through a zero-copy shared-memory arena instead of
+    sending a copy to every reader. Opt-in; most beneficial for multimodal
+    serving with large images and tensor parallelism. Active only when all
+    queue readers are node-local; reserves slots in ``/dev/shm``."""
+
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
 
