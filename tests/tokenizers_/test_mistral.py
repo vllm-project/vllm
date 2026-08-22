@@ -9,13 +9,16 @@ import pytest
 from mistral_common.exceptions import InvalidMessageStructureException
 from mistral_common.guidance.grammar_factory import GrammarFactory
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy, SpecialTokens
+from transformers.tokenization_mistral_common import MistralCommonBackend
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
     _validate_apply_chat_template_args,
     validate_request_params,
+    with_placeholder_token_support,
 )
+from vllm.utils.mistral import is_transformers_mistral_common_tokenizer
 
 
 def test_validate_apply_chat_template_args():
@@ -2256,6 +2259,117 @@ def test_convert_ids_to_tokens_pre_args_tekken():
     ids = tokenizer.encode("Hello world !", add_special_tokens=False)
     tokens = tokenizer.convert_ids_to_tokens(ids, skip_special_tokens=True)
     assert len(tokens) > 0
+
+
+# ---------------------------------------------------------------------------
+# with_placeholder_token_support – dual-format checkpoints (HF tokenizer
+# files alongside mistral-common's tekken.json) resolve to transformers'
+# native `MistralCommonBackend` under the default tokenizer mode, which does
+# not encode special tokens (e.g. modality placeholders like "[IMG]") found
+# in plain text. HF multimodal processors rely on that encoding when
+# building dummy/templated inputs at engine startup, so vLLM must swap in a
+# tokenizer variant that performs it. Regression coverage for
+# `InputProcessingContext.get_hf_processor`'s handling of this case.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def pixtral_common_backend() -> MistralCommonBackend:
+    return MistralCommonBackend.from_pretrained(
+        "mistralai/Pixtral-12B-2409", mode="test"
+    )
+
+
+def test_is_transformers_mistral_common_tokenizer(
+    pixtral_common_backend: MistralCommonBackend,
+):
+    assert is_transformers_mistral_common_tokenizer(pixtral_common_backend)
+    assert not is_transformers_mistral_common_tokenizer(object())
+    assert not is_transformers_mistral_common_tokenizer(None)
+
+
+def test_stock_backend_does_not_encode_placeholder_from_text(
+    pixtral_common_backend: MistralCommonBackend,
+):
+    """Sanity-check the bug this fix addresses: mistral-common never folds
+    special tokens found in plain text back into their ids."""
+    image_token_id = pixtral_common_backend.convert_tokens_to_ids("[IMG]")
+    assert pixtral_common_backend.encode("[IMG]", add_special_tokens=False) != [
+        image_token_id
+    ]
+
+
+def test_with_placeholder_token_support_encodes_placeholder(
+    pixtral_common_backend: MistralCommonBackend,
+):
+    image_token_id = pixtral_common_backend.convert_tokens_to_ids("[IMG]")
+
+    patched = with_placeholder_token_support(pixtral_common_backend)
+
+    assert patched is not pixtral_common_backend
+    assert patched.encode("[IMG]", add_special_tokens=False) == [image_token_id]
+
+
+def test_with_placeholder_token_support_is_memoized(
+    pixtral_common_backend: MistralCommonBackend,
+):
+    first = with_placeholder_token_support(pixtral_common_backend)
+    second = with_placeholder_token_support(pixtral_common_backend)
+    assert first is second
+
+
+def test_with_placeholder_token_support_is_idempotent(
+    pixtral_common_backend: MistralCommonBackend,
+):
+    patched = with_placeholder_token_support(pixtral_common_backend)
+    assert with_placeholder_token_support(patched) is patched
+
+
+def test_with_placeholder_token_support_preserves_plain_text_encoding(
+    pixtral_common_backend: MistralCommonBackend,
+):
+    patched = with_placeholder_token_support(pixtral_common_backend)
+    text = "Hello world, nothing special here."
+    assert patched.encode(
+        text, add_special_tokens=False
+    ) == pixtral_common_backend.encode(text, add_special_tokens=False)
+
+
+def test_with_placeholder_token_support_handles_mixed_and_adjacent_placeholders(
+    pixtral_common_backend: MistralCommonBackend,
+):
+    image_token_id = pixtral_common_backend.convert_tokens_to_ids("[IMG]")
+    img_break_id = pixtral_common_backend.convert_tokens_to_ids("[IMG_BREAK]")
+    img_end_id = pixtral_common_backend.convert_tokens_to_ids("[IMG_END]")
+
+    patched = with_placeholder_token_support(pixtral_common_backend)
+
+    # "[IMG]" is a string-prefix of "[IMG_BREAK]"/"[IMG_END]"; the longer
+    # placeholders must not be shadowed by a naive prefix match.
+    adjacent_ids = patched.encode("[IMG][IMG_BREAK][IMG_END]", add_special_tokens=False)
+    assert adjacent_ids == [image_token_id, img_break_id, img_end_id]
+
+    # Placeholders interleaved with ordinary text still tokenize correctly,
+    # and the surrounding text is unaffected.
+    mixed_ids = patched.encode(
+        "Describe this image [IMG] please.", add_special_tokens=False
+    )
+    assert image_token_id in mixed_ids
+    prefix_ids = pixtral_common_backend.encode(
+        "Describe this image ", add_special_tokens=False
+    )
+    assert mixed_ids[: len(prefix_ids)] == prefix_ids
+
+
+def test_with_placeholder_token_support_respects_add_special_tokens(
+    pixtral_common_backend: MistralCommonBackend,
+):
+    image_token_id = pixtral_common_backend.convert_tokens_to_ids("[IMG]")
+    bos_id = pixtral_common_backend.tokenizer.instruct_tokenizer.tokenizer.bos_id
+
+    patched = with_placeholder_token_support(pixtral_common_backend)
+
+    assert patched.encode("[IMG]", add_special_tokens=True) == [bos_id, image_token_id]
 
 
 # ---------------------------------------------------------------------------

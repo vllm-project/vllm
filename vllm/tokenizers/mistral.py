@@ -5,6 +5,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
+import regex as re
 from mistral_common.guidance.grammar_factory import GrammarFactory
 from mistral_common.guidance.tokenizer import from_mistral_tokenizer
 from mistral_common.protocol.instruct.request import (
@@ -204,6 +205,94 @@ def tekken_convert_tokens_to_string(
         ids = [_tekken_token_to_id(tokenizer, t) for t in tokens]
         return tokenizer.decode(ids, SpecialTokenPolicy.KEEP)
     return "".join(cast(Sequence[str], tokens))
+
+
+class _PlaceholderAwareMistralCommonBackend(MistralCommonBackend):
+    """`MistralCommonBackend` that recognizes special tokens (e.g. modality
+    placeholders such as ``"[IMG]"``) embedded in plain text.
+
+    mistral-common intentionally never encodes special tokens found inside
+    ordinary text: calling `encode("[IMG]")` tokenizes the literal characters
+    `[`, `IMG`, `]` rather than resolving to the placeholder's token id. This
+    is fine for user-authored prompts, but HF multimodal processors (e.g.
+    `PixtralProcessor`) build synthetic/templated text that already contains
+    those placeholder strings and expect the tokenizer to fold them back into
+    their special ids, the same way HF's own tokenizers handle "added
+    tokens". Without this, vLLM's dummy-input profiling for Mistral3/Pixtral
+    crashes because the placeholder count in the templated text no longer
+    matches the placeholder count in the tokenized ids.
+
+    Only use this class to tokenize trusted/internal text (e.g. the copy
+    handed to an HF processor), never to encode raw, user-supplied prompts.
+    """
+
+    @cached_property
+    def _placeholder_token_ids(self) -> dict[str, int]:
+        # `all_special_tokens` and `all_special_ids` are index-aligned.
+        return dict(zip(self.all_special_tokens, self.all_special_ids))
+
+    @cached_property
+    def _placeholder_pattern(self) -> "re.Pattern[str]":
+        # Sort longest-first so that a placeholder which is a prefix of
+        # another one (e.g. "[IMG]" vs "[IMG_BREAK]") is not shadowed.
+        placeholders = sorted(self._placeholder_token_ids, key=len, reverse=True)
+        return re.compile("(" + "|".join(re.escape(p) for p in placeholders) + ")")
+
+    def _text_to_ids(self, text: str, add_special_tokens: bool) -> list[int]:
+        raw_tokenizer = self.tokenizer.instruct_tokenizer.tokenizer
+
+        if not self._placeholder_token_ids:
+            token_ids = raw_tokenizer.encode(text, bos=False, eos=False)
+        else:
+            token_ids = []
+            # `re.split` with a capturing group returns the delimiters
+            # (placeholders) interleaved at the odd indices.
+            for i, chunk in enumerate(self._placeholder_pattern.split(text)):
+                if not chunk:
+                    continue
+                if i % 2:
+                    token_ids.append(self._placeholder_token_ids[chunk])
+                else:
+                    token_ids.extend(raw_tokenizer.encode(chunk, bos=False, eos=False))
+
+        if add_special_tokens:
+            token_ids = [raw_tokenizer.bos_id, *token_ids]
+            if self._mode == ValidationMode.finetuning:
+                token_ids.append(raw_tokenizer.eos_id)
+
+        return token_ids
+
+
+def with_placeholder_token_support(
+    tokenizer: "MistralCommonBackend",
+) -> "MistralCommonBackend":
+    """Return a variant of `tokenizer` that folds placeholder-like special
+    tokens (e.g. `"[IMG]"`) appearing in plain text back into their token
+    ids, which the stock `MistralCommonBackend` never does. See
+    `_PlaceholderAwareMistralCommonBackend` for the rationale.
+
+    The variant is memoized on `tokenizer` so repeated calls (e.g. from a
+    cache keyed on the tokenizer identity) return the same object.
+    """
+    if isinstance(tokenizer, _PlaceholderAwareMistralCommonBackend):
+        return tokenizer
+
+    cached_variant = tokenizer.__dict__.get("_placeholder_aware_variant")
+    if cached_variant is not None:
+        return cached_variant
+
+    variant = _PlaceholderAwareMistralCommonBackend(
+        tokenizer_path=tokenizer._tokenizer_path,
+        mode=tokenizer.mode,
+        model_max_length=tokenizer.model_max_length,
+        padding_side=tokenizer.padding_side,
+        truncation_side=tokenizer.truncation_side,
+        model_input_names=tokenizer.model_input_names,
+        clean_up_tokenization_spaces=tokenizer.clean_up_tokenization_spaces,
+    )
+
+    tokenizer.__dict__["_placeholder_aware_variant"] = variant
+    return variant
 
 
 class MistralTokenizer(TokenizerLike):
