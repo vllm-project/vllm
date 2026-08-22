@@ -225,7 +225,22 @@ message MediaItem {
     string url = 2;       // http:// or https://
     string data_uri = 3;  // data:
     bytes raw_bytes = 4;
+    PreprocessedMediaFeatures features = 7;
   }
   string mime_type = 5;
   string uuid = 6;
+}
+
+// Engine-ready multimodal features produced by a version-compatible frontend.
+// `kwargs` is the MessagePack wire representation of one MmKwargsItem.
+message PreprocessedMediaFeatures {
+  // Required inline payload. Cache-only references are not accepted.
+  optional bytes kwargs = 1;
+  // Caller metadata accepted for wire compatibility. The server derives the
+  // EngineCore cache identity from the modality and kwargs payload.
+  string identifier = 2;
+  uint64 offset = 3;
+  uint64 length = 4;
+  optional string mm_hash = 5;
+  repeated bool is_embed = 6;
 }
