@@ -13,6 +13,7 @@ import json
 import multiprocessing
 import os
 import shutil
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -24,6 +25,13 @@ from tqdm import tqdm
 from vllm.benchmarks.lib.utils import (
     convert_to_pytorch_benchmark_format,
     write_to_json,
+)
+from vllm.benchmarks.startup_spans import (
+    InMemorySpanSink,
+    build_phase_report,
+    collect_startup_spans,
+    compare_to_baseline,
+    format_phase_report,
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -131,7 +139,7 @@ def cold_startup():
             os.environ.pop("VLLM_CACHE_ROOT", None)
 
 
-def run_startup_in_subprocess(engine_args, result_queue):
+def run_startup_in_subprocess(engine_args, result_queue, otlp_endpoint=None):
     """
     Run LLM startup in a subprocess and return timing metrics via a queue.
     This ensures complete isolation between iterations.
@@ -139,6 +147,9 @@ def run_startup_in_subprocess(engine_args, result_queue):
     try:
         # Import inside the subprocess to avoid issues with forking
         from vllm import LLM
+
+        if otlp_endpoint is not None:
+            engine_args.otlp_traces_endpoint = otlp_endpoint
 
         # Measure total startup time
         start_time = time.perf_counter()
@@ -216,6 +227,25 @@ def add_cli_args(parser: FlexibleArgumentParser):
         default=None,
         help="Path to save the startup time results in JSON format.",
     )
+    parser.add_argument(
+        "--per-phase",
+        action="store_true",
+        default=False,
+        help="Capture OTEL startup spans and report per-phase cold-start "
+        "timings. Requires opentelemetry.",
+    )
+    parser.add_argument(
+        "--phase-baseline",
+        type=str,
+        default=None,
+        help="Path to a baseline per-phase JSON (as written by --output-json) "
+        "to compare against (regression gate). Only applies with "
+        "--per-phase. Exits non-zero when a phase regresses beyond "
+        "the threshold (default: 0.5 seconds absolute or 10 percent "
+        "relative, whichever is greater). A missing file or a "
+        "phase_list_version mismatch logs a warning and skips the "
+        "comparison (never hard-fails the bench).",
+    )
 
     parser = EngineArgs.add_cli_args(parser)
     return parser
@@ -228,11 +258,21 @@ def main(args: argparse.Namespace):
 
     engine_args = EngineArgs.from_cli_args(args)
 
+    per_phase_enabled = bool(args.per_phase)
+    sink: InMemorySpanSink | None = None
+    otlp_endpoint: str | None = None
+    if per_phase_enabled:
+        try:
+            sink = InMemorySpanSink(address="localhost:0")
+            otlp_endpoint = sink.start()
+        except RuntimeError as e:
+            print(f"--per-phase unavailable: {e}; falling back to total-only.\n")
+            per_phase_enabled = False
+            sink = None
+            otlp_endpoint = None
+
     def create_llm_and_measure_startup():
-        """
-        Create LLM instance in a subprocess and measure startup time.
-        Returns timing metrics, using subprocess for complete isolation.
-        """
+        """Create LLM in a subprocess and measure startup time."""
 
         # Create a queue for inter-process communication
         result_queue: multiprocessing.Queue[Any] = multiprocessing.Queue()
@@ -241,8 +281,11 @@ def main(args: argparse.Namespace):
             args=(
                 engine_args,
                 result_queue,
+                otlp_endpoint,
             ),
         )
+        if sink is not None:
+            sink.clear()
         process.start()
         process.join()
 
@@ -254,6 +297,12 @@ def main(args: argparse.Namespace):
                     raise RuntimeError(f"Subprocess failed: {error_msg}")
                 else:
                     raise RuntimeError("Subprocess failed with unknown error")
+            if sink is not None:
+                phase_spans = collect_startup_spans(sink)
+                result["per_phase"] = build_phase_report(
+                    phase_spans,
+                    wall_clock_startup_s=result["total_startup_time"],
+                )
             return result
         else:
             raise RuntimeError("Subprocess did not return a result")
@@ -296,11 +345,55 @@ def main(args: argparse.Namespace):
     _print_phase("WARM STARTUP", warm_metrics)
     print("=" * 60)
 
+    per_phase_payload: dict[str, Any] = {}
+    baseline_regressed = False
+    if per_phase_enabled:
+        print("-" * 60)
+        print("PER-PHASE COLD-START REPORT")
+        print("-" * 60)
+        for label, iters in (("Cold", cold_iterations), ("Warm", warm_iterations)):
+            if not iters or "per_phase" not in iters[-1]:
+                continue
+            rpt = iters[-1]["per_phase"]
+            print(f"\n{label} startup (last iteration):")
+            print(format_phase_report(rpt))
+            per_phase_payload[label.lower()] = rpt
+            if args.phase_baseline is not None:
+                cmp = compare_to_baseline(rpt, args.phase_baseline)
+                per_phase_payload[label.lower()]["baseline"] = cmp
+                if cmp.get("regressed"):
+                    baseline_regressed = True
+                    for d in cmp["phases"]:
+                        if d["regressed"]:
+                            print(f"  REGRESSION  {d['name']:<22} "
+                                  f"{d['baseline_s']:.3f}s -> "
+                                  f"{d['current_s']:.3f}s "
+                                  f"(delta {d['delta_s']:+.3f}s)")
+        print("-" * 60)
+        if args.phase_baseline is not None:
+            status = ("REGRESSION DETECTED" if baseline_regressed
+                      else "no regression")
+            print(f"Baseline comparison ({args.phase_baseline}): {status}")
+            print("-" * 60)
+
     # Output JSON results if specified
     if args.output_json:
         results: dict[str, Any] = {}
         for m in all_metrics:
             results.update(_metric_to_json(m))
+        if per_phase_payload:
+            results["per_phase"] = per_phase_payload
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
         save_to_pytorch_benchmark_format(args, all_metrics)
+
+    if sink is not None:
+        sink.stop()
+
+    # Regression gate (criterion #6): non-zero exit only when a phase
+    # regressed beyond the baseline threshold. A missing baseline file or
+    # a phase_list_version mismatch is a warning, not a failure (see
+    # compare_to_baseline).
+    if baseline_regressed:
+        print("\nBaseline regression detected; exiting with non-zero status.\n")
+        sys.exit(1)
