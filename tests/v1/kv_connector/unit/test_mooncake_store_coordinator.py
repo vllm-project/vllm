@@ -8,11 +8,12 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
+    partial_hash_hits_enabled,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import BlockHash, resolve_dcp_kv_block_size
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -43,6 +44,44 @@ def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=Non
         use_eagle=use_eagle,
         retention_interval=retention_interval,
     )
+
+
+def test_partial_hash_hits_enabled_for_dcp_full_attention_geometry():
+    groups = [
+        KVCacheGroupSpec(["attention"], _full(block_size=3072)),
+        KVCacheGroupSpec(["mamba"], _mamba_align(block_size=1536)),
+    ]
+
+    assert not partial_hash_hits_enabled(groups, hash_block_size=1536)
+    assert partial_hash_hits_enabled(
+        groups,
+        hash_block_size=1536,
+        dcp_world_size=8,
+    )
+
+
+def test_partial_hash_hits_enabled_scales_dcp_geometry_exactly_once():
+    # The predicate is handed the raw config groups and derives the effective
+    # block size itself, so scheduler and worker cannot scale a different
+    # number of times and disagree.
+    raw = [KVCacheGroupSpec(["attention"], _full(block_size=8))]
+
+    assert resolve_dcp_kv_block_size(raw[0].kv_cache_spec, 8) == 64
+    # One effective block is exactly one hash block, so there is no sub-block
+    # tail to hit.
+    assert not partial_hash_hits_enabled(raw, hash_block_size=64, dcp_world_size=8)
+    # Two hash blocks per effective block does leave a tail.
+    wider = [KVCacheGroupSpec(["attention"], _full(block_size=16))]
+    assert partial_hash_hits_enabled(wider, hash_block_size=64, dcp_world_size=8)
+
+
+def test_resolve_dcp_kv_block_size_replicates_mamba():
+    groups = [
+        KVCacheGroupSpec(["attention"], _full(block_size=16)),
+        KVCacheGroupSpec(["mamba"], _mamba_align(block_size=128)),
+    ]
+
+    assert [resolve_dcp_kv_block_size(g.kv_cache_spec, 8) for g in groups] == [128, 128]
 
 
 # ----- ExternalCachedBlockPool -----

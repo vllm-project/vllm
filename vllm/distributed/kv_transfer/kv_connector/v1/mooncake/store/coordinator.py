@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    resolve_dcp_kv_block_size,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -111,7 +112,7 @@ class MooncakeStoreCoordinator:
         """
         attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
-            spec = _unwrap_spec(g.kv_cache_spec)
+            spec = unwrap_kv_cache_spec(g.kv_cache_spec)
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None, (
                 f"No manager registered for KVCacheSpec {spec}"
@@ -249,7 +250,7 @@ class MooncakeStoreCoordinator:
         )
         masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
-            spec = _unwrap_spec(g.kv_cache_spec)
+            spec = unwrap_kv_cache_spec(g.kv_cache_spec)
             end_chunk = aligned_token_len // spec.block_size
             start_chunk = min(end_chunk, max(0, cdiv(start_token, spec.block_size)))
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
@@ -399,24 +400,39 @@ class MooncakeStoreCoordinator:
         )
 
 
-def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
+def unwrap_kv_cache_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
 
 
 def partial_hash_hits_enabled(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
     hash_block_size: int,
     dcp_world_size: int = 1,
 ) -> bool:
-    """Match core's DCP-aware Mamba partial-hit condition."""
-    return any(
-        isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)
-        and spec.mamba_cache_mode == "align"
-        and (
-            (dcp_world_size == 1 and spec.block_size > hash_block_size)
-            or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
-        )
-        for g in kv_cache_groups
-    )
+    """Mirror of core's ``HybridKVCacheCoordinator.enable_partial_hash_hits``.
+
+    Geometry comes from ``resolve_dcp_kv_block_size`` so the comparisons read
+    the same ``block_size`` core compares against: DCP scales full-attention
+    blocks and leaves replicated Mamba state alone. Single copy on purpose --
+    scheduler and coordinator must not disagree.
+    """
+    for g in kv_cache_groups:
+        spec = unwrap_kv_cache_spec(g.kv_cache_spec)
+        block_size = resolve_dcp_kv_block_size(g.kv_cache_spec, dcp_world_size)
+        if isinstance(spec, MambaSpec):
+            # TP needs hashing finer than the Mamba block; DCP accepts equality
+            # because it scales the full-attention block instead.
+            if spec.mamba_cache_mode == "align" and (
+                block_size > hash_block_size
+                or (dcp_world_size > 1 and block_size == hash_block_size)
+            ):
+                return True
+        elif (
+            dcp_world_size > 1
+            and isinstance(spec, FullAttentionSpec)
+            and block_size > hash_block_size
+        ):
+            return True
+    return False
