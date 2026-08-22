@@ -103,7 +103,7 @@ steps:
 
 - label: ":nvidia: (L4) Attention Kernels Shard %N"
   key: kernels-attention-test
-  timeout_in_minutes: 65
+  timeout_in_minutes: 30
   source_file_dependencies:
   - csrc/attention/
   - vllm/v1/attention
@@ -113,12 +113,15 @@ steps:
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  parallelism: 7
   mirror:
     amd:
       label: ":amd: (MI300) Attention Kernels Shard %N"
       dind: false
       device: mi300_1
+      # Pin the AMD mirror at its current 2 shards so raising NVIDIA
+      # parallelism does not multiply AMD copies (needs ci-infra #473).
+      parallelism: 2
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd
