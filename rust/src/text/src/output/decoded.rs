@@ -189,11 +189,12 @@ pub async fn decoded_text_event_stream(
                 break;
             }
 
+            // TODO: avoid generating a chunk every time a token is pushed
             if intermediate && let Some(chunk) = decoder.next_chunk() {
                 if let Some(delta_str) = delta.as_mut() {
-                    delta_str.push_str(&chunk);
+                    delta_str.push_str(&chunk.text);
                 } else {
-                    delta = Some(chunk);
+                    delta = Some(chunk.text);
                 }
             }
         }
@@ -234,16 +235,17 @@ pub async fn decoded_text_event_stream(
 
         if let Some(reason) = finish_reason {
             // Flush any remaining buffered text.
-            let (last_chunk, mut text) = decoder.flush(truncate_output_to)?;
-            let text_len = text.len();
-            let full_text = tracing::enabled!(Level::TRACE).then(|| text.clone());
+            let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
+            let text_len = full_decoded.text.len();
+            let full_text = tracing::enabled!(Level::TRACE).then(|| full_decoded.text.clone());
+            let mut text = full_decoded.text;
 
             if intermediate {
                 if let Some(chunk) = last_chunk {
                     if let Some(delta_str) = delta.as_mut() {
-                        delta_str.push_str(&chunk);
+                        delta_str.push_str(&chunk.text);
                     } else {
-                        delta = Some(chunk);
+                        delta = Some(chunk.text);
                     }
                 }
                 token_ids = new_token_ids;

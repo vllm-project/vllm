@@ -3,7 +3,46 @@
 
 use std::mem::take;
 
+use smallvec::SmallVec;
+
 use crate::{Result, Tokenizer};
+
+/// Position of one generated token in decoded text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenAnchor {
+    /// The token contributed to visible decoded text.
+    Visible { byte_offset: u32 },
+    /// The token produced no visible decoded bytes.
+    ZeroWidth { byte_offset: u32 },
+}
+
+impl TokenAnchor {
+    fn byte_offset(self) -> u32 {
+        match self {
+            Self::Visible { byte_offset } | Self::ZeroWidth { byte_offset } => byte_offset,
+        }
+    }
+
+    fn with_byte_offset(self, byte_offset: u32) -> Self {
+        match self {
+            Self::Visible { .. } => Self::Visible { byte_offset },
+            Self::ZeroWidth { .. } => Self::ZeroWidth { byte_offset },
+        }
+    }
+}
+
+/// Decoded text and the generated tokens attributed to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DecodedText {
+    /// Decoded UTF-8 text.
+    pub text: String,
+    /// One entry per generated token, in generation order.
+    ///
+    /// Offsets are local to `text`. Visible offsets may repeat when multiple
+    /// tokens jointly decode into one character. A zero-width offset may equal
+    /// `text.len()`.
+    pub anchors: SmallVec<[TokenAnchor; 8]>,
+}
 
 /// Stateful incremental decoder that emits text chunks one token at a time.
 pub trait IncrementalDecoder: Send {
@@ -12,16 +51,25 @@ pub trait IncrementalDecoder: Send {
     fn push_token(&mut self, token_id: u32) -> Result<usize>;
 
     /// Consume any text which is currently ready.
-    fn next_chunk(&mut self) -> Option<String>;
+    fn next_chunk(&mut self) -> Option<DecodedText>;
 
     /// Flush any remaining buffered text that has not yet been emitted.
     ///
     /// Called after the final generated token to force out buffered/incomplete
     /// fragments.
-    fn flush(&mut self, truncate_output_to: Option<usize>) -> Result<(Option<String>, String)>;
+    fn flush(
+        &mut self,
+        truncate_output_to: Option<usize>,
+    ) -> Result<(Option<DecodedText>, DecodedText)>;
 
     /// Return cumulative decoded text so far.
     fn output(&self) -> &str;
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PendingAnchor {
+    Unresolved,
+    Resolved(TokenAnchor),
 }
 
 /// [`IncrementalDecoder`] built on [`Tokenizer::decode()`] with prefix-diffing.
@@ -38,6 +86,9 @@ pub(crate) struct DecodeStream<'a, T: Tokenizer + ?Sized> {
     prefix_seeded: bool,
     cumulative_output: String,
     output_index: usize,
+    anchors: Vec<PendingAnchor>,
+    anchor_output_index: usize,
+    pending_anchor_start: Option<usize>,
 }
 
 impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
@@ -57,6 +108,9 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
             prefix_seeded: prompt_token_ids.is_empty(),
             cumulative_output: String::new(),
             output_index: 0,
+            anchors: Vec::new(),
+            anchor_output_index: 0,
+            pending_anchor_start: None,
         }
     }
 }
@@ -67,7 +121,99 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
 const SAFE_SUFFIX_MIN: usize = 4;
 const SAFE_SUFFIX_MAX: usize = 6;
 
+fn offset_as_u32(offset: usize) -> u32 {
+    u32::try_from(offset).expect("decoded text exceeds 4 GiB")
+}
+
 impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
+    fn push_pending_anchor(&mut self, token_id: u32) {
+        let anchor = if self.skip_special_tokens && self.tokenizer.is_special_id(token_id) {
+            PendingAnchor::Resolved(TokenAnchor::ZeroWidth {
+                byte_offset: offset_as_u32(self.cumulative_output.len()),
+            })
+        } else {
+            self.pending_anchor_start.get_or_insert(self.anchors.len());
+            PendingAnchor::Unresolved
+        };
+        self.anchors.push(anchor);
+    }
+
+    fn resolve_pending_visible(&mut self, byte_offset: usize) {
+        let Some(pending_anchor_start) = self.pending_anchor_start.take() else {
+            return;
+        };
+        let byte_offset = offset_as_u32(byte_offset);
+        for anchor in &mut self.anchors[pending_anchor_start..] {
+            if matches!(anchor, PendingAnchor::Unresolved) {
+                *anchor = PendingAnchor::Resolved(TokenAnchor::Visible { byte_offset });
+            }
+        }
+    }
+
+    fn resolve_pending_zero_width(&mut self) {
+        let Some(pending_anchor_start) = self.pending_anchor_start.take() else {
+            return;
+        };
+        let byte_offset = offset_as_u32(self.cumulative_output.len());
+        for anchor in &mut self.anchors[pending_anchor_start..] {
+            if matches!(anchor, PendingAnchor::Unresolved) {
+                *anchor = PendingAnchor::Resolved(TokenAnchor::ZeroWidth { byte_offset });
+            }
+        }
+    }
+
+    fn truncate_anchors(&mut self, truncate_output_to: usize) {
+        let byte_offset = offset_as_u32(truncate_output_to);
+        for anchor in &mut self.anchors {
+            let PendingAnchor::Resolved(resolved) = anchor else {
+                continue;
+            };
+            if resolved.byte_offset() >= byte_offset {
+                *resolved = TokenAnchor::ZeroWidth { byte_offset };
+            }
+        }
+    }
+
+    fn take_ready(&mut self, cutoff: usize) -> Option<DecodedText> {
+        let chunk_start = self.output_index;
+        let cutoff_u32 = offset_as_u32(cutoff);
+        let mut anchor_end = self.anchor_output_index;
+
+        for anchor in &self.anchors[self.anchor_output_index..] {
+            let PendingAnchor::Resolved(anchor) = anchor else {
+                break;
+            };
+            let ready = match anchor {
+                TokenAnchor::Visible { byte_offset } => *byte_offset < cutoff_u32,
+                TokenAnchor::ZeroWidth { byte_offset } => *byte_offset <= cutoff_u32,
+            };
+            if !ready {
+                break;
+            }
+            anchor_end += 1;
+        }
+
+        if cutoff == chunk_start && anchor_end == self.anchor_output_index {
+            return None;
+        }
+
+        let chunk_start_u32 = offset_as_u32(chunk_start);
+        let anchors = self.anchors[self.anchor_output_index..anchor_end]
+            .iter()
+            .map(|anchor| {
+                let PendingAnchor::Resolved(anchor) = anchor else {
+                    unreachable!("ready anchors must be resolved")
+                };
+                anchor.with_byte_offset(anchor.byte_offset() - chunk_start_u32)
+            })
+            .collect();
+        let text = self.cumulative_output[chunk_start..cutoff].to_string();
+
+        self.output_index = cutoff;
+        self.anchor_output_index = anchor_end;
+        Some(DecodedText { text, anchors })
+    }
+
     /// Decode prompt-only context for prefix seeding.
     ///
     /// Prompt ids may come from the model vocabulary rather than the local
@@ -132,6 +278,7 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
         }
 
         self.ids.push(token_id);
+        self.push_pending_anchor(token_id);
         let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
         let prefix_len = self.prefix.len();
         if string.len() <= prefix_len || string.ends_with('\u{FFFD}') {
@@ -139,6 +286,7 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
         }
         // Ensure we split at a utf-8 char boundary.
         let new_chunk = &string[string.floor_char_boundary(prefix_len)..];
+        self.resolve_pending_visible(self.cumulative_output.len());
         self.cumulative_output.push_str(new_chunk);
         self.ids.drain(..self.prefix_index);
         self.prefix = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
@@ -146,38 +294,57 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
         Ok(new_chunk.len())
     }
 
-    fn next_chunk(&mut self) -> Option<String> {
+    fn next_chunk(&mut self) -> Option<DecodedText> {
         let cutoff = self.cumulative_output.len().saturating_sub(self.min_bytes_to_buffer);
         // Ensure we split at a utf-8 char boundary.
         let cutoff = self.cumulative_output.floor_char_boundary(cutoff);
-        (cutoff > self.output_index).then(|| {
-            let chunk = self.cumulative_output[self.output_index..cutoff].to_string();
-            self.output_index = cutoff;
-            chunk
-        })
+        self.take_ready(cutoff)
     }
 
-    fn flush(&mut self, truncate_output_to: Option<usize>) -> Result<(Option<String>, String)> {
+    fn flush(
+        &mut self,
+        truncate_output_to: Option<usize>,
+    ) -> Result<(Option<DecodedText>, DecodedText)> {
         // If the prefix was never seeded (no push_token was called), `ids`
         // holds only prompt context — decoding it would re-emit prompt text.
         if self.prefix_seeded && !self.ids.is_empty() {
             let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
             let prefix_len = self.prefix.len();
             // Ensure we split at a utf-8 char boundary.
-            self.cumulative_output
-                .push_str(&string[string.floor_char_boundary(prefix_len)..]);
+            let new_chunk = &string[string.floor_char_boundary(prefix_len)..];
+            if !new_chunk.is_empty() {
+                self.resolve_pending_visible(self.cumulative_output.len());
+                self.cumulative_output.push_str(new_chunk);
+            }
         }
+        self.resolve_pending_zero_width();
         self.ids.clear();
         self.prefix.clear();
         self.prefix_index = 0;
         self.prefix_seeded = true;
         if let Some(truncate_output_to) = truncate_output_to {
             self.cumulative_output.truncate(truncate_output_to);
+            self.truncate_anchors(truncate_output_to);
         }
-        let last_chunk = (self.output_index < self.cumulative_output.len())
-            .then(|| self.cumulative_output[self.output_index..].to_string());
+        let last_chunk = self.take_ready(self.cumulative_output.len());
+
+        let anchors = take(&mut self.anchors)
+            .into_iter()
+            .map(|anchor| {
+                let PendingAnchor::Resolved(anchor) = anchor else {
+                    unreachable!("flush must resolve every token anchor")
+                };
+                anchor
+            })
+            .collect();
+        let full_text = DecodedText {
+            text: take(&mut self.cumulative_output),
+            anchors,
+        };
         self.output_index = 0;
-        Ok((last_chunk, take(&mut self.cumulative_output)))
+        self.anchor_output_index = 0;
+        self.pending_anchor_start = None;
+        Ok((last_chunk, full_text))
     }
 
     fn output(&self) -> &str {
@@ -217,6 +384,83 @@ mod tests {
         }
     }
 
+    /// Backend with tokens that decode to whole text pieces.
+    #[derive(Debug)]
+    struct PieceBackend;
+
+    impl Tokenizer for PieceBackend {
+        fn encode(&self, _text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
+            unreachable!()
+        }
+
+        fn encode_ordinary(&self, _text: &str) -> Result<Vec<u32>> {
+            unreachable!()
+        }
+
+        fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+            Ok(token_ids
+                .iter()
+                .map(|token_id| match token_id {
+                    1 => "abcd",
+                    2 => "ab",
+                    3 => "<stop>",
+                    4 => "",
+                    _ => unreachable!("unexpected token id: {token_id}"),
+                })
+                .collect())
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
+
+        fn id_to_token(&self, id: u32) -> Option<String> {
+            Some(id.to_string())
+        }
+    }
+
+    const SPECIAL_TOKEN_ID: u32 = 0x100;
+
+    /// Raw-byte backend with one filterable special token.
+    #[derive(Debug)]
+    struct Utf8SpecialBackend;
+
+    impl Tokenizer for Utf8SpecialBackend {
+        fn encode(&self, _text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
+            unreachable!()
+        }
+
+        fn encode_ordinary(&self, _text: &str) -> Result<Vec<u32>> {
+            unreachable!()
+        }
+
+        fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
+            let mut bytes = Vec::new();
+            for &token_id in token_ids {
+                if token_id == SPECIAL_TOKEN_ID {
+                    if !skip_special_tokens {
+                        bytes.extend_from_slice(b"<special>");
+                    }
+                } else {
+                    bytes.push(token_id as u8);
+                }
+            }
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
+
+        fn id_to_token(&self, id: u32) -> Option<String> {
+            Some(id.to_string())
+        }
+
+        fn is_special_id(&self, token_id: u32) -> bool {
+            token_id == SPECIAL_TOKEN_ID
+        }
+    }
+
     #[test]
     fn holds_incomplete_utf8_until_complete() {
         let backend = Utf8Backend;
@@ -245,13 +489,13 @@ mod tests {
         let mut decoder = backend.create_decode_stream(&[], false, 0);
 
         assert_eq!(decoder.push_token(b'o' as u32).unwrap(), 1);
-        assert_eq!(decoder.next_chunk().as_deref(), Some("o"));
+        assert_eq!(decoder.next_chunk().unwrap().text, "o");
         assert_eq!(decoder.push_token(b'k' as u32).unwrap(), 1);
-        assert_eq!(decoder.next_chunk().as_deref(), Some("k"));
+        assert_eq!(decoder.next_chunk().unwrap().text, "k");
         // All text already consumed via next_chunk
         let (last_chunk, full_text) = decoder.flush(None).unwrap();
         assert_eq!(last_chunk, None);
-        assert_eq!(full_text, "ok");
+        assert_eq!(full_text.text, "ok");
     }
 
     #[test]
@@ -288,6 +532,7 @@ mod tests {
                     0 if !skip_special_tokens => text.push_str("<special>"),
                     0 => {}
                     1 => text.push('a'),
+                    2 => text.push('b'),
                     _ => {}
                 }
             }
@@ -300,6 +545,229 @@ mod tests {
 
         fn id_to_token(&self, _id: u32) -> Option<String> {
             unreachable!()
+        }
+
+        fn is_special_id(&self, token_id: u32) -> bool {
+            token_id == 0
+        }
+    }
+
+    fn visible(byte_offset: u32) -> TokenAnchor {
+        TokenAnchor::Visible { byte_offset }
+    }
+
+    fn zero_width(byte_offset: u32) -> TokenAnchor {
+        TokenAnchor::ZeroWidth { byte_offset }
+    }
+
+    fn decoded(text: &str, anchors: &[TokenAnchor]) -> DecodedText {
+        DecodedText {
+            text: text.to_string(),
+            anchors: anchors.iter().copied().collect(),
+        }
+    }
+
+    struct AttributionCase<'a> {
+        name: &'static str,
+        tokenizer: &'a dyn Tokenizer,
+        prompt_token_ids: Vec<u32>,
+        token_ids: Vec<u32>,
+        skip_special_tokens: bool,
+        min_bytes_to_buffer: usize,
+        truncate_output_to: Option<usize>,
+        expected_chunks: Vec<DecodedText>,
+        expected_full: DecodedText,
+    }
+
+    #[test]
+    fn token_attribution_invariants() {
+        let utf8 = Utf8Backend;
+        let pieces = PieceBackend;
+        let special = SpecialTokenBackend;
+        let utf8_special = Utf8SpecialBackend;
+
+        let cases = vec![
+            AttributionCase {
+                name: "one visible anchor per ascii token",
+                tokenizer: &utf8,
+                prompt_token_ids: vec![],
+                token_ids: vec![b'o' as u32, b'k' as u32],
+                skip_special_tokens: false,
+                min_bytes_to_buffer: 0,
+                truncate_output_to: None,
+                expected_chunks: vec![decoded("o", &[visible(0)]), decoded("k", &[visible(0)])],
+                expected_full: decoded("ok", &[visible(0), visible(1)]),
+            },
+            AttributionCase {
+                name: "byte fallback tokens share one visible anchor",
+                tokenizer: &utf8,
+                prompt_token_ids: vec![],
+                token_ids: vec![0xe4, 0xbd, 0xa0],
+                skip_special_tokens: false,
+                min_bytes_to_buffer: 0,
+                truncate_output_to: None,
+                expected_chunks: vec![decoded("你", &[visible(0), visible(0), visible(0)])],
+                expected_full: decoded("你", &[visible(0), visible(0), visible(0)]),
+            },
+            AttributionCase {
+                name: "holdback splits text without repeating the token anchor",
+                tokenizer: &pieces,
+                prompt_token_ids: vec![],
+                token_ids: vec![1],
+                skip_special_tokens: false,
+                min_bytes_to_buffer: 2,
+                truncate_output_to: None,
+                expected_chunks: vec![decoded("ab", &[visible(0)]), decoded("cd", &[])],
+                expected_full: decoded("abcd", &[visible(0)]),
+            },
+            AttributionCase {
+                name: "filtered special token is zero width at its byte boundary",
+                tokenizer: &special,
+                prompt_token_ids: vec![],
+                token_ids: vec![1, 0, 2],
+                skip_special_tokens: true,
+                min_bytes_to_buffer: 0,
+                truncate_output_to: None,
+                expected_chunks: vec![
+                    decoded("a", &[visible(0)]),
+                    decoded("", &[zero_width(0)]),
+                    decoded("b", &[visible(0)]),
+                ],
+                expected_full: decoded("ab", &[visible(0), zero_width(1), visible(1)]),
+            },
+            AttributionCase {
+                name: "zero width preserves order inside a byte fallback group",
+                tokenizer: &utf8_special,
+                prompt_token_ids: vec![],
+                token_ids: vec![0xe4, SPECIAL_TOKEN_ID, 0xbd, 0xa0],
+                skip_special_tokens: true,
+                min_bytes_to_buffer: 0,
+                truncate_output_to: None,
+                expected_chunks: vec![decoded(
+                    "你",
+                    &[visible(0), zero_width(0), visible(0), visible(0)],
+                )],
+                expected_full: decoded("你", &[visible(0), zero_width(0), visible(0), visible(0)]),
+            },
+            AttributionCase {
+                name: "retained special token has a visible anchor",
+                tokenizer: &utf8_special,
+                prompt_token_ids: vec![],
+                token_ids: vec![SPECIAL_TOKEN_ID],
+                skip_special_tokens: false,
+                min_bytes_to_buffer: 0,
+                truncate_output_to: None,
+                expected_chunks: vec![decoded("<special>", &[visible(0)])],
+                expected_full: decoded("<special>", &[visible(0)]),
+            },
+            AttributionCase {
+                name: "empty decode resolves to zero width on flush",
+                tokenizer: &pieces,
+                prompt_token_ids: vec![],
+                token_ids: vec![4],
+                skip_special_tokens: false,
+                min_bytes_to_buffer: 0,
+                truncate_output_to: None,
+                expected_chunks: vec![decoded("", &[zero_width(0)])],
+                expected_full: decoded("", &[zero_width(0)]),
+            },
+            AttributionCase {
+                name: "incomplete utf8 tokens share the replacement character anchor on flush",
+                tokenizer: &utf8,
+                prompt_token_ids: vec![],
+                token_ids: vec![0xe4, 0xbd],
+                skip_special_tokens: false,
+                min_bytes_to_buffer: 0,
+                truncate_output_to: None,
+                expected_chunks: vec![decoded("�", &[visible(0), visible(0)])],
+                expected_full: decoded("�", &[visible(0), visible(0)]),
+            },
+            AttributionCase {
+                name: "truncation converts a fully removed token to zero width",
+                tokenizer: &pieces,
+                prompt_token_ids: vec![],
+                token_ids: vec![2, 3],
+                skip_special_tokens: false,
+                min_bytes_to_buffer: 32,
+                truncate_output_to: Some(2),
+                expected_chunks: vec![decoded("ab", &[visible(0), zero_width(2)])],
+                expected_full: decoded("ab", &[visible(0), zero_width(2)]),
+            },
+            AttributionCase {
+                name: "truncation inside a token retains its first-byte anchor",
+                tokenizer: &pieces,
+                prompt_token_ids: vec![],
+                token_ids: vec![1],
+                skip_special_tokens: false,
+                min_bytes_to_buffer: 32,
+                truncate_output_to: Some(2),
+                expected_chunks: vec![decoded("ab", &[visible(0)])],
+                expected_full: decoded("ab", &[visible(0)]),
+            },
+            AttributionCase {
+                name: "prompt context contributes no generated-token anchors",
+                tokenizer: &utf8,
+                prompt_token_ids: vec![b'H' as u32, b'i' as u32],
+                token_ids: vec![b'!' as u32],
+                skip_special_tokens: false,
+                min_bytes_to_buffer: 0,
+                truncate_output_to: None,
+                expected_chunks: vec![decoded("!", &[visible(0)])],
+                expected_full: decoded("!", &[visible(0)]),
+            },
+        ];
+
+        for case in cases {
+            let mut decoder = case.tokenizer.create_decode_stream(
+                &case.prompt_token_ids,
+                case.skip_special_tokens,
+                case.min_bytes_to_buffer,
+            );
+            let mut chunks = Vec::new();
+
+            for token_id in &case.token_ids {
+                decoder.push_token(*token_id).unwrap();
+                while let Some(chunk) = decoder.next_chunk() {
+                    chunks.push(chunk);
+                }
+            }
+            let (remaining, full) = decoder.flush(case.truncate_output_to).unwrap();
+            if let Some(remaining) = remaining {
+                chunks.push(remaining);
+            }
+
+            assert_eq!(chunks, case.expected_chunks, "{}: chunks", case.name);
+            assert_eq!(full, case.expected_full, "{}: full output", case.name);
+            assert_eq!(
+                full.anchors.len(),
+                case.token_ids.len(),
+                "{}: one anchor per pushed token",
+                case.name
+            );
+
+            let mut reconstructed_text = String::new();
+            let mut reconstructed_anchors = Vec::new();
+            for chunk in &chunks {
+                let chunk_start = reconstructed_text.len() as u32;
+                reconstructed_text.push_str(&chunk.text);
+                reconstructed_anchors.extend(
+                    chunk
+                        .anchors
+                        .iter()
+                        .map(|anchor| anchor.with_byte_offset(anchor.byte_offset() + chunk_start)),
+                );
+            }
+            assert_eq!(
+                reconstructed_text, full.text,
+                "{}: chunk text reconstructs full text",
+                case.name
+            );
+            assert_eq!(
+                reconstructed_anchors.as_slice(),
+                full.anchors.as_slice(),
+                "{}: chunk anchors reconstruct full anchors",
+                case.name
+            );
         }
     }
 
@@ -393,17 +861,17 @@ mod tests {
         let mut decoder = backend.create_decode_stream(&[], false, 0);
 
         let input = b"Hello, world!";
-        let mut full = String::new();
+        let mut out = String::new();
         for &byte in input {
             decoder.push_token(byte as u32).unwrap();
             if let Some(chunk) = decoder.next_chunk() {
-                full.push_str(&chunk);
+                out.push_str(&chunk.text);
             }
         }
-        let (last_chunk, full_text) = decoder.flush(None).unwrap();
+        let (last_chunk, full) = decoder.flush(None).unwrap();
         assert_eq!(last_chunk, None); // all consumed via next_chunk
-        assert_eq!(full, "Hello, world!");
-        assert_eq!(full_text, "Hello, world!");
+        assert_eq!(out, "Hello, world!");
+        assert_eq!(full.text, "Hello, world!");
     }
 
     /// Backend simulating non-monotonic decode where adding a token changes how
@@ -470,15 +938,15 @@ mod tests {
         for &byte in input {
             decoder.push_token(byte as u32).unwrap();
             if let Some(chunk) = decoder.next_chunk() {
-                chunks.push_str(&chunk);
+                chunks.push_str(&chunk.text);
             }
         }
         // With hold_back_bytes=3, last 3 bytes ("lo!") are held back
         assert_eq!(chunks, "Hel");
         // Flush returns the rest
-        let (last_chunk, full_text) = decoder.flush(None).unwrap();
-        assert_eq!(last_chunk.as_deref(), Some("lo!"));
-        assert_eq!(full_text, "Hello!");
+        let (last_chunk, full) = decoder.flush(None).unwrap();
+        assert_eq!(last_chunk.unwrap().text, "lo!");
+        assert_eq!(full.text, "Hello!");
     }
 
     #[test]
@@ -493,14 +961,14 @@ mod tests {
         for byte in "你好A".bytes() {
             decoder.push_token(u32::from(byte)).unwrap();
             if let Some(chunk) = decoder.next_chunk() {
-                out.push_str(&chunk);
+                out.push_str(&chunk.text);
             }
         }
-        let (last_chunk, full_text) = decoder.flush(None).unwrap();
+        let (last_chunk, full) = decoder.flush(None).unwrap();
         if let Some(chunk) = last_chunk {
-            out.push_str(&chunk);
+            out.push_str(&chunk.text);
         }
-        assert_eq!(full_text, "你好A");
+        assert_eq!(full.text, "你好A");
         assert_eq!(out, "你好A");
     }
 
@@ -515,9 +983,9 @@ mod tests {
             .collect();
         let mut decoder = backend.create_decode_stream(&prompt, false, 0);
 
-        let (last_chunk, full_text) = decoder.flush(None).unwrap();
+        let (last_chunk, full) = decoder.flush(None).unwrap();
         assert_eq!(last_chunk, None);
-        assert_eq!(full_text, "");
+        assert_eq!(full.text, "");
     }
 
     #[test]
@@ -526,8 +994,8 @@ mod tests {
         let prompt = vec![0xe4, 0xbd];
         let mut decoder = backend.create_decode_stream(&prompt, false, 0);
 
-        let (last_chunk, full_text) = decoder.flush(None).unwrap();
+        let (last_chunk, full) = decoder.flush(None).unwrap();
         assert_eq!(last_chunk, None);
-        assert_eq!(full_text, "");
+        assert_eq!(full.text, "");
     }
 }
