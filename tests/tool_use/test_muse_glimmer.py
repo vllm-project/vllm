@@ -384,3 +384,38 @@ def test_exact_match_kept():
         T, _call("get_weather"), _req("get_weather")
     )
     assert out.tool_calls[0].function.name == "get_weather"
+
+
+class _OrdTok:
+    """Character-level tokenizer so decode-based predicates can be unit-tested."""
+
+    def decode(self, ids, *args, **kwargs):
+        return "".join(chr(i) for i in ids)
+
+    def get_vocab(self):
+        return {}
+
+
+def _ord_ids(text: str) -> list[int]:
+    return [ord(c) for c in text]
+
+
+def test_grammar_starts_on_user_channel_without_tool_handoff():
+    """#52594: JSON schemas attach at ``to=user``, not only at a tool channel."""
+    parser = MuseGlimmerReasoningParser(_OrdTok())
+    reasoning_only = "<|start|>assistant to=self<|message|>think"
+    answer = (
+        "<|start|>assistant to=self<|message|>think<|eom|>"
+        "to=user<|message|>{\"scenario\":\"x\"}"
+    )
+    tool = _call("read.read")
+
+    assert parser.is_reasoning_end(_ord_ids(reasoning_only)) is False
+    assert parser.is_grammar_start_allowed(_ord_ids(reasoning_only), []) is False
+
+    assert parser.is_reasoning_end(_ord_ids(answer)) is False
+    assert parser.is_reasoning_end_streaming(_ord_ids(answer), []) is False
+    assert parser.is_grammar_start_allowed(_ord_ids(answer), []) is True
+
+    assert parser.is_reasoning_end(_ord_ids(tool)) is True
+    assert parser.is_grammar_start_allowed(_ord_ids(tool), []) is False
