@@ -41,14 +41,17 @@ if current_platform.is_cuda():
     def _dsv4_topk_kernel(
         gating_output_ptr,
         correction_bias_ptr,
+        is_padding_ptr,
         topk_weights_ptr,
         topk_ids_ptr,
         routed_scaling_factor,
         NUM_EXPERTS: tl.constexpr,
         BLOCK_N: tl.constexpr,
+        HAS_PADDING: tl.constexpr,
         launch_pdl: tl.constexpr,
     ):
         row = tl.program_id(0)
+        is_padding = tl.load(is_padding_ptr + row) if HAS_PADDING else False
         expert_offsets = tl.arange(0, BLOCK_N)
         expert_mask = expert_offsets < NUM_EXPERTS
         bias = tl.load(
@@ -92,6 +95,8 @@ if current_platform.is_cuda():
         if launch_pdl:
             tl.extra.cuda.gdc_launch_dependents()
 
+        selected_weights = tl.where(is_padding, 0.0, selected_weights)
+        selected_ids = tl.where(is_padding, -1, selected_ids)
         tl.store(topk_weights_ptr + output_offsets, selected_weights, mask=output_mask)
         tl.store(topk_ids_ptr + output_offsets, selected_ids, mask=output_mask)
 
@@ -101,20 +106,24 @@ def dsv4_topk(
     correction_bias: torch.Tensor,
     indices_dtype: torch.dtype,
     routed_scaling_factor: float,
+    is_padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens, num_experts = gating_output.shape
     shape = (num_tokens, _TOPK)
     topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
     topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
     if num_tokens > 0:
+        is_padding_ptr = gating_output if is_padding is None else is_padding
         _dsv4_topk_kernel[(num_tokens,)](
             gating_output,
             correction_bias,
+            is_padding_ptr,
             topk_weights,
             topk_ids,
             routed_scaling_factor,
             NUM_EXPERTS=num_experts,
             BLOCK_N=triton.next_power_of_2(num_experts),
+            HAS_PADDING=is_padding is not None,
             num_warps=1,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )

@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
     can_use_dsv4_topk,
     dsv4_topk,
 )
+from vllm.platforms import current_platform
 
 
 def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
@@ -149,6 +150,7 @@ def fused_topk_bias(
                 e_score_correction_bias,
                 output_indices_dtype,
                 routed_scaling_factor,
+                is_padding=_get_padding_mask(gating_output.shape[0]),
             )
 
         M, _ = hidden_states.size()
@@ -323,6 +325,13 @@ class FusedTopKBiasRouter(BaseRouter):
         # ``shared_expert_weight``, AFTER the routed top-k is renormalized.
         self.num_fused_shared_experts = num_fused_shared_experts
         self.shared_expert_weight = shared_expert_weight
+
+    def _handles_padding(self) -> bool:
+        return (
+            current_platform.is_cuda()
+            and not rocm_aiter_ops.is_fused_moe_enabled()
+            and self.num_fused_shared_experts == 0
+        )
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
