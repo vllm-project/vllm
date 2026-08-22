@@ -407,17 +407,17 @@ def test_create_next_worker_view_worker_isolation(iid):
 # ---------------------------------------------------------------------------
 
 
-def test_creator_flag_set_on_first_open(iid):
-    """The first worker to open the file must have _creator == True."""
+def test_creator_role_is_not_persisted(iid):
+    """Winning O_EXCL must not create lifecycle ownership state."""
     with _region(iid) as r:
-        assert r._creator is True
+        assert not hasattr(r, "_creator")
 
 
-def test_joiner_flag_not_set(iid):
-    """A second worker opening the same file must have _creator == False."""
+def test_joiner_does_not_reintroduce_creator_state(iid):
+    """Joining an existing region must not create lifecycle creator state."""
     with _multi_region(iid, num_workers=2) as (r0, r1):
-        assert r0._creator is True
-        assert r1._creator is False
+        assert not hasattr(r0, "_creator")
+        assert not hasattr(r1, "_creator")
 
 
 def test_file_exists_after_construction(iid):
@@ -570,20 +570,15 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_multi_worker_race_exactly_one_creator(iid):
-    """When N threads race to create the same region, exactly one becomes creator."""
+def test_multi_worker_race_does_not_persist_creator(iid):
+    """Concurrent initialization must not retain a creator ownership flag."""
     num_workers = 8
     regions, errors = _race_construct(iid, num_workers=num_workers)
     try:
         assert not errors, f"Workers raised: {errors}"
         assert len(regions) == num_workers, "Some workers failed to construct"
 
-        creators = [r for r in regions if r._creator]
-        assert len(creators) == 1, f"Expected 1 creator, got {len(creators)}"
-        assert sum(1 for r in regions if not r._creator) == num_workers - 1, (
-            f"Expected {num_workers - 1} non-creators, got "
-            f"{sum(1 for r in regions if not r._creator)}"
-        )
+        assert all(not hasattr(r, "_creator") for r in regions)
 
         for r in regions:
             assert not r.mmap_obj.closed
@@ -673,8 +668,11 @@ def test_multiprocess_race_construct_and_write(iid):
 # ---------------------------------------------------------------------------
 
 
-def test_cleanup_creator_all_effects(iid):
-    """cleanup() on the creator closes mmap, closes fd, and removes the file."""
+def test_cleanup_singleton_owner_removes_file(iid, monkeypatch):
+    """cleanup() on the local owner closes resources and removes the file."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
     r = _make_region(iid)
     path = r.mmap_path
     fd = r.fd
@@ -683,15 +681,19 @@ def test_cleanup_creator_all_effects(iid):
     r.cleanup()
 
     assert mmap_obj.closed, "mmap should be closed after cleanup"
-    assert not os.path.exists(path), "creator should remove the file"
+    assert not os.path.exists(path), "singleton owner should remove the file"
     with pytest.raises(OSError):
         os.fstat(fd)  # fd should be closed
 
 
-def test_cleanup_non_creator_all_effects(iid):
-    """cleanup() on a non-creator closes mmap and fd, but leaves the file on disk."""
-    r0 = _make_region(iid)  # creator
-    r1 = _make_region(iid)  # joiner
+def test_cleanup_non_owner_leaves_file(iid, monkeypatch):
+    """A non-owner must close local resources without removing the file."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    r0 = _make_region(iid)
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
+    r1 = _make_region(iid)
     path = r0.mmap_path
     fd1 = r1.fd
     mmap_obj1 = r1.mmap_obj
@@ -705,6 +707,36 @@ def test_cleanup_non_creator_all_effects(iid):
     finally:
         r0.cleanup()
         _cleanup_file(path)
+
+
+def test_creator_exit_does_not_change_singleton_owner(iid, monkeypatch):
+    """A joiner chosen as owner must unlink even if another worker created."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
+    creator = _make_region(iid)
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    owner = _make_region(iid)
+    path = creator.mmap_path
+    try:
+        creator.cleanup()
+        assert os.path.exists(path)
+        owner.cleanup()
+        assert not os.path.exists(path)
+    finally:
+        creator.cleanup()
+        owner.cleanup()
+        _cleanup_file(path)
+
+
+def test_layout_rank_does_not_determine_singleton_owner(iid, monkeypatch):
+    """A replicated-layout slot-0 worker may still be a non-owner."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
+    with _region(iid, rank=0) as region:
+        assert region.rank == 0
+        assert region._is_singleton_owner is False
 
 
 def test_cleanup_idempotent(iid):
