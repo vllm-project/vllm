@@ -77,6 +77,31 @@ async def test_invalid_json_schema(client: openai.AsyncOpenAI, model_name: str) 
 
 
 @pytest.mark.asyncio
+async def test_empty_json_schema_returns_bad_request(
+    client: openai.AsyncOpenAI,
+) -> None:
+    messages = [{"role": "user", "content": "Say hello"}]
+    empty_schemas: list[dict[str, object] | str] = [{}, "{}"]
+
+    for empty_schema in empty_schemas:
+        with pytest.raises(openai.BadRequestError) as exc_info:
+            await client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                extra_body={"structured_outputs": {"json": empty_schema}},
+            )
+        assert exc_info.value.status_code == 400
+        assert "cannot be an empty JSON schema" in str(exc_info.value)
+
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_completion_tokens=1,
+    )
+    assert response.choices
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],

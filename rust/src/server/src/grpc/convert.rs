@@ -4,6 +4,7 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
+use thiserror_ext::AsReport as _;
 use tonic::Status;
 use url::Url;
 use uuid::Uuid;
@@ -318,7 +319,8 @@ fn convert_structured_output(
         StructuredOutput::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
-            StructuredOutputsParams::json(json)
+            StructuredOutputsParams::try_json(json)
+                .map_err(|error| Status::invalid_argument(error.to_report_string()))?
         }
         StructuredOutput::Regex(regex) => StructuredOutputsParams::regex(regex.clone()),
         StructuredOutput::Choice(choices) => {
@@ -577,11 +579,15 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{FinishReason, Finished, Prompt};
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
-    use super::{ResponseOpts, pb, to_finish_info, to_sequence_output, to_text_request};
+    use super::{
+        ResponseOpts, convert_structured_output, pb, to_finish_info, to_sequence_output,
+        to_text_request,
+    };
 
     fn base_request() -> pb::GenerateRequest {
         pb::GenerateRequest {
@@ -662,6 +668,27 @@ mod tests {
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, None);
         // Prompt conversion still succeeds and reaches the expected variant.
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
+    }
+
+    #[test]
+    fn grpc_rejects_empty_json_schema() {
+        let decoding = pb::DecodingParameters {
+            structured_output: Some(pb::decoding_parameters::StructuredOutput::Json(
+                "{}".to_string(),
+            )),
+            ..Default::default()
+        };
+
+        let error = convert_structured_output(&decoding).unwrap_err();
+
+        expect![[r#"
+            Status {
+                code: InvalidArgument,
+                message: "invalid structured outputs params: structured_outputs.json cannot be an empty JSON schema; provide a non-empty schema, or use json_object=true when JSON object output is intended",
+                source: None,
+            }
+        "#]]
+        .assert_debug_eq(&error);
     }
 
     fn finished(reason: FinishReason) -> Finished {

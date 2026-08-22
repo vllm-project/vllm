@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror_ext::AsReport as _;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 
 use crate::error::ApiError;
@@ -83,9 +84,13 @@ pub fn convert_from_response_format(
     match fmt {
         ResponseFormat::Text => Ok(None),
         ResponseFormat::JsonObject => Ok(Some(StructuredOutputsParams::json_object())),
-        ResponseFormat::JsonSchema { json_schema } => Ok(Some(StructuredOutputsParams::json(
-            json_schema.schema.clone(),
-        ))),
+        ResponseFormat::JsonSchema { json_schema } => {
+            StructuredOutputsParams::try_json(json_schema.schema.clone()).map(Some).map_err(
+                |error| {
+                    ApiError::invalid_request(error.to_report_string(), Some("response_format"))
+                },
+            )
+        }
         ResponseFormat::StructuralTag { .. } => {
             // The Python frontend dumps the entire response_format object (including the
             // `type` field) as a JSON string for the engine-core backend.
@@ -125,4 +130,35 @@ pub fn convert_from_response_format_value(
         )
     })?;
     convert_from_response_format(Some(&fmt), &None)
+}
+
+#[cfg(test)]
+mod tests {
+    use expect_test::expect;
+
+    use super::*;
+
+    #[test]
+    fn response_format_rejects_empty_json_schema() {
+        let response_format = ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaFormat {
+                name: "response".to_string(),
+                description: None,
+                schema: serde_json::json!({}),
+                strict: None,
+            },
+        };
+
+        let error = convert_from_response_format(Some(&response_format), &None).unwrap_err();
+
+        expect![[r#"
+            InvalidRequest {
+                message: "invalid structured outputs params: structured_outputs.json cannot be an empty JSON schema; provide a non-empty schema, or use json_object=true when JSON object output is intended",
+                param: Some(
+                    "response_format",
+                ),
+            }
+        "#]]
+        .assert_debug_eq(&error);
+    }
 }
