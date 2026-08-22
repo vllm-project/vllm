@@ -1704,12 +1704,15 @@ class KimiLinearForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights)
+        return loader.load_weights(weights)
+
+    def process_weights_after_loading(self) -> None:
+        # A parent AutoWeightsLoader may invoke load_weights repeatedly for
+        # non-contiguous streamed prefixes. Finalize only after the full stream.
         self.model.finalize_mega_moe_weights()
         # The fused MultiHeadLatentAttention's process_weights_after_loading
         # (W_UK_T / W_UV absorption) is driven by the loader's generic post-load
         # hook for any AttentionLayerBase, so no manual trigger is needed here.
-        return loaded
 
 
 def get_spec_layer_idx_from_weight_name(
@@ -2154,3 +2157,6 @@ class KimiK3ForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()
