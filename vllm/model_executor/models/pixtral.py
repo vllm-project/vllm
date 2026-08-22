@@ -212,7 +212,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
 
 class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]):
     # The tokens are already inserted by the chat template
-    hf_processor_applies_updates = True
+    renderer_applies_updates = True
 
     def _get_mm_fields_config(
         self,

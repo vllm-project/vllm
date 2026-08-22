@@ -1177,9 +1177,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with `transformers.ProcessorMixin`.
     """
 
-    hf_processor_applies_updates: ClassVar[bool] = False
+    renderer_applies_updates: ClassVar[bool] = False
     """
-    Only set to True if the tokenizer or chat template
+    Only set to True if the tokenizer or chat template in the Renderer
     (which are run before MM processing) inserts placeholder tokens.
     """
 
@@ -1811,12 +1811,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         The main steps are:
 
-        1. Apply HF Processor on prompt text and multi-modal data together,
-           outputting token IDs and processed tensors.
-        2. Find and update sequences in the token IDs with placeholder tokens.
+        1. Perform MM-specific post-processing to the token inputs.
+        2. Apply HF Processor on multi-modal data together with optional
+           dummy text, outputting processed multi-modal data tensors.
+        3. Find and update sequences in the token IDs with placeholder tokens.
            The number of placeholder tokens equals the feature size of the
            multi-modal data outputted by the multi-modal encoder.
-        3. Extract information about the placeholder tokens from the
+        4. Extract information about the placeholder tokens from the
            processed token IDs.
         """
         prompt_ids = self._postprocess_prompt(inputs.prompt)
@@ -1828,7 +1829,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 prompt_ids=prompt_ids,
                 mm_kwargs=mm_info.kwargs,
                 mm_prompt_updates=mm_info.prompt_updates,
-                is_update_applied=self.hf_processor_applies_updates,
+                is_update_applied=self.renderer_applies_updates,
             )
 
         mm_placeholder_ranges = {
