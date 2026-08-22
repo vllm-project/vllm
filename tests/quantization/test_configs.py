@@ -10,7 +10,6 @@ from dataclasses import dataclass
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.platforms import current_platform
 
 
 @dataclass
@@ -28,7 +27,7 @@ MODEL_ARG_EXPTYPES = [
     (
         "TheBloke/Llama-2-7B-Chat-GPTQ",
         "marlin",
-        "auto_gptq" if current_platform.is_cuda_alike() else "ERROR",
+        "auto_gptq",
     ),
     ("TheBloke/Llama-2-7B-Chat-GPTQ", "gptq", "auto_gptq"),
     ("TheBloke/Llama-2-7B-Chat-GPTQ", "awq", "ERROR"),
@@ -38,23 +37,22 @@ MODEL_ARG_EXPTYPES = [
     (
         "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
         "marlin",
-        "auto_gptq" if current_platform.is_cuda_alike() else "ERROR",
+        "auto_gptq",
     ),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "gptq", "auto_gptq"),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "awq", "ERROR"),
     # AUTOAWQ
-    # AutoAWQConfig.override_quantization_method() returns "auto_awq" for AWQ models
-    # when user_quant is None, "awq", "awq_marlin", "marlin", or "auto_awq"
+    # AutoAWQConfig returns "awq" for AWQ models
     (
         "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
         None,
-        "auto_awq",
+        "awq",
     ),
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "auto_awq"),
+    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "awq"),
     (
         "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
         "marlin",
-        "auto_awq" if current_platform.is_cuda_alike() else "ERROR",
+        "ERROR",
     ),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
 ]
