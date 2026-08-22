@@ -208,7 +208,10 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
 
 class Gemma4Config(VerifyAndUpdateConfig):
     @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+    def verify_and_update_config(
+        vllm_config: "VllmConfig",
+        fallback_to_triton: bool = False,
+    ) -> None:
         """Configure attention for heterogeneous head dimensions.
 
         Gemma4 uses different head dimensions for sliding window vs full attention
@@ -216,8 +219,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
         mixed backend selection and numerical divergence.
 
         When FA4 is available we force it for ALL layers, giving a uniform kernel path
-        and avoiding the mixed FA3+FA4 penalty. When FA4 is not available we fall back
-        to Triton.
+        and avoiding the mixed FA3+FA4 penalty. Otherwise, leave backend selection to
+        the standard attention selector unless fallback_to_triton is set.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -235,19 +238,25 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
         max_head_dim = max(head_dims.values())
 
-        if is_fa_version_supported(4) and max_head_dim <= 512:
-            if (
-                vllm_config.attention_config.flash_attn_version is None
-                and vllm_config.attention_config.backend
-                in (None, AttentionBackendEnum.FLASH_ATTN)
-            ):
-                vllm_config.attention_config.flash_attn_version = 4
-                logger.info(
-                    "Gemma4 model has heterogeneous head dimensions %s. Using FA4 for "
-                    "all layers to avoid mixed FA3/FA4 penalty.",
-                    head_dims,
-                )
-        elif vllm_config.attention_config.backend is None:
+        fa4_supports_dims = is_fa_version_supported(4) and max_head_dim <= 512
+
+        if (
+            fa4_supports_dims
+            and vllm_config.attention_config.flash_attn_version is None
+            and vllm_config.attention_config.backend
+            in (None, AttentionBackendEnum.FLASH_ATTN)
+        ):
+            vllm_config.attention_config.flash_attn_version = 4
+            logger.info(
+                "Gemma4 model has heterogeneous head dimensions %s. Using FA4 for "
+                "all layers to avoid mixed FA3/FA4 penalty.",
+                head_dims,
+            )
+        elif (
+            fallback_to_triton
+            and not fa4_supports_dims
+            and vllm_config.attention_config.backend is None
+        ):
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
@@ -266,9 +275,9 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         read straight from generation_config.json at sampler-build time
         (see DiffusionGemma's custom_sampler), not injected here.
         """
-        # Inherit Gemma4's attention backend selection (FA4 on Hopper,
-        # TRITON_ATTN fallback for heterogeneous head dims).
-        Gemma4Config.verify_and_update_config(vllm_config)
+        # Inherit Gemma4's attention backend selection, keeping the Triton
+        # fallback for mixed causal/bidirectional attention.
+        Gemma4Config.verify_and_update_config(vllm_config, fallback_to_triton=True)
 
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
