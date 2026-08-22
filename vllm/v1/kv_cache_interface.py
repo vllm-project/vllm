@@ -1020,6 +1020,35 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         )
 
 
+def iter_layer_specs(kv_cache_spec: KVCacheSpec) -> Collection[KVCacheSpec]:
+    """The per-layer specs a KV cache group spec covers.
+
+    ``UniformTypeKVCacheSpecs`` groups keep one spec per layer; every other
+    spec describes its group on its own. Returns the layer specs either way so
+    callers do not have to special-case the wrapper.
+    """
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        return kv_cache_spec.kv_cache_specs.values()
+    return (kv_cache_spec,)
+
+
+def is_full_attention_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    """Whether a KV cache group spec is (or wraps) full attention.
+
+    ``UniformTypeKVCacheSpecs`` is not itself a ``FullAttentionSpec``, so a bare
+    isinstance check misses groups that carry the wrapper -- DeepSeek-V4's MLA
+    layers, or any model taking the ``UniformTypeKVCacheSpecs.from_specs`` path.
+
+    Every layer must be full attention: a group holding a recycling
+    (sliding-window) layer has no stable slot layout, so callers that key data
+    by slot cannot use it.
+    """
+    layer_specs = iter_layer_specs(kv_cache_spec)
+    return len(layer_specs) > 0 and all(
+        isinstance(spec, FullAttentionSpec) for spec in layer_specs
+    )
+
+
 def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         inner_kinds = {
@@ -1144,15 +1173,9 @@ class KVCacheConfig:
         """Whether attention groups store their KV cache at more than one precision."""
         kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
         for group in self.kv_cache_groups:
-            group_spec = group.kv_cache_spec
-            group_specs = (
-                list(group_spec.kv_cache_specs.values())
-                if isinstance(group_spec, UniformTypeKVCacheSpecs)
-                else [group_spec]
-            )
             kv_cache_precisions.update(
                 (spec.dtype, spec.kv_quant_mode)
-                for spec in group_specs
+                for spec in iter_layer_specs(group.kv_cache_spec)
                 if isinstance(spec, AttentionSpec)
             )
         return len(kv_cache_precisions) > 1
