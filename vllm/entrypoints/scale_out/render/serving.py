@@ -53,6 +53,12 @@ class ServingRender(BaseServing):
 
         self.online_renderer = online_renderer
 
+        self._merge_inline_system = (
+            AnthropicServingMessages._detect_merge_inline_system(
+                online_renderer.chat_template
+            )
+        )
+
         self.default_sampling_params = (
             online_renderer.model_config.get_diff_sampling_param()
         )
@@ -161,7 +167,9 @@ class ServingRender(BaseServing):
         conversion as the /v1/messages server path, then delegates to
         render_chat_request so the rendered tokens match the server exactly.
         """
-        chat_req = AnthropicServingMessages.to_chat_completion_request(request)
+        chat_req = AnthropicServingMessages.to_chat_completion_request(
+            request, merge_inline_system=self._merge_inline_system
+        )
         return await self.render_chat_request(chat_req)
 
     async def render_completion_request(

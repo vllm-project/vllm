@@ -549,6 +549,48 @@ async def test_messages_render_system_and_multi_turn(client):
 
 
 @pytest.mark.asyncio
+async def test_messages_render_merges_inline_system(client):
+    """Inline system messages merge into the leading system block.
+
+    Without a --chat-template arg the /v1/messages server path detects
+    merge_inline_system=True, so render must produce the same tokens as
+    the manually pre-merged request.
+    """
+    inline = await client.post(
+        "/v1/messages/render",
+        json={
+            "model": MODEL_NAME,
+            "max_tokens": 16,
+            "system": "You are a helpful assistant.",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi! How can I help?"},
+                {"role": "system", "content": "Be brief."},
+                {"role": "user", "content": "What is 2 + 2?"},
+            ],
+        },
+    )
+    assert inline.status_code == 200
+
+    merged = await client.post(
+        "/v1/messages/render",
+        json={
+            "model": MODEL_NAME,
+            "max_tokens": 16,
+            "system": "You are a helpful assistant.Be brief.",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi! How can I help?"},
+                {"role": "user", "content": "What is 2 + 2?"},
+            ],
+        },
+    )
+    assert merged.status_code == 200
+
+    assert inline.json()["token_ids"] == merged.json()["token_ids"]
+
+
+@pytest.mark.asyncio
 async def test_messages_render_error_invalid_model(client):
     """Messages render with an invalid model returns an error."""
     response = await client.post(
