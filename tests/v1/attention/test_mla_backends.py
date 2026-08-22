@@ -27,7 +27,16 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
+    _is_mla_bmm_requantization_allowed,
     build_mla_chunked_context_metadata,
+)
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.quantization.quark.quark import (
+    QuarkConfig,
+    QuarkLinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
@@ -92,6 +101,103 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     assert spec.kv_quant_mode == expected_quant_mode
     if cache_dtype == "fp8_ds_mla":
         assert spec.page_size_bytes == 64 * 656
+
+
+@pytest.mark.parametrize(
+    ("quant_config", "quant_method", "expected"),
+    [
+        pytest.param(None, UnquantizedLinearMethod(), True, id="fully-bf16"),
+        pytest.param(
+            object(),
+            UnquantizedLinearMethod(),
+            False,
+            id="explicitly-unquantized",
+        ),
+        pytest.param(object(), object(), True, id="quantized"),
+    ],
+)
+def test_mla_bmm_requantization_respects_linear_precision_provenance(
+    quant_config, quant_method, expected
+):
+    kv_b_proj = SimpleNamespace(
+        quant_config=quant_config,
+        quant_method=quant_method,
+    )
+
+    assert _is_mla_bmm_requantization_allowed(kv_b_proj) is expected
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "model.layers.3.self_attn.kv_b_proj",
+        "model.layers.78.self_attn.kv_b_proj",
+    ],
+)
+def test_quark_excluded_mla_projection_denies_bmm_requantization(prefix):
+    quant_config = QuarkConfig({"exclude": [prefix]})
+    linear = LinearBase.__new__(LinearBase)
+    quant_method = quant_config.get_quant_method(linear, prefix)
+    kv_b_proj = SimpleNamespace(
+        quant_config=quant_config,
+        quant_method=quant_method,
+    )
+
+    assert isinstance(quant_method, UnquantizedLinearMethod)
+    assert not _is_mla_bmm_requantization_allowed(kv_b_proj)
+
+
+def _quark_config_from_checkpoint(model_type: str, exclude: list[str]) -> QuarkConfig:
+    """Build a QuarkConfig the way vLLM does at config construction time.
+
+    ``maybe_update_config`` is the gate that opts DeepSeek-V3-family fp4
+    checkpoints into dynamic MXFP4 re-quantization of *excluded* attention
+    projections; every other checkpoint keeps the exclusion.
+    """
+    quant_config = {
+        "exclude": exclude,
+        "global_quant_config": {"weight": {"dtype": "fp4"}},
+    }
+    config = QuarkConfig(quant_config)
+    config.maybe_update_config(
+        "dummy-model",
+        hf_config=SimpleNamespace(
+            model_type=model_type, quantization_config=quant_config
+        ),
+    )
+    return config
+
+
+@pytest.mark.parametrize(
+    ("model_type", "allows_requantization"),
+    [
+        # amd/DeepSeek-R1-0528-MXFP4 excludes kv_b_proj on every layer but
+        # deliberately opts into dynamic MXFP4, so re-quantization stays on.
+        pytest.param("deepseek_v3", True, id="deepseek-v3-fp4-opts-in"),
+        # amd/GLM-5.2-MXFP4 excludes kv_b_proj without opting in, so the
+        # checkpoint's exclusion must be honored.
+        pytest.param("glm_moe_dsa", False, id="non-deepseek-honors-exclude"),
+    ],
+)
+def test_dynamic_mxfp4_option_decides_excluded_mla_projection(
+    monkeypatch, model_type, allows_requantization
+):
+    prefix = "model.layers.3.self_attn.kv_b_proj"
+    quant_config = _quark_config_from_checkpoint(model_type, [prefix])
+    monkeypatch.setattr(quant_config, "get_scheme", lambda **_: object())
+
+    linear = LinearBase.__new__(LinearBase)
+    quant_method = quant_config.get_quant_method(linear, prefix)
+    kv_b_proj = SimpleNamespace(
+        quant_config=quant_config,
+        quant_method=quant_method,
+    )
+
+    expected_cls = (
+        QuarkLinearMethod if allows_requantization else UnquantizedLinearMethod
+    )
+    assert isinstance(quant_method, expected_cls)
+    assert _is_mla_bmm_requantization_allowed(kv_b_proj) is allows_requantization
 
 
 @pytest.mark.cpu_test
