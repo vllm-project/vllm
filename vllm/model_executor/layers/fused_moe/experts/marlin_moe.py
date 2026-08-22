@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
     MoEActivation,
     apply_moe_activation,
+    apply_moe_activation_masked_supported,
     apply_moe_activation_supported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -954,6 +955,10 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return apply_moe_activation_masked_supported(activation)
 
     def workspace_shapes(
         self,

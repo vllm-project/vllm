@@ -517,27 +517,21 @@ __device__ __forceinline__ bool get_masked_row_range(
     end_row = expert_first_row + num_tokens;
     row_stride = gridDim.z;
   } else {
-    // [T, *]: each block handles one row, masked by a single valid prefix.
-    const int row = blockIdx.x;
+    // [T, *]: y lanes grid-stride over the single valid token prefix.
     const int num_tokens = max(0, min(valid_token_counts[0], max_num_tokens));
-    if (row >= num_tokens) {
+    const int token_block = blockIdx.y;
+    if (token_block >= num_tokens) {
       return false;
     }
-    first_row = row;
-    end_row = row + 1;
-    row_stride = 1;
+    first_row = token_block;
+    end_row = num_tokens;
+    row_stride = gridDim.y;
   }
   return first_row < end_row;
 }
 
-template <bool BATCHED_EXPERTS>
 __device__ __forceinline__ int get_masked_feature_index() {
-  // Feature tiles occupy x for batched layouts and y for flat layouts.
-  if constexpr (BATCHED_EXPERTS) {
-    return blockIdx.x * blockDim.x + threadIdx.x;
-  } else {
-    return blockIdx.y * blockDim.x + threadIdx.x;
-  }
+  return blockIdx.x * blockDim.x + threadIdx.x;
 }
 
 template <typename scalar_t, bool BATCHED_EXPERTS>
@@ -546,7 +540,7 @@ __global__ void masked_situ_and_mul_kernel(
     const int* __restrict__ valid_token_counts, const int max_num_tokens,
     const int d, const float beta, const float linear_beta) {
   int64_t first_row, end_row, row_stride;
-  const int idx = get_masked_feature_index<BATCHED_EXPERTS>();
+  const int idx = get_masked_feature_index();
   if (idx >= d ||
       !get_masked_row_range<BATCHED_EXPERTS>(valid_token_counts, max_num_tokens,
                                              first_row, end_row, row_stride)) {
@@ -576,7 +570,7 @@ __global__ void masked_act_and_mul_kernel(
     const int* __restrict__ valid_token_counts, const int max_num_tokens,
     const int d, const float limit, const float alpha, const float beta) {
   int64_t first_row, end_row, row_stride;
-  const int idx = get_masked_feature_index<BATCHED_EXPERTS>();
+  const int idx = get_masked_feature_index();
   if (idx >= d ||
       !get_masked_row_range<BATCHED_EXPERTS>(valid_token_counts, max_num_tokens,
                                              first_row, end_row, row_stride)) {
@@ -600,7 +594,7 @@ __global__ void masked_swigluoai_and_mul_kernel(
     const int* __restrict__ valid_token_counts, const int max_num_tokens,
     const int d, const float alpha, const float limit) {
   int64_t first_row, end_row, row_stride;
-  const int idx = get_masked_feature_index<BATCHED_EXPERTS>();
+  const int idx = get_masked_feature_index();
   if (idx >= d ||
       !get_masked_row_range<BATCHED_EXPERTS>(valid_token_counts, max_num_tokens,
                                              first_row, end_row, row_stride)) {
@@ -621,7 +615,7 @@ __global__ void masked_swiglustep_and_mul_kernel(
     const int* __restrict__ valid_token_counts, const int max_num_tokens,
     const int d, const float limit) {
   int64_t first_row, end_row, row_stride;
-  const int idx = get_masked_feature_index<BATCHED_EXPERTS>();
+  const int idx = get_masked_feature_index();
   if (idx >= d ||
       !get_masked_row_range<BATCHED_EXPERTS>(valid_token_counts, max_num_tokens,
                                              first_row, end_row, row_stride)) {
@@ -669,7 +663,7 @@ __global__ void masked_activation_kernel(
     const int* __restrict__ valid_token_counts, const int max_num_tokens,
     const int d) {
   int64_t first_row, end_row, row_stride;
-  const int idx = get_masked_feature_index<BATCHED_EXPERTS>();
+  const int idx = get_masked_feature_index();
   if (idx >= d ||
       !get_masked_row_range<BATCHED_EXPERTS>(valid_token_counts, max_num_tokens,
                                              first_row, end_row, row_stride)) {
@@ -806,9 +800,7 @@ void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
     return;
   }
   constexpr int block_size = 256;
-  const int token_blocks =
-      std::min(max_num_tokens, vllm::kMaxMaskedTokenBlocks);
-  dim3 grid((d + block_size - 1) / block_size, num_experts, token_blocks);
+  dim3 grid((d + block_size - 1) / block_size, num_experts);
   dim3 block(block_size);
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -857,10 +849,10 @@ void masked_moe_activation(
   const int feature_blocks = (d + block_size - 1) / block_size;
   const int token_blocks =
       std::min(max_num_tokens, vllm::kMaxMaskedTokenBlocks);
-  // Batched grid: (feature tile, expert, token lane); flat grid: (row,
-  // feature tile). Token lanes grid-stride the valid prefix.
+  // Batched grid: (feature tile, expert, token lane); flat grid: (feature
+  // tile, token lane). Token lanes grid-stride each valid prefix.
   dim3 grid = batched_experts ? dim3(feature_blocks, num_experts, token_blocks)
-                              : dim3(max_num_tokens, feature_blocks);
+                              : dim3(feature_blocks, token_blocks);
   dim3 block(block_size);
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());

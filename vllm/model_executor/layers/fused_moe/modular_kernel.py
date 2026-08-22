@@ -102,13 +102,10 @@ class ExpertTokensMetadata:
 
     expert_num_tokens: torch.Tensor
     expert_num_tokens_cpu: torch.Tensor | None
-    num_valid_tokens: torch.Tensor | None = None
 
     @staticmethod
     def make_from_list(
-        expert_num_tokens_list: list[int],
-        device: str,
-        num_valid_tokens: torch.Tensor | None = None,
+        expert_num_tokens_list: list[int], device: str
     ) -> "ExpertTokensMetadata":
         expert_num_tokens_cpu = torch.tensor(
             expert_num_tokens_list, device="cpu", dtype=torch.int32
@@ -116,7 +113,6 @@ class ExpertTokensMetadata:
         return ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens_cpu.to(device, non_blocking=True),
             expert_num_tokens_cpu=expert_num_tokens_cpu,
-            num_valid_tokens=num_valid_tokens,
         )
 
 

@@ -14,7 +14,6 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
-    apply_moe_activation_masked_supported,
     apply_moe_activation_supported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -101,10 +100,7 @@ def _is_supported_wna16_weight_key(weight_key: QuantKey | None) -> bool:
     )
 
 
-def get_humming_moe_gemm_type(
-    moe_config: FusedMoEConfig | None = None,
-    activation_format: mk.FusedMoEActivationFormat | None = None,
-) -> str:
+def get_humming_moe_gemm_type(moe_config: FusedMoEConfig | None = None) -> str:
     env_gemm_type: str | None = envs.VLLM_HUMMING_MOE_GEMM_TYPE
     if env_gemm_type is not None and env_gemm_type.lower() != "auto":
         env_gemm_type = env_gemm_type.lower()
@@ -112,8 +108,6 @@ def get_humming_moe_gemm_type(
             gemm_type = "grouped_contiguous"
         else:
             gemm_type = env_gemm_type
-    elif activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        gemm_type = "grouped_masked"
     elif moe_config is not None and moe_config.moe_parallel_config.use_ep:
         gemm_type = "grouped_contiguous"
     else:
@@ -581,20 +575,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             activation_format,
         )
 
-        if supported and moe_config.use_deepep_ll_kernels:
-            supported = False
-            reason = "DeepEP low-latency does not support deferred input quantization"
-
-        if supported and moe_config.use_nixl_ep_kernels:
-            supported = False
-            reason = "NIXL EP does not support deferred input quantization"
-
         if supported:
             assert hasattr(cls, "humming_gemm_type")
             gemm_type = cls.humming_gemm_type().value.lower()
-            preferred_gemm_type = get_humming_moe_gemm_type(
-                moe_config, activation_format
-            )
+            preferred_gemm_type = get_humming_moe_gemm_type(moe_config)
             supported = preferred_gemm_type.lower() == gemm_type
             if not supported:
                 reason = (
@@ -611,10 +595,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         input: torch.Tensor,
         valid_token_counts: torch.Tensor | None = None,
     ) -> None:
-        if valid_token_counts is not None and valid_token_counts.size(0) > 1:
-            num_experts = valid_token_counts.size(0)
-            input = input.view(num_experts, -1, input.size(-1))
-            output = output.view(num_experts, -1, output.size(-1))
         activation_kwargs: dict[str, Any] = dict(
             activation=activation,
             input=input,
@@ -747,12 +727,6 @@ class HummingIndexedExperts(HummingExpertsBase):
             activation=activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
-            valid_token_counts=(
-                expert_tokens_meta.num_valid_tokens * topk_ids.size(1)
-                if expert_tokens_meta is not None
-                and expert_tokens_meta.num_valid_tokens is not None
-                else None
-            ),
         )
 
         inputs, input_scale = self.quantize_input(
@@ -867,7 +841,6 @@ class HummingGroupedExperts(HummingExpertsBase):
             valid_token_counts=(
                 expert_first_token_offset[-1:].to(torch.int32)
                 if expert_tokens_meta is None
-                or expert_tokens_meta.num_valid_tokens is not None
                 else None
             ),
         )
@@ -906,10 +879,6 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
-
-    @staticmethod
-    def _supports_activation(activation: MoEActivation) -> bool:
-        return apply_moe_activation_masked_supported(activation)
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
@@ -981,7 +950,6 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             activation=activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
-            valid_token_counts=expert_num_tokens,
         )
 
         inputs, input_scale = self.quantize_input(

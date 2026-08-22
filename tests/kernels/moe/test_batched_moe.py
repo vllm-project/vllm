@@ -21,7 +21,6 @@ from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
     MoEActivation,
     apply_moe_activation,
-    apply_moe_activation_masked_supported,
 )
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
@@ -507,34 +506,22 @@ def test_batched_triton_experts_supports_current_device():
     assert BatchedTritonExperts._supports_current_device()
 
 
-@pytest.mark.parametrize("is_xpu", [False, True], ids=["cuda-rocm", "xpu"])
-def test_batched_triton_activation_support_contract(monkeypatch, is_xpu: bool):
-    monkeypatch.setattr(current_platform, "is_xpu", lambda: is_xpu)
+@pytest.mark.parametrize(
+    "activation",
+    [
+        MoEActivation.SITU,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        MoEActivation.SWIGLUSTEP,
+    ],
+)
+def test_batched_triton_supports_masked_activations(
+    monkeypatch, activation: MoEActivation
+):
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    assert BatchedTritonExperts._supports_activation(activation)
 
-    supported = {
-        activation
-        for activation in MoEActivation
-        if BatchedTritonExperts._supports_activation(activation)
-    }
-    if is_xpu:
-        expected = {
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.GELU_TANH_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        }
-    else:
-        expected = {
-            activation
-            for activation in MoEActivation
-            if apply_moe_activation_masked_supported(activation)
-        }
-
-    assert supported == expected
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    assert not BatchedTritonExperts._supports_activation(activation)
 
 
 def _torch_experts_with_shared_activation(
@@ -578,7 +565,7 @@ def _torch_experts_with_shared_activation(
     )
 
 
-_NEW_BATCHED_ACTIVATION_CASES = [
+_MASKED_BATCHED_ACTIVATION_CASES = [
     pytest.param(
         MoEActivation.SITU,
         ApplyMoEActivationConfig(
@@ -601,17 +588,15 @@ _NEW_BATCHED_ACTIVATION_CASES = [
 
 
 @pytest.mark.parametrize(
-    ("activation", "activation_config"), _NEW_BATCHED_ACTIVATION_CASES
+    ("activation", "activation_config"), _MASKED_BATCHED_ACTIVATION_CASES
 )
 @torch.inference_mode()
-def test_batched_experts_new_activation_end_to_end(
+def test_batched_experts_masked_activation_end_to_end(
     activation: MoEActivation,
     activation_config: ApplyMoEActivationConfig,
 ):
     if current_platform.is_xpu():
-        pytest.skip("The new masked activations are not enabled on XPU")
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Requires CUDA or ROCm")
+        pytest.skip("Masked activations are not enabled on XPU")
 
     from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -640,8 +625,10 @@ def test_batched_experts_new_activation_end_to_end(
         activation_config.activation_situ_linear_beta
     )
 
+    routing_weights = torch.softmax(score.float(), dim=-1)
+    topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+    topk_ids = topk_ids.to(torch.int32)
     with set_current_vllm_config(vllm_config):
-        topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
         baseline_output = _torch_experts_with_shared_activation(
             a,
             w1,
