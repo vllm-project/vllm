@@ -7,8 +7,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import Counter, deque
 from collections.abc import Callable
-from dataclasses import asdict
-from itertools import count
+from dataclasses import asdict, dataclass
 from queue import Queue
 from typing import Any
 
@@ -118,6 +117,127 @@ class AllBlocksCleared(KVCacheEvent):
 
 class KVEventBatch(EventBatch):
     events: list[BlockStored | BlockRemoved | AllBlocksCleared]
+
+
+_BlockKey = tuple[ExternalBlockHash, str | None, int | None, str | None]
+
+
+@dataclass(slots=True)
+class _StoredBlocks:
+    event: BlockStored
+    keys: tuple[_BlockKey, ...]
+    active_keys: set[_BlockKey]
+
+
+class _KVCacheState:
+    """Tracks active blocks while retaining their original store metadata."""
+
+    def __init__(self) -> None:
+        self._next_store_id = 0
+        self._stores: dict[int, _StoredBlocks] = {}
+        self._active_stores: dict[_BlockKey, int] = {}
+        self._keys_by_hash: dict[ExternalBlockHash, set[_BlockKey]] = {}
+
+    @staticmethod
+    def _key(
+        block_hash: ExternalBlockHash,
+        medium: str | None,
+        group_idx: int | None,
+        locality: str | None,
+    ) -> _BlockKey:
+        return block_hash, medium, group_idx, locality
+
+    def update(
+        self,
+        events: list[BlockStored | BlockRemoved | AllBlocksCleared],
+    ) -> None:
+        for event in events:
+            if isinstance(event, AllBlocksCleared):
+                self.clear()
+            elif isinstance(event, BlockStored):
+                self._store(event)
+            elif isinstance(event, BlockRemoved):
+                self._remove(event)
+
+    def clear(self) -> None:
+        self._next_store_id = 0
+        self._stores.clear()
+        self._active_stores.clear()
+        self._keys_by_hash.clear()
+
+    def snapshot_events(
+        self,
+    ) -> list[BlockStored | BlockRemoved | AllBlocksCleared]:
+        events: list[BlockStored | BlockRemoved | AllBlocksCleared] = [
+            AllBlocksCleared()
+        ]
+        for stored in self._stores.values():
+            events.append(stored.event)
+            removed_hashes = [
+                key[0] for key in stored.keys if key not in stored.active_keys
+            ]
+            if removed_hashes:
+                event = stored.event
+                events.append(
+                    BlockRemoved(
+                        block_hashes=removed_hashes,
+                        medium=event.medium,
+                        group_idx=event.group_idx,
+                        locality=event.locality,
+                    )
+                )
+        return events
+
+    def _store(self, event: BlockStored) -> None:
+        keys = tuple(
+            self._key(
+                block_hash,
+                event.medium,
+                event.group_idx,
+                event.locality,
+            )
+            for block_hash in event.block_hashes
+        )
+        if not keys:
+            return
+
+        for key in keys:
+            self._deactivate(key)
+
+        store_id = self._next_store_id
+        self._next_store_id += 1
+        stored = _StoredBlocks(event, keys, set(keys))
+        self._stores[store_id] = stored
+        for key in keys:
+            self._active_stores[key] = store_id
+            self._keys_by_hash.setdefault(key[0], set()).add(key)
+
+    def _remove(self, event: BlockRemoved) -> None:
+        for block_hash in event.block_hashes:
+            for key in tuple(self._keys_by_hash.get(block_hash, ())):
+                _, medium, group_idx, locality = key
+                if event.medium is not None and medium != event.medium:
+                    continue
+                if event.group_idx is not None and group_idx != event.group_idx:
+                    continue
+                if event.locality is not None and locality != event.locality:
+                    continue
+                self._deactivate(key)
+
+    def _deactivate(self, key: _BlockKey) -> None:
+        store_id = self._active_stores.pop(key, None)
+        if store_id is None:
+            return
+
+        hash_keys = self._keys_by_hash[key[0]]
+        hash_keys.remove(key)
+        if not hash_keys:
+            del self._keys_by_hash[key[0]]
+
+        stored = self._stores[store_id]
+        stored.active_keys.remove(key)
+        if not stored.active_keys:
+            del self._stores[store_id]
 
 
 class KVEventAggregator:
@@ -300,7 +420,9 @@ class ZmqEventPublisher(EventPublisher):
     replay_endpoint:
         Optional ROUTER address for replay requests. When given, subscribers can
         request missed batches by sending the starting sequence number as an
-        8-byte big-endian integer.
+        8-byte big-endian integer, or request a complete cache snapshot by
+        sending ``b"snapshot"``. Snapshot response frames carry the next live
+        sequence number from which replay should resume.
     buffer_steps:
         Number of past batches to keep for replay.
     hwm:
@@ -313,6 +435,8 @@ class ZmqEventPublisher(EventPublisher):
 
     SHUTDOWN_TIMEOUT: float = 1.0
     END_SEQ = (-1).to_bytes(8, "big", signed=True)
+    SNAPSHOT_REQUEST = b"snapshot"
+    SNAPSHOT_BATCH_SIZE = 1_000
 
     def __init__(
         self,
@@ -354,8 +478,9 @@ class ZmqEventPublisher(EventPublisher):
         self._socket_setup()
 
         # Payload
-        self._seq_gen = count()
+        self._next_seq = 0
         self._topic_bytes = topic.encode("utf-8")
+        self._kv_cache_state = _KVCacheState() if self._replay is not None else None
 
         # Thread
         self._running = True
@@ -457,9 +582,12 @@ class ZmqEventPublisher(EventPublisher):
                 continue
 
             try:
-                seq = next(self._seq_gen)
+                seq = self._next_seq
+                self._next_seq += 1
 
                 payload = self._pack.encode(event)
+                if self._kv_cache_state is not None and isinstance(event, KVEventBatch):
+                    self._kv_cache_state.update(event.events)
                 seq_bytes = seq.to_bytes(8, "big")
                 self._pub.send_multipart((self._topic_bytes, seq_bytes, payload))
 
@@ -479,7 +607,12 @@ class ZmqEventPublisher(EventPublisher):
         if len(frame) != 3:
             logger.warning("Invalid replay request: %s", frame)
             return
-        client_id, _, start_seq_bytes = frame
+        client_id, _, request = frame
+        if request == self.SNAPSHOT_REQUEST:
+            self._service_snapshot(client_id)
+            return
+
+        start_seq_bytes = request
         start_seq = int.from_bytes(start_seq_bytes, "big")
 
         for seq, buf in self._buffer:
@@ -489,6 +622,31 @@ class ZmqEventPublisher(EventPublisher):
                     (client_id, b"", self._topic_bytes, seq.to_bytes(8, "big"), buf)
                 )
         # Send end of sequence marker
+        self._replay.send_multipart((client_id, b"", b"", self.END_SEQ, b""))
+
+    def _service_snapshot(self, client_id: bytes) -> None:
+        """Send cache state and the sequence from which replay should resume."""
+        assert self._replay is not None
+        assert self._kv_cache_state is not None
+
+        events = self._kv_cache_state.snapshot_events()
+        resume_seq = self._next_seq.to_bytes(8, "big")
+        timestamp = time.time()
+        for start in range(0, len(events), self.SNAPSHOT_BATCH_SIZE):
+            batch = KVEventBatch(
+                ts=timestamp,
+                events=events[start : start + self.SNAPSHOT_BATCH_SIZE],
+                data_parallel_rank=self._data_parallel_rank,
+            )
+            self._replay.send_multipart(
+                (
+                    client_id,
+                    b"",
+                    self._topic_bytes,
+                    resume_seq,
+                    self._pack.encode(batch),
+                )
+            )
         self._replay.send_multipart((client_id, b"", b"", self.END_SEQ, b""))
 
     @staticmethod
