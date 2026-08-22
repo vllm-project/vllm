@@ -12,7 +12,7 @@ pytest-cov
 
 # testing utils
 albumentations # required for Nemotron Parse in test_common.py
-av # required for audio_in_video tests
+av>=17.1.0 # required for audio_in_video tests
 backoff # required for phi4mm test
 blobfile # required for kimi-vl test
 httpx

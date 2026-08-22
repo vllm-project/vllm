@@ -1519,7 +1519,7 @@ setup(
         "instanttensor": ["instanttensor >= 0.1.9"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
-            "av",
+            "av>=17.1.0",
             "scipy",
             "soundfile",
             "soxr",

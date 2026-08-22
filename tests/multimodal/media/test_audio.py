@@ -10,7 +10,13 @@ import pytest
 import soundfile as sf
 
 from vllm.multimodal.media import AudioMediaIO
-from vllm.multimodal.media.audio import load_audio, load_audio_soundfile
+from vllm.multimodal.media import audio as audio_module
+from vllm.multimodal.media.audio import (
+    load_audio,
+    load_audio_pyav,
+    load_audio_soundfile,
+)
+from vllm.multimodal.pyav_utils import is_safe_iamf_libavformat_version
 
 from ...conftest import AudioTestAssets
 
@@ -81,6 +87,51 @@ def test_load_audio_max_duration_rejected(dummy_audio_bytes):
     """Audio exceeding the duration limit must be rejected during decode."""
     with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
         load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001)
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ((60, 16, 100), True),
+        ((61, 7, 101), False),
+        ((61, 7, 102), True),
+        ((62, 3, 100), False),
+        ((62, 3, 102), True),
+        ((62, 6, 102), False),
+        ((62, 6, 103), True),
+        ((62, 12, 102), True),
+        ((63, 0, 0), True),
+    ],
+)
+def test_iamf_parser_version_guard(
+    version: tuple[int, int, int], expected: bool
+) -> None:
+    assert is_safe_iamf_libavformat_version(version) is expected
+
+
+def test_load_audio_pyav_rejects_vulnerable_iamf_parser_before_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(audio_module.av.library_versions, "libavformat", (62, 3, 100))
+
+    def fail_open(*_args, **_kwargs):
+        raise AssertionError("av.open must not be reached on a vulnerable FFmpeg stack")
+
+    monkeypatch.setattr(audio_module.av, "open", fail_open)
+
+    with pytest.raises(ValueError, match="FFmpeg build with the IAMF parser fix"):
+        load_audio_pyav(BytesIO(b"not parsed"))
+
+
+def test_load_audio_pyav_allows_fixed_iamf_parser(
+    dummy_audio_bytes: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(audio_module.av.library_versions, "libavformat", (62, 12, 102))
+
+    audio, sr = load_audio_pyav(BytesIO(dummy_audio_bytes), sr=None)
+
+    assert isinstance(audio, np.ndarray)
+    assert sr == 16000
 
 
 def test_audio_media_io_from_video(video_assets):

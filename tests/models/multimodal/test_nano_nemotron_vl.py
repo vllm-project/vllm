@@ -7,10 +7,12 @@ import numpy as np
 import pytest
 
 from vllm import envs
+from vllm.model_executor.models import nano_nemotron_vl as nano_nemotron_module
 from vllm.model_executor.models.nano_nemotron_vl import (
     NanoNemotronVLMultiModalProcessor,
     NemotronH_Nano_VL_V2,
 )
+from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
 
 
@@ -177,6 +179,53 @@ def test_extract_audio_from_videos_rejects_oversized_audio():
         side_effect=ValueError("Audio exceeds maximum allowed duration"),
     ):
         _, audio_items, has_audio = processor._extract_audio_from_videos(mm_items)
+
+    assert audio_items == []
+    assert has_audio == [False]
+
+
+def test_nano_nemotron_audio_extraction_propagates_unsafe_pyav_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = object.__new__(NanoNemotronVLMultiModalProcessor)
+    mm_items = MultiModalDataItems(
+        {
+            "video": VideoProcessorItems(
+                [np.zeros((1, 1, 1, 3), dtype=np.uint8)],
+                metadata=[{"original_video_bytes": b"video"}],
+            )
+        }
+    )
+
+    monkeypatch.setitem(audio_module.av.library_versions, "libavformat", (62, 3, 100))
+
+    with pytest.raises(ValueError, match="FFmpeg build with the IAMF parser fix"):
+        processor._extract_audio_from_videos(mm_items)
+
+
+def test_nano_nemotron_audio_extraction_still_skips_missing_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = object.__new__(NanoNemotronVLMultiModalProcessor)
+    mm_items = MultiModalDataItems(
+        {
+            "video": VideoProcessorItems(
+                [np.zeros((1, 1, 1, 3), dtype=np.uint8)],
+                metadata=[{"original_video_bytes": b"video"}],
+            )
+        }
+    )
+
+    def fail_load_audio_pyav(_path, **_kwargs):
+        raise ValueError("No audio stream found.")
+
+    monkeypatch.setattr(
+        nano_nemotron_module,
+        "load_audio_pyav",
+        fail_load_audio_pyav,
+    )
+
+    _, audio_items, has_audio = processor._extract_audio_from_videos(mm_items)
 
     assert audio_items == []
     assert has_audio == [False]

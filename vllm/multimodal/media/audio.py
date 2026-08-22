@@ -12,6 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.multimodal.audio import resample_audio_pyav
+from vllm.multimodal.pyav_utils import UnsafePyAVError, require_safe_pyav_stack
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.mem_constants import MiB_bytes
 from vllm.utils.serial_utils import tensor2base64
@@ -71,6 +72,7 @@ def load_audio_pyav(
         ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
     """
+    require_safe_pyav_stack(av.library_versions)
     native_sr = None
     try:
         with av.open(path) as container:
@@ -254,6 +256,8 @@ def load_audio(
         )
     except ImportError:
         raise  # Let PlaceholderModule's message ("install vllm[audio]") propagate.
+    except UnsafePyAVError:
+        raise
     except Exception as pyav_exc:
         raise ValueError("Invalid or unsupported audio file.") from pyav_exc
 
