@@ -31,10 +31,12 @@ from openai_harmony import Author, Message, Role, TextContent
 
 from vllm.entrypoints.openai.parser.harmony_utils import (
     BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
+    channel_to_phase,
     extract_function_from_recipient,
     flatten_input_text_content,
     get_system_or_developer_message,
     is_function_recipient,
+    phase_to_channel,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -137,6 +139,8 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         # TODO: Support refusal.
         contents = [TextContent(text=c.get("text", "")) for c in content]
     msg = Message.from_role_and_contents(role, contents)
+    if role == "assistant":
+        msg = msg.with_channel(phase_to_channel(chat_msg.get("phase"), default="final"))
     return [msg]
 
 
@@ -172,7 +176,11 @@ def response_input_to_harmony(
             contents = [TextContent(text=c.get("text", "")) for c in content]
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
-            msg = msg.with_channel("final")
+            # Preserve the preamble/final distinction when the client echoes
+            # back `phase`; default to "final" for clients that drop it.
+            msg = msg.with_channel(
+                phase_to_channel(response_msg.get("phase"), default="final")
+            )
     elif response_msg["type"] == "function_call_output":
         call_id = response_msg["call_id"]
         call_response: ResponseFunctionToolCall | None = None
@@ -346,7 +354,7 @@ def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
 def _parse_final_message(
     message: Message, incomplete: bool = False
 ) -> ResponseOutputItem:
-    """Parse final channel messages into output message items."""
+    """Parse user-visible assistant text into output message items."""
     contents = []
     for content in message.content:
         output_text = ResponseOutputText(
@@ -362,6 +370,7 @@ def _parse_final_message(
         role=message.author.role,
         status="incomplete" if incomplete else "completed",
         type="message",
+        phase=channel_to_phase(message.channel),
     )
 
 
