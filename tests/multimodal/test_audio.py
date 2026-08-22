@@ -15,6 +15,7 @@ from vllm.multimodal.audio import (
     AudioSpec,
     ChannelReduction,
     normalize_audio,
+    reduce_channels_to_mono,
     resample_audio_pyav,
     resample_audio_scipy,
     split_audio,
@@ -266,6 +267,107 @@ class TestNormalizeAudio:
         # Mean across 4 channels: [1+5+9+13, 2+6+10+14, ...] / 4
         expected = np.array([7.0, 8.0, 9.0, 10.0])
         np.testing.assert_array_almost_equal(result, expected)
+
+
+class TestReduceChannelsToMono:
+    """`reduce_channels_to_mono` must match the reductions it replaces.
+
+    The function exists to avoid NumPy's reduction machinery on the short
+    channel axis, so the contract worth guarding is that the faster path
+    returns exactly what the generic reduction returns.
+    """
+
+    REFERENCE = {
+        ChannelReduction.MEAN: (
+            lambda a: np.mean(a, axis=0),
+            lambda t: t.mean(dim=0),
+        ),
+        ChannelReduction.SUM: (
+            lambda a: np.sum(a, axis=0),
+            lambda t: t.sum(dim=0),
+        ),
+        ChannelReduction.MAX: (
+            lambda a: np.max(a, axis=0),
+            lambda t: t.max(dim=0).values,
+        ),
+        ChannelReduction.FIRST: (lambda a: a[0], lambda t: t[0]),
+    }
+
+    @pytest.mark.parametrize("reduction", list(ChannelReduction))
+    @pytest.mark.parametrize("num_channels", [1, 2, 3, 6])
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("channels_first", [True, False])
+    def test_matches_reference_reduction(
+        self, reduction, num_channels, dtype, channels_first
+    ):
+        """`channels_first=False` is the transposed view soundfile returns."""
+        shape = (num_channels, 1000) if channels_first else (1000, num_channels)
+        audio = np.random.default_rng(num_channels).standard_normal(shape).astype(dtype)
+        if not channels_first:
+            audio = audio.T
+        numpy_ref, torch_ref = self.REFERENCE[reduction]
+
+        result = reduce_channels_to_mono(audio, reduction)
+        np.testing.assert_array_equal(result, numpy_ref(audio))
+        assert result.dtype == dtype
+
+        # torch accumulates in blocks above 4 channels, so its reference is
+        # only reproducible to a couple of ulp there; mono and stereo, the
+        # layouts audio decode actually sees, stay exact.
+        tensor = torch.from_numpy(audio)
+        tensor_result = reduce_channels_to_mono(tensor, reduction)
+        if num_channels <= 2:
+            assert torch.equal(tensor_result, torch_ref(tensor))
+        else:
+            tolerance = 8 * torch.finfo(tensor.dtype).eps
+            torch.testing.assert_close(
+                tensor_result, torch_ref(tensor), rtol=tolerance, atol=tolerance
+            )
+
+    @pytest.mark.parametrize("reduction", [ChannelReduction.MEAN, ChannelReduction.SUM])
+    def test_integer_input_promotes_like_reference(self, reduction):
+        """Integer PCM must keep the reference dtype promotion, not overflow."""
+        audio = np.full((2, 8), 20000, dtype=np.int16)
+
+        result = reduce_channels_to_mono(audio, reduction)
+        expected = self.REFERENCE[reduction][0](audio)
+        np.testing.assert_array_equal(result, expected)
+        assert result.dtype == expected.dtype
+
+    def test_flattens_leading_channel_dims(self):
+        audio = np.random.default_rng(1).standard_normal((2, 3, 100)).astype(np.float32)
+        result = reduce_channels_to_mono(audio)
+        expected = np.mean(audio, axis=tuple(range(audio.ndim - 1)))
+        np.testing.assert_array_equal(result, expected)
+
+    def test_unknown_reduction_raises(self):
+        stereo = np.zeros((2, 4), dtype=np.float32)
+        with pytest.raises(ValueError, match="Unknown reduction method"):
+            reduce_channels_to_mono(stereo, "median")
+
+    @pytest.mark.parametrize(
+        "reduction",
+        [ChannelReduction.MEAN, ChannelReduction.SUM, ChannelReduction.MAX],
+    )
+    @pytest.mark.parametrize("num_channels", [1, 2])
+    def test_result_does_not_alias_input(self, reduction, num_channels):
+        """Combining channels must allocate, like the reductions it replaces.
+
+        Single-channel input is the case at risk: returning the first channel
+        directly would hand back a view, so a caller writing into the result
+        would corrupt the decoded audio it came from.
+        """
+        audio = np.ones((num_channels, 16), dtype=np.float32)
+
+        result = reduce_channels_to_mono(audio, reduction)
+        result += 1.0
+
+        assert not np.shares_memory(result, audio)
+        np.testing.assert_array_equal(audio, np.ones((num_channels, 16)))
+
+    def test_mono_audio_passes_through(self):
+        mono = np.arange(8, dtype=np.float32)
+        assert reduce_channels_to_mono(mono) is mono
 
 
 # ============================================================
