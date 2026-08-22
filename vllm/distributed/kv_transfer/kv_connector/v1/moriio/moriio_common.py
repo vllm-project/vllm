@@ -13,6 +13,7 @@ import regex as re
 import torch
 import zmq
 
+import vllm.envs as envs
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
@@ -318,9 +319,7 @@ class MoRIIOConfig:
                 "transfer_timeout", MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT
             )
         )
-        defer_timeout = float(
-            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
-        )
+        defer_timeout = log_resolved_defer_timeout(extra_config, "worker")
 
         return cls(
             local_ip=resolve_host_ip(extra_config),
@@ -370,8 +369,97 @@ class MoRIIOConstants:
     DEFAULT_TRANSFER_TIMEOUT = 30.0
     # Timeout (seconds) before a deferred send with no finished_sending
     # notification is reaped and its blocks force-freed.
-    # Overridable via kv_connector_extra_config["defer_timeout"].
-    DEFAULT_DEFER_TIMEOUT = 60.0
+    # Conservative default: comfortably above observed handshake / first-token
+    # times, but far below the multi-minute (30 min) values that would strand a
+    # request's blocks for a long time when an async KV-completion notify is
+    # lost. Overridable, highest precedence first, via the
+    # VLLM_MORIIO_DEFERRED_TIMEOUT_S env var (operator override, no rebuild) or
+    # kv_connector_extra_config["defer_timeout"]. See resolve_defer_timeout().
+    DEFAULT_DEFER_TIMEOUT = 300.0
+
+    # Env var overriding the deferred-send reap timeout (seconds). Takes
+    # precedence over kv_connector_extra_config["defer_timeout"] so operators
+    # can raise/lower it without a rebuild.
+    ENV_DEFERRED_TIMEOUT_S = "VLLM_MORIIO_DEFERRED_TIMEOUT_S"
+
+
+def resolve_defer_timeout_with_source(
+    extra_config: dict[str, Any],
+) -> tuple[float, str]:
+    """Resolve the deferred-send reap timeout and report where it came from.
+
+    Returns ``(seconds, source)``; see :func:`resolve_defer_timeout` for the
+    precedence rules. ``source`` is a short human-readable provenance string
+    for the startup log, so a run's effective timeout can be read off the logs
+    instead of inferred from the deployment manifests.
+    """
+    # Read via vllm.envs so the var is centrally registered/typed and does not
+    # trip validate_environ(). The getter returns the raw string (or None when
+    # unset); envs.is_set() distinguishes "unset" from "set", but we still gate
+    # on truthiness below so an empty string is treated as unset (no warning),
+    # preserving prior behavior. Float parsing, the >0 check, and the
+    # warn-and-fallback all remain here so precedence/validation live in one place.
+    env_val = (
+        envs.VLLM_MORIIO_DEFERRED_TIMEOUT_S
+        if envs.is_set(MoRIIOConstants.ENV_DEFERRED_TIMEOUT_S)
+        else None
+    )
+    if env_val:
+        try:
+            secs = float(env_val)
+            if secs > 0:
+                return secs, f"env {MoRIIOConstants.ENV_DEFERRED_TIMEOUT_S}"
+            logger.warning(
+                "Ignoring non-positive %s=%r; using extra_config/default",
+                MoRIIOConstants.ENV_DEFERRED_TIMEOUT_S,
+                env_val,
+            )
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid %s=%r; using extra_config/default",
+                MoRIIOConstants.ENV_DEFERRED_TIMEOUT_S,
+                env_val,
+            )
+    if "defer_timeout" in extra_config:
+        return (
+            float(extra_config["defer_timeout"]),
+            'kv_connector_extra_config["defer_timeout"]',
+        )
+    return MoRIIOConstants.DEFAULT_DEFER_TIMEOUT, "built-in default"
+
+
+def resolve_defer_timeout(extra_config: dict[str, Any]) -> float:
+    """Resolve the deferred-send reap timeout (seconds).
+
+    Precedence (highest first):
+      1. ``VLLM_MORIIO_DEFERRED_TIMEOUT_S`` env var (operator override; no
+         rebuild required, consistent with how VLLM_MORIIO_TRANSFER_TIMEOUT_S
+         is read in the worker).
+      2. ``kv_connector_extra_config["defer_timeout"]``.
+      3. ``MoRIIOConstants.DEFAULT_DEFER_TIMEOUT``.
+
+    Historically the deploy overlay pinned this env var (e.g. 1800s) but the
+    code never read it, silently falling back to the extra_config/default; this
+    wires it up so the operator-supplied value actually takes effect while the
+    built-in default stays conservative.
+    """
+    return resolve_defer_timeout_with_source(extra_config)[0]
+
+
+def log_resolved_defer_timeout(extra_config: dict[str, Any], component: str) -> float:
+    """Resolve the defer timeout and log it once, at startup.
+
+    Emitted from the scheduler and worker init paths only (never per request)
+    so every run leaves a direct record of the timeout actually in effect.
+    """
+    secs, source = resolve_defer_timeout_with_source(extra_config)
+    logger.info(
+        "MoRIIO %s deferred-send reap timeout: %.1fs (source: %s)",
+        component,
+        secs,
+        source,
+    )
+    return secs
 
 
 # The router embeds both zmq_addresses in the request_id:
