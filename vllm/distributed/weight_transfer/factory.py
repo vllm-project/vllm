@@ -234,6 +234,12 @@ WeightTransferEngineFactory.register_engine(
     "SparseNCCLWeightTransferEngine",
 )
 
+WeightTransferEngineFactory.register_engine(
+    "nccl_m2n",
+    "vllm.distributed.weight_transfer.m2n_engine",
+    "M2NWeightTransferEngine",
+)
+
 
 # Trainer-side engines, parallel to the worker registry above.
 WeightTransferTrainerFactory.register_engine(
