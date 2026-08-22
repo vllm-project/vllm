@@ -67,6 +67,10 @@ class NixlBaseConnectorScheduler:
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        self.side_channel_advertize_host = (
+            envs.VLLM_NIXL_SIDE_CHANNEL_ADVERTIZE_HOST
+            or self.side_channel_host
+        )
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
             + vllm_config.parallel_config.data_parallel_index
