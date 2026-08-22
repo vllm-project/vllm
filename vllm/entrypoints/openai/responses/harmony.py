@@ -436,10 +436,13 @@ def harmony_to_response_output(
     message: Message,
     function_tool_names: frozenset[str],
     incomplete: bool = False,
+    *,
+    has_declared_tools: bool = True,
 ) -> list[ResponseOutputItem]:
     """Parse a Harmony message into a list of output response items.
 
     This is the main dispatcher that routes based on channel and recipient.
+    When no tools are declared, recipient is ignored and channel semantics apply.
     """
     if message.author.role != "assistant":
         # This is a message from a tool to the assistant (e.g., search result).
@@ -448,7 +451,7 @@ def harmony_to_response_output(
         return []
 
     output_items: list[ResponseOutputItem] = []
-    recipient = message.recipient
+    recipient = message.recipient if has_declared_tools else None
 
     if recipient is not None:
         # Browser tool calls (browser.search, browser.open, browser.find)
