@@ -330,7 +330,12 @@ class Scheduler(SchedulerInterface):
             and not self.use_eagle
             and all(
                 not isinstance(group.kv_cache_spec, MambaSpec)
-                or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+                or (
+                    group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+                    and self.hash_block_size
+                    % group.kv_cache_spec.prefill_checkpoint_alignment
+                    == 0
+                )
                 for group in kv_cache_config.kv_cache_groups
             )
         )

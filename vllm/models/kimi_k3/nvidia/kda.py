@@ -40,6 +40,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
+    FLASHKDA_CHUNK_SIZE,
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
 )
@@ -565,6 +566,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         return replace(
             spec,
             num_prefill_checkpoint_blocks=int(self.kda_prefill_backend == "flashkda"),
+            prefill_checkpoint_alignment=FLASHKDA_CHUNK_SIZE,
         )
 
     def forward(
@@ -816,9 +818,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                             else None
                         ),
                         checkpoint_state_indices=(
-                            checkpoint.state_indices
-                            if checkpoint is not None
-                            else None
+                            checkpoint.state_indices if checkpoint is not None else None
                         ),
                     ).transpose(0, 1)
 

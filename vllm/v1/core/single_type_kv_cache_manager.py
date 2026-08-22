@@ -1474,12 +1474,18 @@ class MambaManager(SingleTypeKVCacheManager):
         num_computed_tokens: int,
     ) -> bool:
         assert isinstance(self.kv_cache_spec, MambaSpec)
+        hash_block_size = self.block_pool.hash_block_size
+        checkpoint_tokens = (num_tokens - 1) // hash_block_size * hash_block_size
         checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
         blocks = self.req_to_blocks[request_id]
         return (
             self.kv_cache_spec.num_prefill_checkpoint_blocks > 0
             and num_tokens % self.block_size != 0
             and num_computed_tokens % self.block_size == 0
+            and num_computed_tokens < checkpoint_tokens < num_tokens
+            and (checkpoint_tokens - num_computed_tokens)
+            % self.kv_cache_spec.prefill_checkpoint_alignment
+            == 0
             and checkpoint_idx >= 0
             and (checkpoint_idx >= len(blocks) or blocks[checkpoint_idx].is_null)
         )
@@ -1745,6 +1751,28 @@ class MambaManager(SingleTypeKVCacheManager):
             return None
         if num_tokens % self.block_size == 0:
             return None
+
+        # A backend-exported checkpoint occupies the otherwise-null slot just
+        # before the running state. Re-key that request-owned block at the
+        # finest reusable prefix boundary. Its allocation, eviction, and free
+        # path remain identical to a full-block checkpoint.
+        if self._num_checkpoint_blocks.get(request.request_id, 0):
+            checkpoint_tokens = (num_tokens - 1) // hash_block_size * hash_block_size
+            if checkpoint_tokens % self.block_size != 0:
+                checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
+                blocks = self.req_to_blocks[request.request_id]
+                assert checkpoint_idx >= 0
+                checkpoint_block = blocks[checkpoint_idx]
+                partial_hash = self.block_pool.cache_partial_block(
+                    request=request,
+                    block=checkpoint_block,
+                    num_tokens=checkpoint_tokens,
+                    kv_cache_group_id=self.kv_cache_group_id,
+                    block_size=self.block_size,
+                )
+                if partial_hash is not None:
+                    return partial_hash
+
         if num_tokens % hash_block_size != 0:
             return None
         latest_prompt_hash_boundary = (

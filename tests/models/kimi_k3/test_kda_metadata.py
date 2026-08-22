@@ -88,6 +88,8 @@ def _make_builder(
     mamba_cache_mode: str = "none",
     use_recoverssm: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
+    mamba_block_size: int = BLOCK_SIZE,
+    prefix_match_unit: int | None = None,
 ) -> AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -104,9 +106,10 @@ def _make_builder(
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.cache_config.use_replayssm = use_recoverssm
     vllm_config.cache_config.use_kda_recoverssm = use_recoverssm
+    vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     builder = builder_cls(
         kv_cache_spec=MambaSpec(
-            block_size=BLOCK_SIZE,
+            block_size=mamba_block_size,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
             mamba_cache_mode=mamba_cache_mode,
@@ -147,6 +150,39 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary():
     torch.testing.assert_close(
         actual.checkpoint.checkpoint_offsets,
         torch.tensor([48, 0], dtype=torch.int32, device=device),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_internal_checkpoint_metadata_targets_partial_hash_boundary():
+    device = torch.device("cuda")
+    batch = BatchSpec(seq_lens=[100], query_lens=[100])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    )
+    common_attn_metadata = common_attn_metadata.replace(
+        is_prefilling=torch.tensor([True]),
+        block_table_tensor=common_attn_metadata.block_table_tensor + 1,
+    )
+    actual = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+        mamba_cache_mode="align",
+        num_prefill_checkpoint_blocks=1,
+        mamba_block_size=64,
+        prefix_match_unit=16,
+        device=device,
+    ).build(0, common_attn_metadata)
+
+    assert actual.checkpoint is not None
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices,
+        torch.tensor([1], dtype=torch.int32, device=device),
+    )
+    torch.testing.assert_close(
+        actual.checkpoint.checkpoint_offsets,
+        torch.tensor([96], dtype=torch.int32, device=device),
     )
 
 

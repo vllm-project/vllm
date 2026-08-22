@@ -583,11 +583,18 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             query_lens = [all_query_lens[row] for row in request_rows]
             seq_lens = m.seq_lens_cpu_upper_bound.tolist()
             block_size = self.kv_cache_spec.block_size
+            checkpoint_granularity = (
+                self.vllm_config.cache_config.prefix_match_unit
+                or self.vllm_config.cache_config.block_size
+            )
             checkpoint_splits = []
             checkpoint_cols = []
             for row, query_len in zip(request_rows, query_lens):
                 seq_len = seq_lens[row]
-                offset = seq_len // block_size * block_size - (seq_len - query_len)
+                checkpoint_tokens = (
+                    (seq_len - 1) // checkpoint_granularity * checkpoint_granularity
+                )
+                offset = checkpoint_tokens - (seq_len - query_len)
                 # offset should be less than query_len
                 valid = (
                     seq_len % block_size != 0

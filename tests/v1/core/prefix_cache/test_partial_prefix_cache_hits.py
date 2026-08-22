@@ -78,6 +78,7 @@ def make_full_mamba_manager(
     num_blocks: int = 32,
     use_eagle: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
+    prefill_checkpoint_alignment: int = 1,
 ):
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -100,6 +101,7 @@ def make_full_mamba_manager(
                     dtypes=(torch.float32,),
                     mamba_cache_mode="align",
                     num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
+                    prefill_checkpoint_alignment=prefill_checkpoint_alignment,
                 ),
             ),
         ],
@@ -517,6 +519,45 @@ def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
     assert mamba_blocks[3].block_id == running_block_id
 
 
+def test_internal_checkpoint_uses_partial_hash_lifecycle():
+    hash_block_size = 2
+    mamba_block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+    request = make_request("producer", list(range(15)), hash_block_size, sha256)
+
+    new_blocks = manager.allocate_slots(request, request.num_tokens)
+
+    assert new_blocks is not None
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    checkpoint_idx = 2
+    checkpoint_block = mamba_blocks[checkpoint_idx]
+    running_block = mamba_blocks[checkpoint_idx + 1]
+    assert not checkpoint_block.is_null
+    assert not running_block.is_null
+    assert checkpoint_block is not running_block
+
+    # The internal block is exported at state@14, replacing its temporary
+    # full-block state@12 key while retaining #52789's req_to_blocks ownership.
+    partial_hash = request.block_hashes[14 // hash_block_size - 1]
+    partial_hit = manager.block_pool.get_cached_block(partial_hash, [1])
+    assert partial_hit is not None
+    assert partial_hit[0] is checkpoint_block
+    assert checkpoint_block.block_hash_num_tokens == 14
+    full_hash = request.block_hashes[12 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(full_hash, [1]) is None
+
+    manager.free(request)
+    replay = make_request("replay", list(range(15)), hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(replay)
+    assert num_computed == 14
+
+
 def test_internal_checkpoint_requires_block_aligned_start():
     hash_block_size = 2
     mamba_block_size = 16
@@ -543,6 +584,27 @@ def test_internal_checkpoint_requires_block_aligned_start():
     assert mamba_blocks[checkpoint_block_idx].is_null
     assert not mamba_blocks[-1].is_null
     checkpoint_hash = request.block_hashes[48 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
+
+
+def test_internal_checkpoint_requires_backend_aligned_offset():
+    hash_block_size = 2
+    mamba_block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=4,
+    )
+    request = make_request("producer", list(range(15)), hash_block_size, sha256)
+
+    assert manager.allocate_slots(request, request.num_tokens) is not None
+
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    assert mamba_blocks[2].is_null
+    checkpoint_hash = request.block_hashes[14 // hash_block_size - 1]
     assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
 
 

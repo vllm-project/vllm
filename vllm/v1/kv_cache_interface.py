@@ -816,6 +816,7 @@ class MambaSpec(KVCacheSpec):
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
     num_prefill_checkpoint_blocks: int = 0
+    prefill_checkpoint_alignment: int = 1
     num_heads: int = 1
     tokens_per_state: int = -1
 
@@ -869,6 +870,7 @@ class MambaSpec(KVCacheSpec):
             isinstance(spec, MambaSpec)
             and spec.num_speculative_blocks == self.num_speculative_blocks
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
+            and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             for spec in kv_cache_specs.values()
         )
 
