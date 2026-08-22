@@ -151,8 +151,13 @@ class LogitsProcessors:
     def __init__(self, logitsprocs: Iterable["LogitsProcessor"] | None = None) -> None:
         self.argmax_invariant: list[LogitsProcessor] = []
         self.non_argmax_invariant: list[LogitsProcessor] = []
+        # True if any loaded processor reads output token id values, so async
+        # scheduling must patch its `-1` placeholders before sampling.
+        self.needs_output_token_ids: bool = False
         if logitsprocs:
             for logitproc in logitsprocs:
+                if logitproc.needs_output_token_ids():
+                    self.needs_output_token_ids = True
                 (
                     self.argmax_invariant
                     if logitproc.is_argmax_invariant()
