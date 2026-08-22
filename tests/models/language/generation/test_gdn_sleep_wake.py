@@ -51,7 +51,10 @@ def _qwen_gdn_state_summary(model):
         if isinstance(module, QwenGatedDeltaNetAttention)
     ]
     states = [state for layer in layers for state in layer.kv_cache]
-    unique_states = {}
+    unique_states: dict[
+        tuple[int, torch.dtype, tuple[int, ...], tuple[int, ...]],
+        torch.Tensor,
+    ] = {}
     for state in states:
         key = (
             state.data_ptr(),
