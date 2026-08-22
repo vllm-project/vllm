@@ -33,6 +33,9 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    scatter_topology_witnesses_,
+)
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -527,6 +530,15 @@ def sparse_attn_indexer(
                 row_starts=chunk.cu_seqlen_ks,
             )
 
+            if envs.VLLM_SPARSE_MLA_TOPOLOGY_SEGMENTS:
+                # Prefill top-k indices are relative to each row's cu_seqlen_ks,
+                # so the row's context length is the ks..ke span.
+                scatter_topology_witnesses_(
+                    topk_indices,
+                    cu_seqlen_ke - cu_seqlen_ks,
+                    envs.VLLM_SPARSE_MLA_TOPOLOGY_SEGMENTS,
+                )
+
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
         assert decode_metadata is not None
@@ -673,6 +685,14 @@ def sparse_attn_indexer(
                 dcp_rank,
                 dcp_world_size,
                 cp_kv_cache_interleave_size,
+            )
+
+        if envs.VLLM_SPARSE_MLA_TOPOLOGY_SEGMENTS:
+            # seq_lens is (B, next_n) and decode rows are batch-major over it.
+            scatter_topology_witnesses_(
+                topk_indices,
+                seq_lens.reshape(-1)[: topk_indices.shape[0]],
+                envs.VLLM_SPARSE_MLA_TOPOLOGY_SEGMENTS,
             )
 
         if decode_metadata.requires_padding:
