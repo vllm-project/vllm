@@ -13,7 +13,10 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.lora.layers import LoRAMapping
-from vllm.lora.ops.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+from vllm.lora.ops.xpu_ops import (
+    lora_expand,
+    lora_shrink,
+)
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
@@ -88,47 +91,6 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
-    def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
-        return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
-
-    def _apply_shrink(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        scale: float,
-    ):
-        buf = torch.zeros(
-            x.size(0),
-            w_t_all.size(-2),
-            dtype=x.dtype,
-            device=x.device,
-        )
-        bgmv_shrink(x, w_t_all, buf, self._get_token_lora_indices(x), scale)
-        y.copy_(buf)
-
-    def _apply_expand(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        y_offset: int,
-        y_slice_size: int,
-        add_inputs: bool,
-    ):
-        token_lora_indices = self._get_token_lora_indices(x)
-        # After tensor-parallel all-gather (non-fully-sharded LoRA), x may
-        # have been gathered along the rank dim so x.size(1) == max_lora_rank
-        # * tp_size, while lora_b only uses max_lora_rank elements. The XPU
-        # C++ kernel requires inputs.size(1) == lora_b.size(-1), so truncate
-        # to the actual rank. x[:, :rank] is non-contiguous, hence the copy.
-        rank = w_t_all.size(-1)
-        if x.size(1) != rank:
-            x = x[:, :rank].contiguous()
-        bgmv_expand_slice(
-            x, w_t_all, y, token_lora_indices, y_offset, y_slice_size, add_inputs
-        )
-
     def add_shrink(
         self,
         y: torch.Tensor,
@@ -152,8 +114,15 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         """
 
         x = x.view(-1, x.shape[-1])
-        for slice_idx in range(len(lora_a_stacked)):
-            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx], scale)
+        lora_shrink(
+            x,
+            lora_a_stacked,
+            y,
+            *self.token_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
+            scale,
+        )
 
     def add_expand(
         self,
@@ -186,18 +155,18 @@ class PunicaWrapperXPU(PunicaWrapperBase):
 
         assert x.ndim == 3
         assert x.size(0) == len(output_slices)
+        num_tokens = x.size(1)
 
-        # TODO fuse these kernels
-        for slice_idx in range(len(lora_b_stacked)):
-            self._apply_expand(
-                y,
-                x[slice_idx],
-                lora_b_stacked[slice_idx],
-                offset_start,
-                output_slices[slice_idx],
-                add_inputs=add_inputs,
-            )
-            offset_start += output_slices[slice_idx]
+        lora_expand(
+            x,
+            lora_b_stacked,
+            y,
+            *self.token_mapping_meta.meta_args(
+                num_tokens, self.lora_config.specialize_active_lora
+            ),
+            offset_start=offset_start,
+            add_inputs=add_inputs,
+        )
         y = y.view_as(y_org)
 
     def add_lora_embedding(
@@ -220,8 +189,16 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
         """
-        token_lora_indices = self._get_token_lora_indices(x)
-        bgmv_expand(x, lora_b_stacked, y, token_lora_indices, add_inputs)
+        lora_expand(
+            x.unsqueeze(dim=0),
+            (lora_b_stacked,),
+            y,
+            *self.token_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
+            offset_start=0,
+            add_inputs=add_inputs,
+        )
 
     def add_lora_linear(
         self,
@@ -327,10 +304,27 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             "To minimize overhead, the buffer should be created by "
             ".add_lora_linear() instead of being passed in."
         )
-        buffer = torch.zeros((x.size(0), r), dtype=x.dtype, device=x.device)
-        sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
-        bgmv_shrink(x, lora_a_stacked, buffer, sampler_indices, scale)
-        bgmv_expand(buffer, lora_b_stacked, y, sampler_indices, add_inputs=True)
+        buffer = torch.empty((x.size(0), r), dtype=torch.float32, device=x.device)
+
+        lora_shrink(
+            x,
+            [lora_a_stacked],
+            buffer.unsqueeze(dim=0),
+            *self.prompt_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
+            scale,
+        )
+
+        lora_expand(
+            buffer.unsqueeze(dim=0),
+            [lora_b_stacked],
+            y,
+            *self.prompt_mapping_meta.meta_args(
+                buffer.size(0), self.lora_config.specialize_active_lora
+            ),
+            add_inputs=True,
+        )
         y = y.view_as(y_org)
 
     def moe_lora_align_block_size(
