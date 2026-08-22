@@ -67,19 +67,13 @@ class VisionLanguageConfig(Protocol):
 
 def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInfo:
     # Avoid circular imports
-    from transformers import Mistral3Config
-
     from .clip import CLIPEncoderInfo, CLIPVisionConfig
-    from .mistral3 import Mistral3HFEncoderInfo
     from .pixtral import PixtralHFEncoderInfo, PixtralVisionConfig
     from .siglip import SiglipEncoderInfo, SiglipVisionConfig
 
     if isinstance(hf_config.vision_config, CLIPVisionConfig):
         return CLIPEncoderInfo(hf_config)
     if isinstance(hf_config.vision_config, PixtralVisionConfig):
-        # Mistral3 shares PixtralVisionConfig but uses a different patch grid.
-        if isinstance(hf_config, Mistral3Config):
-            return Mistral3HFEncoderInfo(hf_config)
         return PixtralHFEncoderInfo(hf_config)
     if isinstance(hf_config.vision_config, SiglipVisionConfig):
         return SiglipEncoderInfo(hf_config)
