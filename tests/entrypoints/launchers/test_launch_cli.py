@@ -388,7 +388,7 @@ def test_snapshot_create_abort_kills_surviving_child_process_group(
 async def test_snapshot_child_rejects_mismatch_before_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    from vllm.entrypoints.openai import api_server
+    from vllm.entrypoints.launchers.api_server import entry as api_server
 
     canaries = iter((_oracle(), _oracle((42,), " Lyon")))
 
