@@ -16,6 +16,24 @@ from vllm.transformers_utils.config import try_get_safetensors_metadata
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 
+def test_hunyuan_vl_checkpoint_weights_mapper():
+    from vllm.model_executor.models.hunyuan_vision import (
+        HunYuanVLForConditionalGeneration,
+    )
+
+    mapper = HunYuanVLForConditionalGeneration.hf_to_vllm_mapper
+
+    assert mapper.apply_list(
+        [
+            "model.embed_tokens.weight",
+            "lm_head.weight",
+        ]
+    ) == [
+        "language_model.model.embed_tokens.weight",
+        "language_model.lm_head.weight",
+    ]
+
+
 def test_cosmos3_new_checkpoint_weights_mapper():
     from vllm.model_executor.models.cosmos3 import Cosmos3ForConditionalGeneration
 

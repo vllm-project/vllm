@@ -829,6 +829,7 @@ class HunYuanVLForConditionalGeneration(
             "vit.vit.": "visual.",
             "vit.": "visual.",
             "model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
         }
     )
 
