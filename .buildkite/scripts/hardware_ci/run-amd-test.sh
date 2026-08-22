@@ -1537,8 +1537,7 @@ if is_multi_node "$commands"; then
   #   BASH_REMATCH[2] = comma-separated node0 commands
   #   BASH_REMATCH[3] = comma-separated node1 commands
   if [[ "$commands" =~ ^(.*)\[(.*)"] && ["(.*)\]$ ]]; then
-    # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
-    prefix=$(echo "${BASH_REMATCH[1]}" | sed 's/;//g')
+    prefix=${BASH_REMATCH[1]//;/}
     echo "PREFIX: ${prefix}"
 
     export composite_command="(command rocm-smi || true)"
@@ -1553,10 +1552,8 @@ if is_multi_node "$commands"; then
     fi
 
     for i in "${!node0[@]}"; do
-      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
-      command_node_0=$(echo "${node0[i]}" | sed 's/\"//g')
-      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
-      command_node_1=$(echo "${node1[i]}" | sed 's/\"//g')
+      command_node_0=${node0[i]//\"/}
+      command_node_1=${node1[i]//\"/}
 
       step_cmd="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
       echo "COMMANDS: ${step_cmd}"
