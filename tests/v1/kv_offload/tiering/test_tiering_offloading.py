@@ -247,6 +247,19 @@ class TestExampleSecondaryTierManager:
         assert tier.lookup(blocks[2], _CTX) is LookupResult.MISS
 
 
+# What a request-level cascade does with a key already present in the primary
+# tier, keyed by what primary lookup says about it. SUPPLY reaches the peer
+# now, DEFER is retried next step, DROP is never offered again, permanently so
+# since prepare_store counts the key as stored and the scheduler advances past
+# its chunk. A new LookupResult has to declare which of the three it is.
+_CASCADE_SUPPLY_BEHAVIOR = {
+    LookupResult.HIT: "supply",
+    LookupResult.HIT_PENDING: "defer",
+    LookupResult.RETRY: "drop",
+    LookupResult.MISS: "drop",
+}
+
+
 class TestTieringOffloadingManager:
     """Tests for TieringOffloadingManager."""
 
@@ -1078,6 +1091,133 @@ class TestTieringOffloadingManager:
 
         # tier2 (block-level) does not get existing blocks here.
         self.secondary_tier2.submit_store.assert_not_called()
+
+    def _make_request_level_request(self, req_id: str) -> ReqContext:
+        """Start a request for which tier1 asks for request-level offloading."""
+        self.secondary_tier1.on_new_request = lambda req_context: (
+            RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+        )
+        ctx = ReqContext(req_id=req_id)
+        self.manager.on_new_request(ctx)
+        return ctx
+
+    def _cascaded_keys_for(self, req_id: str) -> list[set[OffloadKey]]:
+        """Key sets tier1 was asked to store on behalf of `req_id`."""
+        return [
+            set(call.args[0].keys)
+            for call in self.secondary_tier1.submit_store.call_args_list
+            if call.args[0].req_context.req_id == req_id
+        ]
+
+    @pytest.mark.parametrize("result", list(LookupResult))
+    def test_cascade_supply_behavior_declared_for_every_lookup_result(
+        self, manager_setup, result: LookupResult
+    ):
+        """Whether a lookup result supplies, defers or drops decides if the
+        peer ever sees the block, so every member needs deliberate behavior."""
+        assert result in _CASCADE_SUPPLY_BEHAVIOR, (
+            f"{result} has no declared cascade disposition"
+        )
+        expected = _CASCADE_SUPPLY_BEHAVIOR[result]
+
+        keys = to_keys(range(3))
+        self._start_request()
+        assert self.manager.prepare_store(keys, _CTX) is not None
+        self.manager.complete_store(keys, _CTX, success=True)
+        self._simulate_on_schedule_end()
+
+        ctx = self._make_request_level_request("req_cascade")
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        self.manager.primary_tier.lookup = lambda key, req_context: result
+
+        self.manager._cascade_existing_blocks_to_request_level_tiers(keys, ctx, {0})
+
+        supplied = bool(self._cascaded_keys_for(ctx.req_id))
+        deferred = bool(self.manager._req_state[ctx.req_id].deferred_cascade_keys)
+        assert (supplied, deferred) == {
+            "supply": (True, False),
+            "defer": (False, True),
+            "drop": (False, False),
+        }[expected]
+
+    def _start_in_flight_primary_write(self, keys: list[OffloadKey]) -> ReqContext:
+        """Leave a GPU->primary write for `keys` open, so they look present to
+        prepare_store but are not yet readable."""
+        writer_ctx = ReqContext(req_id="req_writer")
+        self._start_request(writer_ctx)
+        writer_result = self.manager.prepare_store(keys, writer_ctx)
+        assert writer_result is not None
+        assert set(writer_result.keys_to_store) == set(keys)
+        return writer_ctx
+
+    def test_cascade_defers_keys_whose_primary_write_is_in_flight(self, manager_setup):
+        """A key another request is still writing must reach the peer once the
+        write lands, not be dropped: prepare_store already counts it as stored
+        and the scheduler advances past its chunk, so nothing re-offers it."""
+        keys = to_keys(range(3))
+        writer_ctx = self._start_in_flight_primary_write(keys)
+
+        ctx = self._make_request_level_request("req_cascade")
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        result = self.manager.prepare_store(keys, ctx)
+        assert result is not None
+        assert not result.keys_to_store
+        assert not self._cascaded_keys_for(ctx.req_id)
+
+        self.manager.complete_store(keys, writer_ctx, success=True)
+        self._simulate_on_schedule_end()
+
+        assert self._cascaded_keys_for(ctx.req_id) == [set(keys)]
+
+    def test_deferred_cascade_holds_request_from_finalization(self, manager_setup):
+        """A request that finishes with keys still deferred must stay alive, or
+        its tiers are torn down before the peer is ever served."""
+        keys = to_keys(range(3))
+        writer_ctx = self._start_in_flight_primary_write(keys)
+
+        ctx = self._make_request_level_request("req_cascade")
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        assert self.manager.prepare_store(keys, ctx) is not None
+        self.manager.on_request_finished(ctx)
+
+        assert ctx.req_id in self.manager._req_state
+        assert self.manager.has_pending_work()
+
+        self.manager.complete_store(keys, writer_ctx, success=True)
+        self._simulate_on_schedule_end()
+
+        assert self._cascaded_keys_for(ctx.req_id) == [set(keys)]
+        assert ctx.req_id not in self.manager._req_state
+
+    def test_cascade_drops_deferred_keys_whose_primary_write_failed(
+        self, manager_setup
+    ):
+        """A failed write frees the block, so the deferred key resolves to MISS
+        and the request finalizes instead of parking forever."""
+        keys = to_keys(range(3))
+        writer_ctx = ReqContext(req_id="req_writer")
+        self._start_request(writer_ctx)
+        assert self.manager.prepare_store(keys, writer_ctx) is not None
+
+        ctx = self._make_request_level_request("req_cascade")
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        assert self.manager.prepare_store(keys, ctx) is not None
+        self.manager.on_request_finished(ctx)
+
+        self.manager.complete_store(keys, writer_ctx, success=False)
+        self._simulate_on_schedule_end()
+
+        assert not self._cascaded_keys_for(ctx.req_id)
+        assert ctx.req_id not in self.manager._req_state
+        assert not self.manager.has_pending_work()
 
     def test_reset_cache_clears_orchestrator_state(self, manager_setup):
         """reset_cache wipes every kind of orchestrator state and resets
