@@ -56,9 +56,22 @@ class XPUWorker(Worker):
                 parallel_config.pipeline_parallel_size
                 * parallel_config.tensor_parallel_size
             )
+            visible_device_count = torch.accelerator.device_count()
+
+            if parallel_config.data_parallel_external_lb:
+                local_dp_capacity = visible_device_count // tp_pp_world_size
+                if local_dp_capacity == 1:
+                    logger.warning_once(
+                        "XPU external LB sees capacity for only one TP/PP replica, "
+                        "which may indicate a device visibility misconfiguration. "
+                        "This is valid when each node hosts one DP rank. If multiple "
+                        "DP ranks share this node, ensure every XPU remains visible "
+                        "and ZE_AFFINITY_MASK is not narrowed per process."
+                    )
+                dp_local_rank = parallel_config.data_parallel_index % local_dp_capacity
+
             self.local_rank += dp_local_rank * tp_pp_world_size
 
-            visible_device_count = torch.accelerator.device_count()
             assert self.local_rank < visible_device_count, (
                 f"DP adjusted local rank {self.local_rank} is out of bounds. "
             )
