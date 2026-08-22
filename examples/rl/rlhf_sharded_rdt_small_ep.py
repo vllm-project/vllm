@@ -4,28 +4,39 @@
 vLLM DP ranks with expert parallelism.
 
 The reference example for the backend, sized to fit a CI runner:
-``ModuleSource`` over an FSDP2 model, one serve actor per trainer rank, the
+``CheckpointNameSource`` over an FSDP2 model, one serve actor per rank, the
 HTTP control plane, and assertions so it can run unattended.
 
 Why a MoE model rather than a small dense one: the point of sharded RDT is that
 each inference worker pulls only the slices it consumes, so the example is only
 meaningful when no rank holds the whole model. That needs experts on both sides.
-``Qwen/Qwen1.5-MoE-A2.7B`` is a small MoE vLLM's CI already exercises, and it is
-the same architecture family as the 30B model the big example uses, so
-``load_sharded_from_disk`` handles it unchanged.
+``Qwen/Qwen1.5-MoE-A2.7B`` is the reference shape, a real MoE of the same family
+as the 30B model the big example uses. Its WEIGHTS are never read: the trainer
+builds the config and the server runs ``--load-format dummy``, so the sync is
+what is under test and nothing is downloaded but the config and tokenizer. A
+smaller MoE via ``RDT_MODEL`` changes nothing about what is exercised, which is
+what CI runs.
 
-Expert sharding falls out of FSDP2 here rather than from an expert-parallel
-mesh. Transformers fuses each layer's experts into ``[E, ...]`` tensors
-(``mlp.experts.gate_up_proj``/``down_proj``) while the checkpoint stores them
-per expert, and FSDP2 shards dim 0 — the expert dimension — so each of the 2
-trainer ranks holds a disjoint half of every layer's experts. The inference side
-gets its EP the ordinary way, from ``--enable-expert-parallel`` over DP2.
-Neither side holds every expert, which is what puts the per-name routing and
-partial-group ownership on the critical path.
+The trainer publishes CHECKPOINT names, not the names its own modules carry:
+Transformers fuses each layer's experts into ``[E, ...]`` tensors
+(``mlp.experts.gate_up_proj``/``down_proj``) while the checkpoint stores them per
+expert, and vLLM's MoE loaders read the per-expert form. ``CheckpointNameSource``
+splits them back, which is the same conversion a real trainer does when it maps
+its internal layout onto checkpoint names. Publishing the fused names instead
+works only for the Qwen families, whose loaders happen to accept them.
 
-Model naming is load-bearing: this loader maps model parameter names onto
-checkpoint keys one-to-one, so a model whose HF module names have drifted from
-its checkpoint (as GraniteMoe's router has) will not load here.
+FSDP2 shards those fused tensors on dim 0 — the expert dimension — so after
+sharding no rank stores every expert, and the inference side gets real EP from
+``--enable-expert-parallel`` over DP2. Two simplifications an example can afford
+and a real trainer cannot: each rank BUILDS the whole model before
+``fully_shard`` splits it (fine for a tiny config, so nothing here streams a
+checkpoint), and iteration all-gathers every parameter, so ownership stays
+uniform. Serving only the experts a rank holds (``held_names``) is where a real
+trainer earns its keep and is deliberately out of scope.
+
+Model naming is load-bearing: names are mapped onto checkpoint keys one-to-one,
+so a model whose HF module names have drifted from its checkpoint (as
+GraniteMoe's router has) will not work here.
 
 What it checks (a smoke test, not a numerical equivalence check):
   - generation CHANGES after the first sync — the weights really moved, so a
@@ -35,8 +46,10 @@ What it checks (a smoke test, not a numerical equivalence check):
 Run:
     python examples/rl/rlhf_sharded_rdt_small_ep.py
 
-Needs 4 GPUs on one node. Joins an existing Ray cluster if there is one and
-otherwise starts its own. Set ``RDT_MODEL`` to try another MoE.
+Needs 4 GPUs on one node, each big enough for the whole model, since every rank
+builds it before ``fully_shard`` splits it: the default is ~29 GiB in bf16, so
+40 GiB cards and up. Set ``RDT_MODEL`` to a tiny MoE on smaller GPUs. Joins an
+existing Ray cluster if there is one and otherwise starts its own.
 """
 
 import os
@@ -48,7 +61,6 @@ import torch
 import torch.distributed as dist
 from ray.util.placement_group import placement_group, placement_group_table
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from rdt_fsdp_loader import load_sharded_from_disk
 from rdt_vllm_serve import (
     http_generate,
     launch_vllm_serve,
@@ -57,12 +69,12 @@ from rdt_vllm_serve import (
     shutdown_server,
     wait_for_server,
 )
+from rdt_weight_source import CheckpointNameSource
 from torch.distributed.fsdp import fully_shard
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
-    ModuleSource,
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
@@ -70,6 +82,8 @@ from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
 )
 from vllm.utils.network_utils import get_open_port
 
+# Weights are built, never loaded, so this costs a config fetch -- but every rank
+# materializes the model before sharding, so the default wants a 40 GiB card.
 MODEL_NAME = os.environ.get("RDT_MODEL", "Qwen/Qwen1.5-MoE-A2.7B")
 RAY_NAMESPACE = "sharded_rdt_small_ep_example"
 VLLM_PORT = int(os.environ.get("RDT_VLLM_PORT", "8100"))
@@ -97,14 +111,16 @@ class FSDPTrainWorker:
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
         torch.accelerator.set_device_index(0)
 
+        # Same seed on every rank, so the shards compose into ONE model rather
+        # than a blend of independent inits -- the second sync's stability check
+        # is only meaningful against coherent weights.
+        torch.manual_seed(0)
         config = AutoConfig.from_pretrained(model_name)
-        with torch.device("meta"):
+        with torch.device("cuda"):
             model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
         for layer in model.model.layers:
             fully_shard(layer)
         fully_shard(model)
-        model.to_empty(device="cuda")
-        load_sharded_from_disk(model, model_name, config)
         self.model = model
 
     def get_rank(self):
@@ -120,7 +136,7 @@ class FSDPTrainWorker:
                 buffer_presize_gb=float(os.environ.get("RDT_BUFFER_PRESIZE_GB", "0")),
             ),
             client=HTTPVLLMWeightSyncClient(vllm_endpoint),
-            source=ModuleSource(self.model),
+            source=CheckpointNameSource(self.model),
         )
 
     def sync_weights(self):
@@ -194,7 +210,7 @@ def main():
         for rank in range(FSDP_WORLD_SIZE)
     ]
     ray.get([w.get_rank.remote() for w in workers])
-    print(f"[init] {FSDP_WORLD_SIZE} FSDP trainer workers ready (real weights).")
+    print(f"[init] {FSDP_WORLD_SIZE} FSDP trainer workers ready (seeded weights).")
 
     server = launch_vllm_serve(
         MODEL_NAME,
@@ -208,7 +224,7 @@ def main():
         wait_for_server(VLLM_ENDPOINT, server)
 
         before = http_generate(VLLM_ENDPOINT, MODEL_NAME, PROMPTS)
-        print("[generate] BEFORE sync (dummy weights):")
+        print("[generate] BEFORE sync (vLLM's own dummy init):")
         for p, t in zip(PROMPTS, before):
             print(f"  {p!r} -> {t!r}")
 
@@ -224,7 +240,7 @@ def main():
         resume_generation(VLLM_ENDPOINT)
 
         after = http_generate(VLLM_ENDPOINT, MODEL_NAME, PROMPTS)
-        print("[generate] AFTER sync (real weights):")
+        print("[generate] AFTER sync (the trainer's weights):")
         for p, t in zip(PROMPTS, after):
             print(f"  {p!r} -> {t!r}")
 
