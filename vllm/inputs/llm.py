@@ -121,6 +121,12 @@ class TokensPrompt(_PromptOptions):
     AND a Fast (Rust-backed) tokenizer was used AND no multimodal data
     was present. The list length equals the length of `prompt_token_ids`."""
 
+    generation_prefix_len: NotRequired[int]
+    """Number of trailing tokens in ``prompt_token_ids`` that form a forced
+    generation prefix (e.g. a channel-open stub appended by the chat
+    template). These tokens are needed by the model but should not be
+    counted toward ``usage.prompt_tokens`` in the API response."""
+
 
 class EmbedsPrompt(_PromptOptions):
     """Schema for a prompt provided via token embeddings."""
