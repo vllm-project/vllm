@@ -277,7 +277,7 @@ def _build_dummy_layer(
 
 @pytest.mark.parametrize("group_size", SUPPORTED_GROUP_SIZES)
 def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_init):
-    """uint4b8 (symmetric): w_q -> [N, K//8] int8 ExLlama shuffle, no zp param."""
+    """uint4b8 (symmetric) repacks to ExLlama int8 [N, K//2] and drops qzeros."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -296,8 +296,16 @@ def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_ini
     w_int4_kn = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
     w_ckpt_nk8 = _pack_int4_along_k_to_ckpt(w_int4_kn)
     scales_ckpt_nkg = 0.05 * torch.rand((N, K // G), device=device, dtype=torch.float16)
+    # GPTQ stores symmetric zero point 8 as packed (8 - 1) nibbles.
+    redundant_qzeros = torch.full(
+        (K // G, N // 8), 0x77777777, device=device, dtype=torch.int32
+    )
 
     layer = _build_dummy_layer(w_ckpt_nk8, scales_ckpt_nkg, zeros_ckpt=None)
+    layer.register_parameter(
+        "weight_zero_point",
+        torch.nn.Parameter(redundant_qzeros, requires_grad=False),
+    )
 
     config = MPLinearLayerConfig(
         full_weight_shape=(K, N),
@@ -312,10 +320,12 @@ def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_ini
         config,
         w_q_param_name="weight_packed",
         w_s_param_name="weight_scale",
-        w_zp_param_name=None,
+        w_zp_param_name="weight_zero_point",
         w_gidx_param_name=None,
     )
     kernel.process_weights_after_loading(layer)
+
+    assert layer.weight_zero_point is None
 
     # Skinny weight is stored once as int8 [N, K//2]; the Triton path
     # reinterprets it as int32 [N, K//8] via a view (no separate parameter).
