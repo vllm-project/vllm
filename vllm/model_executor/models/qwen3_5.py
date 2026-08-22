@@ -53,6 +53,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.offloader import UVAOffloader, get_offloader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -511,6 +512,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+        self.visual = self._maybe_offload_visual_tower(self.visual)
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5ForCausalLM(
@@ -520,6 +522,34 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
+    def _maybe_offload_visual_tower(self, visual: nn.Module) -> nn.Module:
+        """Route the vision tower through the UVA offloader.
+
+        The vision tower is built directly (not via ``make_layers``), so it
+        never reaches ``get_offloader().wrap_modules`` on its own and
+        ``--cpu-offload-params visual`` would silently match nothing. Route it
+        through the UVA offloader so the tower parameters can be offloaded to
+        CPU like the language-model layers.
+
+        The tower is wrapped in a throwaway container so the parameters are
+        named ``visual.<...>`` for the offloader's segment matching
+        (``f".visual." in f".{name}."``); passing the bare tower would expose
+        names like ``blocks.0.attn.qkv.weight`` with no ``visual`` segment.
+
+        Only the UVA backend with zero-copy enabled is supported here:
+        ``PrefetchOffloader`` is layer-stack-scoped and its ``wrap_modules``
+        must be called exactly once, which ``make_layers`` already does.
+        When UVA is unavailable the functional_call fallback hooks the
+        disposable container rather than the tower, so the tower is left
+        unmodified to avoid a device mismatch at inference time.
+        """
+        offloader = get_offloader()
+        if isinstance(offloader, UVAOffloader) and offloader.uva_offloading:
+            container = nn.Module()
+            container.visual = visual
+            offloader.wrap_modules(m for m in [container])
+        return visual
 
     def embed_input_ids(
         self,
@@ -727,6 +757,7 @@ class Qwen3_5MoeForConditionalGeneration(
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+        self.visual = self._maybe_offload_visual_tower(self.visual)
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5MoeForCausalLM(
