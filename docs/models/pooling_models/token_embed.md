@@ -131,6 +131,13 @@ print(f"Score: {score}")
 
 Please refer to the [Pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
 
+For ColBERT-style models, `/pooling` with `"task":"token_embed"`
+returns raw per-token embeddings for the input after vLLM tokenization.
+The number of returned vectors follows the tokenized input length.
+Provider-specific fields such as Jina's `input_type="query"` are not
+interpreted by this generic token embedding endpoint. If you need
+query-document relevance scores, use `/score` or `/rerank` instead.
+
 ## More examples
 
 More examples can be found here: [examples/pooling/token_embed](../../../examples/pooling/token_embed)
