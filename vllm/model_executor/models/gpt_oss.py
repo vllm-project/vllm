@@ -77,16 +77,6 @@ _GPT_OSS_STREAMED_EXPERT_SUFFIX_TO_SHARD = {
     "w13_weight_scale": "gpt_oss_w13",
     "w2_weight_scale": "gpt_oss_w2",
 }
-_GPT_OSS_HF_TO_VLLM_STREAMED_EXPERT_SUFFIX = {
-    ".gate_up_proj_blocks": ".w13_weight",
-    ".gate_up_proj": ".w13_weight",
-    ".down_proj_blocks": ".w2_weight",
-    ".down_proj": ".w2_weight",
-    ".gate_up_proj_bias": ".w13_bias",
-    ".down_proj_bias": ".w2_bias",
-    ".gate_up_proj_scales": ".w13_weight_scale",
-    ".down_proj_scales": ".w2_weight_scale",
-}
 
 
 class OAIAttention(nn.Module):
@@ -1386,8 +1376,18 @@ class GptOssForCausalLM(
         },
         orig_to_new_suffix={
             ".embed_tokens.weight": ".embedding.weight",
-            **_GPT_OSS_HF_TO_VLLM_STREAMED_EXPERT_SUFFIX,
-            # Quark checkpoints are handled only by _load_weights_quark.
+            # MoE MXFP4 weights
+            ".gate_up_proj_blocks": ".w13_weight",
+            ".down_proj_blocks": ".w2_weight",
+            ".gate_up_proj_scales": ".w13_weight_scale",
+            ".down_proj_scales": ".w2_weight_scale",
+            # MoE other weights
+            ".gate_up_proj": ".w13_weight",
+            ".down_proj": ".w2_weight",
+            # MoE Bias
+            ".gate_up_proj_bias": ".w13_bias",
+            ".down_proj_bias": ".w2_bias",
+            # For quark format
             ".gate_up_proj.weight": ".w13_weight",
             ".gate_up_proj.weight_scale": ".w13_weight_scale",
             ".gate_up_proj.bias": ".w13_bias",
