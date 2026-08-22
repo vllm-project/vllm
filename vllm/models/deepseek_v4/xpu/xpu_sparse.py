@@ -89,11 +89,7 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
         return num_heads
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
-            fused_inv_rope_fp8_quant,
-        )
-
-        o_fp8, o_scale = fused_inv_rope_fp8_quant(
+        o_fp8, o_scale = torch.ops._xpu_C.deepseek_inv_rope_fp8_quant(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
@@ -101,20 +97,19 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
             rope_dim=self.rope_head_dim,
-            tma_aligned_scales=False,
         )
 
         # Precomputed contiguous [G, K, N] weight and [G, K/bs, N/bs] scale.
         wo_a_weight = self.wo_a.bmm_weight
         wo_a_scale = self.wo_a.bmm_scale
 
-        # TODO: optimize fused_inv_rope_fp8_quant for xpu bmm to
-        # eliminate o_scale transpose + contiguous
+        # SYCL kernel already emits group-major [G, T, K] fp8 and contiguous
+        # [G, T, K/bs] scales, so no transpose/contiguous is needed.
         z = torch.ops.vllm.xpu_fp8_bmm(
-            o_fp8.transpose(0, 1),
+            o_fp8,
             wo_a_weight,
             torch.bfloat16,
-            o_scale.transpose(0, 1).contiguous(),
+            o_scale,
             wo_a_scale,
             None,
         )
