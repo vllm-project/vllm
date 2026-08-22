@@ -3,8 +3,18 @@
 
 from unittest.mock import MagicMock, patch
 
+import msgspec
+import pytest
+
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa: E501
     ExampleConnectorMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.lifecycle import (
+    KV_CONNECTOR_LIFECYCLE_LOG_PREFIX,
+    KVConnectorLifecycleEvent,
+    LoggingKVConnectorLifecycleSink,
+    NoOpKVConnectorLifecycleSink,
+    create_kv_connector_lifecycle_sink,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
     ensure_kv_transfer_initialized,
@@ -75,3 +85,126 @@ def test_kv_connector_mixin_clears_metadata():
     finally:
         # Ensure we clean up the global connector between tests
         ensure_kv_transfer_shutdown()
+
+
+def _logging_sink(sample_rate: float = 1.0) -> LoggingKVConnectorLifecycleSink:
+    return LoggingKVConnectorLifecycleSink(
+        connector="NixlConnector",
+        transfer_mode="pull",
+        component="worker",
+        sample_rate=sample_rate,
+    )
+
+
+def test_lifecycle_sink_is_disabled_by_default():
+    sink = create_kv_connector_lifecycle_sink(
+        create_vllm_config(), transfer_mode="pull", component="scheduler"
+    )
+
+    assert isinstance(sink, NoOpKVConnectorLifecycleSink)
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.lifecycle.logger.info"
+    ) as log:
+        sink.emit(
+            KVConnectorLifecycleEvent.TRANSFER_STAGED,
+            "private-request-id",
+            role="consumer",
+        )
+    log.assert_not_called()
+
+
+def test_lifecycle_log_is_structured_and_privacy_safe():
+    request_id = "request-private-aaaaaaaa"
+    remote_request_id = "request-private-bbbbbbbb"
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.lifecycle.logger.info"
+    ) as log:
+        _logging_sink().emit(
+            KVConnectorLifecycleEvent.TRANSFER_STARTED,
+            request_id,
+            role="consumer",
+            remote_request_id=remote_request_id,
+            block_count=7,
+        )
+
+    log.assert_called_once()
+    fmt, prefix, payload = log.call_args.args
+    assert fmt == "%s%s"
+    assert prefix == KV_CONNECTOR_LIFECYCLE_LOG_PREFIX
+    assert request_id not in payload
+    assert remote_request_id not in payload
+
+    record = msgspec.json.decode(payload)
+    assert record["schema"] == "vllm-kv-connector-v1"
+    assert record["event"] == "transfer_started"
+    assert record["connector"] == "NixlConnector"
+    assert record["transfer_mode"] == "pull"
+    assert record["component"] == "worker"
+    assert record["role"] == "consumer"
+    assert record["block_count"] == 7
+    assert record["request_id_hash"] != record["remote_request_id_hash"]
+    assert isinstance(record["wall_ns"], int)
+    assert isinstance(record["monotonic_ns"], int)
+
+
+def test_related_request_ids_share_sampling_and_group_hash():
+    first_id = "cmpl-shared-request-aaaaaaaa"
+    second_id = "cmpl-shared-request-bbbbbbbb"
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.lifecycle.logger.info"
+    ) as log:
+        sink = _logging_sink(sample_rate=0.5)
+        sink.emit(
+            KVConnectorLifecycleEvent.TRANSFER_STAGED,
+            first_id,
+            role="consumer",
+        )
+        sink.emit(
+            KVConnectorLifecycleEvent.TRANSFER_STAGED,
+            second_id,
+            role="consumer",
+        )
+
+    # Sampling is based on the shared ID after stripping the random suffix.
+    assert log.call_count in (0, 2)
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.lifecycle.logger.info"
+    ) as log:
+        sink = _logging_sink()
+        sink.emit(
+            KVConnectorLifecycleEvent.TRANSFER_STAGED,
+            first_id,
+            role="consumer",
+        )
+        sink.emit(
+            KVConnectorLifecycleEvent.TRANSFER_STAGED,
+            second_id,
+            role="consumer",
+        )
+
+    first = msgspec.json.decode(log.call_args_list[0].args[2])
+    second = msgspec.json.decode(log.call_args_list[1].args[2])
+    assert first["request_id_hash"] != second["request_id_hash"]
+    assert first["request_group_id_hash"] == second["request_group_id_hash"]
+
+
+@pytest.mark.parametrize("sample_rate", [-0.1, 1.1, float("nan")])
+def test_lifecycle_sink_rejects_invalid_sample_rate(sample_rate: float):
+    with pytest.raises(ValueError, match="must be between 0.0 and 1.0"):
+        _logging_sink(sample_rate=sample_rate)
+
+
+def test_factory_enables_configured_sink():
+    config = create_vllm_config(
+        kv_connector_extra_config={
+            "kv_connector_lifecycle_trace_sample_rate": 0.25,
+        }
+    )
+    sink = create_kv_connector_lifecycle_sink(
+        config, transfer_mode="pull", component="scheduler"
+    )
+
+    assert isinstance(sink, LoggingKVConnectorLifecycleSink)

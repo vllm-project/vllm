@@ -19,6 +19,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.lifecycle import (
+    KVConnectorLifecycleSink,
+    NoOpKVConnectorLifecycleSink,
+    create_kv_connector_lifecycle_sink,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     HeartbeatInfo,
@@ -55,6 +60,8 @@ class NixlBaseConnectorScheduler:
     # pull (READ) producer from a push (WRITE) one. Overridden by the push
     # scheduler.
     _TRANSFER_MODE: str = "pull"
+    # Class default keeps light-weight ``__new__`` test doubles disabled.
+    _lifecycle_sink: KVConnectorLifecycleSink = NoOpKVConnectorLifecycleSink()
 
     def __init__(
         self,
@@ -66,6 +73,11 @@ class NixlBaseConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
+        self._lifecycle_sink = create_kv_connector_lifecycle_sink(
+            vllm_config,
+            transfer_mode=self._TRANSFER_MODE,
+            component="scheduler",
+        )
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
