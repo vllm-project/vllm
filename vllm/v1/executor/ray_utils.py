@@ -464,11 +464,16 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
     # if they cannot be provisioned.
     placement_group_specs = current_placement_group.bundle_specs
 
-    s = time.time()
+    s = time.monotonic()
     pg_ready_ref = current_placement_group.ready()
     wait_interval = 10
-    while time.time() - s < PG_WAIT_TIMEOUT:
-        ready, _ = ray.wait([pg_ready_ref], timeout=wait_interval)
+    while True:
+        # Cap the wait so the doubling backoff cannot block past the deadline.
+        remaining = PG_WAIT_TIMEOUT - (time.monotonic() - s)
+        if remaining <= 0:
+            break
+
+        ready, _ = ray.wait([pg_ready_ref], timeout=min(wait_interval, remaining))
         if len(ready) > 0:
             break
 
@@ -481,13 +486,14 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             " and make sure the IP addresses used by ray cluster"
             " are the same as VLLM_HOST_IP environment variable"
             " specified in each node if you are running on a multi-node.",
-            int(time.time() - s),
+            int(time.monotonic() - s),
             placement_group_specs,
         )
 
     try:
         ray.get(pg_ready_ref, timeout=0)
     except ray.exceptions.GetTimeoutError:
+        waited = int(time.monotonic() - s)
         # Provide more helpful error message when GPU count is exceeded
         total_gpu_required = sum(spec.get("GPU", 0) for spec in placement_group_specs)
         # If more than one GPU is required for the placement group, provide a
@@ -500,7 +506,7 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
                 f"Cannot provide a placement group requiring "
                 f"{total_gpu_required} GPUs "
                 f"(placement_group_specs={placement_group_specs}) within "
-                f"{PG_WAIT_TIMEOUT} seconds.\n"
+                f"{waited} seconds.\n"
                 f"Tensor parallel size may exceed available GPUs in your "
                 f"cluster. Check resources with `ray status` and "
                 f"`ray list nodes`.\n"
@@ -511,7 +517,7 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             raise ValueError(
                 "Cannot provide a placement group of "
                 f"{placement_group_specs=} within "
-                f"{PG_WAIT_TIMEOUT} seconds. See "
+                f"{waited} seconds. See "
                 "`ray status` and `ray list nodes` to make sure the cluster "
                 "has enough resources."
             ) from None
@@ -519,9 +525,9 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
 
 def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
     ray.util.remove_placement_group(current_placement_group)
-    s = time.time()
+    s = time.monotonic()
     wait_interval = 10
-    while time.time() - s < PG_WAIT_TIMEOUT:
+    while time.monotonic() - s < PG_WAIT_TIMEOUT:
         pg = ray.util.get_current_placement_group()
         if pg is None:
             break
@@ -530,9 +536,11 @@ def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
         wait_interval *= 2
         logger.info(
             "Waiting for removing a placement group of specs for %d seconds.",
-            int(time.time() - s),
+            int(time.monotonic() - s),
         )
-        time.sleep(wait_interval)
+        # Recompute after the poll so the sleep cannot overrun the deadline.
+        remaining = PG_WAIT_TIMEOUT - (time.monotonic() - s)
+        time.sleep(max(min(wait_interval, remaining), 0))
 
 
 def initialize_ray_cluster(

@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import numpy as np
+import pytest
 
+from vllm.v1.executor import ray_utils
 from vllm.v1.executor.ray_utils import detach_zero_copy_from_model_runner_output
 from vllm.v1.outputs import (
     LogprobsLists,
@@ -82,3 +84,80 @@ def test_detach_zero_copy_routed_experts_without_logprobs():
     assert detached.slot_mapping.flags.writeable
     np.testing.assert_array_equal(detached.routing_data, original.routing_data)
     np.testing.assert_array_equal(detached.slot_mapping, original.slot_mapping)
+
+
+class _FakeClock:
+    """Deterministic stand-in for ``time.monotonic``."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _FakePlacementGroup:
+    bundle_specs = [{"GPU": 1}]
+
+    def ready(self):
+        return "pg-ready-ref"
+
+
+def test_wait_until_pg_ready_does_not_wait_past_the_deadline(monkeypatch):
+    """Before the cap, the final wait started at 1270s and blocked another
+    1280s, so the loop returned at ~2550s for a nominal 1800s timeout."""
+    clock = _FakeClock()
+    waits: list[float] = []
+
+    def fake_wait(refs, timeout):
+        # The placement group never becomes ready.
+        waits.append(timeout)
+        clock.advance(timeout)
+        return [], refs
+
+    def fake_get(ref, timeout):
+        raise ray_utils.ray.exceptions.GetTimeoutError()
+
+    monkeypatch.setattr(ray_utils.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(ray_utils.ray, "wait", fake_wait)
+    monkeypatch.setattr(ray_utils.ray, "get", fake_get)
+
+    start = clock.now
+    with pytest.raises(ValueError) as exc_info:
+        ray_utils._wait_until_pg_ready(_FakePlacementGroup())
+
+    elapsed = clock.now - start
+    assert elapsed == ray_utils.PG_WAIT_TIMEOUT
+    assert all(w > 0 for w in waits)
+    # The final wait is the one that used to overshoot.
+    assert waits[-1] == ray_utils.PG_WAIT_TIMEOUT - sum(waits[:-1])
+    # The error reports what was actually waited, not the nominal constant.
+    assert f"within {int(elapsed)} seconds" in str(exc_info.value)
+
+
+def test_wait_until_pg_removed_does_not_sleep_past_the_deadline(monkeypatch):
+    """The removal loop must also stop at the deadline instead of overshooting."""
+    clock = _FakeClock()
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    monkeypatch.setattr(ray_utils.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(ray_utils.time, "sleep", fake_sleep)
+    monkeypatch.setattr(ray_utils.ray.util, "remove_placement_group", lambda pg: None)
+    # The placement group is never actually removed.
+    monkeypatch.setattr(
+        ray_utils.ray.util, "get_current_placement_group", lambda: object()
+    )
+
+    start = clock.now
+    ray_utils._wait_until_pg_removed(_FakePlacementGroup())
+
+    elapsed = clock.now - start
+    assert elapsed == ray_utils.PG_WAIT_TIMEOUT
+    assert all(s >= 0 for s in sleeps)
