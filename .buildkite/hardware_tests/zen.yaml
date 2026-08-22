@@ -1,0 +1,32 @@
+group: Zen CPU
+depends_on: []
+steps:
+- label: Zen-CPU-Kernel Tests
+  # Wait for the pre-built zen image so run-zen-cpu-test.sh can pull it instead
+  # of compiling on the scarce zen5 hardware. Keep source_file_dependencies in
+  # sync with the image-build-zen-cpu step so the image exists whenever this
+  # test is scheduled (otherwise the script falls back to a local build).
+  depends_on:
+  - image-build-zen-cpu
+  soft_fail: false
+  device: zen5
+  no_plugin: true
+  source_file_dependencies:
+  - docker/Dockerfile.cpu
+  - vllm/model_executor/layers/utils.py
+  - vllm/platforms/cpu.py
+  - vllm/platforms/__init__.py
+  - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+  # - setup.py
+  # - cmake/cpu_extension.cmake
+  # - CMakeLists.txt
+  # - requirements/cpu.txt
+  # - requirements/build/cpu.txt
+  # - csrc/cpu/
+  # - docker/Dockerfile.zen
+  # - .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh
+  # - vllm/platforms/zen_cpu.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh 20m "
+      pytest -x -v -s tests/model_executor/test_cpu_unquantized_gemm_dispatch.py"
