@@ -119,11 +119,13 @@ def make_mock_tokenizer(sample: Sample) -> MockTokenizer:
 
 def _test_request(
     tools: list[dict] | None = None,
+    chat_template_kwargs: dict | None = None,
 ) -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "test"}],
         tools=tools,
+        chat_template_kwargs=chat_template_kwargs,
     )
 
 
@@ -166,6 +168,8 @@ def replay_streaming(
     finished_on_last: bool = False,
     tools: list[dict] | None = None,
     prompt_token_ids: list[int] | None = None,
+    finish_reason: str | None = None,
+    chat_template_kwargs: dict | None = None,
 ) -> list[DeltaMessage | None]:
     """Feed tokens through ``parser.parse_delta()`` at a given chunk size.
 
@@ -180,6 +184,14 @@ def replay_streaming(
         tools: Optional tool definitions to include on the request,
             matching the serving layer where tools set
             ``tool_choice`` to ``"auto"``.
+        finish_reason: Passed through to every ``parse_delta()`` call as
+            the engine's reported finish reason (e.g. ``"stop"``,
+            ``"length"``); only consulted by parsers when ``finished`` is
+            also True. ``None`` matches real server behavior for
+            in-progress deltas and is also the default when unset.
+        chat_template_kwargs: Set on the request built for this replay
+            (e.g. to opt into a parser's ``force_nonempty_content``-style
+            fallback).
 
     Returns:
         List of ``DeltaMessage`` results from each ``parse_delta()`` call.
@@ -191,7 +203,7 @@ def replay_streaming(
     all_ids = [tid for tid, _ in tokens]
     all_texts = [text for _, text in tokens]
 
-    request = _test_request(tools=tools)
+    request = _test_request(tools=tools, chat_template_kwargs=chat_template_kwargs)
     first_prompt_ids = prompt_token_ids if prompt_token_ids is not None else []
 
     if holdback_chars <= 0:
@@ -208,6 +220,7 @@ def replay_streaming(
                 request,
                 prompt_token_ids=first_prompt_ids if start == 0 else None,
                 finished=finished_on_last and is_last,
+                finish_reason=finish_reason,
             )
             results.append(result)
         return results
@@ -241,6 +254,7 @@ def replay_streaming(
             request,
             prompt_token_ids=first_prompt_ids if is_first else None,
             finished=finished_on_last and is_last_chunk,
+            finish_reason=finish_reason,
         )
         results.append(result)
         is_first = False
@@ -254,6 +268,7 @@ def replay_streaming(
             request,
             prompt_token_ids=first_prompt_ids if is_first else None,
             finished=finished_on_last,
+            finish_reason=finish_reason,
         )
         results.append(result)
 

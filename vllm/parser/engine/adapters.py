@@ -125,8 +125,11 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         self,
         text: str,
         request: ChatCompletionRequest | ResponsesRequest,
+        finish_reason: str | None = None,
     ) -> str | None:
-        return self._parser_engine.get_streaming_fallback_content(text, request)
+        return self._parser_engine.get_streaming_fallback_content(
+            text, request, finish_reason=finish_reason
+        )
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         if self._streaming_count_valid:

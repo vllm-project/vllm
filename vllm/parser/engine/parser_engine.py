@@ -435,6 +435,7 @@ class ParserEngine(Parser):
         prompt_token_ids: list[int] | None = None,
         *,
         finished: bool,
+        finish_reason: str | None = None,
     ) -> DeltaMessage | None:
         self._initialize_history_tool_call_cnt(request)
         if not self._prompt_streaming_prepared and prompt_token_ids is not None:
@@ -449,6 +450,22 @@ class ParserEngine(Parser):
             events.extend(self._engine.finish())
         result = self._events_to_delta(events, finished=finished)
         result = self._strip_trailing_reasoning(result)
+
+        if finished and not self._reasoning_ended:
+            # Mirrors DelegatingParser.finalize_generation for parsers used
+            # standalone (not wrapped by ParserEngineReasoningAdapter). The
+            # base hook is a no-op; only overridden by parsers that opt into
+            # a fallback (e.g. DeepSeekV4Parser, see #48645). No separate
+            # "previous_text" buffer exists at this layer -- overrides that
+            # need buffered text (rather than re-parsing raw text) track
+            # their own, as DeepSeekV4Parser does via _streamed_reasoning.
+            promoted = self.get_streaming_fallback_content(
+                "", request, finish_reason=finish_reason
+            )
+            if promoted:
+                if result is None:
+                    result = DeltaMessage()
+                result.content = (result.content or "") + promoted
 
         # Suppress reasoning deltas if not requested
         if result and not request.include_reasoning:
@@ -621,6 +638,7 @@ class ParserEngine(Parser):
         self,
         text: str,
         request: ChatCompletionRequest | ResponsesRequest,
+        finish_reason: str | None = None,
     ) -> str | None:
         return None
 
