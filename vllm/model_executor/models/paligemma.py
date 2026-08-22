@@ -152,23 +152,6 @@ class PaliGemmaDummyInputsBuilder(BaseDummyInputsBuilder[PaliGemmaProcessingInfo
 
 
 class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
-        if not mm_data:
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
