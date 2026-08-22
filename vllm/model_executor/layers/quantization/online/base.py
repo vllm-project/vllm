@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    _is_equal_or_regex_match,
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -92,11 +93,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
         args: QuantizationConfigArgs,
     ) -> None:
         super().__init__()
-        if args.linear is None and args.moe is None:
+        if args.linear is None and args.moe is None and not args.online:
             raise ValueError(
                 "OnlineQuantizationConfig requires at least one of "
-                "quantization_config.linear or quantization_config.moe "
-                "to be set."
+                "quantization_config.linear, quantization_config.moe, or "
+                "quantization_config.online to be set."
             )
         self.args = args
         self.ignored_layers: list[str] = args.ignore
@@ -154,6 +155,21 @@ class OnlineQuantizationConfig(QuantizationConfig):
             return cls(layer=layer)
         return cls()
 
+    def _get_spec_for_layer(
+        self, prefix: str, default_spec: QuantSpec | None
+    ) -> QuantSpec | None:
+        if not self.args.online:
+            return default_spec
+        matched_spec = None
+        for pattern, spec in self.args.online.items():
+            if _is_equal_or_regex_match(prefix, pattern):
+                if matched_spec is not None and matched_spec != spec:
+                    raise ValueError(
+                        f"Layer {prefix!r} matches multiple online quantization patterns with conflicting specs."
+                    )
+                matched_spec = spec
+        return matched_spec if matched_spec is not None else default_spec
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
@@ -164,7 +180,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-            method = self._dispatch(self.args.linear, _ONLINE_LINEAR_METHODS, layer)
+            spec = self._get_spec_for_layer(prefix, self.args.linear)
+            method = self._dispatch(spec, _ONLINE_LINEAR_METHODS, layer)
             return method if method is not None else UnquantizedLinearMethod()
         elif isinstance(layer, RoutedExperts):
             if should_ignore_layer(
@@ -173,7 +190,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
-            method = self._dispatch(self.args.moe, _ONLINE_MOE_METHODS, layer)
+            spec = self._get_spec_for_layer(prefix, self.args.moe)
+            method = self._dispatch(spec, _ONLINE_MOE_METHODS, layer)
             return (
                 method
                 if method is not None
