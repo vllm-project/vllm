@@ -280,11 +280,11 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
-        uses_expanded_input_vocab = self.config.vocab_size != self.target_vocab_size
+        uses_expanded_input_vocab = self.config.vocab_size > self.target_vocab_size
         uses_reduced_vocab = self.config.draft_vocab_size != self.target_vocab_size
         if uses_expanded_input_vocab and not includes_embed_tokens:
             raise ValueError(
-                "Qwen3 DSpark checkpoints whose input vocab_size differs from "
+                "Qwen3 DSpark checkpoints whose input vocab_size is larger than "
                 "the target vocabulary must include embed_tokens weights."
             )
         if uses_reduced_vocab and not includes_lm_head:

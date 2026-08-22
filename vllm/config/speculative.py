@@ -309,12 +309,11 @@ def _validate_qwen3_omni_dspark(
     if (
         not isinstance(draft_input_vocab_size, int)
         or isinstance(draft_input_vocab_size, bool)
-        or draft_input_vocab_size < target_vocab_size
+        or draft_input_vocab_size <= 0
     ):
         raise ValueError(
-            "Qwen3-Omni DSpark input vocab_size must be at least the target "
-            f"tokenizer vocabulary ({target_vocab_size}); got "
-            f"{draft_input_vocab_size}."
+            "Qwen3-Omni DSpark input vocab_size must be a positive integer; "
+            f"got {draft_input_vocab_size}."
         )
     draft_output_vocab_size = getattr(draft_hf_config, "draft_vocab_size", None)
     if draft_output_vocab_size is None:

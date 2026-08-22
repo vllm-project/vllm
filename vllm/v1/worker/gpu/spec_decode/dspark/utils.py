@@ -92,7 +92,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_embed = getattr(draft_inner, "embed_tokens", None)
     if (
         target_embed is not None
-        and draft_model_config.get_vocab_size() == target_vocab_size
+        and draft_model_config.get_vocab_size() <= target_vocab_size
         and _should_share(
             draft_model, "has_own_embed_tokens", draft_embed, target_embed
         )

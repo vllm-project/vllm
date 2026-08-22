@@ -2181,7 +2181,7 @@ def test_qwen3_omni_dspark_rejects_generic_qwen3_architecture():
         ("markov_head_type", "gated", "markov_head_type='vanilla'"),
         ("sample_from_anchor", False, "sample_from_anchor=true"),
         ("dspark_bonus_anchor", True, "dspark_bonus_anchor=false"),
-        ("vocab_size", 151936, "input vocab_size must be at least"),
+        ("vocab_size", 0, "input vocab_size must be a positive integer"),
     ],
 )
 @pytest.mark.skip_global_cleanup
@@ -2208,6 +2208,15 @@ def test_qwen3_omni_dspark_allows_draft_only_noise_token_row():
     draft_config.hf_config.vocab_size = 152065
     draft_config.hf_config.draft_vocab_size = 152064
     draft_config.hf_config.mask_token_id = 152064
+
+    _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_allows_smaller_input_vocabulary():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    draft_config.hf_config.vocab_size = 151936
+    draft_config.hf_config.mask_token_id = 151669
 
     _validate_qwen3_omni_dspark(target_config, draft_config, 7)
 

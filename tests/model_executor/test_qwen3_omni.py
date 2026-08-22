@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -293,6 +294,7 @@ def test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states():
     ("input_vocab_size", "draft_vocab_size", "weights", "error"),
     [
         (101, 100, [], "must include embed_tokens weights"),
+        (99, 99, [], "must include lm_head weights"),
         (100, 40, [], "must include lm_head weights"),
         (
             100,
@@ -321,6 +323,66 @@ def test_qwen3_dspark_rejects_incomplete_vocab_weights(
 
     with pytest.raises(ValueError, match=error):
         model.load_weights(weights)
+
+
+@pytest.mark.skip_global_cleanup
+def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
+    from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
+
+    target_embedding = nn.Embedding(100, 8)
+    draft_embedding = nn.Embedding(99, 8)
+    target_model = SimpleNamespace(model=SimpleNamespace(embed_tokens=target_embedding))
+    draft_model = SimpleNamespace(
+        model=SimpleNamespace(embed_tokens=draft_embedding),
+        has_own_embed_tokens=False,
+    )
+    draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type="qwen3"),
+        get_vocab_size=Mock(return_value=99),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=draft_model_config,
+            attention_backend=None,
+            kv_cache_dtype=None,
+        ),
+        attention_config=SimpleNamespace(backend=None),
+        cache_config=SimpleNamespace(),
+        model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
+    )
+
+    def fake_replace(config, **changes):
+        values = vars(config).copy()
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    with (
+        patch.object(dspark_utils, "replace", side_effect=fake_replace),
+        patch.object(
+            dspark_utils,
+            "get_pp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+        patch(
+            "vllm.compilation.backends.set_model_tag",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm.model_executor.model_loader.get_model",
+            return_value=draft_model,
+        ),
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.dflash_has_any_non_causal",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.models.utils.get_draft_quant_config",
+            return_value=None,
+        ),
+    ):
+        loaded_model = dspark_utils.load_dspark_model(target_model, vllm_config)
+
+    assert loaded_model.model.embed_tokens is target_embedding
 
 
 if __name__ == "__main__":
