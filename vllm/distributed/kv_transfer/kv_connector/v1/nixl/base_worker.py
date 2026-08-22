@@ -2409,9 +2409,19 @@ class NixlBaseConnectorWorker:
         if not self._has_mamba:
             for i, prefill_group in enumerate(prefill_block_ids):
                 num_decode_blocks = len(decode_block_ids[i])
-                assert num_decode_blocks <= len(prefill_group)
-                if num_decode_blocks < len(prefill_group):
+                num_prefill_blocks = len(prefill_group)
+                if num_decode_blocks < num_prefill_blocks:
                     prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
+                elif num_decode_blocks > num_prefill_blocks:
+                    # Decoder allocated more blocks than the remote produced.
+                    # This happens when the decode prompt is longer than the
+                    # prefiller prompt (the disagg proxy appends the first
+                    # sampled token) and that extra token starts a fresh block
+                    # with no remote counterpart -- e.g. a prefiller prompt that
+                    # is an exact multiple of the block size. Read only the
+                    # blocks the remote has; the trailing block(s) are computed
+                    # locally during decode.
+                    decode_block_ids[i] = decode_block_ids[i][:num_prefill_blocks]
         else:
             # (NOTE: ZhanqiuHu) HeteroTP can cause different kernel block counts
             # due to logical block rounding.
