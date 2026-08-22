@@ -209,7 +209,7 @@ def warmup_kernels(
     We must call the provided worker's execute_model for pipeline parallel
     coordination.
     """
-    if model_runner.is_encoder_only:
+    if model_runner.vllm_config.is_mm_encoder_only:
         return
 
     num_spec_steps = model_runner.num_speculative_steps
