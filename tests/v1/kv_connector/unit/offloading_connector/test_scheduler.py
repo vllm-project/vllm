@@ -1595,6 +1595,28 @@ def test_fence_at_update_state_after_alloc(request_runner):
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
 
+def test_update_state_after_alloc_records_zero_token_allocations():
+    scheduler = object.__new__(OffloadingConnectorScheduler)
+    scheduler._current_batch_allocated_block_ids = set()
+    blocks = KVCacheBlocks(
+        (
+            (
+                KVCacheBlock(block_id=7),
+                KVCacheBlock(block_id=0),
+            ),
+            (KVCacheBlock(block_id=11),),
+        )
+    )
+
+    scheduler.update_state_after_alloc(
+        SimpleNamespace(request_id="req-0"),
+        blocks,
+        num_external_tokens=0,
+    )
+
+    assert scheduler._current_batch_allocated_block_ids == {7, 11}
+
+
 def test_fence_at_build_store_jobs(request_runner):
     """A new prefill (no load -> update_state_after_alloc returns early)
     reusing a finished request's pending-store block is flushed by
