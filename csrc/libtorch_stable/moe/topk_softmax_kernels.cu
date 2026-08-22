@@ -86,7 +86,7 @@ __launch_bounds__(TPB) __global__
     __shared__ float normalizing_factor;
     __shared__ float float_max;
 
-    const int thread_row_offset = blockIdx.x * num_cols;
+    const int64_t thread_row_offset = static_cast<int64_t>(blockIdx.x) * num_cols;
 
     float threadData(-FLT_MAX);
 
@@ -142,7 +142,7 @@ template <int TPB, typename InputType>
 __launch_bounds__(TPB) __global__
     void moeSigmoid(const InputType* input, const bool* finished, float* output, const int num_cols)
 {
-    const int thread_row_offset = blockIdx.x * num_cols;
+    const int64_t thread_row_offset = static_cast<int64_t>(blockIdx.x) * num_cols;
 
     // Don't touch finished rows.
     if ((finished != nullptr) && finished[blockIdx.x])
@@ -189,7 +189,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(
     const int block_row = blockIdx.x;
 
     const bool row_is_active = finished ? !finished[block_row] : true;
-    const int thread_read_offset = blockIdx.x * num_experts;
+    const int64_t thread_read_offset = static_cast<int64_t>(blockIdx.x) * num_experts;
     float selected_sum = 0.f;
     for (int k_idx = 0; k_idx < k; ++k_idx)
     {
