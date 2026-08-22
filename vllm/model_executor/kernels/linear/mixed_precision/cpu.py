@@ -15,9 +15,12 @@ from vllm.scalar_type import scalar_types
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 _CPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
+_CPU_GEMM_WNA16_SCHEMA = "_C::cpu_gemm_wna16"
 
 
 class CPUWNA16LinearKernel(MPLinearKernel):
+    requires_cpu_gemm_wna16 = True
+
     @classmethod
     def get_min_capability(cls) -> int:
         return -1
@@ -55,6 +58,24 @@ class CPUWNA16LinearKernel(MPLinearKernel):
                 f"Output size ({c.partition_weight_shape[1]}) not supported by "
                 "CPUWNA16, supported sizes are multiples of 32",
             )
+
+        uses_w4a8 = (
+            envs.VLLM_CPU_INT4_W4A8
+            and not c.has_g_idx
+            and c.act_type == torch.bfloat16
+            and (
+                torch.cpu._is_amx_tile_supported()
+                or current_platform.get_cpu_architecture() == CpuArchEnum.RISCV
+            )
+        )
+        if cls.requires_cpu_gemm_wna16 and not uses_w4a8:
+            try:
+                torch._C._dispatch_find_schema_or_throw(_CPU_GEMM_WNA16_SCHEMA, "")
+            except RuntimeError:
+                return (
+                    False,
+                    "cpu_gemm_wna16 is not registered in the loaded CPU extension",
+                )
 
         return True, None
 
