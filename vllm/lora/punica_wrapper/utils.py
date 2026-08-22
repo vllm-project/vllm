@@ -58,7 +58,15 @@ def convert_mapping(
     vocab_size: int,
     extra_vocab_size: int,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    list[int],
+    list[int],
+    list[int],
+]:
     """Converts LoRAMapping to index tensors.
 
     Args:
@@ -87,6 +95,8 @@ def convert_mapping(
             indices_len: List of lengths of the above tensors. It contains
                 (base_indices, sampler_indices, sampler_indices_padded,
                 embeddings_indices).
+            lora_indices: CPU list containing the base LoRA indices.
+            prompt_mapping: CPU list containing the sampler LoRA indices.
     """
     index_mapping_indices: list[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
@@ -157,4 +167,6 @@ def convert_mapping(
         sampler_indices_padded,
         embeddings_indices,
         indices_len,
+        lora_indices,
+        prompt_mapping,
     )
