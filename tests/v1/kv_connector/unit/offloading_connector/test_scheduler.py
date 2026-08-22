@@ -36,7 +36,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    make_block_hash_with_group_id,
+)
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -184,6 +188,64 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
     assert req_status.partial_tail_boundary is None
+
+
+def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
+    """A recurrent group may hold unhashed blocks inside the computed prefix.
+
+    A recurrent (Mamba / GDN) group has no per-token KV: it carries a fixed-size
+    state, so most positions point at the null sentinel and the one real block
+    holding the state is legitimately not full-and-cached. Sliding-window groups
+    are similar -- neither is required to retain the whole prefix, so a non-null,
+    unhashed block can sit *below* the locally-computed mark. Scanning the
+    block list from index 0 treated such a block as the start of the freshly
+    allocated region, dragging the load boundary below that mark -- which loads the
+    wrong keys into the wrong destination blocks, and asserts on the way.
+
+    Geometry: tokens_per_block = tokens_per_chunk = 16, blocks_per_chunk = 1.
+    16 tokens are already computed (block 0) and 16 are loaded (block 1), so the
+    fresh region must start at index 1. The Mamba group's block 0 is non-null and
+    unhashed and must be ignored rather than taken as the boundary.
+    """
+    scheduler = _make_partial_tail_scheduler()
+
+    request = MagicMock()
+    request.request_id = "req"
+    request.kv_transfer_params = None
+    request.num_prompt_tokens = 64
+    request.num_tokens = 64
+    request.block_hashes = [BlockHash(f"b{i}".encode()) for i in range(16)]
+    request.all_token_ids = list(range(64))
+    request.lora_request = None
+    request.is_finished.return_value = False
+    scheduler.on_new_request(request)
+
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 16
+    req_status.update_offload_keys()
+
+    full_blocks = [KVCacheBlock(31), KVCacheBlock(32)]
+    mamba_blocks = [KVCacheBlock(41), KVCacheBlock(42)]
+    full_blocks[0].set_block_hash(
+        make_block_hash_with_group_id(BlockHash(b"h0"), 0), 16
+    )
+    # Both Mamba blocks are non-null and unhashed -- the shape a recurrent group
+    # produces for a prefix it does not retain.
+    for b in mamba_blocks:
+        assert b.block_hash is None and not b.is_null
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks((full_blocks, mamba_blocks)),
+        num_external_tokens=16,
+    )
+
+    [load_job] = scheduler._current_batch_load_jobs.values()
+    loaded = list(load_job.dst_spec.block_ids)
+    # The fresh region starts at index 1, so the sparse group's block 0 (id 41) is
+    # not a load destination. Before the fix the boundary collapsed to 0.
+    assert 41 not in loaded
+    assert 42 in loaded
 
 
 def test_partial_lookup_requires_every_cache_group():
