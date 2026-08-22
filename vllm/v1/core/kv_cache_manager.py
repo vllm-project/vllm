@@ -859,13 +859,16 @@ class KVCacheManager:
 
         Returns ``{request_id: [(group_id, block_id, boundary_tokens), ...]}``
         for the durable boundary blocks of producers' last-prompt-boundary
-        partial tails. Only mamba "align" groups contribute; empty otherwise.
-        A KV connector reads the referenced blocks and offloads them so a later
+        partial tails. Mamba "align" groups contribute the CoW block that
+        preserved their boundary state; full-attention groups under DCP
+        contribute the request's own boundary block, which is a durable source
+        because KV below the boundary is append-only. Empty otherwise. A KV
+        connector reads the referenced blocks and offloads them so a later
         request can hit the sub-block prefix.
 
-        Each handed-off block lives off the request block table, so it is
-        pinned here and unpinned when the request's blocks are freed — for a
-        producer with saved tokens, after the connector reports sends done.
+        Each handed-off block is pinned here and unpinned when the request's
+        blocks are freed — for a producer with saved tokens, after the
+        connector reports sends done.
         """
         offloads: dict[str, list[tuple[int, int, int]]] = {}
         for mgr in self.coordinator.single_type_managers:

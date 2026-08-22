@@ -337,3 +337,45 @@ def test_async_progressive_load_failure(
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         assert scheduler.failed_recving_kv_req_ids == {request.request_id}
         assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_group,invalid_idx,expected_computed_tokens",
+    [
+        (0, 4, 0),
+        (1, 1, 24_576),
+    ],
+)
+def test_hybrid_load_failure_uses_runtime_manager_block_sizes(
+    scheduler: Scheduler,
+    invalid_group: int,
+    invalid_idx: int,
+    expected_computed_tokens: int,
+):
+    """Hybrid recovery must use DCP-scaled manager block sizes and align the
+    shared computed-token boundary for every cache group."""
+    managers = [Mock(block_size=1_536), Mock(block_size=24_576)]
+    scheduler.kv_cache_manager.coordinator.single_type_managers = managers
+    scheduler.block_size = 24_576
+
+    block_ids_by_group = (
+        list(range(100, 141)),
+        list(range(200, 203)),
+    )
+    scheduler.kv_cache_manager.get_block_ids = Mock(
+        return_value=block_ids_by_group
+    )
+    request = Mock(request_id="hybrid-request", num_computed_tokens=62_976)
+    invalid_block_ids = {
+        block_ids_by_group[invalid_group][invalid_idx],
+    }
+
+    affected, _, _ = scheduler._update_requests_with_invalid_blocks(
+        [request],
+        invalid_block_ids,
+        num_scheduled_tokens={},
+        evict_blocks=False,
+    )
+
+    assert affected == {"hybrid-request"}
+    assert request.num_computed_tokens == expected_computed_tokens
