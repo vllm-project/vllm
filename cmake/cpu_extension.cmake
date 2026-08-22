@@ -257,7 +257,16 @@ endif()
 
 
 # Build oneDNN for GEMM kernels
-if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND OR RVV_FP16_FOUND OR RVV_BF16_FOUND OR S390_FOUND)
+# RISC-V scalar builds do not provide the vector APIs used by dnnl_kernels.cpp.
+# Use the effective target VLEN as well as the host RVV capability before
+# enabling the RISC-V oneDNN integration.
+set(VLLM_RISCV_ONEDNN_ENABLED OFF)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
+        VLLM_RVV_VLEN GREATER 0 AND (RVV_FP16_FOUND OR RVV_BF16_FOUND))
+    set(VLLM_RISCV_ONEDNN_ENABLED ON)
+endif()
+
+if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND OR VLLM_RISCV_ONEDNN_ENABLED OR S390_FOUND)
     # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
     # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
     set(ONEDNN_AARCH64_USE_ACL OFF CACHE BOOL "")
