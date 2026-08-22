@@ -453,7 +453,7 @@ def test_is_model_fused_shared_expert_compatible() -> None:
     [
         (False, []),
         (True, []),
-        (True, ["*.shared_experts.*"]),
+        (True, [r"re:.*\.shared_experts?\..*"]),
     ],
 )
 def test_models_fse_init(
@@ -574,7 +574,7 @@ def test_models_fse_init(
 
 @pytest.mark.parametrize(
     ("exclude", "expected"),
-    [([], True), (["*.shared_expert.*"], False)],
+    [([], True), ([r"re:.*\.shared_expert\..*"], False)],
 )
 def test_quark_shared_expert_fse_compatibility(
     exclude: list[str], expected: bool
@@ -599,6 +599,42 @@ def test_quark_shared_expert_fse_compatibility(
             reason
             == "Quark excludes shared experts at model.layers.0.mlp.shared_expert"
         )
+
+
+def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:
+    """Excluding one layer's shared experts must not disable FSE elsewhere.
+
+    amd/GLM-5.2-MXFP4 excludes its MTP layer (78) wholesale, including
+    ``model.layers.78.mlp.shared_experts.{gate,up,down}_proj``, while the 75
+    target MoE layers keep MXFP4 shared experts.
+    """
+    quant_config = QuarkConfig(
+        {
+            "exclude": [
+                f"model.layers.78.mlp.shared_experts.{projection_name}"
+                for projection_name in ("gate_proj", "up_proj", "down_proj")
+            ],
+            "global_quant_config": {},
+            "layer_quant_config": {},
+        }
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.3.mlp.experts",
+        "model.layers.3.mlp.shared_experts",
+    ) == (True, None)
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.78.mlp.experts",
+        "model.layers.78.mlp.shared_experts",
+    )
+    assert compatible is False
+    assert (
+        reason == "Quark excludes shared experts at model.layers.78.mlp.shared_experts"
+    )
 
 
 def test_quark_shared_expert_fse_requires_matching_layer_quant_configs() -> None:
