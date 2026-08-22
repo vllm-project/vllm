@@ -329,13 +329,15 @@ def test_moe_align_block_size_deterministic():
 
 @pytest.mark.parametrize("max_tokens_per_batch", [13, 16, 512])
 @pytest.mark.parametrize("num_experts", [8, 16, 32, 64])
-@pytest.mark.parametrize("block_size", [8, 16, 32, 64])
-@pytest.mark.parametrize("simulate_empty_batches", [False, True])
+@pytest.mark.parametrize("block_size", [8, 16, 32, 48, 64])
+@pytest.mark.parametrize(
+    "token_distribution", ["random", "alternating_empty", "skewed"]
+)
 def test_batched_moe_align_block_size(
     max_tokens_per_batch: int,
     num_experts: int,
     block_size: int,
-    simulate_empty_batches: bool,
+    token_distribution: str,
 ):
     def ref_outputs(
         expert_num_tokens: torch.Tensor,
@@ -384,15 +386,17 @@ def test_batched_moe_align_block_size(
     # Compute expert_num_tokens
     expert_num_tokens = torch.randint(
         low=0,
-        high=max_tokens_per_batch,
+        high=max_tokens_per_batch + 1,
         size=(num_experts,),
         device="cpu",
         dtype=torch.int32,
     )
-    if simulate_empty_batches:
-        # mark half the batches to have 0 tokens
-        zero_batches = torch.randperm(num_experts)[: num_experts // 2]
-        expert_num_tokens[zero_batches] = 0
+    if token_distribution == "alternating_empty":
+        expert_num_tokens[::2] = 0
+    elif token_distribution == "skewed":
+        expert_num_tokens.zero_()
+        expert_num_tokens[0] = max_tokens_per_batch
+        expert_num_tokens[-1] = 1
 
     # ref outputs
     ref_sorted_ids, ref_expert_ids, ref_num_tokens_post_pad = ref_outputs(
