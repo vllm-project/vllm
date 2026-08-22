@@ -21,6 +21,7 @@ Only tensor parallelism is supported; pipeline, data, and expert parallelism
 are rejected at launch.
 """
 
+import contextlib
 import multiprocessing
 import os
 import queue
@@ -65,10 +66,8 @@ def _report_ready(message: str) -> None:
     rely on that line to know the daemon is serving, write it directly to file
     descriptor 2 so it bypasses the logging machinery entirely.
     """
-    try:
+    with contextlib.suppress(OSError):
         os.write(2, (message + "\n").encode())
-    except OSError:
-        pass
 
 
 def export_entries(
@@ -163,9 +162,7 @@ class WeightCacheDaemon:
         assert self.model is not None
         self.entries, self.aliases = export_entries(self.model)
 
-    def serve_forever(
-        self, ready_callback: Callable[[], None] | None = None
-    ) -> None:
+    def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
         """Serve requests until terminated.
 
         The socket is only bound once the model is fully cached, so clients
@@ -336,7 +333,7 @@ def main() -> None:
 
     distributed_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
     ctx = multiprocessing.get_context("spawn")
-    ready_queue: "multiprocessing.Queue[int]" = ctx.Queue()
+    ready_queue: multiprocessing.Queue[int] = ctx.Queue()
     procs = [
         ctx.Process(
             target=_run_daemon,

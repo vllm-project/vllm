@@ -85,4 +85,3 @@ class NvFp4LinearKernel(ABC):
         override.
         """
         return
-

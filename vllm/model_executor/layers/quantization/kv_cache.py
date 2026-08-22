@@ -213,4 +213,3 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             layer._q_scale_float = layer._q_scale.item()
             layer._k_scale_cpu = layer._k_scale.detach().to("cpu")
             layer._v_scale_cpu = layer._v_scale.detach().to("cpu")
-
