@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use asynk_strim_attr::{TryYielder, try_stream};
@@ -5,7 +8,7 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
-use vllm_engine_core_client::protocol::StopReason;
+use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::{FinishReason, GenerateOutput, TokenUsage};
 use vllm_tokenizer::{DynTokenizer, IncrementalDecoder};
 
@@ -44,6 +47,9 @@ pub struct Finished {
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
+    /// Connector-specific encoder cache transfer parameters for disaggregated
+    /// serving.
+    pub ec_transfer_params: Option<serde_json::Value>,
 }
 
 /// Internal decoded-text event emitted before higher-level assistant
@@ -120,14 +126,12 @@ pub async fn decoded_text_event_stream(
                 // when streaming the outputs.
                 match decode_options.include_stop_str_in_output {
                     true => 0,
-                    false => {
-                        decode_options
-                            .stop_strings
-                            .as_ref()
-                            .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
-                            .unwrap_or(1)
-                            - 1
-                    }
+                    false => decode_options
+                        .stop_strings
+                        .as_ref()
+                        .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
+                        .unwrap_or(1)
+                        .saturating_sub(1),
                 },
             );
             decoder = Some(dec);
@@ -151,6 +155,7 @@ pub async fn decoded_text_event_stream(
         let decoder = decoder.as_mut().unwrap();
 
         let kv_transfer_params = output.kv_transfer_params;
+        let ec_transfer_params = output.ec_transfer_params;
         let mut finish_reason = output.finish_reason;
         let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
@@ -275,6 +280,7 @@ pub async fn decoded_text_event_stream(
                     },
                     finish_reason: reason,
                     kv_transfer_params,
+                    ec_transfer_params,
                 }),
             })
             .await;
@@ -298,6 +304,12 @@ pub async fn decoded_text_event_stream(
 /// If stop string matches, returns tuple
 /// (index into stop string vec, byte index of first byte of stop string in
 /// output)
+///
+/// When several stop strings match within the newly generated text (for example
+/// when a step appends multiple tokens, or one token decodes to several
+/// characters), the stop string that completes earliest in the text is selected,
+/// so the result matches appending one character at a time. Ties are broken by
+/// stop-list order.
 fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Option<(usize, usize)> {
     // We compare byte subslices to avoid utf8 boundary problem
     let output = output.as_bytes();
@@ -306,12 +318,18 @@ fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Opti
         .iter()
         .map(|ss| (ss.as_bytes(), ss.len(), next_off.saturating_sub(ss.len())))
         .enumerate()
-        .find_map(|(ss_idx, (ss, len, start_off))| {
+        .filter_map(|(ss_idx, (ss, len, start_off))| {
+            if len == 0 {
+                return None;
+            }
             output[start_off..]
                 .windows(len)
-                .rposition(|w| w == ss)
-                .map(|pos| (ss_idx, start_off + pos))
+                .position(|w| w == ss)
+                .map(|pos| (ss_idx, start_off + pos, start_off + pos + len))
         })
+        // `min_by_key` keeps the first minimum, so ties fall back to stop-list order.
+        .min_by_key(|&(_, _, end)| end)
+        .map(|(ss_idx, start, _)| (ss_idx, start))
 }
 
 #[cfg(test)]
@@ -323,36 +341,10 @@ mod tests {
     use futures::{Stream, stream};
     use vllm_engine_core_client::AbortCause;
     use vllm_llm::GenerateOutput;
-    use vllm_tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
     use crate::output::TextOutputStreamExt as _;
-
-    /// Backend that treats each token ID as a raw byte, producing lossy UTF-8.
-    struct ByteTokenizer;
-
-    impl Tokenizer for ByteTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            unreachable!()
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
-            Ok(String::from_utf8_lossy(&bytes).into_owned())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            unreachable!()
-        }
-    }
 
     /// Helper: run `decoded_text_event_stream` to completion and return the
     /// collected output.
@@ -366,7 +358,7 @@ mod tests {
             token_ids,
             Some(FinishReason::Length),
         ))]);
-        let tokenizer: DynTokenizer = Arc::new(ByteTokenizer);
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
         decoded_text_event_stream("test".into(), tokenizer, raw_stream, decode_options, false)
             .collect_output()
             .await
@@ -419,7 +411,7 @@ mod tests {
             ))),
             dropped_cause: Arc::clone(&dropped_cause),
         };
-        let tokenizer: DynTokenizer = Arc::new(ByteTokenizer);
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
 
         let output = decoded_text_event_stream(
             "test".into(),
@@ -464,6 +456,13 @@ mod tests {
     #[tokio::test]
     async fn stream_stop_string_no_match_runs_to_completion() {
         let output = run_to_completion(ascii_tokens("hello"), opts(&["z"], 0)).await;
+        assert_eq!(output.text, "hello");
+        assert_eq!(output.finish_reason, FinishReason::Length);
+    }
+
+    #[tokio::test]
+    async fn stream_empty_stop_string_does_not_underflow_buffer() {
+        let output = run_to_completion(ascii_tokens("hello"), opts(&[""], 0)).await;
         assert_eq!(output.text, "hello");
         assert_eq!(output.finish_reason, FinishReason::Length);
     }
@@ -542,9 +541,47 @@ mod tests {
     #[test]
     fn stop_string_matches_first_of_multiple() {
         let stops = vec!["wor".to_string(), "say".to_string()];
-        // "say" appears earlier but "wor" is checked first (index 0)
+        // Only "wor" can complete in the 1-new-byte window; the "say" at index 0
+        // is behind the window start and is not a candidate.
         let result = matches_stop_string(&stops, "say wor", 1);
         assert_eq!(result, Some((0, 4)));
+    }
+
+    /// Several stop strings can land in the same window when a step appends
+    /// multiple tokens (speculative decoding) or when one token decodes to
+    /// several characters. The earliest-completing one must win over stop-list
+    /// order, so that a batched step agrees with character-at-a-time appending.
+    #[test]
+    fn stop_string_earliest_completing_wins_regardless_of_list_order() {
+        // " The user is a": " is a" (5 bytes) was appended in one step. Both
+        // "is" (index 10, completes at 12) and " a" (index 12, completes at 14)
+        // land in the window. "is" completes earlier, so it wins either order.
+        for stops in [vec!["a", "is"], vec!["is", "a"]] {
+            let owned: Vec<String> = stops.iter().map(|s| s.to_string()).collect();
+            let is_idx = stops.iter().position(|s| *s == "is").unwrap();
+            let result = matches_stop_string(&owned, " The user is a", " is a".len());
+            assert_eq!(result, Some((is_idx, 10)), "stop list order {stops:?}");
+        }
+    }
+
+    /// Both stops complete at the same offset, so stop-list order decides. This
+    /// pins `min_by_key`'s first-minimum behavior, which is what implements the
+    /// tie-break.
+    #[test]
+    fn stop_string_ties_broken_by_list_order() {
+        for (stops, expected) in [(vec!["ab", "b"], (0, 0)), (vec!["b", "ab"], (0, 1))] {
+            let owned: Vec<String> = stops.iter().map(|s| s.to_string()).collect();
+            let result = matches_stop_string(&owned, "ab", "ab".len());
+            assert_eq!(result, Some(expected), "stop list order {stops:?}");
+        }
+    }
+
+    #[test]
+    fn stop_string_completion_position_not_start_position() {
+        // "b" starts later than "abc" but completes earlier, so it must win.
+        let stops = vec!["abc".to_string(), "b".to_string()];
+        let result = matches_stop_string(&stops, "abc", 3);
+        assert_eq!(result, Some((1, 1)));
     }
 
     #[test]
@@ -560,6 +597,13 @@ mod tests {
         // "say wor" where last 3 bytes "wor" were added at once
         let result = matches_stop_string(&stops, "say wor", 3);
         assert_eq!(result, Some((0, 4)));
+    }
+
+    #[test]
+    fn stop_string_matches_leftmost_with_multiple_new_bytes() {
+        let stops = vec!["\n".to_string()];
+        let result = matches_stop_string(&stops, "Answer\n\n", 2);
+        assert_eq!(result, Some((0, 6)));
     }
 
     #[test]
@@ -596,6 +640,13 @@ mod tests {
     #[test]
     fn stop_string_empty_list() {
         let stops: Vec<String> = vec![];
+        let result = matches_stop_string(&stops, "hello", 1);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn empty_stop_string_is_ignored_by_matcher() {
+        let stops = vec!["".to_string(), "world".to_string()];
         let result = matches_stop_string(&stops, "hello", 1);
         assert_eq!(result, None);
     }

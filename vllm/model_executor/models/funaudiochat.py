@@ -20,17 +20,16 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import PreTrainedTokenizerFast, WhisperFeatureExtractor
+from transformers import TokenizersBackend, WhisperFeatureExtractor
 from transformers.activations import get_activation
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -53,7 +52,12 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import _has_module
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 
 class _SinusoidsPositionEmbedding(nn.Module):
@@ -78,6 +82,14 @@ class _SinusoidsPositionEmbedding(nn.Module):
 
 class FunAudioChatAudioAttention(nn.Module):
     """Multi-headed attention used inside the continuous audio tower."""
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
 
     def __init__(self, config: Any):
         super().__init__()
@@ -123,42 +135,15 @@ class FunAudioChatAudioAttention(nn.Module):
             bias=True,
         )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-
-        params_dict = dict(self.named_parameters())
         with torch.no_grad():
             if self.qkv_proj.bias is not None:
                 # HF FunAudioChat uses bias=False for k_proj. Ensure the missing
                 # shard starts as zeros, while allowing q/v shards to load.
                 self.qkv_proj.bias.zero_()
 
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, shard_name, shard_id in stacked_params_mapping:
-                if shard_name not in name:
-                    continue
-                name = name.replace(shard_name, param_name)
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-            loaded_params.add(name)
-
-        return loaded_params
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def forward(
         self,
@@ -271,25 +256,6 @@ class FunAudioChatAudioEncoder(nn.Module):
     @property
     def dtype(self) -> torch.dtype:
         return self.conv1.weight.dtype
-
-    def _prepare_attention_mask(
-        self, inputs_tensor: torch.Tensor, cu_seqlens: torch.Tensor
-    ) -> torch.Tensor | None:
-        if getattr(self.config, "_attn_implementation", "eager") == "flash_attention_2":
-            return None
-
-        seq_length = inputs_tensor.shape[0]
-        attention_mask = torch.full(
-            (1, 1, seq_length, seq_length),
-            torch.finfo(inputs_tensor.dtype).min,
-            device=inputs_tensor.device,
-            dtype=inputs_tensor.dtype,
-        )
-        for i in range(1, len(cu_seqlens)):
-            start = int(cu_seqlens[i - 1].item())
-            end = int(cu_seqlens[i].item())
-            attention_mask[..., start:end, start:end] = 0
-        return attention_mask
 
     def forward(
         self,
@@ -553,18 +519,23 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
 
     @cached_property
     def feature_extractor(self) -> WhisperFeatureExtractor:
-        return WhisperFeatureExtractor.from_pretrained(self.model_id)
+        return WhisperFeatureExtractor.from_pretrained(
+            self.model_id,
+            revision=self.ctx.model_config.revision,
+        )
 
     @cached_property
-    def speech_tokenizer(self) -> PreTrainedTokenizerFast:
-        return PreTrainedTokenizerFast.from_pretrained(
-            self.model_id, subfolder="speech_tokenizer"
+    def speech_tokenizer(self) -> TokenizersBackend:
+        return TokenizersBackend.from_pretrained(
+            self.model_id,
+            subfolder="speech_tokenizer",
+            revision=self.ctx.model_config.tokenizer_revision,
         )
 
     def get_feature_extractor(self) -> WhisperFeatureExtractor:
         return self.feature_extractor
 
-    def get_speech_tokenizer(self) -> PreTrainedTokenizerFast:
+    def get_speech_tokenizer(self) -> TokenizersBackend:
         return self.speech_tokenizer
 
     def get_data_parser(self):
@@ -629,6 +600,7 @@ class FunAudioChatDummyInputsBuilder(
         num_audios = int(mm_counts.get("audio", 0))
 
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
@@ -641,21 +613,32 @@ class FunAudioChatDummyInputsBuilder(
 class FunAudioChatMultiModalProcessor(
     BaseMultiModalProcessor[FunAudioChatProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         tokenizer = self.info.get_tokenizer()
-        input_ids = torch.tensor([tokenizer.encode(prompt, **tok_kwargs)])
+        input_ids = torch.tensor([tokenizer.encode(prompt_text)])
 
         audios = mm_data.get("audios", [])
         if not audios:
-            return BatchFeature({"input_ids": input_ids})
+            processed_data = BatchFeature({"input_ids": input_ids})
+            processed_data.update(passthrough_data)
+            return processed_data
+        assert isinstance(audios, Sequence)
 
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
 
@@ -706,16 +689,9 @@ class FunAudioChatMultiModalProcessor(
             "feature_exist_mask": torch.ones((len(wavs),), dtype=torch.bool),
         }
 
-        return BatchFeature({"input_ids": input_ids, **mm_inputs})
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
+        processed_data = BatchFeature({"input_ids": input_ids, **mm_inputs})
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -724,7 +700,9 @@ class FunAudioChatMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "speech_ids": MultiModalFieldConfig.batched("audio"),
-            "speech_attention_mask": MultiModalFieldConfig.batched("audio"),
+            "speech_attention_mask": MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
             "input_features": MultiModalFieldConfig.batched("audio"),
             "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
             "feature_exist_mask": MultiModalFieldConfig.batched("audio"),
@@ -787,6 +765,8 @@ class FunAudioChatMultiModalProcessor(
     dummy_inputs=FunAudioChatDummyInputsBuilder,
 )
 class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"audio_invert_tower.": None})
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -996,5 +976,5 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_invert_tower."])
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

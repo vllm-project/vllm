@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # copied from : https://github.com/huggingface/transformers
 import ast
-from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from itertools import accumulate
@@ -191,87 +190,71 @@ class HCXVisionDummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionProcessingInfo
 
 
 class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
         for video_idx, video_arr in enumerate(mm_data.get("videos", [])):
             if video_arr.dtype != np.uint8:
                 mm_data["videos"][video_idx] = video_arr.astype(np.uint8)
 
-        processed_outputs = self.info.ctx.call_hf_processor(
-            hf_processor=self.info.get_hf_processor(**mm_kwargs),
+        images = mm_data.get("images")
+        videos = mm_data.get("videos")
+
+        # batchify input as a single item
+        processed_data = self.info.ctx.call_hf_processor(
+            hf_processor=self.info.get_hf_processor(**hf_processor_mm_kwargs),
             data=dict(
-                text=prompt,
-                images=None,
-                videos=None,
+                images=None if images is None else [images],
+                videos=None if videos is None else [videos],
             ),
-        )  # text-only
+        )
 
-        if len(mm_data) > 0:
-            images = mm_data.get("images")
-            videos = mm_data.get("videos")
+        for k, v in processed_data.items():
+            if isinstance(v, list) and len(v) > 0:
+                assert len(v) == 1
+                processed_data[k] = v[0]
 
-            # batchify input as a single item
-            _processed_outputs = self.info.ctx.call_hf_processor(
-                hf_processor=self.info.get_hf_processor(**mm_kwargs),
-                data=dict(
-                    text=None,
-                    images=None if images is None else [images],
-                    videos=None if videos is None else [videos],
-                ),
-            )  # mm-only
+        if images:
+            processed_data["image_sizes_images"] = torch.tensor(
+                processed_data["image_sizes_images"]
+            )
+            processed_data["vision_query_lengths_images"] = torch.tensor(
+                processed_data["vision_query_lengths_images"]
+            )
 
-            for k, v in _processed_outputs.items():
-                if isinstance(v, list) and len(v) > 0:
-                    assert len(v) == 1
-                    _processed_outputs[k] = v[0]
-
-            if images:
-                _processed_outputs["image_sizes_images"] = torch.tensor(
-                    _processed_outputs["image_sizes_images"]
-                )
-                _processed_outputs["vision_query_lengths_images"] = torch.tensor(
-                    _processed_outputs["vision_query_lengths_images"]
-                )
-
-            if videos:
-                _idx_per_video = [
-                    0,
-                    *accumulate(
-                        get_num_combined_frames(len(video)) for video in videos
-                    ),
+        if videos:
+            _idx_per_video = [
+                0,
+                *accumulate(get_num_combined_frames(len(video)) for video in videos),
+            ]
+            processed_data["pixel_values_videos"] = [
+                processed_data["pixel_values_videos"][
+                    _idx_per_video[i] : _idx_per_video[i + 1]
                 ]
-                _processed_outputs["pixel_values_videos"] = [
-                    _processed_outputs["pixel_values_videos"][
+                for i in range(len(videos))
+            ]
+            processed_data["vision_query_lengths_videos"] = [
+                torch.tensor(
+                    processed_data["vision_query_lengths_videos"][
                         _idx_per_video[i] : _idx_per_video[i + 1]
                     ]
-                    for i in range(len(videos))
-                ]
-                _processed_outputs["vision_query_lengths_videos"] = [
-                    torch.tensor(
-                        _processed_outputs["vision_query_lengths_videos"][
-                            _idx_per_video[i] : _idx_per_video[i + 1]
-                        ]
-                    )
-                    for i in range(len(videos))
-                ]
+                )
+                for i in range(len(videos))
+            ]
 
-            processed_outputs.update(_processed_outputs)
+        processed_data.update(passthrough_data)
 
-        return processed_outputs
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -325,10 +308,14 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
     ) -> Mapping[str, MultiModalFieldConfig]:
         fields = dict(
             pixel_values_images=MultiModalFieldConfig.batched("image"),
-            image_sizes_images=MultiModalFieldConfig.batched("image"),
-            vision_query_lengths_images=MultiModalFieldConfig.batched("image"),
+            image_sizes_images=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            vision_query_lengths_images=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             pixel_values_videos=MultiModalFieldConfig.batched("video"),
-            vision_query_lengths_videos=MultiModalFieldConfig.batched("video"),
+            vision_query_lengths_videos=MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            ),
         )
 
         return fields
@@ -890,37 +877,6 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             torch.cat(video_features[idxs_per_video[i] : idxs_per_video[i + 1]])
             for i in range(len(feats_per_video))
         )
-
-    def _prepare_multimodal_kwargs(self, **kwargs: object):
-        output = defaultdict(list)
-        for k, v in kwargs.items():
-            if len(v) < 1 or len(v[0]) < 1:
-                continue  # if empty batch of empty sample
-
-            new_k, is_video = k, False
-            if not k.endswith("_images") and not k.endswith("_videos"):
-                pass
-            else:
-                new_k, is_video = k.split("_")[:-1], k.split("_")[-1]
-                new_k = "_".join(new_k)
-                is_video = is_video == "videos"
-
-            for _sample_idx, _v in enumerate(v):  # batch -> sample
-                if new_k not in ["pixel_values"]:
-                    if len(output[new_k]) < _sample_idx + 1:
-                        output[new_k].append(list())
-                    _v = _v.detach().cpu().numpy().tolist()
-                    output[new_k][_sample_idx] += _v
-                elif isinstance(_v, torch.Tensor):
-                    if len(output[new_k]) < _sample_idx + 1:
-                        output[new_k].append(list())
-                        output["is_videos"].append(list())
-                    _v = list(torch.unbind(_v, dim=0))
-                    output[new_k][_sample_idx] += _v
-                    output["is_videos"][_sample_idx] += [
-                        is_video,
-                    ] * len(_v)
-        return dict(output)
 
     def compute_logits(
         self,

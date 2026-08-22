@@ -20,12 +20,12 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .vision import (
     is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
@@ -38,9 +38,10 @@ class Siglip2VisionEmbeddings(nn.Module):
         self.config = config
         self.embed_dim = config.hidden_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Linear(
-            in_features=config.num_channels * self.patch_size * self.patch_size,
-            out_features=self.embed_dim,
+        self.patch_embedding = ReplicatedLinear(
+            input_size=config.num_channels * self.patch_size * self.patch_size,
+            output_size=self.embed_dim,
+            return_bias=False,
         )
         self.num_patches = config.num_patches
         self.position_embedding_size = int(self.num_patches**0.5)
@@ -458,6 +459,14 @@ class Siglip2VisionTransformer(nn.Module):
 
 
 class Siglip2Model(torch.nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: Siglip2VisionConfig,
@@ -475,6 +484,10 @@ class Siglip2Model(torch.nn.Module):
             require_post_norm=require_post_norm,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
+        if self.vision_model.post_layernorm is None:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix={"vision_model.post_layernorm.": None}
+            )
 
     def forward(
         self,
@@ -501,42 +514,18 @@ class Siglip2Model(torch.nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loader = AutoWeightsLoader(self)
+
+        # Drop layers omitted by num_hidden_layers_override.
         layer_count = len(self.vision_model.encoder.layers)
 
-        for name, loaded_weight in weights:
-            # post_layernorm is optional in Siglip2Model
-            if (
-                name.startswith("vision_model.post_layernorm")
-                and self.vision_model.post_layernorm is None
-            ):
-                continue
-
-            # omit layers when num_hidden_layers_override is set
-            if name.startswith("vision_model.encoder.layers"):
-                layer_idx = int(name.split(".")[3])
-                if layer_idx >= layer_count:
+        def _filter(ws):
+            for n, w in ws:
+                if (
+                    n.startswith("vision_model.encoder.layers.")
+                    and int(n.split(".")[3]) >= layer_count
+                ):
                     continue
+                yield n, w
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)

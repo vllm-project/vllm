@@ -20,7 +20,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.models.intern_vit import (
     InternVisionModel,
 )
@@ -59,7 +59,12 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 
 class InternVLImagePixelInputs(TensorSchema):
@@ -215,29 +220,21 @@ class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
     """Basic image-only MultiModalProcessor for InternVL-style models."""
 
-    def _call_hf_processor(
+    def _postprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token_id = hf_processor.ctx_image_token_id
 
         # Since there may be extra tokens in the feature placeholders,
         # we need to pass the image token ID to the model to select the
         # tokens to merge from the vision encoder outputs
-        processed_outputs["image_token_id"] = torch.tensor(image_token_id)
+        processed_data["image_token_id"] = torch.tensor(image_token_id)
 
-        return processed_outputs
+        return processed_data
 
     def _get_image_fields_config(self, hf_inputs: BatchFeature):
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
@@ -452,22 +449,23 @@ class InternVLMultiModalProcessor(
 ):
     """InternVL MultiModalProcessor extended for video support"""
 
-    def _call_hf_processor(
+    def _postprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt, mm_data, mm_kwargs, tok_kwargs
+        processed_data = super()._postprocess_hf_mm_data(
+            mm_data,
+            hf_processor_mm_kwargs,
+            processed_data,
         )
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         if (video_token_id := hf_processor.ctx_video_token_id) is not None:
-            processed_outputs["video_token_id"] = torch.tensor(video_token_id)
+            processed_data["video_token_id"] = torch.tensor(video_token_id)
 
-        return processed_outputs
+        return processed_data
 
     def _get_video_fields_config(self, hf_inputs: BatchFeature):
         video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
@@ -478,7 +476,9 @@ class InternVLMultiModalProcessor(
                 "video", video_num_patches
             ),
             video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-            video_token_id=MultiModalFieldConfig.shared("video", num_videos),
+            video_token_id=MultiModalFieldConfig.shared(
+                "video", num_videos, keep_on_cpu=True
+            ),
         )
 
     def _get_mm_fields_config(
@@ -551,6 +551,26 @@ class InternVLChatModel(
     SupportsEncoderCudaGraph,
 ):
     supports_encoder_tp_data = True
+    supports_tower_connector_lora = True
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix=dict.fromkeys(
+            [
+                "action_embed",
+                "temporal_embed",
+                "track_embed",
+                "track_embed_decoder",
+                "box_token",
+                "cg_criterion",
+                "cg_model",
+                "loc_encoder",
+                "loc_decoder",
+                "sam",
+                "temporal_token",
+                "track_token",
+            ]
+        )
+    )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -608,7 +628,7 @@ class InternVLChatModel(
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
-        if isinstance(quant_config, AWQConfig):
+        if isinstance(quant_config, AutoAWQConfig):
             text_config = config.text_config
             llm_quant_config = getattr(text_config, "quantization_config", None)
             if (not quant_config.modules_to_not_convert) and (
@@ -863,23 +883,8 @@ class InternVLChatModel(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
-        skip_prefixes = [
-            "action_embed",
-            "temporal_embed",
-            "track_embed",
-            "track_embed_decoder",
-            "box_token",
-            "cg_criterion",
-            "cg_model",
-            "loc_encoder",
-            "loc_decoder",
-            "sam",
-            "temporal_token",
-            "track_token",
-        ]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -1004,6 +1009,7 @@ class InternVLChatModel(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1026,6 +1032,7 @@ class InternVLChatModel(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
@@ -1042,6 +1049,7 @@ class InternVLChatModel(
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         # The graph is always captured with pixel_values_flat as the input
         # buffer. During video replay the manager copies video tiles into
@@ -1054,6 +1062,7 @@ class InternVLChatModel(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         if self.get_input_modality(mm_kwargs) == "image":
             pixel_values = mm_kwargs["pixel_values_flat"]

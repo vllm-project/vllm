@@ -14,6 +14,7 @@ import torch
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 
 if HAS_TRITON:
@@ -83,9 +84,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.is_prefill = mapping.is_prefill
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
-        # Prepare cuda kernel metadata tensors
-        self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
-        self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+        # TODO avoid gpu<->cpu sync here
+        with gpu_sync_allowed():
+            # Prepare cuda kernel metadata tensors
+            self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
+            self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
     def add_shrink(
         self,
@@ -446,11 +449,17 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             _,
             _,
             lora_ids,
-            _,
+            no_lora_flag,
             num_active_loras,
         ) = self.token_mapping_meta.meta_args(
             x.size(0), self.lora_config.specialize_active_lora
         )
+
+        assert no_lora_flag.numel() == 1
+        if no_lora_flag.item():
+            # None of the inputs require LoRA.
+            return
+
         if token_lora_mapping is None:
             token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(

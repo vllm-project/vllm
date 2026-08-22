@@ -237,7 +237,11 @@ class ModernBertEncoderLayer(nn.Module):
 @default_pooling_type(seq_pooling_type="CLS")
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"layers.": "encoder_layer.layers."}
+        orig_to_new_prefix={
+            "model.layers.": "encoder_layer.layers.",
+            "layers.": "encoder_layer.layers.",
+            "model.": "",
+        }
     )
 
     def __init__(
@@ -265,6 +269,8 @@ class ModernBertModel(nn.Module):
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if name.endswith(".bias") and name not in params_dict:
+                continue
+            if name not in params_dict:
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -428,6 +434,8 @@ class ModernBertPredictionHead(nn.Module):
 class ModernBertForTokenClassification(nn.Module):
     is_pooling_model = True
 
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"drop": None})
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -450,8 +458,8 @@ class ModernBertForTokenClassification(nn.Module):
         return self.model.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self, skip_prefixes=["drop"])
-        loaded_params = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return loaded_params
 
     def forward(

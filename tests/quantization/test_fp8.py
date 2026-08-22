@@ -14,12 +14,25 @@ import torch
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.config.model import ModelConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    MarlinFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.attention.attention import (
+    set_default_quant_scales,
+)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
     Fp8LinearMethod,
     Fp8MoEMethod,
+)
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PerTensorOnlineLinearMethod,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    process_fp8_input_tensor_strategy_moe,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -37,13 +50,23 @@ MODELS = [
 ]
 
 
+def test_static_fp8_moe_input_scales_remain_scalar() -> None:
+    a1_scale, a2_scale = process_fp8_input_tensor_strategy_moe(
+        torch.tensor([0.25, 0.5]),
+        torch.tensor([0.75, 0.6]),
+        enable_eplb=False,
+    )
+
+    assert a1_scale.ndim == a2_scale.ndim == 0
+
+
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
 @pytest.mark.parametrize("model_id", MODELS)
 @pytest.mark.parametrize(
-    "force_marlin", [False] if current_platform.is_rocm() else [False, True]
+    "force_marlin", [True, False] if current_platform.is_cuda() else [False]
 )
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
@@ -54,74 +77,12 @@ def test_model_load_and_run(
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
+    kwargs = {}
     if force_marlin:
-        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+        kwargs["linear_backend"] = "marlin"
+        kwargs["moe_backend"] = "marlin"
 
-    with vllm_runner(model_id, enforce_eager=True) as llm:
-        # note: this does not test accuracy, just that we can run through
-        # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        print(outputs[0][1])
-
-
-KV_CACHE_MODELS = [
-    # AutoFP8 format using separate .k_scale and .v_scale
-    # The original checkpoint below was removed from the Hub. To unblock CI and
-    # until a small replacement with split K/V scales is found, skip this case.
-    # See PR #27717 for context.
-    pytest.param(
-        "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
-        marks=pytest.mark.skip(
-            reason=(
-                "Checkpoint removed from HF; temporarily disabling this "
-                "AutoFP8 split K/V case (PR #27717)."
-            )
-        ),
-    ),
-]
-
-
-@pytest.mark.skipif(
-    not is_quant_method_supported("fp8"),
-    reason="FP8 is not supported on this GPU type.",
-)
-@pytest.mark.parametrize("model_id", KV_CACHE_MODELS)
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
-)
-def test_kv_cache_model_load_and_run(
-    vllm_runner, model_id: str, use_rocm_aiter: bool, monkeypatch
-):
-    if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
-    # `LLM.apply_model` requires pickling a function.
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    with vllm_runner(model_id, kv_cache_dtype="fp8", enforce_eager=True) as llm:
-
-        def check_model(model):
-            attn = model.model.layers[0].self_attn.attn
-
-            assert isinstance(attn.quant_method, Fp8KVCacheMethod)
-
-            if not current_platform.is_rocm():
-                # NOTE: This code path requires validation on Non-CUDA platform
-                # NOTE: it is valid for scales to be 1.0 (default value), but
-                # we know these checkpoints have scales < 1.0
-                assert 0.0 < attn._k_scale < 1.0
-                assert 0.0 < attn._v_scale < 1.0
-            else:
-                # NOTE: This code path is for ROCm platform
-                # NOTE: it is valid for scales to be 1.0 (default value), but
-                # we know these checkpoints have scales < 1.0
-                # However on ROCm platform, the _k_scale and _v_scale will be
-                # scaled by a factor of 2 as described in
-                # vllm/model_executor/layers/quantization/kv_cache.py
-                assert 0.0 < attn._k_scale < (1.0 * 2.0)
-                assert 0.0 < attn._v_scale < (1.0 * 2.0)
-
-        llm.apply_model(check_model)
-
+    with vllm_runner(model_id, enforce_eager=True, **kwargs) as llm:
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
@@ -134,7 +95,7 @@ def test_kv_cache_model_load_and_run(
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize(
-    "force_marlin", [False] if current_platform.is_rocm() else [False, True]
+    "force_marlin", [True, False] if current_platform.is_cuda() else [False]
 )
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
@@ -152,33 +113,48 @@ def test_online_quantization(
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
+    kwargs = {}
     if force_marlin:
-        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+        kwargs["linear_backend"] = "marlin"
+        kwargs["moe_backend"] = "marlin"
+
+    model_dtype = "auto"
+    if kv_cache_dtype == "fp8" and current_platform.is_device_capability_family(90):
+        # FA3 requires BF16 output when the query input is FP8.
+        model_dtype = "bfloat16"
 
     with vllm_runner(
         "facebook/opt-125m",
         quantization="fp8",
+        dtype=model_dtype,
         enforce_eager=True,
         kv_cache_dtype=kv_cache_dtype,
+        **kwargs,
     ) as llm:
 
         def check_model(model):
             fc1 = model.model.decoder.layers[0].fc1
-            assert isinstance(fc1.quant_method, Fp8LinearMethod)
+            assert isinstance(fc1.quant_method, Fp8PerTensorOnlineLinearMethod)
             if kv_cache_dtype == "fp8":
                 attn = model.model.decoder.layers[0].self_attn.attn
                 assert isinstance(attn.quant_method, Fp8KVCacheMethod)
                 assert attn._k_scale == 1.0
                 assert attn._v_scale == 1.0
 
-            if current_platform.is_cuda():
+            if current_platform.is_cuda() or current_platform.is_xpu():
                 if current_platform.supports_fp8() and not force_marlin:
                     # For GPUs with hardware support, we keep weights in fp8
                     assert fc1.weight.dtype == torch.float8_e4m3fn
+                    assert not isinstance(
+                        fc1.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
+                    )
                 else:
                     # For GPUs without hardware support, we pack the fp8 weights
                     # for weight-only quantization using Marlin kernels
                     assert fc1.weight.dtype == torch.int32
+                    assert isinstance(
+                        fc1.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
+                    )
             elif current_platform.is_rocm():
                 if current_platform.supports_fp8() and not force_marlin:
                     # For GPUs with hardware support, we keep weights in fp8
@@ -382,7 +358,7 @@ def test_scaled_fp8_quant(dtype) -> None:
 @pytest.mark.parametrize("method_cls", [Fp8LinearMethod, Fp8MoEMethod])
 # FP8 weight reloading does not support online quantization
 @pytest.mark.parametrize("is_checkpoint_fp8_serialized", [True])  # skip False
-@pytest.mark.parametrize("weight_block_size", [None, [1, 1]])
+@pytest.mark.parametrize("weight_block_size", [None, [128, 128]])
 # any postprocessing that is applied to the weights such as padding and repacking
 # (excluding device sharding) must also be applied to the reloaded weights
 #
@@ -413,6 +389,8 @@ def test_fp8_reloading(
 
     # Set model config as model_config.dtype is required in Fp8LinearMethod.
     default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.kernel_config.moe_backend = "triton"
+    layer_size = 128 if weight_block_size is not None else 1
     with torch.device(f"{DEVICE_TYPE}:0"):
         config = Fp8Config(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
@@ -420,33 +398,33 @@ def test_fp8_reloading(
         )
 
         if method_cls is Fp8LinearMethod:
-            layer = torch.nn.Linear(1, 1)
+            layer = torch.nn.Linear(layer_size, layer_size)
             method = method_cls(config)
             method.create_weights(
                 layer=layer,
-                input_size_per_partition=1,
-                output_partition_sizes=[1],
-                input_size=1,
-                output_size=1,
+                input_size_per_partition=layer_size,
+                output_partition_sizes=[layer_size],
+                input_size=layer_size,
+                output_size=layer_size,
                 params_dtype=torch.bfloat16,
                 weight_loader=default_weight_loader,
             )
             method.use_marlin = use_marlin
 
         else:
-            layer = FusedMoE(
+            layer = FusedMoEFactory(
                 num_experts=1,
                 top_k=1,
-                hidden_size=1,
-                intermediate_size=1,
+                hidden_size=layer_size,
+                intermediate_size=layer_size,
             )
             layer = layer.routed_experts
             method = method_cls(config, layer)
             method.create_weights(
                 layer=layer,
                 num_experts=1,
-                hidden_size=1,
-                intermediate_size_per_partition=1,
+                hidden_size=layer_size,
+                intermediate_size_per_partition=layer_size,
                 params_dtype=torch.bfloat16,
                 weight_loader=default_weight_loader,
             )
@@ -472,6 +450,31 @@ def test_fp8_reloading(
         weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)
+
+
+def test_kv_cache_scale_sync_to_host_copies():
+    """Test device-to-host sync of the k/v quantization scales, for both the
+    checkpoint-load and runtime-calc paths that produce them.
+    """
+    layer = torch.nn.Module()
+    set_default_quant_scales(layer, register_buffer=True)
+    layer.kv_cache_dtype = "fp8"
+
+    method = BaseKVCacheMethod(quant_config=None)
+    method.create_weights(layer)
+    # 0.3 stays != 1.0 even after the fp8_fnuz x2 rescale.
+    checkpoint_scale = torch.tensor(0.3, dtype=torch.float32)
+    layer.k_scale.weight_loader(layer.k_scale, checkpoint_scale)
+    layer.v_scale.weight_loader(layer.v_scale, checkpoint_scale)
+    method.process_weights_after_loading(layer)
+
+    assert layer._k_scale_float != 1.0
+    assert layer._v_scale_float != 1.0
+    # Host copy must mirror both the float and the device scale tensor.
+    assert layer._k_scale_cpu.item() == pytest.approx(layer._k_scale_float)
+    assert layer._v_scale_cpu.item() == pytest.approx(layer._v_scale_float)
+    assert layer._k_scale_cpu.item() == pytest.approx(layer._k_scale.item())
+    assert layer._v_scale_cpu.item() == pytest.approx(layer._v_scale.item())
 
 
 @pytest.mark.skipif(

@@ -5,7 +5,6 @@ from abc import abstractmethod
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     RoutedExperts,
@@ -41,7 +40,7 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
                 device="meta",
                 dtype=params_dtype,
@@ -70,7 +69,7 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     device="meta",
                     dtype=layer.orig_dtype,
                 ),
@@ -96,18 +95,39 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
 
         initialize_online_processing(layer)
 
+    def _zero_padding(self, layer: torch.nn.Module) -> None:
+        hidden_size = layer.moe_config.hidden_dim_unpadded
+        intermediate_size = layer.moe_config.intermediate_size_per_partition_unpadded
+
+        w13_shard = layer.w13_weight.shape[1] // self.moe.w13_num_shards
+        if w13_shard > intermediate_size:
+            for shard in range(self.moe.w13_num_shards):
+                start = shard * w13_shard + intermediate_size
+                layer.w13_weight[:, start : (shard + 1) * w13_shard, :] = 0
+        if layer.w13_weight.shape[2] > hidden_size:
+            layer.w13_weight[:, :, hidden_size:] = 0
+
+        if layer.w2_weight.shape[1] > hidden_size:
+            layer.w2_weight[:, hidden_size:, :] = 0
+        if layer.w2_weight.shape[2] > intermediate_size:
+            layer.w2_weight[:, :, intermediate_size:] = 0
+
+        if getattr(layer, "w13_bias", None) is not None:
+            w13_bias_shard = layer.w13_bias.shape[1] // self.moe.w13_num_shards
+            if w13_bias_shard > intermediate_size:
+                for shard in range(self.moe.w13_num_shards):
+                    start = shard * w13_bias_shard + intermediate_size
+                    layer.w13_bias[:, start : (shard + 1) * w13_bias_shard] = 0
+
+        if (
+            getattr(layer, "w2_bias", None) is not None
+            and layer.w2_bias.shape[1] > hidden_size
+        ):
+            layer.w2_bias[:, hidden_size:] = 0
+
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
-        )
 
     @property
     def supports_eplb(self) -> bool:

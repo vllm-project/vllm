@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 from vllm.config import set_current_vllm_config
@@ -46,7 +48,14 @@ def _make_kv_cache_config() -> KVCacheConfig:
     spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     return KVCacheConfig(
         num_blocks=4,
-        kv_cache_tensors=[KVCacheTensor(size=8192, shared_by=["layer0"])],
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8192,
+                layers=["layer0"],
+                layer_stride=8192,
+                block_stride=2048,
+            )
+        ],
         kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
     )
 
@@ -208,64 +217,6 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
     assert kv_events.get_all_events() == [event]
 
 
-def test_prefer_cross_layer_blocks_from_config():
-    # Default: disabled
-    vllm_config = _make_vllm_config()
-    kv_cache_config = _make_kv_cache_config()
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
-        )
-    assert connector.prefer_cross_layer_blocks is False
-
-    # Enabled via config
-    vllm_config_enabled = create_vllm_config(
-        kv_connector="MooncakeStoreConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"enable_cross_layers_blocks": "true"},
-    )
-    with (
-        set_current_vllm_config(vllm_config_enabled),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        connector_enabled = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config_enabled, KVConnectorRole.SCHEDULER, kv_cache_config
-        )
-    assert connector_enabled.prefer_cross_layer_blocks is True
-
-
-def test_register_cross_layers_kv_cache_delegates_to_worker():
-    vllm_config = _make_vllm_config()
-    kv_cache_config = _make_kv_cache_config()
-
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreWorker"
-        ) as mock_worker_cls,
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.WORKER, kv_cache_config
-        )
-
-    fake_tensor = MagicMock()
-    fake_backend = MagicMock()
-    connector.register_cross_layers_kv_cache(fake_tensor, fake_backend)
-
-    worker = mock_worker_cls.return_value
-    worker.register_cross_layers_kv_caches.assert_called_once_with(fake_tensor)
-
-
 def test_update_connector_output_and_take_events():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
@@ -406,7 +357,9 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
     fake_socket = mock_make_socket.return_value
     fake_socket.recv.return_value = (5).to_bytes(4, "big")
 
-    assert client.lookup(token_len=128, block_hashes=[]) == 5
+    # Blocking lookup (non_block defaults to False) runs on the executor and
+    # returns the resolved hit length.
+    assert client.lookup("req0", num_tokens=128, block_hashes=[]) == 5
 
     sent_frames = fake_socket.send_multipart.call_args[0][0]
     assert sent_frames[0] == protocol.LOOKUP_MSG
@@ -433,6 +386,127 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     # NACK path: server returns RESP_ERR -> client returns False.
     fake_socket.recv.return_value = protocol.RESP_ERR
     assert client.reset() is False
+
+
+def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
+    """Drive non-blocking lookup until the executor completes it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = client.lookup(req_id, num_tokens, list(block_hashes), non_block=True)
+        if result is not None:
+            return result
+        time.sleep(0.005)
+    return None
+
+
+def _gated_recv(gate: threading.Event, value: int):
+    """Mock recv side-effect that blocks until ``gate`` is set, so the
+    executor's lookup can be held pending deterministically."""
+
+    def recv():
+        gate.wait()
+        return value.to_bytes(4, "big")
+
+    return recv
+
+
+def test_lookup_key_client_non_block_lookup_async():
+    """Non-blocking lookup defers to the executor: None first, hit once the
+    Future resolves."""
+    vllm_config = _make_vllm_config()
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "worker.make_zmq_socket"
+    ) as mock_make_socket:
+        client = worker.LookupKeyClient(vllm_config)
+
+    fake_socket = mock_make_socket.return_value
+    # Hold the executor's lookup pending until we release the gate.
+    gate = threading.Event()
+    fake_socket.recv.side_effect = _gated_recv(gate, 7)
+
+    # First query submits the lookup and returns None while it is in flight.
+    assert client.lookup("req1", 128, [], non_block=True) is None
+    # Release the executor; a later poll returns the hit length.
+    gate.set()
+    assert _poll_lookup(client, "req1") == 7
+    # Future is consumed (popped) on read.
+    assert "req1" not in client.futures
+
+
+def test_lookup_key_client_discard_clears_state():
+    """discard() drops a completed lookup Future so it is not served stale."""
+    vllm_config = _make_vllm_config()
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "worker.make_zmq_socket"
+    ) as mock_make_socket:
+        client = worker.LookupKeyClient(vllm_config)
+
+    fake_socket = mock_make_socket.return_value
+    gate = threading.Event()
+    fake_socket.recv.side_effect = _gated_recv(gate, 9)
+
+    # Submit while gated so the call returns None and the Future stays in
+    # `futures` (unconsumed) once it resolves.
+    assert client.lookup("req2", 128, [], non_block=True) is None
+    gate.set()
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if client.futures["req2"].done():
+            break
+        time.sleep(0.005)
+    # discard() drops the completed result before any lookup consumes it.
+    client.discard("req2")
+    assert "req2" not in client.futures
+    # A fresh query re-submits rather than returning a stale value: hold the
+    # gate so the resubmitted lookup stays in flight.
+    gate.clear()
+    assert client.lookup("req2", 128, [], non_block=True) is None
+    gate.set()  # release the executor so the worker thread can drain
+
+
+def test_get_num_new_matched_tokens_async_defers_then_reports():
+    """Async lookup returns (None, False) until ready, then the hit count."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"lookup_async": True},
+    )
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "scheduler.LookupKeyClient"
+        ) as mock_client_cls,
+    ):
+        sched = scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
+
+    assert sched.lookup_async is True
+    mock_client = mock_client_cls.return_value
+
+    block_size = sched._block_size
+    request = MagicMock()
+    request.request_id = "r1"
+    request.num_tokens = 4 * block_size
+    request.block_hashes = []
+
+    # Lookup not ready -> defer.
+    mock_client.lookup.return_value = None
+    assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+    assert "r1" not in sched.load_specs
+
+    # Lookup ready with a hit -> report need_to_allocate + async-load flag.
+    hit = 3 * block_size
+    mock_client.lookup.return_value = hit
+    need, load_async = sched.get_num_new_matched_tokens(request, 0)
+    assert need == hit
+    assert load_async == sched.load_async
+    assert sched.load_specs["r1"].kvpool_cached_tokens == hit
 
 
 def test_protocol_tags_are_distinct_and_non_empty():

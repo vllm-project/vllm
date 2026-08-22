@@ -1,6 +1,9 @@
-use vllm_tool_parser::Result;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use super::{ToolParser, ToolParserFactory, ToolParserOutput, names};
+use vllm_parser::tool::{Result, ToolParserOutput};
+
+use super::{ToolParser, ToolParserFactory, names};
 use crate::Error;
 use crate::request::ChatTool;
 
@@ -78,21 +81,44 @@ fn factory_creates_registered_parser_for_model() {
 }
 
 #[test]
+fn factory_distinguishes_qwen_tool_formats() {
+    let factory = ToolParserFactory::new();
+
+    for (model, expected) in [
+        ("Qwen/Qwen3.5-0.8B", Some(names::QWEN3_CODER)),
+        ("Qwen/Qwen3-0.6B", Some(names::QWEN3_XML)),
+        ("Qwen/Qwen3-Coder-30B", Some(names::QWEN3_CODER)),
+        ("Qwen/QwQ-32B", Some(names::HERMES)),
+        ("Qwen/Qwen2.5-0.5B-Instruct", Some(names::HERMES)),
+        ("Qwen/Qwen2-1.5B-Instruct", None),
+    ] {
+        assert_eq!(factory.resolve_name_for_model(model), expected, "{model}");
+    }
+}
+
+#[test]
+fn factory_parses_qwen2_5_coder_template_with_hermes() {
+    let factory = ToolParserFactory::new();
+    let tool_call = r#"<tool_call>
+{"name":"get_weather","arguments":{"location":"Tokyo"}}
+</tool_call>"#;
+
+    let mut parser = factory.create_for_model("Qwen/Qwen2.5-Coder-7B-Instruct", &[]).unwrap();
+    let mut output = ToolParserOutput::default();
+    parser.parse_into(tool_call, &mut output).unwrap();
+    output.append(parser.finish().unwrap());
+    let output = output.coalesce();
+
+    assert!(output.normal_text().is_empty());
+    assert_eq!(output.calls().len(), 1);
+    assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(output.calls()[0].arguments, r#"{"location":"Tokyo"}"#);
+}
+
+#[test]
 fn factory_new_resolves_default_patterns() {
     let factory = ToolParserFactory::new();
 
-    assert_eq!(
-        factory.resolve_name_for_model("Qwen/Qwen3.5-0.8B"),
-        Some(names::QWEN3_CODER)
-    );
-    assert_eq!(
-        factory.resolve_name_for_model("Qwen/Qwen3-0.6B"),
-        Some(names::QWEN3_XML)
-    );
-    assert_eq!(
-        factory.resolve_name_for_model("Qwen/Qwen3-Coder-30B"),
-        Some(names::QWEN3_CODER)
-    );
     assert_eq!(
         factory.resolve_name_for_model("meta-llama-4-maverick"),
         Some(names::LLAMA4_JSON)
@@ -158,12 +184,24 @@ fn factory_new_resolves_default_patterns() {
         Some(names::HY_V3)
     );
     assert_eq!(
+        factory.resolve_name_for_model("MiniMax/MiniMax-M3-Text"),
+        Some(names::MINIMAX_M3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("org/mm-m3-base"),
+        Some(names::MINIMAX_M3)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("MiniMax/MiniMax-M2-01"),
         Some(names::MINIMAX_M2)
     );
     assert_eq!(
         factory.resolve_name_for_model("org/mm-m2-base"),
         Some(names::MINIMAX_M2)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ByteDance-Seed/Seed-OSS-36B-Instruct"),
+        Some(names::SEED_OSS)
     );
 
     // InternLM2 positive: both dashed and underscored versioned names route.

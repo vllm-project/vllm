@@ -51,6 +51,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import (
@@ -102,65 +103,6 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
-
-    def _resize_output_size(
-        self,
-        *,
-        height: int,
-        width: int,
-        max_len: int | None = None,
-        min_len: int = 1,
-        max_size: int | None = None,
-    ) -> tuple[int, int]:
-        # Set default value for max_len if not provided
-        max_len = max(height, width) if max_len is None else max_len
-        aspect_ratio = width / height
-
-        # Handle the maximum size constraint
-        if max_size is not None:
-            max_len = min(max_len, max_size)
-
-        # Adjust dimensions according to the aspect ratio
-        if width >= height:
-            width = max_len
-            height = int(width / aspect_ratio)
-        else:
-            height = max_len
-            width = int(height * aspect_ratio)
-
-        # Ensure both width and height are even (if needed)
-        height += height % 2
-        width += width % 2
-
-        # Ensure dimensions are not smaller than the minimum length
-        height = max(height, min_len)
-        width = max(width, min_len)
-
-        return height, width
-
-    def _get_resize_output_image_size(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        resolution_max_side: int,
-    ) -> tuple[int, int]:
-        hf_processor = self.get_hf_processor()
-        image_processor: Idefics3ImageProcessor = hf_processor.image_processor
-        max_image_size = image_processor.size["longest_edge"]
-        if resolution_max_side > max_image_size:
-            raise ValueError(
-                "`resolution_max_side` cannot be larger than `max_image_size`"
-            )
-
-        height, width = image_height, image_width
-
-        # Find the output size, when rescaling the longest edge to max_len and
-        # preserving the aspect ratio
-        height, width = self._resize_output_size(
-            height=height, width=width, max_len=resolution_max_side
-        )
-        return height, width
 
     def _get_image_feature_grid_size(
         self,
@@ -297,50 +239,58 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo])
 
 
 class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo]):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Text-only input not supported in composite processor
-        if not (images := mm_data.get("images", [])):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        mm_kwargs = {"input_data_format": "channels_last", **mm_kwargs}
-        processed_outputs = super()._call_hf_processor(
-            prompt,
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        image_processor = self.info.get_hf_processor().image_processor
+        if getattr(image_processor, "backend", "pil") == "pil":
+            hf_processor_mm_kwargs = {
+                "input_data_format": "channels_last",
+                **hf_processor_mm_kwargs,
+            }
+
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
             mm_data,
-            mm_kwargs,
-            tok_kwargs,
+            hf_processor_mm_kwargs,
         )
 
+        images = mm_data.get("images", [])
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
         parsed_images = mm_items.get_items("image", ImageProcessorItems)
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
         ]
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         num_patches = [
             self.info.get_num_patches(
                 image_width=size.width,
                 image_height=size.height,
                 processor=hf_processor,
-                mm_kwargs=mm_kwargs,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
             for size in image_sizes
         ]
-        processed_outputs["num_patches"] = torch.tensor(num_patches)
+        processed_data["num_patches"] = torch.tensor(num_patches)
 
         # Remove the extra batch dimension
-        processed_outputs["pixel_values"].squeeze_(0)
-        processed_outputs["pixel_attention_mask"].squeeze_(0)
+        processed_data["pixel_values"].squeeze_(0)
+        processed_data["pixel_attention_mask"].squeeze_(0)
 
-        return processed_outputs
+        processed_data.update(passthrough_data)
+
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -499,11 +449,12 @@ class Idefics3Model(nn.Module):
         real_images_inds = (pixel_values == 0.0).sum(
             dim=(-1, -2, -3)
         ) != nb_values_per_image
-        pixel_values = pixel_values[real_images_inds].contiguous()
+        with gpu_sync_allowed():
+            pixel_values = pixel_values[real_images_inds].contiguous()
 
-        # Handle the vision attention mask
-        # Remove padding images from the mask
-        pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
+            # Handle the vision attention mask
+            # Remove padding images from the mask
+            pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
 
         patch_size = self.config.vision_config.patch_size
         patches_subgrid = pixel_attention_mask.unfold(
@@ -559,6 +510,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
         ],
     }
 
+    supports_tower_connector_lora = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -595,7 +548,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.text_config.tie_word_embeddings:
-            self.lm_head.weight = self.model.text_model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.text_model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> ImageInputs | None:
