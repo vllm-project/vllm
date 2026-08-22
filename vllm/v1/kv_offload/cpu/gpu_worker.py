@@ -73,6 +73,43 @@ class Transfer:
     batch_sizes: torch.Tensor
 
 
+def _assert_ptrs_within_tensor(
+    ptrs: np.ndarray,
+    tensor: torch.Tensor,
+    max_bytes_per_ptr: int,
+    what: str,
+) -> None:
+    """Verify computed device addresses fall inside ``tensor``'s allocation.
+
+    ``compute_sub_block_ptrs`` derives addresses from ``data_ptr()``,
+    ``stride(0)`` and ``shape[1]``. Those assume a flat, unpadded row layout.
+    A cache whose pages carry alignment padding (for example DeepSeek-V4 MLA,
+    which uses 576B/584B padded uint8 pages) breaks that assumption, and the
+    resulting addresses walk off the buffer. The copy kernel dereferences them
+    without a bounds check, so the failure surfaces as a CUDA illegal memory
+    access, or as silently corrupted KV.
+
+    One min/max over the pointer array per batch is negligible next to the
+    transfer itself, and turns an undiagnosable fault into an actionable error.
+    """
+    if ptrs.size == 0:
+        return
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size()
+    lo = int(ptrs.min())
+    hi = int(ptrs.max()) + max_bytes_per_ptr
+    if lo < base or hi > end:
+        raise ValueError(
+            f"KV offload computed out-of-bounds {what} addresses: "
+            f"[{lo:#x}, {hi:#x}) escapes tensor allocation "
+            f"[{base:#x}, {end:#x}) "
+            f"(shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+            f"stride0={tensor.stride(0)}). This usually means the KV cache "
+            f"layout is not the flat unpadded row layout this transfer path "
+            f"assumes, e.g. a paged layout with per-page alignment padding."
+        )
+
+
 def compute_sub_block_ptrs(
     block_ids: np.ndarray,
     blocks_per_chunk: int,
@@ -108,6 +145,7 @@ def compute_sub_block_ptrs(
     if blocks_per_chunk == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
         output[:] = base_ptr + block_ids.astype(np.uint64)[:num_sub_blocks] * row_stride
+        _assert_ptrs_within_tensor(output, tensor, row_stride, "block")
         return
 
     # Vectorized expansion for blocks_per_chunk > 1.
@@ -121,6 +159,7 @@ def compute_sub_block_ptrs(
     # Flatten and apply skip_count / truncation
     flat = all_ptrs.ravel()
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
+    _assert_ptrs_within_tensor(output, tensor, block_page_size, "sub-block")
 
 
 class CopyPlan(NamedTuple):
