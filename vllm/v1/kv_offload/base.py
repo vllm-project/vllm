@@ -267,6 +267,23 @@ class OffloadingManager(ABC):
         """
         return
 
+    def restore_order_after_transfer(
+        self,
+        key_groups: Sequence[Collection[OffloadKey]],
+        req_context: ReqContext,
+    ) -> None:
+        """Restore eviction order after a transfer changes block eligibility.
+
+        Each collection uses the same key ordering contract as ``touch``.
+        Managers whose eviction order is unaffected while blocks are
+        transfer-pinned may leave this as a no-op.
+
+        Args:
+            key_groups: Ordered key groups to restore.
+            req_context: Per-request context.
+        """
+        return
+
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Marks previous blocks that were prepared to load as done loading.

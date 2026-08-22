@@ -1666,6 +1666,7 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     # First store: fires when block 0 is fully populated.
     runner.run(decoded_tokens=[0, 0], expected_stored=(0, 1, 2))
     assert runner.manager.complete_store.call_count == 1
+    assert runner.manager.restore_order_after_transfer.call_count == 1
     first_call_keys = set(runner.manager.complete_store.call_args.args[0])
     assert len(first_call_keys) == 1
     runner.manager.complete_store.reset_mock()
@@ -1676,6 +1677,7 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
         expected_stored=(3, 4, 5),
     )
     assert runner.manager.complete_store.call_count == 1
+    assert runner.manager.restore_order_after_transfer.call_count == 1
     second_call_keys = set(runner.manager.complete_store.call_args.args[0])
     assert first_call_keys != second_call_keys
     runner.manager.complete_store.reset_mock()
@@ -1683,6 +1685,37 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     # Finish: no store pending -> no further call.
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     assert runner.manager.complete_store.call_count == 0
+
+
+def test_complete_load_restores_prefix_order(request_runner):
+    """The scheduler restores manager order after a CPU-to-GPU load."""
+    runner = request_runner(
+        blocks_per_chunk=1,
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    token_ids = [1] * 8
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.new_request(token_ids=token_ids)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1))
+
+    runner.scheduler.reset_prefix_cache()
+    runner.manager.lookup.return_value = LookupResult.HIT
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    runner.new_request(token_ids=token_ids)
+    runner.run(decoded_tokens=[], expected_loaded=(0, 1))
+
+    runner.manager.complete_load.assert_called_once()
+    runner.manager.restore_order_after_transfer.assert_called_once()
+    key_groups, req_context = runner.manager.restore_order_after_transfer.call_args.args
+    assert len(key_groups) == 1
+    assert len(key_groups[0]) == 2
+    assert req_context.req_id == str(runner.req_id)
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

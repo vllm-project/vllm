@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import chain, islice
 from typing import Any, NamedTuple
@@ -663,12 +663,15 @@ class OffloadingConnectorScheduler:
                 return idx + sliding_window_size if not defer_lookup else None
         return consecutive_hits if not defer_lookup else None
 
-    def _touch(self, req_status: RequestOffloadState):
+    def _get_touch_key_groups(
+        self, req_status: RequestOffloadState
+    ) -> tuple[Collection[OffloadKey], ...]:
+        key_groups: list[Collection[OffloadKey]] = []
         for group_config, group_state in zip(
             self.config.kv_group_configs, req_status.group_states
         ):
             if group_config.sliding_window_size_in_chunks is None:
-                self.manager.touch(group_state.offload_keys, req_status.req_context)
+                key_groups.append(group_state.offload_keys)
             else:
                 # Keep only chunks needed to hit the original request, plus
                 # decoded chunks.
@@ -677,12 +680,9 @@ class OffloadingConnectorScheduler:
                     group_state.num_hit_chunks
                     - group_config.sliding_window_size_in_chunks,
                 )
-                self.manager.touch(
-                    group_state.offload_keys[chunks_to_skip:],
-                    req_status.req_context,
-                )
+                key_groups.append(group_state.offload_keys[chunks_to_skip:])
         if req_status.partial_tail_boundary is not None:
-            self.manager.touch(
+            key_groups.append(
                 tuple(
                     self._make_boundary_key(
                         req_status.req,
@@ -690,9 +690,13 @@ class OffloadingConnectorScheduler:
                         req_status.partial_tail_boundary,
                     )
                     for group in self.config.kv_group_configs
-                ),
-                req_status.req_context,
+                )
             )
+        return tuple(key_groups)
+
+    def _touch(self, req_status: RequestOffloadState):
+        for keys in self._get_touch_key_groups(req_status):
+            self.manager.touch(keys, req_status.req_context)
 
     def _lookup_complete_chunks(self, req_status: RequestOffloadState) -> int | None:
         """
@@ -1568,6 +1572,10 @@ class OffloadingConnectorScheduler:
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._chunks_being_loaded:
                     self._chunks_being_loaded.difference_update(job_status.keys)
+            self.manager.restore_order_after_transfer(
+                self._get_touch_key_groups(req_status),
+                req_status.req_context,
+            )
             if self._block_id_to_pending_jobs:
                 # Sliding window blocks are tracked from store creation
                 # and must be cleaned up unconditionally.
