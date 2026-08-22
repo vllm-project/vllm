@@ -7,10 +7,12 @@ from typing import Any
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.minimax_m3_tool_parser import MinimaxM3ToolParser
 
@@ -22,6 +24,10 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 NS = "]<]minimax[>["
 EOS_ID = 99
+
+
+class MinimaxM3DelegatingParser(DelegatingParser):
+    tool_parser_cls = MinimaxM3ToolParser
 
 
 class FakeTokenizer:
@@ -237,6 +243,85 @@ def test_streaming_without_tool_call_emits_text(parser):
 
     assert _collect_content(results) == "plain response"
     assert _collect_tool_calls(results) == {}
+
+
+def test_streaming_flushes_partial_tool_start_as_text(parser):
+    partial_text = f"plain {NS}<tool_ca"
+
+    result = parser.extract_tool_calls(partial_text, request=None)
+    results = _feed(parser, [partial_text[:8], partial_text[8:]])
+    finish_delta = parser.finish_streaming()
+    if finish_delta is not None:
+        results.append(finish_delta)
+
+    assert not result.tools_called
+    assert result.content == partial_text
+    assert _collect_content(results) == partial_text
+    assert _collect_tool_calls(results) == {}
+
+
+def test_streaming_error_recovery_keeps_committed_tool_call_structured(parser):
+    first_invocation = build_order_invocation(1)
+    second_suffix = f'\n{NS}<invoke name="create_order">{NS}<user_id>2'
+    text = f"plain {NS}<tool_call>\n{first_invocation}{second_suffix}"
+
+    results = _feed(parser, [text[:8], text[8 : len(text) - 7], text[-7:]])
+    finish_delta = parser.finish_streaming()
+    if finish_delta is not None:
+        results.append(finish_delta)
+
+    tool_calls = _collect_tool_calls(results)
+    content = _collect_content(results)
+
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["name"] == "create_order"
+    assert json.loads(tool_calls[0]["arguments"]) == {"user_id": 1}
+    assert content == "plain " + second_suffix
+    assert first_invocation not in content
+
+
+def test_streaming_parse_error_emits_buffer_and_later_deltas(parser):
+    invalid = f"{NS}<tool_call>\n{NS}</user_id>"
+
+    results = _feed(parser, [invalid, " after error"])
+
+    assert _collect_content(results) == f"\n{NS}</user_id> after error"
+    assert _collect_tool_calls(results) == {}
+
+
+def test_streaming_parser_reuse_after_parse_error(parser):
+    invalid = f"{NS}<tool_call>\n{NS}</user_id>"
+
+    _feed(parser, [invalid, " after error"])
+    results = _feed(parser, ["next request text"])
+
+    assert _collect_content(results) == "next request text"
+    assert _collect_tool_calls(results) == {}
+
+
+def test_delegating_parser_flushes_partial_tool_start_on_finish():
+    partial_text = f"plain {NS}<tool_ca"
+    tools = sample_tools()
+    request = ChatCompletionRequest(messages=[], model="m", tools=tools)
+    parser = MinimaxM3DelegatingParser(FakeTokenizer(), tools=tools)
+
+    first = parser.parse_delta(
+        delta_text=partial_text[:8],
+        delta_token_ids=[1],
+        request=request,
+        prompt_token_ids=[],
+        finished=False,
+    )
+    final = parser.parse_delta(
+        delta_text=partial_text[8:],
+        delta_token_ids=[EOS_ID],
+        request=request,
+        prompt_token_ids=[],
+        finished=True,
+    )
+
+    messages = [msg for msg in [first, final] if msg is not None]
+    assert _collect_content(messages) == partial_text
 
 
 def test_streaming_nested_tool_call(parser):
