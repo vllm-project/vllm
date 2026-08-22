@@ -90,6 +90,14 @@ class LLMEngine:
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
 
+        # Launch the multimodal warmup in the background so it overlaps
+        # engine-core initialization (model loading, started below). The MM
+        # warmup is frontend-only (sends no engine_core requests) and only
+        # needs the renderer, which is now constructed. Joined by
+        # reset_mm_cache / warmup / shutdown so the mm_processor_cache is
+        # never touched concurrently by the warmup and the serving path.
+        renderer.start_mm_warmup_in_background()
+
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
@@ -342,6 +350,10 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
+        # Join any background MM warmup before clearing: the mm_processor_cache
+        # is not designed for concurrent access, so the warmup's apply/clear
+        # must have finished before we clear here.
+        self.renderer._join_mm_warmup()
         self.renderer.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 

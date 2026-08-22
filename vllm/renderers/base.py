@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import cached_property
+from threading import Thread
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
@@ -78,6 +79,18 @@ class BaseRenderer(ABC, Generic[_T]):
         self.api_process_rank = config.parallel_config._api_process_rank
 
         self.tokenizer = tokenizer
+
+        # Background thread running the multimodal warmup so it can overlap
+        # engine-core initialization. None when no background warmup has been
+        # launched (or it has already been joined). Joined by the first of
+        # reset_mm_cache / warmup / shutdown so the mm_processor_cache is
+        # never touched concurrently by the warmup and the serving path.
+        self._mm_warmup_thread: Thread | None = None
+        # Whether warmup_mm has already run. Survives _join_mm_warmup (which
+        # clears the thread pointer), so warmup() can tell that the background
+        # warmup already ran even after reset_mm_cache joined it first, and
+        # avoid running warmup_mm a second time.
+        self._mm_warmup_done: bool = False
 
         # Thread pool executor for blocking tokenizer operations.  The
         # multimodal processor receives a deep-copied tokenizer (see #36557)
@@ -234,12 +247,86 @@ class BaseRenderer(ABC, Generic[_T]):
         elapsed = time.perf_counter() - start_time
         logger.info("%s warmup completed in %.3fs", log_prefix, elapsed)
 
+    def warmup_mm(self) -> None:
+        # Run only the multimodal warmup (mm + readonly mm), serially.
+        # Idempotent: runs at most once. A background warmup
+        # (start_mm_warmup_in_background) may already have run it, and
+        # reset_mm_cache may have joined that background thread before warmup()
+        # reaches this point — the _mm_warmup_done flag survives the join (the
+        # thread pointer does not), so warmup() can still tell it already ran.
+        if self._mm_warmup_done:
+            return
+        try:
+            # prevent MM processor hangs
+            with set_default_torch_num_threads(1):
+                if self.mm_processor:
+                    try:
+                        logger.debug("Warming up multi-modal processing...")
+                        self._warmup_mm_processor(
+                            self.mm_processor,
+                            log_prefix="Multi-modal",
+                        )
+                    except Exception:
+                        logger.warning("Multi-modal warmup failed")
+                    finally:
+                        self.clear_mm_cache()
+
+                if self._readonly_mm_processor is not None:
+                    try:
+                        logger.debug("Warming up readonly multi-modal processing...")
+                        self._warmup_mm_processor(
+                            self._readonly_mm_processor,
+                            log_prefix="Readonly multi-modal",
+                        )
+                    except Exception:
+                        logger.warning("Readonly multi-modal warmup failed")
+                    finally:
+                        self._clear_processor_cache(self._readonly_mm_processor)
+        finally:
+            self._mm_warmup_done = True
+
+    def start_mm_warmup_in_background(self) -> None:
+        # Launch the multimodal warmup in a background thread so it can
+        # overlap with engine-core initialization (model loading).
+        #
+        # The MM warmup only needs the renderer (tokenizer + mm_processor),
+        # which is constructed before the engine core starts, and it sends no
+        # requests to the engine core. The engine core runs in a separate
+        # process, so this is true parallelism across processes (no GIL contention).
+        #
+        # The background thread is joined by the first of: reset_mm_cache,
+        # warmup, or shutdown. This guarantees the frontend
+        # mm_processor_cache — which is not designed for concurrent access
+        # (its get_and_update must stay ordered with the engine-core cache) —
+        # is never touched concurrently by the warmup and the serving path.
+        if self.mm_processor is None and self._readonly_mm_processor is None:
+            return  # text-only model: nothing to warm up
+        if self._mm_warmup_thread is not None:
+            return  # already launched
+        self._mm_warmup_thread = Thread(
+            target=self.warmup_mm, daemon=True, name="vllm_mm_warmup"
+        )
+        self._mm_warmup_thread.start()
+
+    def _join_mm_warmup(self) -> None:
+        # Wait for a background MM warmup to finish, if one was started.
+        thread = getattr(self, "_mm_warmup_thread", None)
+        if thread is not None:
+            thread.join()
+            self._mm_warmup_thread = None
+
     def warmup(self, chat_params: ChatParams) -> None:
         """
         Warm up this renderer to avoid first-request latency.
 
         For chat requests:
         - Jinja2 template compilation
+
+        If a background multimodal warmup was launched (to overlap
+        engine-core init) it is joined first so it is not still touching the
+        mm_processor_cache. warmup_mm is idempotent, so the call below is a
+        no-op if the background warmup — or a prior reset_mm_cache that joined
+        it — already ran it.
         """
         from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
 
@@ -258,29 +345,12 @@ class BaseRenderer(ABC, Generic[_T]):
             except Exception:
                 logger.warning("Chat template warmup failed", exc_info=True)
 
-            if self.mm_processor:
-                try:
-                    logger.debug("Warming up multi-modal processing...")
-                    self._warmup_mm_processor(
-                        self.mm_processor,
-                        log_prefix="Multi-modal",
-                    )
-                except Exception:
-                    logger.warning("Multi-modal warmup failed")
-                finally:
-                    self.clear_mm_cache()
-
-            if self._readonly_mm_processor is not None:
-                try:
-                    logger.debug("Warming up readonly multi-modal processing...")
-                    self._warmup_mm_processor(
-                        self._readonly_mm_processor,
-                        log_prefix="Readonly multi-modal",
-                    )
-                except Exception:
-                    logger.warning("Readonly multi-modal warmup failed")
-                finally:
-                    self._clear_processor_cache(self._readonly_mm_processor)
+        if self._mm_warmup_thread is not None:
+            # Join a background MM warmup launched to overlap engine-core init.
+            self._join_mm_warmup()
+        # Idempotent: no-op if the background warmup (or a prior reset_mm_cache)
+        # already ran the MM warmup.
+        self.warmup_mm()
 
     async def clear_mm_cache_async(self) -> None:
         """Serialize clear_mm_cache through the multimodal executor to avoid
@@ -288,6 +358,10 @@ class BaseRenderer(ABC, Generic[_T]):
         await self._clear_mm_cache_async()
 
     def shutdown(self) -> None:
+        # Wait for any background MM warmup to finish before closing the
+        # mm_processor_cache and stopping the executors.
+        self._join_mm_warmup()
+
         mm_processor_cache = self.mm_processor_cache
         if mm_processor_cache is not None:
             mm_processor_cache.close()
