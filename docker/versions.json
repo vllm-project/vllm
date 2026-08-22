@@ -70,6 +70,9 @@
     "FLASHINFER_VERSION": {
       "default": "0.6.17"
     },
+    "INSTALL_FLASHINFER_JIT_CACHE": {
+      "default": "true"
+    },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
     },
