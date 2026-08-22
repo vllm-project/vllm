@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -31,6 +32,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -738,6 +740,7 @@ def test_set_inputs_first_pass_parallel_drafting():
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
 @pytest.mark.parametrize("use_distinct_lm_head", [True, False])
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_tp_group")
 @mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_pp_group")
 @mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
 @mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
@@ -745,6 +748,7 @@ def test_load_model(
     mock_get_model,
     mock_get_layers,
     mock_get_pp_group,
+    mock_get_tp_group,
     method,
     attn_backend,
     pp_size,
@@ -791,6 +795,10 @@ def test_load_model(
     mock_pp_group.world_size = pp_size
     mock_get_pp_group.return_value = mock_pp_group
 
+    mock_tp_group = mock.MagicMock()
+    mock_tp_group.world_size = 1
+    mock_get_tp_group.return_value = mock_tp_group
+
     # Set up the target model mock with a custom class so that
     # isinstance() checks match the expected type.
     class _TargetModelStub(LlamaForCausalLM):
@@ -829,6 +837,58 @@ def test_load_model(
         assert proposer.model.model.embed_tokens is not target_model.model.embed_tokens
     else:
         assert proposer.model.model.embed_tokens is target_model.model.embed_tokens
+
+
+@pytest.mark.parametrize("global_vote", [0, 1])
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_tp_group")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_pp_group")
+def test_eagle_weight_sharing_requires_all_tp_shards_to_match(
+    mock_get_pp_group,
+    mock_get_tp_group,
+    global_vote,
+    monkeypatch,
+):
+    mock_get_pp_group.return_value = SimpleNamespace(world_size=1)
+    cpu_group = object()
+    mock_get_tp_group.return_value = SimpleNamespace(world_size=2, cpu_group=cpu_group)
+
+    def all_reduce(vote, *, op, group):
+        assert vote.item() == 1
+        assert vote.device.type == "cpu"
+        assert op == torch.distributed.ReduceOp.MIN
+        assert group is cpu_group
+        vote.fill_(global_vote)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+
+    target_embed = SimpleNamespace(weight=torch.ones(4, 2))
+    target_lm_head = SimpleNamespace(weight=torch.ones(4, 2))
+    draft_embed = SimpleNamespace(weight=torch.ones(4, 2))
+    draft_lm_head = SimpleNamespace(weight=torch.ones(4, 2))
+
+    proposer = object.__new__(SpecDecodeBaseProposer)
+    proposer.vllm_config = SimpleNamespace(speculative_config=None)
+    proposer.use_local_argmax_reduction = False
+    proposer.model = SimpleNamespace(
+        has_own_embed_tokens=True,
+        has_own_lm_head=True,
+        model=SimpleNamespace(embed_tokens=draft_embed),
+        lm_head=draft_lm_head,
+    )
+    target_model = SimpleNamespace(
+        model=SimpleNamespace(embed_tokens=target_embed),
+        lm_head=target_lm_head,
+    )
+
+    proposer._maybe_share_embeddings(target_model)
+    proposer._maybe_share_lm_head(target_model)
+
+    if global_vote:
+        assert proposer.model.model.embed_tokens is target_embed
+        assert proposer.model.lm_head is target_lm_head
+    else:
+        assert proposer.model.model.embed_tokens is draft_embed
+        assert proposer.model.lm_head is draft_lm_head
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
