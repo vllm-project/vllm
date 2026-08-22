@@ -563,6 +563,9 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     with pytest.raises(OSError) as exc_info:
         _make_region(iid)
     assert exc_info.value.errno == errno.EIO
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap"), (
+        "a creator that fails partway through construction must not leak its file"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +793,7 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     monkeypatch.setattr(region.os, "open", mock_open)
     monkeypatch.setattr(region.os, "unlink", mock_unlink)
     monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(region.fcntl, "flock", MagicMock())
     monkeypatch.setattr(
         region,
         "check_shm_free_space",
@@ -822,6 +826,7 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
     monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
     monkeypatch.setattr(region.os, "unlink", mock_unlink)
     monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(region.fcntl, "flock", MagicMock())
     monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
     monkeypatch.setattr(
         region.os,
@@ -840,3 +845,121 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
+
+
+def _make_bare_orphan(age_s: float) -> str:
+    """Create a lone region file with no lock holder and a chosen mtime."""
+    path = f"/dev/shm/vllm_offload_{uuid.uuid4()}.mmap"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    os.close(fd)
+    stamp = time.time() - age_s
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def _child_create_and_exit_gracefully(engine_id: str) -> None:
+    """Create a creator region and return normally: atexit must remove the file."""
+    SharedOffloadRegion(
+        engine_id=engine_id,
+        num_blocks=2,
+        rank=0,
+        kv_bytes_per_block=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+    )
+
+
+def _child_create_and_hold(engine_id: str, ready_queue) -> None:
+    """Create a creator region, signal readiness, then block holding its lock."""
+    SharedOffloadRegion(
+        engine_id=engine_id,
+        num_blocks=2,
+        rank=0,
+        kv_bytes_per_block=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+    )
+    ready_queue.put(True)
+    time.sleep(60)
+
+
+def test_old_orphan_reaped_by_new_creator(iid):
+    """A stale region file with no live holder is reaped when a creator starts."""
+    orphan = _make_bare_orphan(age_s=10_000)
+    try:
+        with _region(iid):
+            assert not os.path.exists(orphan), "old unlocked orphan must be reaped"
+    finally:
+        _cleanup_file(orphan)
+
+
+def test_recent_orphan_within_grace_not_reaped(iid):
+    """A file too young to be sure it is stale must survive the sweep."""
+    orphan = _make_bare_orphan(age_s=0.0)
+    try:
+        with _region(iid):
+            assert os.path.exists(orphan), "young file must be left within grace"
+    finally:
+        _cleanup_file(orphan)
+
+
+def test_reaper_does_not_follow_symlink(iid, tmp_path):
+    """A symlink planted in world-writable /dev/shm must not be followed or reaped."""
+    target = tmp_path / "victim"
+    target.write_bytes(b"secret")
+    link = f"/dev/shm/vllm_offload_{uuid.uuid4()}.mmap"
+    os.symlink(target, link)
+    stamp = time.time() - 10_000
+    os.utime(link, (stamp, stamp), follow_symlinks=False)
+    try:
+        with _region(iid):
+            pass
+        assert os.path.islink(link), "symlink must not be reaped"
+        assert target.exists(), "symlink target must be untouched"
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(link)
+
+
+def test_live_region_not_reaped(iid):
+    """A live region holding a shared lock is never reaped, even if it looks old."""
+    with _region(iid) as live:
+        stamp = time.time() - 10_000
+        os.utime(live.mmap_path, (stamp, stamp))
+        with _region(str(uuid.uuid4())):
+            pass
+        assert os.path.exists(live.mmap_path), "locked live region must survive"
+
+
+def test_graceful_exit_removes_file_via_atexit(iid):
+    """A process that exits normally without cleanup() still removes its file."""
+    ctx = get_mp_context()
+    p = ctx.Process(target=_child_create_and_exit_gracefully, args=(iid,))
+    p.start()
+    p.join(timeout=30)
+    assert p.exitcode == 0
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+
+
+def test_sigkilled_region_leaks_then_reaped(iid):
+    """SIGKILL cannot clean up, but the next creator reaps the leftover."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    ctx = get_mp_context()
+    ready = ctx.Queue()
+    p = ctx.Process(target=_child_create_and_hold, args=(iid, ready))
+    p.start()
+    try:
+        ready.get(timeout=30)
+        assert os.path.exists(path)
+        p.kill()
+        p.join(timeout=10)
+        assert os.path.exists(path), "SIGKILL is expected to leak the file"
+
+        stamp = time.time() - 10_000
+        os.utime(path, (stamp, stamp))
+        with _region(str(uuid.uuid4())):
+            pass
+        assert not os.path.exists(path), "leftover must be reaped by next creator"
+    finally:
+        if p.is_alive():
+            p.kill()
+            p.join(timeout=10)
+        _cleanup_file(path)
