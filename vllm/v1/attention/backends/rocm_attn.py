@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
+import numpy as np
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
@@ -39,6 +40,12 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
+# A query row at or below this many tokens is treated as "short": too little work
+# to hide its own memory latency. Measured on the FlyDSL dualwave prefill kernel,
+# where the penalty for ordering such a row last is 1.28x at 1-256 tokens and
+# still 1.22x at 512, decaying to nothing by 2048. See RocmFlyDSLAttentionImpl.
+SHORT_QUERY_ROW_TOKENS = 512
+
 
 @dataclass
 class RocmAttentionMetadata:
@@ -72,6 +79,16 @@ class RocmAttentionMetadata:
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
 
+    # Number of requests in the batch whose query is short enough that its
+    # latency cannot hide behind its own work. Host-derived in build(); see
+    # RocmFlyDSLAttentionImpl, which dispatches on it.
+    num_short_query_rows: int = 0
+
+    # Number of single-token (decode) rows. Each costs the FlyDSL kernel a
+    # whole q-block workgroup, so it is counted exactly rather than folded
+    # into num_short_query_rows.
+    num_decode_rows: int = 0
+
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
@@ -103,6 +120,13 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
 
+        # A full graph is only captured for a uniform decode batch, so every row
+        # is one token and therefore short. Pin both rather than inferring them
+        # from query_start_loc, which is zeroed just below: the values baked
+        # into the graph must be the ones replay will present.
+        attn_metadata.num_short_query_rows = common_attn_metadata.num_reqs
+        attn_metadata.num_decode_rows = common_attn_metadata.num_reqs
+
         # Zero device query start locations to avoid invalid memory access in
         # the prefix prefill kernel during graph capture (#25985).
         common_attn_metadata.query_start_loc.zero_()
@@ -125,6 +149,13 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         slot_mapping = common_attn_metadata.slot_mapping
 
         use_cascade = common_prefix_len > 0
+
+        # query_start_loc_cpu is already materialised on the host, so this is a
+        # numpy diff over num_reqs+1 int32s -- no device read and no sync.
+        qsl_np = common_attn_metadata.query_start_loc_cpu.numpy()
+        query_lens = np.diff(qsl_np[: common_attn_metadata.num_reqs + 1])
+        num_decode_rows = int((query_lens == 1).sum())
+        num_short_query_rows = int((query_lens <= SHORT_QUERY_ROW_TOKENS).sum())
 
         if use_cascade:
             cu_prefix_query_lens = torch.tensor(
@@ -156,6 +187,8 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             causal=common_attn_metadata.causal,
+            num_short_query_rows=num_short_query_rows,
+            num_decode_rows=num_decode_rows,
         )
         return attn_metadata
 
