@@ -161,13 +161,18 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
 
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
-    # DSpark indexes target layers as aux_id - 1 (matches the dense configs).
-    pre_trained_config["target_layer_ids"] = [i - 1 for i in aux_layer_ids]
+    target_layer_ids = [i - 1 for i in aux_layer_ids]
+    pre_trained_config["target_layer_ids"] = target_layer_ids
+
+    pre_trained_config["dflash_config"] = {
+        "mask_token_id": config_dict["mask_token_id"],
+        "target_layer_ids": target_layer_ids,
+        "causal": not config_dict.get("sliding_window_non_causal", True),
+    }
 
     for key in (
         "draft_vocab_size",
         "target_hidden_size",
-        "mask_token_id",
         "markov_rank",
         "markov_head_type",
         "block_size",
