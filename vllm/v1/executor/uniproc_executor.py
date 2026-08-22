@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
@@ -30,9 +31,15 @@ logger = init_logger(__name__)
 
 
 class AsyncOutputFuture(Future):
-    def __init__(self, async_output: AsyncModelRunnerOutput, single_value: bool):
+    def __init__(
+        self,
+        async_output: AsyncModelRunnerOutput,
+        single_value: bool,
+        kv_output_aggregator: KVOutputAggregator | None = None,
+    ):
         self.async_output = async_output
         self.single_value = single_value
+        self.kv_output_aggregator = kv_output_aggregator
         super().__init__()
 
     def result(self, timeout=None):
@@ -41,7 +48,9 @@ class AsyncOutputFuture(Future):
 
         if not super().done():
             try:
-                output = self.async_output.get_output()
+                output: ModelRunnerOutput | None = self.async_output.get_output()
+                if self.kv_output_aggregator is not None:
+                    output = self.kv_output_aggregator.aggregate([output])
                 self.set_result(output if self.single_value else [output])
             except Exception as e:
                 self.set_exception(e)
@@ -95,6 +104,7 @@ class UniProcExecutor(Executor):
         kwargs: dict | None = None,
         non_block: bool = False,
         single_value: bool = False,
+        kv_output_aggregator: KVOutputAggregator | None = None,
     ) -> Any:
         if kwargs is None:
             kwargs = {}
@@ -103,12 +113,16 @@ class UniProcExecutor(Executor):
             result = run_method(self.driver_worker, method, args, kwargs)
             if isinstance(result, AsyncModelRunnerOutput):
                 result = result.get_output()
+            if kv_output_aggregator is not None:
+                result = kv_output_aggregator.aggregate([result])
             return result if single_value else [result]
 
         try:
             result = run_method(self.driver_worker, method, args, kwargs)
             if isinstance(result, AsyncModelRunnerOutput):
-                return AsyncOutputFuture(result, single_value)
+                return AsyncOutputFuture(result, single_value, kv_output_aggregator)
+            if kv_output_aggregator is not None:
+                result = kv_output_aggregator.aggregate([result])
             future = Future[Any]()
             future.set_result(result if single_value else [result])
         except Exception as e:
@@ -124,6 +138,7 @@ class UniProcExecutor(Executor):
             args=(scheduler_output,),
             non_block=non_block,
             single_value=True,
+            kv_output_aggregator=self.kv_output_aggregator,
         )
         # In non-blocking mode, surface any exception as early as possible.
         if non_block and output.done():
@@ -139,6 +154,7 @@ class UniProcExecutor(Executor):
             args=(grammar_output,),
             non_block=non_block,
             single_value=True,
+            kv_output_aggregator=self.kv_output_aggregator,
         )
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
