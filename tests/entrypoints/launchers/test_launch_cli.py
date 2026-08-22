@@ -223,6 +223,11 @@ def test_snapshot_environment_contract(
     assert secret not in str(environment)
     assert "VLLM_API_KEY" not in environment
 
+    monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD")
+    implicit_worker_default = dict(LocalSnapshotTools()._environment_identity())
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    assert dict(LocalSnapshotTools()._environment_identity()) == implicit_worker_default
+
     monkeypatch.setenv("VLLM_USER_SETTING", f"{secret}-changed")
     changed_environment = dict(LocalSnapshotTools()._environment_identity())
     assert changed_environment["VLLM_USER_SETTING"] != environment["VLLM_USER_SETTING"]

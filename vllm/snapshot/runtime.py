@@ -611,10 +611,12 @@ class LocalSnapshotTools:
 
     def _environment_identity(self) -> tuple[tuple[str, str], ...]:
         prefixes = ("VLLM_", "CUDA_", "NCCL_", "TORCH_", "TRITON_")
+        environment = os.environ.copy()
+        environment.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         selected = tuple(
             sorted(
                 (key, hashlib.sha256(key.encode() + b"\0" + value.encode()).hexdigest())
-                for key, value in os.environ.items()
+                for key, value in environment.items()
                 if key.startswith(prefixes)
                 and key not in {"VLLM_API_KEY", "VLLM_SNAPSHOT_TIMEOUT_S"}
             )
