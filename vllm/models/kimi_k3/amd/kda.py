@@ -46,6 +46,10 @@ from vllm.models.kimi_k3.amd.ops.kda_decode import (
     make_decode_conv1d_weight_loader,
     make_decode_norm_weight_loader,
 )
+from vllm.models.kimi_k3.amd.ops.oproj_quant import (
+    kda_will_fuse_oproj_quant,
+    maybe_fused_kda_oproj_quant,
+)
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     chunk_kda_with_fused_gate,
     fused_recurrent_kda,
@@ -287,13 +291,27 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
+        # Fuse gated RMSNorm with MXFP4 in this function (next to o_proj), not
+        # inside _forward. The previous producer returned QuantizedActivation
+        # across the KDA capture break and declined the HIP decode path, where
+        # onorm already ran inside kda_decode_fusion_kernel.
+        defer_onorm = kda_will_fuse_oproj_quant(self.o_proj)
         self._forward(
             mixed_qkv=mixed_qkv,
             g1=g1,
             g2=g2,
             beta=beta,
             core_attn_out=core_attn_out,
+            defer_onorm=defer_onorm,
         )
+        if defer_onorm:
+            fused_qa = maybe_fused_kda_oproj_quant(
+                core_attn_out, g2, self.o_norm, self.o_proj
+            )
+            if fused_qa is not None:
+                output[:] = self.o_proj(fused_qa)[0]
+                return
+            core_attn_out.copy_(self.o_norm(core_attn_out, g2))
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
 
@@ -305,6 +323,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         g2: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
+        defer_onorm: bool = False,
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -346,6 +365,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             and m.num_decodes > 0
         ):
             assert non_spec_state_indices_tensor is not None
+            # When fusing MXFP4, omit the in-kernel gated RMSNorm so the
+            # producer can quantize the fp32 epilogue in the same Triton
+            # launch. conv + recurrent stay in this HIP kernel.
             ops.fused_kda_decode(
                 x=mixed_qkv,
                 weight=self.decode_conv1d_weight,
@@ -359,8 +381,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 state=recurrent_state,
                 out=core_attn_out[:, :num_actual_tokens],
                 lower_bound=self.gate_lower_bound,
-                output_gate=g2[:num_actual_tokens],
-                norm_weight=self.decode_norm_weight,
+                output_gate=None if defer_onorm else g2[:num_actual_tokens],
+                norm_weight=None if defer_onorm else self.decode_norm_weight,
                 norm_eps=self.o_norm.eps,
             )
             return
@@ -614,4 +636,5 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             ]
         else:
             assert core_attn_out_spec is not None
-        core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+        if not defer_onorm:
+            core_attn_out.copy_(self.o_norm(core_attn_out, g2))
