@@ -199,6 +199,11 @@ class NemotronHMoE(nn.Module):
                 disable_tp=self.is_sequence_parallel,
                 prefix=f"{prefix}.fc2_latent_proj",
             )
+            # A bias-free linear transform commutes with the tensor-parallel sum,
+            # since sum_r W x_r == W sum_r x_r, so the routed output can be reduced
+            # once after the transform instead of twice. With a bias it does not:
+            # sum_r (W x_r + b) == W sum_r x_r + R*b, so the early reduce is kept.
+            self.fc2_latent_proj.reduce_commutative = not config.mlp_bias
         else:
             self.fc1_latent_proj = None
             self.fc2_latent_proj = None
