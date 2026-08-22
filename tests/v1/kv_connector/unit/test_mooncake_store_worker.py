@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed.kv_events import KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     rdma_utils,
@@ -42,6 +43,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import 
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+)
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 _TP_SHARED_NAMESPACE = "@store_tp:4@store_pp:1@store_format:tp_shared_v1"
 
@@ -286,7 +292,10 @@ def _make_vllm_config(
     decode_context_parallel_size: int = 1,
     kv_role: str = "kv_both",
     pipeline_parallel_size: int = 1,
+    kv_cache_layout: KVCacheLayout = KVCacheLayout.LBHNC,
 ) -> SimpleNamespace:
+    cache_config = SimpleNamespace(block_size=16, num_gpu_blocks=10)
+    cache_config.get_resolved_kv_cache_layout = lambda: kv_cache_layout
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
         parallel_config=SimpleNamespace(
@@ -299,7 +308,7 @@ def _make_vllm_config(
         kv_transfer_config=_FakeKVTransferConfig(
             kv_role=kv_role, extra_config=extra_config
         ),
-        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=10),
+        cache_config=cache_config,
         kv_events_config=SimpleNamespace(enable_kv_cache_events=False),
         speculative_config=None,
     )
@@ -354,7 +363,6 @@ def _patch_worker_runtime(
     tp_rank: int = 0,
     tp_size: int = 1,
     dcp_size: int = 1,
-    kv_cache_layout: str = "HND",
 ) -> None:
     single_rank_group = SimpleNamespace(world_size=1, rank_in_group=0)
     # DCP groups are contiguous splits of the TP group (see
@@ -365,7 +373,6 @@ def _patch_worker_runtime(
     monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
     monkeypatch.setattr(worker, "get_dcp_group", lambda: dcp_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
-    monkeypatch.setattr(worker, "get_kv_cache_layout", lambda: kv_cache_layout)
     monkeypatch.setattr(worker, "LookupKeyServer", MagicMock())
 
 
@@ -2026,7 +2033,7 @@ def test_store_tp_nhd_falls_back_to_rank_local_namespace(tmp_path, monkeypatch):
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
-    _patch_worker_runtime(monkeypatch, tp_size=2, kv_cache_layout="NHD")
+    _patch_worker_runtime(monkeypatch, tp_size=2)
     monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
     monkeypatch.setenv(
         "MOONCAKE_CONFIG_PATH",
@@ -2041,7 +2048,10 @@ def test_store_tp_nhd_falls_back_to_rank_local_namespace(tmp_path, monkeypatch):
     )
 
     w = worker.MooncakeStoreWorker(
-        _make_vllm_config(extra_config={"store_tp_size": 4}),
+        _make_vllm_config(
+            extra_config={"store_tp_size": 4},
+            kv_cache_layout=KVCacheLayout.LBNHC,
+        ),
         _make_kv_cache_config(),
     )
 
@@ -2049,7 +2059,7 @@ def test_store_tp_nhd_falls_back_to_rank_local_namespace(tmp_path, monkeypatch):
     assert type(w.token_dbs[0]) is ChunkedTokenDatabase
     key = w.token_dbs[0].key_for(BlockHash(b"h"))
     assert "@store_tp:" not in key
-    assert "@store_format:rank_local_tp2_layout_NHD" in key
+    assert "@store_format:rank_local_tp2_layout_LBNHC" in key
 
 
 @pytest.mark.parametrize(
@@ -2190,7 +2200,7 @@ def test_worker_keeps_rank_local_layout_for_unsupported_store_tp(
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
-    _patch_worker_runtime(monkeypatch, tp_size=2, kv_cache_layout="NHD")
+    _patch_worker_runtime(monkeypatch, tp_size=2)
     monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
     monkeypatch.setenv(
         "MOONCAKE_CONFIG_PATH",
@@ -2205,7 +2215,10 @@ def test_worker_keeps_rank_local_layout_for_unsupported_store_tp(
     )
 
     w = worker.MooncakeStoreWorker(
-        _make_vllm_config(extra_config={"store_tp_size": store_tp_size}),
+        _make_vllm_config(
+            extra_config={"store_tp_size": store_tp_size},
+            kv_cache_layout=KVCacheLayout.LBNHC,
+        ),
         _make_kv_cache_config(),
     )
 
@@ -2214,7 +2227,7 @@ def test_worker_keeps_rank_local_layout_for_unsupported_store_tp(
     key = w.token_dbs[0].key_for(BlockHash(b"h"))
     assert "@store_tp:" not in key
     assert "@store_pp:1" in key
-    assert "@store_format:rank_local_tp2_layout_NHD" in key
+    assert "@store_format:rank_local_tp2_layout_LBNHC" in key
 
 
 def test_store_tp_opt_in_isolates_different_pp_sizes(tmp_path, monkeypatch):
@@ -3575,116 +3588,83 @@ def test_putting_consumer_queues_decode_save():
     assert req.current_event is event
 
 
-def test_register_kv_caches_blocks_first_single_segment():
-    """Blocks-first layout (FlashInfer/MLA): one segment per layer."""
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     num_blocks = 10
-    page_size_elements = 64
+    num_layers = 2
     worker = _make_bare_worker(num_gpu_blocks=num_blocks)
-
-    # Shape: (num_blocks, page_size_elements) — blocks outermost, no outer_dims
-    tensor = torch.zeros(num_blocks, page_size_elements, dtype=torch.float16)
-    _register_with_mocked_threads(worker, {"layer0": tensor})
-
-    layout = worker.token_dbs[0].store_layout
-    assert isinstance(layout, RankLocalStoreLayout)
-    assert layout.kv_caches_base_addr == [tensor.untyped_storage().data_ptr()]
-    assert layout.block_len == [tensor.untyped_storage().nbytes() // num_blocks]
-    worker.store.register_buffer.assert_called_once_with(
-        tensor.untyped_storage().data_ptr(),
-        tensor.untyped_storage().nbytes(),
-    )
-
-
-def test_register_kv_caches_kv_first_two_segments():
-    """K/V-first layout (FlashAttn): two segments (K, V) per layer."""
-    num_blocks = 10
-    block_size_tokens = 16
-    num_kv_heads = 4
-    head_size = 8
-    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
-
-    # Shape: (2, num_blocks, block_size, num_kv_heads, head_size) — K/V outermost
-    tensor = torch.zeros(
-        2,
-        num_blocks,
-        block_size_tokens,
-        num_kv_heads,
-        head_size,
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=8,
         dtype=torch.float16,
     )
-    _register_with_mocked_threads(worker, {"layer0": tensor})
-
-    layout = worker.token_dbs[0].store_layout
-    assert isinstance(layout, RankLocalStoreLayout)
-    seg_stride = tensor.stride(0) * tensor.element_size()
-    base = tensor.untyped_storage().data_ptr()
-    assert layout.kv_caches_base_addr == [base, base + seg_stride]
-    assert layout.block_len == [seg_stride // num_blocks] * 2
-
-
-def test_register_kv_caches_cross_layer_single_segment():
-    """Cross-layer tensor: single segment with block_len = page_size * num_layers."""
-    num_blocks = 10
-    num_layers = 4
-    per_layer_page_elements = 64  # elements per layer per block
-
-    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
-
-    # Cross-layer blocks-first tensor: all layers packed into a single
-    # contiguous block.  Shape (num_blocks, num_layers * per_layer_page)
-    # mimics the physical layout after stride reordering.
-    total_page_elements = num_layers * per_layer_page_elements
-    tensor = torch.zeros(num_blocks, total_page_elements, dtype=torch.float16)
-
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "worker.KVCacheStoreSendingThread",
-            side_effect=_auto_set_ready_event,
-        ),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "worker.KVCacheStoreRecvingThread",
-            side_effect=_auto_set_ready_event,
-        ),
-    ):
-        # Use the cross-layer wrapper key, same as register_cross_layers_kv_caches
-        worker.register_kv_caches({"__cross_layer__": tensor})
-
-    layout = worker.token_dbs[0].store_layout
-    assert isinstance(layout, RankLocalStoreLayout)
-    assert len(layout.kv_caches_base_addr) == 1
-    assert layout.kv_caches_base_addr[0] == tensor.untyped_storage().data_ptr()
-
-    expected_block_len = tensor.untyped_storage().nbytes() // num_blocks
-    # block_len should be per_layer_page_size * num_layers
-    assert (
-        expected_block_len
-        == num_layers * per_layer_page_elements * tensor.element_size()
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
     )
-    assert len(layout.block_len) == 1
-    assert layout.block_len[0] == expected_block_len
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
-    # Also verify via register_cross_layers_kv_caches wrapper
-    worker2 = _make_bare_worker(num_gpu_blocks=num_blocks)
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "worker.KVCacheStoreSendingThread",
-            side_effect=_auto_set_ready_event,
-        ),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "worker.KVCacheStoreRecvingThread",
-            side_effect=_auto_set_ready_event,
-        ),
-    ):
-        worker2.register_cross_layers_kv_caches(tensor)
+    _register_with_mocked_threads(
+        worker,
+        {"layer0": caches[0], "__cross_layer__": caches[1]},
+    )
 
-    layout2 = worker2.token_dbs[0].store_layout
-    assert isinstance(layout2, RankLocalStoreLayout)
-    assert layout2.kv_caches_base_addr == layout.kv_caches_base_addr
-    assert layout2.block_len == layout.block_len
+    db = worker.token_dbs[0]
+    if not layout.is_block_compact:
+        # Each head group is its own region, so a block spans L*H regions.
+        head_cache = caches[0][:, 0]
+        assert db.kv_caches_base_addr == [
+            cache[:, head_idx].data_ptr()
+            for cache in caches
+            for head_idx in range(cache.shape[1])
+        ]
+        assert db.block_len == [head_cache.stride(0) * head_cache.element_size()] * (
+            num_layers * caches[0].shape[1]
+        )
+    elif layout.is_layer_compact:
+        assert db.kv_caches_base_addr == [cache.data_ptr() for cache in caches]
+        assert db.block_len == [spec.page_size_bytes] * num_layers
+    else:
+        assert db.kv_caches_base_addr == [raw.data_ptr()]
+        assert db.block_len == [num_layers * spec.page_size_bytes]
+    worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
+
+
+def test_register_kv_caches_separate_head_groups():
+    # LHBNC gives each head group its own region; the K/V split doubles heads.
+    layout = KVCacheLayout.LHBNC
+    num_blocks = 3
+    num_layers = 2
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    spec = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=8,
+        dtype=torch.float16,
+        num_head_slots=2,
+        state_content_bytes=2 * 8 * 2,
+    )
+    layer_names = ["layer0", "__cross_layer__"]
+    worker._kv_cache_groups = [KVCacheGroupSpec(layer_names, spec)]
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
+    )
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
+
+    _register_with_mocked_threads(worker, dict(zip(layer_names, caches)))
+
+    head_block_bytes = caches[0].stride(0) * caches[0].element_size()
+    expected_addrs = [
+        cache[:, head_idx].data_ptr()
+        for cache in caches
+        for head_idx in range(cache.shape[1])
+    ]
+    db = worker.token_dbs[0]
+    assert db.kv_caches_base_addr == expected_addrs
+    assert db.block_len == [head_block_bytes] * len(expected_addrs)
+    worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
 
 # ---------------------------------------------------------------------------

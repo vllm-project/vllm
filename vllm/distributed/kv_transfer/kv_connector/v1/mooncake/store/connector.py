@@ -97,18 +97,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if resolve_store_tp_size(kv_transfer_config.kv_connector_extra_config) is None:
             return None
         logger.info_once(
-            "MooncakeStoreConnector setting KV cache layout to HND for "
+            "MooncakeStoreConnector setting KV cache layout to LBHNC for "
             "heterogeneous TP store sharing."
         )
-        return "HND"
-
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        extra_config = self._kv_transfer_config.kv_connector_extra_config
-        return (
-            str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
-            == "true"
-        )
+        return "LBHNC"
 
     @staticmethod
     def _validate_kv_cache_config(
@@ -302,16 +294,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type
-    ):
-        assert self.connector_worker is not None
-        assert (
-            self._kv_cache_config is not None
-            and len(self._kv_cache_config.kv_cache_groups) == 1
-        ), "Cross-layer KV cache does not supported with hybrid models"
-        self.connector_worker.register_cross_layers_kv_caches(kv_cache)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         # No-op: loads are issued in get_finished() for compute overlap.

@@ -216,10 +216,10 @@ class StoreLayout:
         raise NotImplementedError
 
     def set_kv_caches_base_addr(self, base_addrs: list[int]) -> None:
-        raise NotImplementedError
+        self.kv_caches_base_addr = base_addrs
 
     def set_block_len(self, block_lens: list[int]) -> None:
-        raise NotImplementedError
+        self.block_len = block_lens
 
     def prepare_values(
         self,
@@ -282,12 +282,6 @@ class RankLocalStoreLayout(StoreLayout):
         self.kv_caches_base_addr = list(base_addrs)
         self.block_len = list(block_lens)
 
-    def set_kv_caches_base_addr(self, base_addrs: list[int]) -> None:
-        self.kv_caches_base_addr = base_addrs
-
-    def set_block_len(self, block_lens: list[int]) -> None:
-        self.block_len = block_lens
-
     def prepare_values(
         self,
         chunks: Sequence[tuple[int, int]],
@@ -334,7 +328,7 @@ class RankLocalStoreLayout(StoreLayout):
 
 
 class HNDStoreLayout(StoreLayout):
-    """Canonical HND layout shared by divisible local TP sizes."""
+    """Canonical head-major (LBHNC) layout shared by divisible TP sizes."""
 
     def __init__(
         self,

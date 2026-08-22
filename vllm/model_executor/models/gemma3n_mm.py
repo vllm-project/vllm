@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
@@ -257,42 +258,69 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
 
 
 class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]):
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # HF Transformers audio processor no longer accepts `audios` key.
-        # We pop `audios` and replace it with `audio` key to suppress
-        # the warning.
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        mm_data = dict(mm_data)
         if "audios" in mm_data:
             mm_data["audio"] = mm_data.pop("audios")
-        processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
-        )
 
-        if "input_features" in processed_outputs:
-            # Padding enables audio_tower to run in batched mode
-            processed_outputs["input_features_padded"] = processed_outputs[
-                "input_features"
+        return mm_data, hf_processor_mm_kwargs
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if "input_features" in processed_data:
+            # The feature extractor pads every clip to the longest one in
+            # the batch, so each clip's frame count depends on the other
+            # clips it was processed with. Trim each clip to the number of
+            # frames it would have if processed alone so that each item's
+            # output (and thus its cache entry) is independent of the other
+            # items in the batch. `batch_audio_features` re-pads the
+            # per-item features so audio_tower can still run batched.
+            num_frames = [
+                self._get_num_audio_frames_alone(len(audio))
+                for audio in mm_data["audio"]
+            ]
+            processed_data["input_features_padded"] = [
+                features[:n]
+                for features, n in zip(processed_data.pop("input_features"), num_frames)
+            ]
+            processed_data["input_features_mask"] = [
+                mask[:n]
+                for mask, n in zip(processed_data["input_features_mask"], num_frames)
             ]
 
-            # Unpad features here since we need the output of each item to be
-            # independent of other items for the cache to work correctly
-            unpadded_features = [
-                f[mask]
-                for f, mask in zip(
-                    processed_outputs["input_features"],
-                    processed_outputs["input_features_mask"],
-                )
-            ]
-            processed_outputs["input_features"] = unpadded_features
-        return processed_outputs
+        return processed_data
+
+    def _get_num_audio_frames_alone(self, num_samples: int) -> int:
+        """
+        Get the number of mel frames that the feature extractor produces
+        for a single audio clip of the given length, independent of batch
+        padding.
+        """
+        feature_extractor = self.info.get_feature_extractor()
+        call_params = inspect.signature(type(feature_extractor).__call__).parameters
+        max_length = call_params["max_length"].default
+        pad_to_multiple_of = call_params["pad_to_multiple_of"].default
+
+        num_samples = min(num_samples, max_length)
+        remainder = num_samples % pad_to_multiple_of
+        if remainder:
+            num_samples += pad_to_multiple_of - remainder
+
+        frame_size = feature_extractor.frame_length + 1
+        num_frames = (num_samples - frame_size) // feature_extractor.hop_length + 1
+
+        return max(num_frames, 0)
 
     def _get_mm_fields_config(
         self,
@@ -390,6 +418,40 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         )
 
         return token_ids, res
+
+    def _apply_token_matches_with_placeholders(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[
+        list[int],
+        MultiModalPromptUpdatesApplyResult,
+        Mapping[str, list[PlaceholderFeaturesInfo]],
+    ]:
+        new_token_ids, match_result = self._apply_token_matches(
+            token_ids,
+            mm_prompt_updates,
+        )
+
+        placeholders: dict[str, list[PlaceholderFeaturesInfo]] = {
+            modality: [] for modality in mm_prompt_updates
+        }
+
+        if all(
+            all(update_idx is not None for update_idx in update_idxs)
+            for update_idxs in match_result.values()
+        ):
+            placeholders = dict(
+                self._find_mm_placeholders(
+                    new_token_ids,
+                    self._matched_updates_from_result(
+                        mm_prompt_updates,
+                        match_result,
+                    ),
+                )
+            )
+
+        return new_token_ids, match_result, placeholders
 
     def _find_mm_placeholders(
         self,
