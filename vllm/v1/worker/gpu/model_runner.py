@@ -29,6 +29,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
@@ -1459,6 +1460,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
+        cudagraph_stats = None
+        if not dummy_run and self.observability_config.cudagraph_metrics:
+            cudagraph_stats = CUDAGraphStat(
+                num_unpadded_tokens=num_toks,
+                num_padded_tokens=batch_desc.num_tokens,
+                num_paddings=batch_desc.num_tokens - num_toks,
+                runtime_mode=str(batch_desc.cg_mode),
+            )
+
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
@@ -1670,6 +1680,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
             routed_experts=routed_experts,
+            cudagraph_stats=cudagraph_stats,
         )
 
         if not self.is_last_pp_rank:
@@ -1694,6 +1705,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
         routed_experts = self.execute_model_state.routed_experts
+        cudagraph_stats = self.execute_model_state.cudagraph_stats
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1752,6 +1764,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            cudagraph_stats=cudagraph_stats,
         )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
@@ -1959,6 +1972,7 @@ class ExecuteModelState(NamedTuple):
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
     routed_experts: RoutedExpertsTensors | None
+    cudagraph_stats: CUDAGraphStat | None
 
 
 class BatchReqState(NamedTuple):
