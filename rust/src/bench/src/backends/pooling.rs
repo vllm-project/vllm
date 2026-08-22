@@ -8,7 +8,7 @@
 //! - `openai-embeddings`: Standard OpenAI `/v1/embeddings` with text input
 //! - `openai-embeddings-chat`: OpenAI `/v1/embeddings` with chat message format (supports
 //!   multimodal)
-//! - `vllm-pooling`: vLLM `/v1/pooling` endpoint
+//! - `vllm-pooling`: vLLM `/pooling` endpoint
 //! - `vllm-rerank`: vLLM `/v1/rerank` endpoint (query + documents)
 
 use std::time::Instant;
