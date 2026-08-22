@@ -4,9 +4,6 @@
 import glob
 import hashlib
 import os
-import tempfile
-
-import huggingface_hub.constants
 
 from vllm.model_executor.model_loader.weight_utils import download_weights_from_hf
 from vllm.transformers_utils.runai_utils import (
@@ -24,18 +21,16 @@ def test_is_runai_obj_uri():
 
 
 def test_runai_list_safetensors_local():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        huggingface_hub.constants.HF_HUB_OFFLINE = False
-        download_weights_from_hf(
-            "openai-community/gpt2",
-            allow_patterns=["*.safetensors", "*.json"],
-            cache_dir=tmpdir,
-        )
-        safetensors = glob.glob(f"{tmpdir}/**/*.safetensors", recursive=True)
-        assert len(safetensors) > 0
-        parentdir = [os.path.dirname(safetensor) for safetensor in safetensors][0]
-        files = list_safetensors(parentdir)
-        assert len(safetensors) == len(files)
+    model_dir = download_weights_from_hf(
+        "openai-community/gpt2",
+        allow_patterns=["*.safetensors", "*.json"],
+        cache_dir=None,
+    )
+    safetensors = glob.glob(f"{model_dir}/**/*.safetensors", recursive=True)
+    assert len(safetensors) > 0
+    parentdir = os.path.dirname(safetensors[0])
+    files = list_safetensors(parentdir)
+    assert len(safetensors) == len(files)
 
 
 def test_runai_pull_files_gcs(monkeypatch):

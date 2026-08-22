@@ -46,4 +46,6 @@ The tiktoken encoding files required by the vLLM server are automatically downlo
 - `cl100k_base.tiktoken`
 - `o200k_base.tiktoken`
 
-Files are cached in the `data/` directory. The `TIKTOKEN_ENCODINGS_BASE` environment variable is automatically set to point to this directory when running evaluations.
+Files are stored under `vllm-test-assets/gpt_oss/tiktoken` in the resolved
+Hugging Face home directory. The `TIKTOKEN_ENCODINGS_BASE` environment variable
+is automatically set to point to this directory when running evaluations.

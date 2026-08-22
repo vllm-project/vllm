@@ -8,6 +8,7 @@ steps:
   timeout_in_minutes: 45
   source_file_dependencies:
   - csrc/
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization
   autorun_on_main: true
   commands:
@@ -22,6 +23,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - csrc/
+      - tests/evals/gsm8k/gsm8k_eval.py
       - vllm/model_executor/layers/quantization
       - vllm/model_executor/models/
       - vllm/model_executor/model_loader/
@@ -63,6 +65,7 @@ steps:
   optional: true
   source_file_dependencies:
   - csrc/
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
@@ -75,6 +78,7 @@ steps:
   optional: true
   source_file_dependencies:
   - csrc/
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization
   autorun_on_main: true
   commands:
@@ -91,6 +95,7 @@ steps:
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
   - tests/evals/gsm8k/configs/models-pcp.txt
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization
   - vllm/config/parallel.py
   - vllm/distributed/parallel_state.py
@@ -111,6 +116,7 @@ steps:
   source_file_dependencies:
   - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TP4.yaml
   - tests/evals/gsm8k/configs/models-spec-decode.txt
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/models/deepseek_v4/
   - vllm/model_executor/models/qwen3_dspark.py
   - vllm/v1/spec_decode/metrics.py
@@ -130,6 +136,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - csrc/
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt
@@ -141,6 +148,7 @@ steps:
   optional: true
   num_devices: 2
   source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/transformers_utils/configs/qwen3_5.py
@@ -157,6 +165,8 @@ steps:
   device: h200
   optional: true
   num_devices: 8
+  source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
   mirror:
@@ -177,6 +187,8 @@ steps:
   device: h100
   optional: true
   num_devices: 2
+  source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
   
@@ -186,6 +198,8 @@ steps:
   optional: true
   num_devices: 2
   parallelism: 4
+  source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
@@ -194,6 +208,8 @@ steps:
   device: b200-k8s
   optional: true
   num_devices: 2
+  source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
 
@@ -205,6 +221,7 @@ steps:
   num_devices: 1
   parallelism: 3
   source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization/humming.py
   - vllm/model_executor/layers/quantization/utils/humming_utils.py
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
@@ -220,6 +237,7 @@ steps:
   optional: true
   num_devices: 1
   source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization/humming.py
   - vllm/model_executor/layers/quantization/utils/humming_utils.py
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
@@ -236,6 +254,7 @@ steps:
   num_devices: 1
   parallelism: 3
   source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization/humming.py
   - vllm/model_executor/layers/quantization/utils/humming_utils.py
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
@@ -251,6 +270,7 @@ steps:
   optional: true
   num_devices: 1
   source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization/humming.py
   - vllm/model_executor/layers/quantization/utils/humming_utils.py
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
@@ -267,6 +287,7 @@ steps:
   optional: true
   num_devices: 1
   source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization/humming.py
   - vllm/model_executor/layers/quantization/utils/humming_utils.py
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
@@ -282,6 +303,7 @@ steps:
   optional: true
   num_devices: 1
   source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization/humming.py
   - vllm/model_executor/layers/quantization/utils/humming_utils.py
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
@@ -296,6 +318,7 @@ steps:
   timeout_in_minutes: 55
   device: h200_18gb
   source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization/turboquant/
   - vllm/v1/attention/backends/turboquant_attn.py
   - vllm/v1/attention/ops/triton_turboquant_decode.py
@@ -356,6 +379,7 @@ steps:
   - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
   - vllm/v1/kv_offload/
   - vllm/v1/simple_kv_offload/
+  - tests/evals/gsm8k/gsm8k_eval.py
   - tests/evals/gsm8k/test_gsm8k_offloading.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
@@ -370,6 +394,7 @@ steps:
   - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
   - vllm/v1/kv_offload/
   - vllm/v1/simple_kv_offload/
+  - tests/evals/gsm8k/gsm8k_eval.py
   - tests/evals/gsm8k/test_gsm8k_offloading.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
@@ -384,6 +409,7 @@ steps:
   - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
   - vllm/v1/kv_offload/
   - vllm/v1/simple_kv_offload/
+  - tests/evals/gsm8k/gsm8k_eval.py
   - tests/evals/gsm8k/test_gsm8k_offloading.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"

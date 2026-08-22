@@ -16,15 +16,11 @@ import sys
 import regex as re
 import yaml
 
-from tests.cache_utils import (
-    download_to_vllm_test_cache,
-    get_vllm_test_cache_dir,
-)
-from tests.utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer, TestAssetFetcher
 
 TOL = 0.05  # Absolute tolerance for accuracy comparison
 
-TIKTOKEN_CACHE_NAMESPACE = "gpt_oss/tiktoken"
+TIKTOKEN_ASSET_SUITE = "gpt_oss/tiktoken"
 
 # Tiktoken encoding files to download
 TIKTOKEN_FILES = {
@@ -39,24 +35,15 @@ TIKTOKEN_FILES = {
 }
 
 
-def get_tiktoken_data_dir():
-    return get_vllm_test_cache_dir(TIKTOKEN_CACHE_NAMESPACE)
-
-
 def ensure_tiktoken_files():
     """Download tiktoken encoding files if they don't exist."""
-    tiktoken_data_dir = get_tiktoken_data_dir()
+    assets = TestAssetFetcher.for_suite(TIKTOKEN_ASSET_SUITE)
 
     for filename, (url, expected_sha256) in TIKTOKEN_FILES.items():
-        filepath = download_to_vllm_test_cache(
-            url,
-            TIKTOKEN_CACHE_NAMESPACE,
-            filename=filename,
-            expected_sha256=expected_sha256,
-        )
+        filepath = assets.fetch(url, filename, expected_sha256)
         print(f"Using {filename} from {filepath}")
 
-    return tiktoken_data_dir
+    return assets.directory
 
 
 def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> float:

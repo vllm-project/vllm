@@ -6,6 +6,7 @@ import atexit
 import contextlib
 import copy
 import functools
+import hashlib
 import importlib
 import itertools
 import json
@@ -33,12 +34,13 @@ import pytest
 import requests
 import torch
 import torch.nn.functional as F
-from huggingface_hub.constants import HF_HUB_OFFLINE
+from huggingface_hub import constants as hf_constants
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
 import vllm.envs as envs
 from tests.models.utils import TextTextLogprobs
+from vllm.connections import global_http_connection
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -70,11 +72,74 @@ logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
+class TestAssetFetcher:
+    """Fetch checksum-pinned test assets into a shared directory."""
+
+    __test__ = False
+
+    def __init__(self, directory: str | Path):
+        self.directory = Path(directory)
+
+    @staticmethod
+    def _relative_path(value: str, *, nested: bool) -> Path:
+        path = Path(value)
+        if (
+            not value
+            or path.is_absolute()
+            or any(part in {".", ".."} for part in path.parts)
+            or (not nested and len(path.parts) != 1)
+        ):
+            raise ValueError(f"Unsafe test asset path: {value!r}")
+        return path
+
+    @classmethod
+    def for_suite(cls, name: str) -> "TestAssetFetcher":
+        root = Path(os.environ.get("HF_HOME", hf_constants.HF_HOME))
+        return cls(root / "vllm-test-assets" / cls._relative_path(name, nested=True))
+
+    @staticmethod
+    def _matches(path: Path, expected_sha256: str) -> bool:
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+                return False
+            digest = hashlib.sha256()
+            with path.open("rb") as file:
+                for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest() == expected_sha256
+        except OSError:
+            return False
+
+    def fetch(self, url: str, filename: str, expected_sha256: str) -> Path:
+        path = self.directory / self._relative_path(filename, nested=False)
+        if self._matches(path, expected_sha256):
+            return path
+        if hf_constants.HF_HUB_OFFLINE:
+            raise FileNotFoundError(
+                f"Test asset is unavailable while HF_HUB_OFFLINE is enabled: {path}"
+            )
+
+        self.directory.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=self.directory, prefix=f".{filename}.")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            global_http_connection.download_file(url, tmp_path, timeout=300)
+            if not self._matches(tmp_path, expected_sha256):
+                raise ValueError(f"Downloaded test asset failed validation: {path}")
+            tmp_path.chmod(0o644)
+            if not self._matches(path, expected_sha256):
+                os.replace(tmp_path, path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        return path
+
+
 def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
     """Pre-populate the HF cache for (repo_id, filename) pairs that upstream
     trust_remote_code modules would otherwise fetch from third-party CDNs
     (often unreachable from US-based CI)."""
-    if HF_HUB_OFFLINE:
+    if hf_constants.HF_HUB_OFFLINE:
         return
     for repo_id, filename in assets:
         try:

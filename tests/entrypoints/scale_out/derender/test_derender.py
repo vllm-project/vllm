@@ -7,8 +7,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from tests.cache_utils import download_url_to_file
-from tests.utils import RemoteLaunchRenderServer
+from tests.utils import RemoteLaunchRenderServer, TestAssetFetcher
 from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -1027,12 +1026,10 @@ def _ensure_harmony_vocab():
             str(Path(tempfile.gettempdir()) / "tiktoken-rs-cache"),
         )
     )
-    download_url_to_file(
+    TestAssetFetcher(runtime_cache_dir).fetch(
         url,
-        runtime_cache_dir / cache_key,
-        expected_sha256=(
-            "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
-        ),
+        cache_key,
+        "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d",
     )
 
 

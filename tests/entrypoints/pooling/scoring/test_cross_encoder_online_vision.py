@@ -89,20 +89,25 @@ def assert_score(actual: float, expected: float, backend: str, label: str):
 query = "A cat standing in the snow."
 document = "This product was excellent and exceeded my expectations."
 image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
-documents = [
-    {
-        "type": "text",
-        "text": document,
-    },
-    {
-        "type": "image_url",
-        "image_url": {"url": image_url},
-    },
-    {
-        "type": "image_url",
-        "image_url": {"url": encode_image_url(fetch_image(image_url))},
-    },
-]
+
+
+@pytest.fixture(scope="module")
+def documents():
+    return [
+        {
+            "type": "text",
+            "text": document,
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": image_url},
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_image_url(fetch_image(image_url))},
+        },
+    ]
+
 
 TEXT_VS_TEXT = 0.10040374100208282
 TEXT_VS_IMAGE = 0.7423753142356873
@@ -162,6 +167,7 @@ async def test_score_api_queries_str_documents_str(
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_text_content(
     server: tuple[RemoteOpenAIServer, str],
+    documents: list[dict],
 ):
     remote_server, backend = server
     score_response = requests.post(
@@ -185,6 +191,7 @@ async def test_score_api_queries_str_documents_text_content(
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_url_content(
     server: tuple[RemoteOpenAIServer, str],
+    documents: list[dict],
 ):
     remote_server, backend = server
     score_response = requests.post(
@@ -208,6 +215,7 @@ async def test_score_api_queries_str_documents_image_url_content(
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_base64_content(
     server: tuple[RemoteOpenAIServer, str],
+    documents: list[dict],
 ):
     remote_server, backend = server
     score_response = requests.post(
@@ -231,6 +239,7 @@ async def test_score_api_queries_str_documents_image_base64_content(
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_url_plus_text_content(
     server: tuple[RemoteOpenAIServer, str],
+    documents: list[dict],
 ):
     remote_server, backend = server
     score_response = requests.post(
@@ -256,6 +265,7 @@ async def test_score_api_queries_str_documents_image_url_plus_text_content(
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_list(
     server: tuple[RemoteOpenAIServer, str],
+    documents: list[dict],
 ):
     remote_server, backend = server
     score_response = requests.post(
@@ -292,6 +302,7 @@ async def test_score_api_queries_str_documents_list(
 @pytest.mark.asyncio
 async def test_rerank_api_queries_str_documents_list(
     server: tuple[RemoteOpenAIServer, str],
+    documents: list[dict],
 ):
     remote_server, backend = server
     rerank_response = requests.post(
@@ -345,6 +356,7 @@ async def test_rerank_api_queries_str_documents_list(
 @pytest.mark.asyncio
 async def test_score_api_queries_list_documents_list(
     server: tuple[RemoteOpenAIServer, str],
+    documents: list[dict],
 ):
     remote_server, backend = server
     score_response = requests.post(
@@ -422,6 +434,7 @@ async def test_score_api_instruction_field(
 @pytest.mark.asyncio
 async def test_rerank_api_instruction_field(
     server: tuple[RemoteOpenAIServer, str],
+    documents: list[dict],
 ):
     remote_server, _ = server
 
@@ -465,6 +478,7 @@ async def test_rerank_api_instruction_field(
 @pytest.mark.asyncio
 async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
     server: tuple[RemoteOpenAIServer, str],
+    documents: list[dict],
 ):
     remote_server, backend = server
 

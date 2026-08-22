@@ -58,9 +58,6 @@ def test_oot_registration_embedding(
             assert all(v == 0 for v in output.outputs.embedding)
 
 
-image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
-
-
 @create_new_process_for_each_test()
 def test_oot_registration_multimodal(
     monkeypatch: pytest.MonkeyPatch,
@@ -68,6 +65,7 @@ def test_oot_registration_multimodal(
 ):
     with monkeypatch.context() as m:
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
+        image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
         prompts = [
             {
                 "prompt": "What's in the image?<image>",

@@ -23,7 +23,6 @@ if __package__ in (None, ""):
     # Preserve the documented direct-script invocation from the repository root.
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from tests.cache_utils import download_to_vllm_test_cache, download_url_to_file
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 
 INVALID = -9999999
@@ -33,19 +32,18 @@ GSM8K_SHA256 = {
 }
 
 
-def download_and_cache_file(
+def fetch_gsm8k_asset(
     url: str,
-    filename: str | None = None,
-    expected_sha256: str | None = None,
+    filename: str,
+    expected_sha256: str,
 ) -> str:
-    """Download and cache a file from a URL."""
-    if filename is None:
-        return str(
-            download_to_vllm_test_cache(url, "gsm8k", expected_sha256=expected_sha256)
-        )
+    """Fetch a checksum-pinned GSM8K asset."""
+    # Keep the direct ``--help`` path lightweight: tests.utils imports the full
+    # test runtime, which is only needed when an evaluation actually loads data.
+    from tests.utils import TestAssetFetcher
 
     return str(
-        download_url_to_file(url, Path(filename), expected_sha256=expected_sha256)
+        TestAssetFetcher.for_suite("gsm8k").fetch(url, filename, expected_sha256)
     )
 
 
@@ -54,12 +52,10 @@ def load_gsm8k_data() -> tuple[list[dict], list[dict]]:
     train_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/train.jsonl"
     test_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/test.jsonl"
 
-    train_file = download_and_cache_file(
-        train_url, expected_sha256=GSM8K_SHA256["train.jsonl"]
+    train_file = fetch_gsm8k_asset(
+        train_url, "train.jsonl", GSM8K_SHA256["train.jsonl"]
     )
-    test_file = download_and_cache_file(
-        test_url, expected_sha256=GSM8K_SHA256["test.jsonl"]
-    )
+    test_file = fetch_gsm8k_asset(test_url, "test.jsonl", GSM8K_SHA256["test.jsonl"])
 
     train_data = list(read_jsonl(train_file))
     test_data = list(read_jsonl(test_file))
