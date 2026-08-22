@@ -96,6 +96,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # regardless whether the kv-scale is available in the checkpoint.
         # No need to process kv scales after loading if we are going to
         # calculate them on the fly.
+        fallback_q_scale: float | None = None
         if is_quantized_kv_cache(layer.kv_cache_dtype):
             if layer.k_scale > 0.0 and layer.v_scale > 0.0:
                 # We prefer to use separate k_scale and v_scale if present
@@ -132,8 +133,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     "Setting it to k_scale. This only matters for "
                     "FP8 Attention backends (flash-attn or flashinfer)."
                 )
-                layer._q_scale.copy_(k_scale)
-                layer._q_scale_float = k_scale
+                fallback_q_scale = k_scale
 
             # These are used in the final Attention.forward()
             layer._k_scale.copy_(k_scale)
@@ -154,6 +154,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             q_scale = layer.q_scale
             if current_platform.is_fp8_fnuz():
                 q_scale *= 2
+        elif fallback_q_scale is not None:
+            q_scale = fallback_q_scale
         else:
             q_scale = 1.0
         if layer.prob_scale > 0.0:
