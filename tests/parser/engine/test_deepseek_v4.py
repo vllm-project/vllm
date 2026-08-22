@@ -1270,3 +1270,67 @@ class TestDelegatingParserLargeDelta:
         assert eos_text not in output.reasoning
         assert output.content == ""
         assert output.tool_calls == []
+
+
+class TestDelegatingMalformedWrapperRecovery:
+    def test_complete_declared_invoke_commits_before_think_end(
+        self, mock_tokenizer, mock_request
+    ):
+        tool = _recovery_tool()
+        mock_request.tools = [tool]
+        mock_request.tool_choice = "auto"
+        parser = _DeepSeekV4Delegating(
+            mock_tokenizer,
+            tools=[tool],
+            chat_template_kwargs={"thinking": True},
+        )
+        delta = parser.parse_delta(
+            "Still thinking.\n" + _recovery_invoke(),
+            [],
+            mock_request,
+            prompt_token_ids=[],
+            finished=True,
+        )
+        output = collect_output([delta])
+
+        assert output.reasoning == "Still thinking.\n"
+        assert output.content == ""
+        assert [call["name"] for call in output.tool_calls] == ["get_weather"]
+
+    @pytest.mark.parametrize(
+        ("candidate", "tool_choice"),
+        [
+            (_recovery_invoke(name="not_declared"), "auto"),
+            (
+                f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+                f"{_param('city', 'true', 'Seoul')}",
+                "auto",
+            ),
+            (_recovery_invoke(), "none"),
+        ],
+        ids=["undeclared", "truncated", "tool_choice_none"],
+    )
+    def test_rejected_invoke_rolls_back_to_reasoning(
+        self, mock_tokenizer, mock_request, candidate, tool_choice
+    ):
+        tool = _recovery_tool()
+        mock_request.tools = [tool]
+        mock_request.tool_choice = tool_choice
+        parser = _DeepSeekV4Delegating(
+            mock_tokenizer,
+            tools=[tool],
+            chat_template_kwargs={"thinking": True},
+        )
+        text = "Still thinking.\n" + candidate
+        delta = parser.parse_delta(
+            text,
+            [],
+            mock_request,
+            prompt_token_ids=[],
+            finished=True,
+        )
+        output = collect_output([delta])
+
+        assert output.reasoning == text
+        assert output.content == ""
+        assert output.tool_calls == []

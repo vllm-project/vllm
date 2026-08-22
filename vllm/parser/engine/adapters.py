@@ -76,6 +76,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
+        self.adjust_request(request)
         self._streaming_count_valid = False
         with self._skip_tool_parsing():
             return self._parser_engine.extract_reasoning(model_output, request)
@@ -112,7 +113,10 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ChatCompletionRequest | ResponsesRequest:
-        return self._parser_engine.adjust_request(request)
+        request = self._parser_engine.adjust_request(request)
+        with self._skip_tool_parsing():
+            self._parser_engine._check_skip_tool_parsing(request)
+        return request
 
     def has_engine_confirmed_reasoning_end(self) -> bool:
         return self._parser_engine.reasoning_ended
