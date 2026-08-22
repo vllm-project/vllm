@@ -55,6 +55,9 @@ def test_initialize_kv_cache_finalizes_persistent_workspace(
     kv_cache_config = SimpleNamespace(
         num_blocks=8,
         needs_kv_cache_zeroing=False,
+        # The engine core resolves the layout; None keeps the worker on the
+        # config it already has.
+        kv_cache_layout=None,
     )
     monkeypatch.setattr(
         gpu_worker_module,
