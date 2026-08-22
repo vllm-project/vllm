@@ -84,7 +84,11 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         if hasattr(target_model, "get_language_model")
         else target_model
     )
-    target_inner = target_language_model.model
+    # A multimodal target whose get_language_model() already returns the inner
+    # decoder (e.g. Muse Glimmer) has no further `.model` to unwrap. The dflash
+    # path applies the same rule; without it DSpark raises AttributeError before
+    # any weights are shared.
+    target_inner = getattr(target_language_model, "model", target_language_model)
     draft_inner = draft_model.model
 
     target_embed = getattr(target_inner, "embed_tokens", None)
