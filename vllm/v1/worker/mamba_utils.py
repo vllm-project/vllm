@@ -13,6 +13,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     get_conv_copy_spec,
     get_temporal_copy_spec,
+    get_token_indexed_conv_copy_spec,
     is_conv_state_dim_first,
 )
 from vllm.triton_utils import tl, triton
@@ -140,6 +141,7 @@ def _copy_mamba_state_block(
     tile_idx,
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
+    TOKEN_INDEXED_CONV: tl.constexpr,
     TEMPORAL_TILES: tl.constexpr,
 ):
     """Copy one (layer, state-type) mamba state block between block columns.
@@ -147,9 +149,10 @@ def _copy_mamba_state_block(
     Shared copy body of ``postprocess_mamba_fused_kernel`` and
     ``precopy_mamba_align_fused_kernel``, mirroring the V1 copy specs
     (``get_conv_copy_spec`` / ``get_temporal_copy_spec``):
-    - conv state (conv_width > 0): shift the window by ``token_bias`` tokens,
-      ``state[bt[src_col], token_bias:] ->
-      state[bt[dst_col], :conv_width - token_bias]``
+    - sliding-window conv state: shift the window by ``token_bias`` tokens,
+      ``state[bt[src_col], token_bias:] -> state[bt[dst_col], :width - bias]``
+    - token-indexed conv state: select and copy the complete accepted-token
+      snapshot, ``state[bt[src_col + token_bias]] -> state[bt[dst_col]]``
     - temporal state: ``token_bias`` selects the accepted speculative column,
       ``state[bt[src_col + token_bias]] -> state[bt[dst_col]]``
 
@@ -184,6 +187,25 @@ def _copy_mamba_state_block(
     dst_addr = state_base_addr + dest_block_id * state_block_stride
 
     is_conv_state = conv_width > 0
+
+    if TOKEN_INDEXED_CONV and is_conv_state:
+        if tile_idx > 0:
+            return
+        src_block_id = tl.load(block_table_base + src_col + token_bias).to(tl.int64)
+        src_addr = state_base_addr + src_block_id * state_block_stride
+        conv_inner_size = state_inner_size
+        if CONV_STATE_DIM_FIRST:
+            conv_inner_size = tl.load(state_dim_row_count_ptr + state_idx)
+        copy_size = conv_width.to(tl.int64) * conv_inner_size * state_elem_size
+        _memcpy_u64_tiled(
+            src_addr,
+            dst_addr,
+            copy_size,
+            tile_idx,
+            COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+            NUM_TILES=1,
+        )
+        return
 
     if CONV_STATE_DIM_FIRST and is_conv_state:
         # Conv states are small; only tile 0 does the copy. Higher tiles
@@ -335,6 +357,7 @@ def postprocess_mamba_fused_kernel(
     # COPY_BLOCK_SIZE: fixed tuning parameter for memory copy loop
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
+    TOKEN_INDEXED_CONV: tl.constexpr,
     # HAS_IDX_MAPPING: when True, program_id(0) is a batch index resolved to a
     # req-state slot via idx_mapping_ptr (V2). When False, it is the req index.
     HAS_IDX_MAPPING: tl.constexpr = False,
@@ -430,6 +453,7 @@ def postprocess_mamba_fused_kernel(
         tile_idx,
         COPY_BLOCK_SIZE,
         CONV_STATE_DIM_FIRST,
+        TOKEN_INDEXED_CONV,
         TEMPORAL_TILES,
     )
 
@@ -502,6 +526,7 @@ def precopy_mamba_align_fused_kernel(
     num_reqs,
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
+    TOKEN_INDEXED_CONV: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr = True,
     # TEMPORAL_TILES: see postprocess_mamba_fused_kernel. Default 1 preserves
     # the 2D-grid contract; > 1 requires a 3D grid.
@@ -561,6 +586,7 @@ def precopy_mamba_align_fused_kernel(
         tile_idx,
         COPY_BLOCK_SIZE,
         CONV_STATE_DIM_FIRST,
+        TOKEN_INDEXED_CONV,
         TEMPORAL_TILES,
     )
 
@@ -657,8 +683,8 @@ class MambaSpecDecodeGPUContext:
     Precomputes memory layout metadata (base addresses, strides, element sizes)
     so the GPU kernel can perform state copies without CPU-GPU sync.
 
-    State types are distinguished by conv_width: >0 for conv states (sliding
-    window with offset-based copies), 0 for temporal states (full block copies).
+    State types are distinguished by conv_width: >0 for conv states and 0 for
+    temporal states. Conv copy semantics are fixed for the lifetime of a context.
     """
 
     # Per-state metadata tensors (shape: [num_layers * num_state_types])
@@ -679,6 +705,7 @@ class MambaSpecDecodeGPUContext:
     num_state_types: int
     mamba_group_ids: list[int]
     num_groups: int
+    token_indexed_conv: bool  # full per-token conv snapshots
 
     # Output buffer for num_accepted_tokens updates
     num_accepted_tokens_out: torch.Tensor
@@ -752,6 +779,7 @@ class MambaSpecDecodeGPUContext:
             num_state_types=num_state_types,
             mamba_group_ids=mamba_group_ids,
             num_groups=len(mamba_group_ids),
+            token_indexed_conv=False,
             num_accepted_tokens_out=torch.zeros(
                 max_num_reqs, dtype=torch.int32, device=device
             ),
@@ -789,9 +817,8 @@ class MambaSpecDecodeGPUContext:
           used to compute offset when slicing state[block, offset:]. For temporal
           states, this field is unused (set to 1).
         - state_conv_widths: Conv dimension size for conv states, 0 for temporal states
-
-        The conv vs temporal state type is detected by inspecting the copy function
-        name: functions containing "conv" are treated as conv states.
+        Conv state kind and copy semantics are derived from the model-provided
+        state copy functions.
 
         This method is idempotent - it only executes once (guarded by is_initialized
         flag) since the metadata is static after model loading.
@@ -826,6 +853,10 @@ class MambaSpecDecodeGPUContext:
         mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
         block_tables: list[torch.Tensor],
     ) -> None:
+        self.token_indexed_conv = (
+            get_token_indexed_conv_copy_spec in mamba_state_copy_funcs
+        )
+
         idx = 0
         for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
             layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
@@ -858,11 +889,14 @@ class MambaSpecDecodeGPUContext:
                     # Element size
                     self.state_elem_sizes[idx] = state.element_size()
 
-                    assert (
-                        copy_func is get_conv_copy_spec
-                        or copy_func is get_temporal_copy_spec
-                    ), f"unexpected copy func: {copy_func}"
-                    if copy_func is get_conv_copy_spec:
+                    is_conv_copy = copy_func in (
+                        get_conv_copy_spec,
+                        get_token_indexed_conv_copy_spec,
+                    )
+                    assert is_conv_copy or copy_func is get_temporal_copy_spec, (
+                        f"unexpected copy func: {copy_func}"
+                    )
+                    if is_conv_copy:
                         if state.dim() != 3:
                             raise ValueError(
                                 "Expected 3D conv state cache, got "
@@ -990,6 +1024,7 @@ class MambaSpecDecodeGPUContext:
             block_size=self.block_size,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            TOKEN_INDEXED_CONV=self.token_indexed_conv,
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
@@ -1034,6 +1069,7 @@ class MambaSpecDecodeGPUContext:
             num_reqs,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            TOKEN_INDEXED_CONV=self.token_indexed_conv,
             HAS_IDX_MAPPING=idx_mapping is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
@@ -1088,6 +1124,7 @@ class MambaSpecDecodeGPUContext:
             block_size=self.block_size,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            TOKEN_INDEXED_CONV=self.token_indexed_conv,
             HAS_IDX_MAPPING=True,
             PRECOMPUTED_NEW_COMPUTED=True,
             TEMPORAL_TILES=_TEMPORAL_TILES,

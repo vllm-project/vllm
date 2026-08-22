@@ -12,6 +12,7 @@ import torch
 from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
+    get_token_indexed_conv_copy_spec,
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
@@ -33,6 +34,21 @@ _COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
+
+
+def test_token_indexed_conv_copy_spec_selects_full_accepted_snapshot():
+    state = torch.empty((8, 4, 16), dtype=torch.bfloat16)
+    block_ids = [7, 2, 5, 1]
+
+    copy_spec = get_token_indexed_conv_copy_spec(
+        state,
+        block_ids,
+        cur_block_idx=1,
+        num_accepted_tokens=3,
+    )
+
+    assert copy_spec.start_addr == state[block_ids[3]].data_ptr()
+    assert copy_spec.num_elements == state[0].numel()
 
 
 def postprocess_mamba(
@@ -689,6 +705,47 @@ class TestPostprocessMambaFusedKernel:
             batch_memcpy(src_ptrs, dst_ptrs, sizes)
             torch.accelerator.synchronize()
             torch.testing.assert_close(state, expected, rtol=0, atol=0)
+
+    def test_token_indexed_conv_copies_accepted_snapshot(self, device):
+        cfg = _TestConfig(num_layers=1)
+        layer_names = ["layer_0"]
+        kv_cache_config = _make_kv_cache_config(cfg, layer_names)
+
+        block_values = torch.arange(cfg.num_blocks, dtype=cfg.dtype, device=device)
+        conv_state = (
+            block_values[:, None, None]
+            .expand(-1, cfg.conv_width, cfg.conv_inner_dim)
+            .clone()
+        )
+        temporal_state = (
+            block_values[:, None].expand(-1, cfg.temporal_state_dim).clone()
+        )
+        forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
+
+        # running=30, accepted=3 => aligned=32, token bias=2, dst col=1.
+        # Token-indexed state must copy the full snapshot from src col 0+2.
+        block_table = torch.tensor([[3, 7, 11, 15]], dtype=torch.int32, device=device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        _run_gpu_postprocess(
+            gpu_ctx,
+            kv_cache_config=kv_cache_config,
+            forward_context=forward_context,
+            copy_funcs=(get_token_indexed_conv_copy_spec, get_temporal_copy_spec),
+            block_table=block_table,
+            req_ids=["req_0"],
+            num_accepted_tokens=[3],
+            mamba_state_idx=[0],
+            num_scheduled_tokens={"req_0": 1},
+            num_computed_tokens=[29],
+            num_draft_tokens={},
+            device=device,
+        )
+
+        expected = torch.full_like(conv_state[7], 11)
+        torch.testing.assert_close(conv_state[7], expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            temporal_state[7], torch.full_like(temporal_state[7], 11), rtol=0, atol=0
+        )
 
     def test_matches_python_postprocess_mamba(self, device, test_config):
         """

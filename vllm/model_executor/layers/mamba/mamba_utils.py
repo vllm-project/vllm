@@ -381,6 +381,26 @@ def get_conv_copy_spec(
     )
 
 
+def get_token_indexed_conv_copy_spec(
+    state: torch.Tensor,
+    block_ids: list[int],
+    cur_block_idx: int,
+    num_accepted_tokens: int,
+) -> MambaCopySpec:
+    """Return the full conv snapshot for the selected speculative token.
+
+    Unlike the sliding-window convention used by :func:`get_conv_copy_spec`,
+    some kernels write a complete conv state snapshot to every block-table
+    entry in ``cache_indices``.  For those kernels, an accepted-token offset
+    selects a block-table column rather than a row within one conv state.
+    """
+    src_block_id = block_ids[cur_block_idx + num_accepted_tokens - 1]
+    src_state = state[src_block_id]
+    return MambaCopySpec(
+        start_addr=src_state.data_ptr(), num_elements=src_state.numel()
+    )
+
+
 def get_temporal_copy_spec(
     state: torch.Tensor,
     block_ids: list[int],
@@ -413,8 +433,13 @@ class MambaStateCopyFuncCalculator:
         return (get_conv_copy_spec,)
 
     @classmethod
-    def gated_delta_net_state_copy_func(cls):
-        return (get_conv_copy_spec, get_temporal_copy_spec)
+    def gated_delta_net_state_copy_func(cls, *, token_indexed_conv: bool = False):
+        conv_copy_func = (
+            get_token_indexed_conv_copy_spec
+            if token_indexed_conv
+            else get_conv_copy_spec
+        )
+        return (conv_copy_func, get_temporal_copy_spec)
 
     @classmethod
     def kda_state_copy_func(cls):

@@ -827,7 +827,9 @@ class Qwen3NextForCausalLM(
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
-        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func(
+            token_indexed_conv=current_platform.is_xpu()
+        )
 
     def compute_logits(
         self,
