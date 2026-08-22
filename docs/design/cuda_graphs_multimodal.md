@@ -21,6 +21,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 
 | Architecture | Models | CG for Image | CG for Video | Multi-Path Graph |
 | ------------ | ------ | ------------ | ------------ | --------------- |
+| `Cosmos3EdgeForConditionalGeneration` | `Cosmos3-Edge` | ✅︎ | ❌︎ | ❌︎ |
 | `DeepseekOCRForCausalLM` | `DeepSeek-OCR` | ✅︎ | ❌︎ | ✅︎ |
 | `Ernie4_5_VLMoeForConditionalGeneration` | `ERNIE-4.5-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `Gemma3ForConditionalGeneration` | `Gemma3` | ✅︎ | ❌︎ | ❌︎ |
@@ -40,6 +41,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 
 | Architecture | NV Blackwell | NV Ampere | AMD MI300X | AMD MI350X / MI355X |
 | ------------ | ---------------- | ------------- | -------------- | --------------------- |
+| `Cosmos3EdgeForConditionalGeneration` | ✅︎ | ❔ | ❔ | ❔ |
 | `DeepseekOCRForCausalLM` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Ernie4_5_VLMoeForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Gemma3ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
@@ -165,6 +167,15 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
+
+    A path can set `require_exact_token_budget_match=True` when padding changes
+    its numerical behavior or erases the graph replay benefit. Inputs between
+    captured budgets then use the eager fallback. Cosmos3-Edge uses this policy
+    and defaults to one 64-token image per replay; fixed-resolution workloads
+    can add their exact merged-token counts through
+    `encoder_cudagraph_token_budgets`. Cosmos3-Edge supports at most one image
+    per replay, so leave `encoder_cudagraph_max_vision_items_per_batch` at its
+    auto-inferred value or set it to `1`.
 
 ## Configuration
 

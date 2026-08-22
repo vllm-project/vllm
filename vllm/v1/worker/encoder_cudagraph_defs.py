@@ -49,6 +49,14 @@ class EncoderCudaGraphPathConfig:
     allow_zero_tokens: bool = False
     """Whether a batch may omit this path entirely."""
 
+    require_exact_token_budget_match: bool = False
+    """Only replay a graph when its token budget exactly matches the input.
+
+    This avoids token-count padding for encoders whose compute cost depends
+    strongly on the captured sequence length. Inputs between captured budgets
+    fall back to eager execution.
+    """
+
 
 @dataclass
 class EncoderCudaGraphConfig:
