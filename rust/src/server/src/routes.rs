@@ -83,6 +83,15 @@ fn build_router_with_options(
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/chat/completions", post(openai::chat_completions))
+        .route("/v1/responses", post(openai::create_responses))
+        .route(
+            "/v1/responses/{response_id}",
+            get(openai::retrieve_response),
+        )
+        .route(
+            "/v1/responses/{response_id}/cancel",
+            post(openai::cancel_response),
+        )
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize))

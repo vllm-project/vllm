@@ -19,6 +19,9 @@ pub enum ApiError {
     },
     /// The requested model name does not match the single configured model.
     ModelNotFound { model: String },
+    /// The requested response ID does not exist in this frontend. Every
+    /// response ID is unknown because the frontend has no response store.
+    ResponseNotFound { response_id: String },
     /// The request body could not be parsed as valid JSON.
     JsonParseError { message: String },
     /// An unexpected internal failure happened before streaming started.
@@ -31,6 +34,7 @@ impl ApiError {
         match self {
             Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::ResponseNotFound { .. } => StatusCode::NOT_FOUND,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
         }
@@ -51,6 +55,12 @@ impl ApiError {
                 error_type: "invalid_request_error".to_string(),
                 param: Some("model".to_string()),
                 code: Some("model_not_found".to_string()),
+            },
+            Self::ResponseNotFound { response_id } => ErrorDetail {
+                message: format!("Response with id '{response_id}' not found."),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("response_id".to_string()),
+                code: Some("invalid_request_error".to_string()),
             },
             Self::ServerError { message } => ErrorDetail {
                 message: message.clone(),
