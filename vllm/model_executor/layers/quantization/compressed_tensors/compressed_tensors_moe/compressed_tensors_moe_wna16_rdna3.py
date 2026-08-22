@@ -63,6 +63,25 @@ class CompressedTensorsWNA16RDNA3MoEMethod(CompressedTensorsWNA16MoEMethod):
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # CT loads in N-first [E, N, K_packed]; RDNA3 kernel needs K-first
+        # [E, K_packed, N].  Transpose weights and scales.
+        layer.w13_weight_packed = torch.nn.Parameter(
+            layer.w13_weight_packed.data.transpose(1, 2).contiguous(),
+            requires_grad=False,
+        )
+        layer.w2_weight_packed = torch.nn.Parameter(
+            layer.w2_weight_packed.data.transpose(1, 2).contiguous(),
+            requires_grad=False,
+        )
+        layer.w13_weight_scale = torch.nn.Parameter(
+            layer.w13_weight_scale.data.transpose(1, 2).contiguous(),
+            requires_grad=False,
+        )
+        layer.w2_weight_scale = torch.nn.Parameter(
+            layer.w2_weight_scale.data.transpose(1, 2).contiguous(),
+            requires_grad=False,
+        )
+
         device = layer.w13_weight_packed.device
         num_experts = layer.w13_weight_packed.shape[0]
         empty_g_idx = torch.empty(0, dtype=torch.int32, device=device)
@@ -76,7 +95,7 @@ class CompressedTensorsWNA16RDNA3MoEMethod(CompressedTensorsWNA16MoEMethod):
             ops.gptq_shuffle(w2_e, empty_g_idx, 4)
             layer.w2_weight_packed.data[e] = w2_e
 
-        # Keep scales as [E, groups, N] in activation dtype
+        # Scales are now [E, groups, N] in activation dtype (after transpose)
         act_dtype = layer.w13_weight_scale.dtype
         layer.w13_weight_scale = torch.nn.Parameter(
             layer.w13_weight_scale.to(dtype=act_dtype).contiguous(),
