@@ -687,6 +687,30 @@ class TestMalformedWrapperRecovery:
         assert result.tool_calls == []
         assert result.content == text
 
+    def test_truncated_recovery_drops_eos_special_token(self, mock_request):
+        eos_text = "<｜end▁of▁sentence｜>"
+        eos_id = 128801
+        tokenizer = make_mock_tokenizer(
+            {
+                DSML_THINK_START: _THINK_START_ID,
+                DSML_THINK_END: _THINK_END_ID,
+                eos_text: eos_id,
+            }
+        )
+        tool = _recovery_tool()
+        mock_request.tools = [tool]
+        parser = _content_recovery_parser(tokenizer, tool)
+        text = (
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+            f"{_param('city', 'true', 'Seoul')}"
+        )
+
+        assert parser._engine.feed(text, []) == []
+        events = parser._engine.feed(eos_text, [eos_id])
+        events.extend(parser._engine.finish())
+
+        assert "".join(event.value for event in events if event.value) == text
+
     def test_tool_end_without_invoke_end_stays_content(
         self, mock_tokenizer, mock_request
     ):

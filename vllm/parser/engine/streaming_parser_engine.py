@@ -388,6 +388,9 @@ class StreamingParserEngine:
         transition = self.config.transitions.get(key)
 
         if transition is None:
+            # DROP_TERMINAL must never enter provisional recovery buffers.
+            if self._has_drops and terminal == DROP_TERMINAL:
+                return []
             if self._recovery_hold_active and self.state == ParserState.TOOL_NAME:
                 events = self._abort_recovery_hold()
                 events.extend(self._on_terminal(terminal, value, token_count))
@@ -397,8 +400,6 @@ class StreamingParserEngine:
                 # no state transition. During recovery they are still part of
                 # the candidate invoke and must stay buffered as arguments.
                 return self._emit_for_state(value, token_count)
-            if self._has_drops and terminal == DROP_TERMINAL:
-                return []
             # The projected skip state may not define the wrapper closer.
             if self.skip_tool_parsing and terminal in self._tool_exit_terminals:
                 self._in_skipped_tool_span = False
