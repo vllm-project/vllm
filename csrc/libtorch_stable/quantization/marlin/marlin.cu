@@ -704,6 +704,12 @@ torch::stable::Tensor marlin_gemm(
   } else {
     c = torch::stable::empty({size_m, size_n}, c_scalar_type, std::nullopt,
                              device);
+    // cudagraph-replay safety: with use_atomic_add the kernel atomic-accumulates
+    // into c, so it must start at the additive identity (0). An uninitialized c is
+    // reused dirty across CUDA graph replays -> accumulation onto stale data -> NaN.
+    if (use_atomic_add) {
+      torch::stable::zero_(c);
+    }
   }
   if (size_m == 0) return c;
 
@@ -717,6 +723,10 @@ torch::stable::Tensor marlin_gemm(
     c_tmp = torch::stable::empty({max_c_tmp_size},
                                  torch::headeronly::ScalarType::Float,
                                  std::nullopt, device);
+    // cudagraph-replay safety (DOMINANT root): the cross-CTA fp32 global reduce
+    // reads c_tmp partial slots; an uninitialized c_tmp is reused dirty across CUDA
+    // graph replays. Isolation: dirty c_tmp -> 570 NaN/1961 calls; zeroed -> 5/7762.
+    torch::stable::zero_(c_tmp);
   } else {
     c_tmp = torch::stable::empty({0}, torch::headeronly::ScalarType::Float,
                                  std::nullopt, device);
