@@ -29,6 +29,9 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
     QuarkW4A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
 )
+from vllm.model_executor.layers.quantization.quark.utils import (
+    should_ignore_layer,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
 )
@@ -632,6 +635,23 @@ FUSED_MAPPING = {
     "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     "gate_up_proj": ["gate_proj", "up_proj"],
 }
+
+
+def test_quark_should_ignore_layer_checks_children():
+    assert should_ignore_layer(
+        "model.layers.78.mlp.experts",
+        ["model.layers.78.mlp.experts.0.down_proj"],
+        check_children=True,
+    )
+
+
+def test_quark_should_ignore_layer_rejects_partial_fused_matches():
+    with pytest.raises(ValueError, match="different quantization schemes"):
+        should_ignore_layer(
+            "model.layers.0.self_attn.qkv_proj",
+            ["model.layers.0.self_attn.q_proj"],
+            FUSED_MAPPING,
+        )
 
 
 def test_fused_name_listed_directly_is_skipped():

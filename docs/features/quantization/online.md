@@ -67,7 +67,7 @@ quantization_config:
   moe:
     weight: <name>
     activation: <name>
-  ignore: [<layer-name-or-regex>, ...]
+  ignore: [<layer-name-or-regex-or-fnmatch-pattern>, ...]
 ```
 
 `linear` and `moe` accept a full `{weight, activation}` dict, or a bare
@@ -133,7 +133,7 @@ llm = LLM(
 
 ### Excluding Layers from Quantization
 
-Use the `ignore` parameter to skip specific layers. It accepts exact layer names and regex patterns (prefixed with `re:`):
+Use the `ignore` parameter to skip specific layers. It accepts exact layer names, regex patterns (prefixed with `re:`), and patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch):
 
 ```python
 from vllm import LLM
@@ -147,10 +147,54 @@ llm = LLM(
             "model.layers.1.self_attn.o_proj",
             # regex: skip all QKV projections
             "re:.*[qkv]_proj",
+            # fnmatch: skip all MoE experts
+            "*mlp.experts*",
         ],
     },
 )
 ```
 
 !!! note
-    For fused layers (e.g., `qkv_proj` which fuses `q_proj`, `k_proj`, `v_proj`), the ignore pattern must match the **unfused** shard names (`q_proj`, `k_proj`, `v_proj`), not the fused name.
+    For fused layers (e.g., `qkv_proj` which fuses `q_proj`, `k_proj`, `v_proj`), patterns may match the fused name directly or all of its unfused shard names.
+
+### Fine-Grained Per-Layer Quantization Schemes
+
+Use the `targets` parameter to apply different online shorthands to different layers, instead of one scheme applied everywhere via `linear`/`moe`. Keys are exact layer names, regex patterns (prefixed with `re:`), or patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch); values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8`, `int8_per_channel_weight_only`, `nvfp4_per_token`).
+
+Example:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    "Qwen/Qwen3.5-35B-A3B",
+    quantization="online",
+    quantization_config={
+        "targets": {
+            # exact layer name
+            "model.layers.0.self_attn.o_proj": "fp8_per_tensor",
+            # regex: quantize all QKV projections
+            r"re:.*self_attn\.qkv_proj.*": "mxfp8",
+            # fnmatch: quantize all MoE experts
+            "*mlp.experts*": "mxfp4",
+        },
+    },
+)
+```
+
+Or with the CLI:
+
+```bash
+vllm serve Qwen/Qwen3.5-35B-A3B \
+  --quantization online \
+  --quantization-config '{"targets":{"model.layers.0.self_attn.o_proj":"fp8_per_tensor","re:.*self_attn\\.qkv_proj.*":"mxfp8","*mlp.experts*":"mxfp4"}}'
+```
+
+!!! info
+
+    - `targets` is mutually exclusive with online `linear` and `moe`: set one or the other, not both.
+    - A layer that matches no `targets` pattern is left unchanged from its checkpoint dtype.
+    - A layer name may not match both `targets` and `ignore`, raising an error.
+    - A layer may not match more than one `targets` pattern, raising an error.
+    - fnmatch-style patterns are supported only by online quantization; they are
+      not applied to Quark or compressed-tensors configurations.
