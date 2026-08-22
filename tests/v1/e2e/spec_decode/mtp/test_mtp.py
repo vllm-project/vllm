@@ -42,8 +42,13 @@ from ..utils import (
             False,
             0.50,
         ),  # gemma4 MTP with assistant model, ref: ~62%
+        (
+            ("mtp", "zai-org/GLM-OCR", 1, None),
+            False,
+            0.0,  # GSM8k not applicable to OCR model
+        ),
     ],
-    ids=["mimo", "deepseek", "qwen3_5-hybrid", "gemma4-e4b"],
+    ids=["mimo", "deepseek", "qwen3_5-hybrid", "gemma4-e4b", "glm_ocr"],
 )
 @single_gpu_only
 def test_mtp_correctness(
@@ -77,6 +82,8 @@ def test_mtp_correctness(
             extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
         elif "gemma-4" in model_name:
             extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "audio": 0}
+        elif "GLM-OCR" in model_name:
+            extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
 
         if draft_model is not None and "gemma-4" in draft_model:
             import transformers
