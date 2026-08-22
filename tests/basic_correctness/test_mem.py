@@ -5,6 +5,7 @@ import asyncio
 
 import pytest
 import torch
+from torch import nn
 
 import vllm.device_allocator.cumem as cumem
 from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
@@ -182,28 +183,44 @@ def test_level2_discards_ordinary_tensor_with_weights_tag():
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses CUDA graph and CuMem")
 def test_cudagraph_replays_with_corrupted_tagged_constant():
-    """Reproduce silent wrong output despite a stable captured pointer."""
+    """Reproduce silent model corruption despite a stable captured pointer."""
+
+    class TinyScaleModel(nn.Module):
+        """One-operation model with persistent runtime metadata.
+
+        ``scale`` deliberately remains a plain tensor attribute. Constructing
+        this model in the KV-cache pool reproduces a persistent model value
+        accidentally inheriting the cache's discard-on-sleep policy.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.scale = torch.tensor([3.0], device=DEVICE_TYPE)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x * self.scale
+
     allocator = get_mem_allocator_instance()
     x = torch.tensor([2.0], device=DEVICE_TYPE)
     with allocator.use_memory_pool("kv_cache"):
-        scale = torch.tensor([3.0], device=DEVICE_TYPE)
+        model = TinyScaleModel()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        output = x * scale
-    scale_ptr = scale.data_ptr()
+        output = model(x)
+    scale_ptr = model.scale.data_ptr()
 
     allocator.sleep(offload_tags=())
     _wake_up_with_poisoned_mappings(allocator)
     graph.replay()
     torch.accelerator.synchronize()
 
-    assert scale.data_ptr() == scale_ptr
+    assert model.scale.data_ptr() == scale_ptr
     assert not torch.equal(output, torch.tensor([6.0], device=DEVICE_TYPE))
 
     # Owners that cannot move storage out of a discardable scope must recover
     # values in place so captured pointers remain valid.
-    scale.fill_(3.0)
+    model.scale.fill_(3.0)
     graph.replay()
     torch.accelerator.synchronize()
     assert torch.equal(output, torch.tensor([6.0], device=DEVICE_TYPE))
