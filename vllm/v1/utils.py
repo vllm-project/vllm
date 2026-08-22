@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 import argparse
 import contextlib
 import json
@@ -21,6 +22,10 @@ from typing import (
     Union,
     overload,
 )
+
+from vllm._environment import apply_runtime_environment
+
+apply_runtime_environment()
 
 import torch
 import uvloop
