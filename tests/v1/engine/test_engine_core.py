@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import PropertyMock, patch
 
 import pytest
+import regex as re
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
@@ -21,6 +22,7 @@ from vllm.config import (
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
@@ -42,6 +44,57 @@ PROMPT = "I am Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 _REQUEST_COUNTER = 0
+
+
+class DummyExecutor(UniProcExecutor):
+    """Executor with non-blocking execute_model/sample_tokens, to exercise
+    the engine's batch queue independently of the worker's own concurrency."""
+
+    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
+        super().initialize_from_config(kv_cache_configs)
+
+        # Create a thread pool with a single worker
+        self.thread_pool = ThreadPoolExecutor(max_workers=1)
+
+    def execute_model(
+        self,
+        scheduler_output,
+        non_block=False,
+    ) -> Future[ModelRunnerOutput | None]:
+        """Make execute_model non-blocking."""
+
+        # DummyExecutor used only for testing async case.
+        assert non_block
+
+        def _execute():
+            output = self.collective_rpc("execute_model", args=(scheduler_output,))
+            # Make a copy because output[0] may be reused
+            # by the next batch.
+            return copy.deepcopy(output[0])
+
+        # Use the thread pool instead of creating a new thread
+        return self.thread_pool.submit(_execute)
+
+    def sample_tokens(
+        self, grammar_output, non_block=False
+    ) -> Future[ModelRunnerOutput]:
+        """Make sample_tokens non-blocking."""
+
+        # DummyExecutor used only for testing async case.
+        assert non_block
+
+        def _execute():
+            output = self.collective_rpc("sample_tokens", args=(grammar_output,))
+            # Make a copy because output[0] may be reused
+            # by the next batch.
+            return copy.deepcopy(output[0])
+
+        # Use the thread pool instead of creating a new thread
+        return self.thread_pool.submit(_execute)
+
+    def shutdown(self):
+        if hasattr(self, "thread_pool"):
+            self.thread_pool.shutdown(wait=False)
 
 
 def make_request() -> EngineCoreRequest:
@@ -251,53 +304,6 @@ def test_engine_core_concurrent_batches():
         request.sampling_params.max_tokens = max_tokens
         return request
 
-    class DummyExecutor(UniProcExecutor):
-        def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-            super().initialize_from_config(kv_cache_configs)
-
-            # Create a thread pool with a single worker
-            self.thread_pool = ThreadPoolExecutor(max_workers=1)
-
-        def execute_model(
-            self,
-            scheduler_output,
-            non_block=False,
-        ) -> Future[ModelRunnerOutput | None]:
-            """Make execute_model non-blocking."""
-
-            # DummyExecutor used only for testing async case.
-            assert non_block
-
-            def _execute():
-                output = self.collective_rpc("execute_model", args=(scheduler_output,))
-                # Make a copy because output[0] may be reused
-                # by the next batch.
-                return copy.deepcopy(output[0])
-
-            # Use the thread pool instead of creating a new thread
-            return self.thread_pool.submit(_execute)
-
-        def sample_tokens(
-            self, grammar_output, non_block=False
-        ) -> Future[ModelRunnerOutput]:
-            """Make sample_tokens non-blocking."""
-
-            # DummyExecutor used only for testing async case.
-            assert non_block
-
-            def _execute():
-                output = self.collective_rpc("sample_tokens", args=(grammar_output,))
-                # Make a copy because output[0] may be reused
-                # by the next batch.
-                return copy.deepcopy(output[0])
-
-            # Use the thread pool instead of creating a new thread
-            return self.thread_pool.submit(_execute)
-
-        def shutdown(self):
-            if hasattr(self, "thread_pool"):
-                self.thread_pool.shutdown(wait=False)
-
     engine_args = EngineArgs(
         model=MODEL_NAME,
         # To test concurrent batches.
@@ -396,6 +402,65 @@ def test_engine_core_concurrent_batches():
             )
         expected_num_tokens[req_id] += 1
         req_id = (req_id + 1) % 2
+
+
+@create_new_process_for_each_test()
+def test_engine_core_concurrent_batches_structured_output():
+    """
+    Regression test for #45014: with async scheduling and enough concurrent
+    batches in flight (as with PP>1) a structured-output request's grammar
+    FSM can lag behind by more than one batch. step_with_batch_queue must
+    drain the queue until the FSM has caught up before computing the
+    grammar bitmask, instead of using a single stale result.
+    """
+
+    engine_args = EngineArgs(
+        model=MODEL_NAME,
+        max_num_seqs=1,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        async_scheduling=True,
+    )
+    vllm_config = engine_args.create_engine_config()
+    # Force several concurrent batches, as PP>1 would, so the structured
+    # request's FSM can fall more than one batch behind.
+    with (
+        set_default_torch_num_threads(1),
+        patch.object(
+            VllmConfig,
+            "max_concurrent_batches",
+            new_callable=PropertyMock,
+            return_value=3,
+        ),
+    ):
+        engine_core = EngineCore(
+            vllm_config=vllm_config, log_stats=False, executor_class=DummyExecutor
+        )
+    assert engine_core.batch_queue is not None
+
+    request = make_request()
+    request.sampling_params = SamplingParams(
+        max_tokens=20,
+        structured_outputs=StructuredOutputsParams(regex="[0-9]+"),
+    )
+    request.sampling_params.structured_outputs._backend = "xgrammar"
+    engine_core.add_request(*engine_core.preprocess_add_request(request))
+
+    generated_token_ids: list[int] = []
+    while engine_core.scheduler.get_num_unfinished_requests() > 0:
+        outputs = engine_core.step_with_batch_queue()[0]
+        if not outputs:
+            continue
+        engine_core_outputs = outputs.get(0)
+        if engine_core_outputs is None:
+            continue
+        for output in engine_core_outputs.outputs:
+            generated_token_ids.extend(output.new_token_ids)
+
+    generated_text = TOKENIZER.decode(generated_token_ids)
+    assert re.fullmatch(r"[0-9]+", generated_text), (
+        f"structured output constraint violated: {generated_text!r}"
+    )
 
 
 @multi_gpu_test(num_gpus=2)
