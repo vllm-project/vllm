@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
     FunctionDefinition,
 )
+from vllm.parser import metrics as parser_metrics
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine import parser_engine as parser_engine_module
 from vllm.parser.engine.adapters import make_adapters
@@ -35,7 +36,6 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.parser.metrics import init_parser_metrics
 from vllm.parser.parser_manager import ParserManager
 
 # ── Shared test configs ──────────────────────────────────────────────
@@ -931,35 +931,49 @@ class TestEngineBasedPath:
             "outcome": "no_tool_call",
             "request_type": "chat_completions",
         }
-        init_parser_metrics(model_name=model_name)
-        request = ChatCompletionRequest(messages=[], model="test")
+        metric_name = "vllm:tool_call_parser_invocations"
+        previous_model_name = parser_metrics._model_name
+        previous_counter = parser_metrics._tool_call_parser_invocations
+        previous_collector = REGISTRY._names_to_collectors.get(metric_name)
+        test_counter = None
+        try:
+            parser_metrics.init_parser_metrics(model_name=model_name)
+            test_counter = parser_metrics._tool_call_parser_invocations
+            request = ChatCompletionRequest(messages=[], model="test")
 
-        non_streaming_labels = {**labels, "mode": "non_streaming"}
-        assert (
-            REGISTRY.get_sample_value(
-                "vllm:tool_call_parser_invocations_total", non_streaming_labels
+            non_streaming_labels = {**labels, "mode": "non_streaming"}
+            assert (
+                REGISTRY.get_sample_value(
+                    "vllm:tool_call_parser_invocations_total",
+                    non_streaming_labels,
+                )
+                == 0
             )
-            == 0
-        )
-        engine = _make_engine(_hermes_config())
-        engine.parse("Hello", request)
-        assert (
-            REGISTRY.get_sample_value(
-                "vllm:tool_call_parser_invocations_total", non_streaming_labels
+            engine = _make_engine(_hermes_config())
+            engine.parse("Hello", request)
+            assert (
+                REGISTRY.get_sample_value(
+                    "vllm:tool_call_parser_invocations_total",
+                    non_streaming_labels,
+                )
+                == 1
             )
-            == 1
-        )
 
-        streaming_labels = {**labels, "mode": "streaming"}
-        engine.initialize_streaming()
-        engine.parse_delta("Hello", [], request, finished=False)
-        engine.parse_delta("", [], request, finished=True)
-        assert (
-            REGISTRY.get_sample_value(
-                "vllm:tool_call_parser_invocations_total", streaming_labels
+            streaming_labels = {**labels, "mode": "streaming"}
+            engine.initialize_streaming()
+            engine.parse_delta("Hello", [], request, finished=False)
+            engine.parse_delta("", [], request, finished=True)
+            assert (
+                REGISTRY.get_sample_value(
+                    "vllm:tool_call_parser_invocations_total", streaming_labels
+                )
+                == 2
             )
-            == 2
-        )
+        finally:
+            parser_metrics._model_name = previous_model_name
+            parser_metrics._tool_call_parser_invocations = previous_counter
+            if previous_collector is None and test_counter is not None:
+                REGISTRY.unregister(test_counter)
 
 
 # ── TestParseTokenIdPassthrough ────────────────────────────────────
