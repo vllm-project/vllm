@@ -280,6 +280,14 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     return f"{scheme}://{host}:{port}"
 
 
+def replace_zmq_tcp_host(path: str, host: str) -> str:
+    """Replace the host of a TCP ZMQ endpoint, preserving its port."""
+    scheme, _, port = split_zmq_path(path)
+    if scheme != "tcp":
+        return path
+    return make_zmq_path(scheme, host, int(port))
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
     ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]

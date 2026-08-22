@@ -149,6 +149,24 @@ class Executor(ABC):
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
 
+    def suspend(self, model_save_path: str | None = None) -> None:
+        self.collective_rpc("suspend", args=(model_save_path,))
+
+    def device_unlock(self) -> None:
+        self.collective_rpc("device_unlock")
+
+    def resume(
+        self,
+        local_ip: str,
+        data_parallel_master_ip: str,
+        model_path: str | None = None,
+        new_engine_id: str | None = None,
+    ) -> None:
+        self.collective_rpc(
+            "resume",
+            args=(local_ip, data_parallel_master_ip, model_path, new_engine_id),
+        )
+
     @overload
     def collective_rpc(
         self,

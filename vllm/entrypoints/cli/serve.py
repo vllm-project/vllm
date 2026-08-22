@@ -339,6 +339,21 @@ def run_multi_api_server(args: argparse.Namespace):
                 stats_update_address=stats_update_address,
             )
         else:
+            snapshot_monitor = None
+            if vllm_config.snapshot_config is not None:
+                import multiprocessing
+
+                from vllm.snapshot.monitor import SnapshotMonitor
+
+                # All API workers must observe the same lifecycle state. Create
+                # the synchronization primitives from the same spawn context
+                # used by APIServerProcessManager.
+                spawn_context = multiprocessing.get_context("spawn")
+                snapshot_monitor = SnapshotMonitor(
+                    spawn_context.Event,
+                    spawn_context.Lock,
+                )
+
             # Start API server(s).
             api_server_manager = APIServerProcessManager(
                 listen_address=listen_address,
@@ -349,6 +364,7 @@ def run_multi_api_server(args: argparse.Namespace):
                 output_addresses=addresses.outputs,
                 stats_update_address=stats_update_address,
                 tensor_queue=tensor_queue,
+                snapshot_monitor=snapshot_monitor,
             )
 
             if not is_ray_dp:
