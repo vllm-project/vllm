@@ -14,6 +14,8 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
+from hypothesis import given
+from hypothesis import strategies as st
 
 from vllm.distributed.device_communicators import shm_broadcast
 from vllm.distributed.device_communicators.shm_broadcast import (
@@ -255,42 +257,53 @@ def worker_fn_test_idle_to_busy():
 
     message1 = "hello world"
     message2 = np.random.randint(1, 100, 100)
-    with mock.patch.object(
-        message_queue._spin_condition, "wait", wraps=message_queue._spin_condition.wait
-    ) as wrapped_wait:
+    # Readers are pinned to the historical fixed 1s grace: this worker
+    # asserts the busy-spin machinery, and the adaptive default would park
+    # under this test's 100ms-spaced traffic.
+    from contextlib import ExitStack
+
+    cond = message_queue._spin_condition
+    with ExitStack() as stack:
         if not message_queue._is_writer:
-            # Put into idle mode
-            message_queue._spin_condition.last_read = 0
+            stack.enter_context(mock.patch.object(cond._grace, "mode", "fixed"))
+            stack.enter_context(mock.patch.object(cond._grace, "fixed_s", 1.0))
+        with mock.patch.object(cond, "wait", wraps=cond.wait) as wrapped_wait:
+            if not message_queue._is_writer:
+                # Put into idle mode
+                cond.last_read = 0
 
-            # no messages, so expect a TimeoutError
-            with pytest.raises(TimeoutError):
-                message_queue.dequeue(timeout=0.01)
-            # wait should only be called once while idle
-            assert wrapped_wait.call_count == 1
+                # no messages, so expect a TimeoutError
+                with pytest.raises(TimeoutError):
+                    message_queue.dequeue(timeout=0.01)
+                # wait should only be called once while idle
+                assert wrapped_wait.call_count == 1
 
-            # sync with the writer and wait for message1
-            dist.barrier()
-            recv_message = message_queue.dequeue(timeout=5)
-            assert recv_message == message1
-            # second call to wait, with a message read, this puts in a busy spin
-            assert wrapped_wait.call_count == 2
+                # sync with the writer and wait for message1
+                dist.barrier()
+                recv_message = message_queue.dequeue(timeout=5)
+                assert recv_message == message1
+                # second call to wait, with a message read, this puts in a
+                # busy spin
+                assert wrapped_wait.call_count == 2
 
-            # sync with the writer and wait for message2
-            dist.barrier()
-            recv_message = message_queue.dequeue(timeout=1)
-            assert np.array_equal(recv_message, message2)
-            # in busy mode, we expect wait to have been called multiple times
-            assert wrapped_wait.call_count > 3
-        else:
-            # writer writes two messages in sync with the reader
-            dist.barrier()
-            # sleep delays the send to ensure reader enters the read loop
-            time.sleep(0.1)
-            message_queue.enqueue(message1)
+                # sync with the writer and wait for message2
+                dist.barrier()
+                recv_message = message_queue.dequeue(timeout=1)
+                assert np.array_equal(recv_message, message2)
+                # in busy mode, we expect wait to have been called multiple
+                # times
+                assert wrapped_wait.call_count > 3
+            else:
+                # writer writes two messages in sync with the reader
+                dist.barrier()
+                # sleep delays the send to ensure reader enters the read
+                # loop
+                time.sleep(0.1)
+                message_queue.enqueue(message1)
 
-            dist.barrier()
-            time.sleep(0.1)
-            message_queue.enqueue(message2)
+                dist.barrier()
+                time.sleep(0.1)
+                message_queue.enqueue(message2)
 
     message_queue.shutdown()
     assert message_queue.shutting_down
@@ -778,3 +791,223 @@ def test_remote_subscribe_addr_unique_concurrent_writers(
 
     for q in queues:
         q.remote_socket.close(linger=0)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive spin grace tests
+# ---------------------------------------------------------------------------
+
+
+def _make_adaptive_reader():
+    """Construct a SpinCondition reader with default adaptive env tunables."""
+
+    ctx = mock.Mock()
+    ctx.socket.return_value = mock.Mock()
+    return shm_broadcast.SpinCondition(
+        is_reader=True, context=ctx, notify_address="inproc://unused"
+    )
+
+
+@pytest.mark.parametrize(
+    ("interval_s", "expect"),
+    [
+        (0.0001, "high"),
+        (0.001, "pivot"),
+        (0.050, "low"),
+    ],
+)
+def test_adaptive_grace_direction(interval_s, expect):
+    """Adaptive grace moves inverse to observed inter-read intervals."""
+    cond = _make_adaptive_reader()
+    assert cond._grace.mode == "adaptive"
+    budget = cond._grace.budget_s
+    t0, times = 100.0, [100.0 + interval_s * (i + 1) for i in range(20)]
+    with mock.patch.object(shm_broadcast.time, "monotonic", side_effect=times):
+        cond.last_read = t0
+        for _ in range(20):
+            cond.record_read()
+
+    g = cond.busy_loop_s
+    assert cond._grace.min_s <= g <= cond._grace.max_s
+    if expect == "high":
+        assert g > budget
+    elif expect == "low":
+        assert g < budget
+    else:
+        assert g == pytest.approx(budget)
+
+
+def test_adaptive_grace_fixed_pin_supersedes():
+    """A pinned busy_loop_s freezes the grace regardless of traffic."""
+
+    ctx = mock.Mock()
+    ctx.socket.return_value = mock.Mock()
+    fixed_cond = shm_broadcast.SpinCondition(
+        is_reader=True,
+        context=ctx,
+        notify_address="inproc://unused",
+        busy_loop_s=0.5,
+    )
+    assert fixed_cond._grace.mode == "fixed"
+    for dt in (0.0001, 0.050):
+        fixed_cond._train_interval_ema(dt)
+    assert fixed_cond.busy_loop_s == 0.5
+
+
+@given(
+    intervals=st.lists(
+        st.floats(min_value=1e-6, max_value=100.0), min_size=1, max_size=50
+    )
+)
+def test_grace_always_within_bounds(intervals):
+    """Property: adaptive grace stays clamped to [min, max]."""
+    cond = _make_adaptive_reader()
+    for dt in intervals:
+        cond._train_interval_ema(dt)
+        assert cond._grace.min_s <= cond.busy_loop_s <= cond._grace.max_s
+
+
+def test_remaining_grace_s_counts_down_and_clamps():
+    """remaining_grace_s(now) decreases toward zero and never goes negative."""
+    cond = _make_adaptive_reader()
+    cond.busy_loop_s = 0.010
+    cond.last_read = 100.0
+    assert cond.remaining_grace_s(now=100.0) == pytest.approx(0.010)
+    assert cond.remaining_grace_s(now=100.005) == pytest.approx(0.005)
+    assert cond.remaining_grace_s(now=100.010) == 0.0
+    assert cond.remaining_grace_s(now=120.0) == 0.0
+
+
+def test_acquire_read_native_wait_policy():
+    """Native spinloop receives min(remaining grace, ext ceiling); zero
+    remaining grace skips the native call; native success skips park."""
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=1024 * 1024,
+        max_chunks=1,
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        cond = reader._spin_condition
+        cond._grace.mode = "fixed"
+        cond._grace.fixed_s = 1.0
+        cond.busy_loop_s = 1.0
+        cond.last_read = time.monotonic()
+
+        calls: list[float] = []
+
+        def fake_spinloop(buf, check, timeout=0.0):
+            calls.append(timeout)
+            return False
+
+        with (
+            mock.patch.object(shm_broadcast, "SPINLOOP_EXT_ENABLED", True),
+            mock.patch.object(shm_broadcast, "spinloop", fake_spinloop, create=True),
+            pytest.raises(TimeoutError),
+        ):
+            reader.dequeue(timeout=0.05)
+        assert calls, "native spinloop must be attempted while grace remains"
+        ext_ceiling = shm_broadcast.SPINLOOP_TIMEOUT_SECONDS
+        assert ext_ceiling < 1.0
+        assert all(0.0 < t <= ext_ceiling for t in calls)
+
+        # (b) Zero remaining grace: no native call.
+        calls.clear()
+        cond.last_read = 0.0
+        with (
+            mock.patch.object(shm_broadcast, "SPINLOOP_EXT_ENABLED", True),
+            mock.patch.object(shm_broadcast, "spinloop", fake_spinloop, create=True),
+            pytest.raises(TimeoutError),
+        ):
+            reader.dequeue(timeout=0.05)
+        assert calls == []
+
+        # (c) Native success skips park.
+        cond.last_read = time.monotonic()
+        message = {"payload": "native-ready"}
+
+        def enqueue_now(buf, check, timeout=0.0):
+            writer.enqueue(message)
+            return check()
+
+        wait_mock = mock.Mock()
+        with (
+            mock.patch.object(shm_broadcast, "SPINLOOP_EXT_ENABLED", True),
+            mock.patch.object(
+                shm_broadcast, "spinloop", side_effect=enqueue_now, create=True
+            ),
+            mock.patch.object(cond, "wait", wait_mock),
+        ):
+            got = reader.dequeue(timeout=0.5)
+        assert got == message
+        wait_mock.assert_not_called()
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+        for s in (
+            writer.local_socket,
+            writer._spin_condition.local_notify_socket,
+            reader.local_socket,
+            reader._spin_condition.local_notify_socket,
+            reader._spin_condition.read_cancel_socket,
+            reader._spin_condition.write_cancel_socket,
+        ):
+            s.close(linger=0)
+
+
+def test_acquire_write_parks_in_bounded_doubling_steps():
+    """Writer parks in doubling sleep steps (capped at _WRITE_PARK_MAX_S)
+    once the grace expires, instead of yielding indefinitely."""
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=1024,
+        max_chunks=1,
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        # Force fixed-0 grace so the first failed check goes straight to the
+        # park path; deterministic without mocking the clock.
+        writer._write_grace.mode = "fixed"
+        writer._write_grace.fixed_s = 0.0
+
+        # Occupy the single block so the next acquire must wait for readers.
+        with writer.acquire_write():
+            pass
+
+        sleeps: list[float] = []
+
+        clock = {"now": 100.0}
+
+        def fake_sleep(s):
+            sleeps.append(s)
+            clock["now"] += s
+
+        def fake_monotonic():
+            return clock["now"]
+
+        with (
+            mock.patch.object(shm_broadcast, "SPINLOOP_EXT_ENABLED", False),
+            mock.patch.object(shm_broadcast.time, "monotonic", fake_monotonic),
+            mock.patch.object(shm_broadcast.time, "sleep", fake_sleep),
+            pytest.raises(TimeoutError),
+            writer.acquire_write(timeout=0.05),
+        ):
+            pass
+
+        # Park steps grow from the 50us floor and cap at _WRITE_PARK_MAX_S.
+        assert sleeps, "writer never parked"
+        assert sleeps[0] == pytest.approx(50e-6)
+        assert max(sleeps) <= shm_broadcast._WRITE_PARK_MAX_S
+        assert sleeps == sorted(sleeps)
+        # Doubling until the cap.
+        for prev, nxt in zip(sleeps, sleeps[1:]):
+            if nxt < shm_broadcast._WRITE_PARK_MAX_S:
+                assert nxt == pytest.approx(prev * 2)
+    finally:
+        writer.shutting_down = True
