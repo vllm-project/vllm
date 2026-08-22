@@ -482,7 +482,7 @@ class TieringOffloadingManager(OffloadingManager):
                 job_metadata = TransferJob(
                     job_id=job_id,
                     keys=entry.keys,
-                    block_ids=np.array(entry.block_ids, dtype=np.int64),
+                    block_ids=np.array(entry.block_ids, dtype=np.int32),
                     is_promotion=True,
                     req_context=entry.req_context,
                 )

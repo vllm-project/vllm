@@ -7,6 +7,8 @@ import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
+import numpy as np
+
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
 from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
@@ -217,12 +219,12 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def _submit_transfer(
         self,
         job_id: int,
-        block_ids: Iterable[int],
+        block_ids: np.ndarray,
         obj_keys: Iterable[str],
         op: str,
     ) -> None:
         """Submit an async transfer. op is 'WRITE' (store) or 'READ' (load)."""
-        block_ids_list = [int(bid) for bid in block_ids]
+        block_ids_array = np.asarray(block_ids, dtype=np.int32)
         # The OBJ backend maps devId -> obj_key. All descriptors must have
         # unique devIds or later registrations overwrite earlier ones.
         nixl_files = [
@@ -247,9 +249,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         xfer_handle = self._agent.make_prepped_xfer(
             op,
             self._dram_prepped_handle,
-            block_ids_list,
+            block_ids_array,
             obj_handle,
-            list(range(len(nixl_files))),
+            np.arange(len(nixl_files), dtype=np.int32),
         )
         if not xfer_handle:
             logger.warning("make_prepped_xfer failed for job %d", job_id)
