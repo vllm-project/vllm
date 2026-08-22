@@ -377,7 +377,11 @@ static void validate_mxfp4_experts_quant_inputs(
 
 static bool mxfp4_experts_quant_sm_supported(int64_t cuda_device_capability) {
 #if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
-  return cuda_device_capability >= 100 && cuda_device_capability < 120;
+  // SM10x/11x and SM12x share this kernel: CUTLASS resolves the same
+  // Sm1xxBlkScaledConfig scale-factor layout for cutlass::arch::Sm100 and
+  // cutlass::arch::Sm120, so the swizzle emitted by
+  // cvt_quant_to_fp4_get_sf_out_offset() is valid for both families.
+  return cuda_device_capability >= 100 && cuda_device_capability < 130;
 #else
   return false;
 #endif
@@ -391,9 +395,10 @@ void mxfp4_experts_quant(
     int64_t n_experts) {
 #if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
   int32_t sm = get_sm_version_num();
-  STD_TORCH_CHECK(mxfp4_experts_quant_sm_supported(sm),
-                  "No compiled MXFP4 experts quant kernel for SM ", sm,
-                  ". Recompile with SM10x/11x FP4 support and CUDA >= 12.9.");
+  STD_TORCH_CHECK(
+      mxfp4_experts_quant_sm_supported(sm),
+      "No compiled MXFP4 experts quant kernel for SM ", sm,
+      ". Recompile with SM10x/11x or SM12x FP4 support and CUDA >= 12.9.");
 
   auto m_topk = input.size(0);
   auto k = input.size(1);
@@ -429,9 +434,10 @@ void silu_and_mul_mxfp4_experts_quant(
     int64_t n_experts) {
 #if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
   int32_t sm = get_sm_version_num();
-  STD_TORCH_CHECK(mxfp4_experts_quant_sm_supported(sm),
-                  "No compiled SiLU+Mul MXFP4 experts quant kernel for SM ", sm,
-                  ". Recompile with SM10x/11x FP4 support and CUDA >= 12.9.");
+  STD_TORCH_CHECK(
+      mxfp4_experts_quant_sm_supported(sm),
+      "No compiled SiLU+Mul MXFP4 experts quant kernel for SM ", sm,
+      ". Recompile with SM10x/11x or SM12x FP4 support and CUDA >= 12.9.");
 
   auto m_topk = input.size(0);
   auto k_times_2 = input.size(1);
