@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -64,6 +65,21 @@ class Fp8MoeBackend(Enum):
     TRITON_MXFP8 = "TRITON_MXFP8"
     # MXFP8 MoE via AITER (FlyDSL two-stage grouped GEMM) on gfx950.
     AITER_MXFP8 = "AITER_MXFP8"
+
+
+def fp8_round_up_hidden_size_and_intermediate_size(
+    backend: Fp8MoeBackend,
+    hidden_size: int,
+    intermediate_size: int,
+) -> tuple[int, int]:
+    """Round up hidden_size and intermediate_size based on backend requirements."""
+    if backend == Fp8MoeBackend.AITER:
+        # AITER's 2-stage CK fp8 MoE GEMM is numerically broken for intermediate
+        # sizes that aren't 128-aligned (e.g. Gemma4-26B-A4B's 704;
+        # activation-independent). Align to 128; the padded tail is zeroed by the
+        # standard weight-loading narrow-and-copy path.
+        intermediate_size = round_up(intermediate_size, 128)
+    return hidden_size, intermediate_size
 
 
 def _get_priority_backends(

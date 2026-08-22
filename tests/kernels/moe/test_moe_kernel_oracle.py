@@ -49,3 +49,26 @@ class TestUnquantizedDelegation:
             None,  # routing_tables default
         )
         assert out is sentinel_kernel
+
+
+def test_fp8_round_up_intermediate_size_for_aiter() -> None:
+    """Ensure fp8 MoE GEMM is rounded up to factor 128 when on AITER."""
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        Fp8MoeBackend,
+        fp8_round_up_hidden_size_and_intermediate_size,
+    )
+
+    # Should round
+    assert fp8_round_up_hidden_size_and_intermediate_size(
+        Fp8MoeBackend.AITER, 2048, 704
+    ) == (2048, 768)
+
+    # no-op
+    assert fp8_round_up_hidden_size_and_intermediate_size(
+        Fp8MoeBackend.AITER, 2048, 1024
+    ) == (2048, 1024)
+
+    # Non-AITER backends are untouched even when non-128-aligned.
+    assert fp8_round_up_hidden_size_and_intermediate_size(
+        Fp8MoeBackend.TRITON, 2048, 704
+    ) == (2048, 704)
