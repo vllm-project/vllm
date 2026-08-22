@@ -917,10 +917,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
-        # Fine-grained partial hits are not supported for sliding window now
-        assert alignment_tokens % kv_cache_spec.block_size == 0, (
-            "SlidingWindowManager does not support fine-grained (partial) cache hits"
-        )
+        # Sliding-window cache hits must stay at the group's physical block
+        # granularity. resolve_block_hashes() converts finer-grained hashes to
+        # that view when the hybrid-cache alignment is smaller than block_size.
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
