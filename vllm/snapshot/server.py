@@ -196,11 +196,11 @@ def parse_vllm_args(argv: list[str]) -> Any:
 
 
 async def run_vllm_snapshot_child(control: ControlArgs, args: Any) -> None:
-    from vllm.entrypoints.openai.api_server import (
+    from vllm.entrypoints.launchers.api_server.entry import (
         build_and_serve,
         build_async_engine_client,
-        setup_server,
     )
+    from vllm.entrypoints.launchers.launcher import setup_server
 
     args.enable_sleep_mode = True
 
