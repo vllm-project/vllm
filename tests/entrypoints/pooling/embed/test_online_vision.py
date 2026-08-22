@@ -28,7 +28,11 @@ TEST_IMAGE_ASSETS = [
 
 input_text = "The best thing about vLLM is that it supports many different models"
 image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
-image_base64 = {"url": encode_image_url(fetch_image(image_url))}
+
+
+@pytest.fixture(scope="module")
+def image_base64():
+    return {"url": encode_image_url(fetch_image(image_url))}
 
 
 @pytest.fixture(scope="module")
@@ -103,7 +107,9 @@ def test_chat_image_url_request(server: RemoteOpenAIServer, model_name: str):
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_chat_image_base64_request(server: RemoteOpenAIServer, model_name: str):
+def test_chat_image_base64_request(
+    server: RemoteOpenAIServer, model_name: str, image_base64: dict
+):
     messages = [
         {
             "role": "user",

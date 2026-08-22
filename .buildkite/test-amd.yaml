@@ -172,6 +172,8 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/test_envs.py
+  - tests/test_asset_fetcher.py
+  - tests/utils.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
@@ -188,6 +190,7 @@ steps:
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_envs.py
+  - pytest -v -s test_asset_fetcher.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
@@ -1219,6 +1222,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization
   - vllm/model_executor/models/
   - vllm/model_executor/model_loader/
@@ -1314,6 +1318,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization
   - vllm/model_executor/models/
   - vllm/model_executor/model_loader/
@@ -2274,6 +2279,7 @@ steps:
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
+  - tests/plugins_tests/test_terratorch_io_processor_plugins.py
   - vllm/platforms/rocm.py
   commands:
   # BEGIN: platform plugin and general plugin tests, all the code in-between runs on dummy platform
@@ -3299,6 +3305,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/transformers_utils/configs/qwen3_5.py
@@ -3323,6 +3330,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/
+  - tests/evals/gsm8k/gsm8k_eval.py
   - vllm/model_executor/layers/quantization
   - vllm/model_executor/models/
   - vllm/model_executor/model_loader/

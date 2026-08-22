@@ -53,10 +53,18 @@ VISION_PROMPT_TEMPLATE = (
     "What is in the image?<|im_end|>\n"
     "<|im_start|>assistant\n"
 )
-VISION_PROMPT = {
-    "prompt": VISION_PROMPT_TEMPLATE,
-    "multi_modal_data": {"image": ImageAsset("stop_sign").pil_image},
-}
+
+
+@pytest.fixture(scope="module")
+def prompt(request) -> PromptType:
+    if request.param == "text":
+        return TEXT_PROMPT
+
+    assert request.param == "vision"
+    return {
+        "prompt": VISION_PROMPT_TEMPLATE,
+        "multi_modal_data": {"image": ImageAsset("stop_sign").pil_image},
+    }
 
 
 async def generate(
@@ -104,7 +112,8 @@ async def generate(
 )
 @pytest.mark.parametrize(
     "engine_args,prompt",
-    [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
+    [(TEXT_ENGINE_ARGS, "text"), (VISION_ENGINE_ARGS, "vision")],
+    indirect=["prompt"],
 )
 @pytest.mark.asyncio
 async def test_load(
@@ -152,7 +161,8 @@ async def test_load(
 )
 @pytest.mark.parametrize(
     "engine_args,prompt",
-    [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
+    [(TEXT_ENGINE_ARGS, "text"), (VISION_ENGINE_ARGS, "vision")],
+    indirect=["prompt"],
 )
 @pytest.mark.asyncio
 async def test_abort(
@@ -301,7 +311,8 @@ async def test_multi_abort(output_kind: RequestOutputKind):
 @pytest.mark.parametrize("n", [1, 3])
 @pytest.mark.parametrize(
     "engine_args,prompt",
-    [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
+    [(TEXT_ENGINE_ARGS, "text"), (VISION_ENGINE_ARGS, "vision")],
+    indirect=["prompt"],
 )
 @pytest.mark.asyncio
 async def test_finished_flag(
@@ -335,7 +346,8 @@ async def test_finished_flag(
 
 @pytest.mark.parametrize(
     "engine_args,prompt",
-    [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
+    [(TEXT_ENGINE_ARGS, "text"), (VISION_ENGINE_ARGS, "vision")],
+    indirect=["prompt"],
 )
 @pytest.mark.asyncio
 async def test_mid_stream_cancellation(

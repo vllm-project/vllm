@@ -13,9 +13,20 @@ from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
-cherry_pil_image = ImageAsset("cherry_blossom").pil_image
-stop_pil_image = ImageAsset("stop_sign").pil_image
-baby_reading_np_ndarrays = VideoAsset("baby_reading").np_ndarrays
+
+@pytest.fixture(scope="module")
+def cherry_pil_image():
+    return ImageAsset("cherry_blossom").pil_image
+
+
+@pytest.fixture(scope="module")
+def stop_pil_image():
+    return ImageAsset("stop_sign").pil_image
+
+
+@pytest.fixture(scope="module")
+def baby_reading_np_ndarrays():
+    return VideoAsset("baby_reading").np_ndarrays
 
 
 def _build_renderer(
@@ -47,7 +58,7 @@ def _build_text_only_renderer() -> HfRenderer:
     )
 
 
-def test_text_only_model_mm_data_maps_to_bad_request():
+def test_text_only_model_mm_data_maps_to_bad_request(cherry_pil_image):
     """Sending multimodal data to a text-only model is a client mistake, so it
     must surface as a ValueError and reach the client as HTTP 400, not 500."""
     renderer = _build_text_only_renderer()
@@ -64,7 +75,7 @@ def test_text_only_model_mm_data_maps_to_bad_request():
     assert error_response.error.code == HTTPStatus.BAD_REQUEST
 
 
-def test_multi_modal_uuids_length_mismatch_raises():
+def test_multi_modal_uuids_length_mismatch_raises(cherry_pil_image, stop_pil_image):
     renderer = _build_renderer()
 
     mm_data = {"image": [cherry_pil_image, stop_pil_image]}
@@ -90,7 +101,7 @@ def test_multi_modal_uuids_length_mismatch_raises():
         renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-1b")
 
 
-def test_multi_modal_uuids_missing_modality_raises():
+def test_multi_modal_uuids_missing_modality_raises(cherry_pil_image):
     renderer = _build_renderer()
 
     mm_data = {
@@ -118,7 +129,11 @@ def test_multi_modal_uuids_missing_modality_raises():
     ],
 )
 def test_multi_modal_uuids_accepts_none_and_passes_through(
-    mm_cache_gb: float, enable_prefix_caching: bool
+    mm_cache_gb: float,
+    enable_prefix_caching: bool,
+    cherry_pil_image,
+    stop_pil_image,
+    baby_reading_np_ndarrays,
 ):
     renderer = _build_renderer(
         mm_cache_gb=mm_cache_gb,
@@ -176,7 +191,9 @@ def test_multi_modal_uuids_accepts_empty(
     assert processed_mm_uuids == mm_uuids
 
 
-def test_multi_modal_uuids_ignored_when_caching_disabled():
+def test_multi_modal_uuids_ignored_when_caching_disabled(
+    cherry_pil_image, stop_pil_image, baby_reading_np_ndarrays
+):
     # When both processor cache is 0 and prefix caching disabled, the
     # processor builds overrides from request id instead of using user UUIDs.
     renderer = _build_renderer(mm_cache_gb=0.0, enable_prefix_caching=False)

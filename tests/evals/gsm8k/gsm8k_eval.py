@@ -9,39 +9,42 @@ import argparse
 import ast
 import asyncio
 import json
-import os
-import tempfile
+import sys
 import time
 from collections.abc import Generator
+from pathlib import Path
 
 import aiohttp
 import numpy as np
 import regex as re
-import requests
 from tqdm.asyncio import tqdm
+
+if __package__ in (None, ""):
+    # Preserve the documented direct-script invocation from the repository root.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 
 INVALID = -9999999
+GSM8K_SHA256 = {
+    "train.jsonl": "17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465",
+    "test.jsonl": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+}
 
 
-def download_and_cache_file(url: str, filename: str | None = None) -> str:
-    """Download and cache a file from a URL."""
-    if filename is None:
-        filename = os.path.join(tempfile.gettempdir(), url.split("/")[-1])
+def fetch_gsm8k_asset(
+    url: str,
+    filename: str,
+    expected_sha256: str,
+) -> str:
+    """Fetch a checksum-pinned GSM8K asset."""
+    # Keep the direct ``--help`` path lightweight: tests.utils imports the full
+    # test runtime, which is only needed when an evaluation actually loads data.
+    from tests.utils import TestAssetFetcher
 
-    if os.path.exists(filename):
-        return filename
-
-    print(f"Downloading from {url} to {filename}")
-    response = requests.get(url, stream=True)
-    response.raise_for_status()
-
-    with open(filename, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024):
-            f.write(chunk)
-
-    return filename
+    return str(
+        TestAssetFetcher.for_suite("gsm8k").fetch(url, filename, expected_sha256)
+    )
 
 
 def load_gsm8k_data() -> tuple[list[dict], list[dict]]:
@@ -49,8 +52,10 @@ def load_gsm8k_data() -> tuple[list[dict], list[dict]]:
     train_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/train.jsonl"
     test_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/test.jsonl"
 
-    train_file = download_and_cache_file(train_url)
-    test_file = download_and_cache_file(test_url)
+    train_file = fetch_gsm8k_asset(
+        train_url, "train.jsonl", GSM8K_SHA256["train.jsonl"]
+    )
+    test_file = fetch_gsm8k_asset(test_url, "test.jsonl", GSM8K_SHA256["test.jsonl"])
 
     train_data = list(read_jsonl(train_file))
     test_data = list(read_jsonl(test_file))
