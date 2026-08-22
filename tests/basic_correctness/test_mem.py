@@ -11,6 +11,7 @@ from torch import nn
 import vllm.device_allocator.cumem as cumem
 from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from vllm.device_allocator import get_mem_allocator_instance
+from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 
@@ -18,7 +19,6 @@ from ..utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
 
-GEMMA3N_SLEEP_MODEL = "google/gemma-3n-E2B-it"
 GEMMA3N_SLEEP_WAKE_CYCLES = int(os.getenv("VLLM_SLEEP_WAKE_REPRO_CYCLES", "3"))
 GEMMA3N_SLEEP_TENSOR_NAMES = (
     "embed_scale",
@@ -62,6 +62,49 @@ def _gemma3n_sleep_tensor_snapshot(model) -> dict[str, tuple[int, float]]:
         for name in GEMMA3N_SLEEP_TENSOR_NAMES
         if (tensor := getattr(decoder, name, None)) is not None
     }
+
+
+def _save_gemma3n_dummy_weights(worker) -> None:
+    model = worker.model_runner.model
+    worker._gemma3n_dummy_weights = [
+        (name, parameter.detach().cpu().clone())
+        for name, parameter in model.named_parameters()
+    ]
+
+
+def _reload_gemma3n_dummy_weights(worker) -> None:
+    worker.reload_weights(
+        weights_iterator=iter(worker._gemma3n_dummy_weights),
+        is_checkpoint_format=False,
+    )
+
+
+def _create_tiny_gemma3n_config(model_dir) -> None:
+    from transformers import Gemma3nTextConfig
+
+    config = Gemma3nTextConfig(
+        architectures=["Gemma3nForCausalLM"],
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=[128, 128, 128],
+        num_hidden_layers=3,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=256,
+        sliding_window=64,
+        layer_types=[
+            "sliding_attention",
+            "full_attention",
+            "sliding_attention",
+        ],
+        vocab_size_per_layer_input=128,
+        hidden_size_per_layer_input=16,
+        num_kv_shared_layers=1,
+        laurel_rank=16,
+        activation_sparsity_pattern=[0.0, 0.0, 0.0],
+    )
+    config.save_pretrained(model_dir)
 
 
 def _generation_signature(output) -> tuple[tuple[int, ...], tuple[float, ...]]:
@@ -407,13 +450,16 @@ def test_deep_sleep():
     not current_platform.is_cuda(),
     reason="Reproduces the CUDA CuMemAllocator level-2 sleep path",
 )
-def test_gemma3n_level2_sleep_wake_preserves_generation(monkeypatch):
+def test_gemma3n_level2_sleep_wake_preserves_generation(monkeypatch, tmp_path):
     """Detect naturally occurring Gemma 3n corruption after level-2 sleep."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    _create_tiny_gemma3n_config(tmp_path)
 
     llm = LLM(
-        model=GEMMA3N_SLEEP_MODEL,
+        model=str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
         enable_sleep_mode=True,
         enforce_eager=True,
         attention_backend="TRITON_ATTN",
@@ -423,7 +469,7 @@ def test_gemma3n_level2_sleep_wake_preserves_generation(monkeypatch):
         enable_prefix_caching=False,
         disable_log_stats=True,
     )
-    prompt = "Explain why the sky is blue in one short sentence."
+    prompt = TokensPrompt(prompt_token_ids=[2, 5, 9, 12, 7, 3])
     sampling_params = SamplingParams(temperature=0.0, max_tokens=16, logprobs=1)
 
     before_output = llm.generate(prompt, sampling_params)
@@ -439,6 +485,7 @@ def test_gemma3n_level2_sleep_wake_preserves_generation(monkeypatch):
         set(snapshot) == set(GEMMA3N_SLEEP_TENSOR_NAMES)
         for snapshot in before_tensors
     )
+    llm.collective_rpc(_save_gemma3n_dummy_weights)
 
     for cycle in range(1, GEMMA3N_SLEEP_WAKE_CYCLES + 1):
         # Do not poison, zero, or allocate test-side GPU memory between sleep
@@ -446,7 +493,7 @@ def test_gemma3n_level2_sleep_wake_preserves_generation(monkeypatch):
         # driver naturally returns cleared or reused physical pages.
         llm.sleep(level=2)
         llm.wake_up(tags=["weights"])
-        llm.collective_rpc("reload_weights")
+        llm.collective_rpc(_reload_gemma3n_dummy_weights)
         after_tensors = llm.apply_model(_gemma3n_sleep_tensor_snapshot)
         llm.wake_up(tags=["kv_cache"])
 
