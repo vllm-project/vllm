@@ -1,0 +1,5 @@
+def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
+    normalized = source_file.rstrip('/')
+    if not normalized:
+        return False
+    return diff_file == normalized or diff_file.startswith(f'{normalized}/')

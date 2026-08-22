@@ -1,0 +1,17 @@
+def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+    if os.getenv('NOAUTO') == '1':
+        return False
+    global_config = get_global_config()
+    if global_config['only_step_keys'] is not None:
+        return step.key in global_config['only_step_keys']
+    if step.key and (step.key.startswith('image-build') or step.key in AMD_ALWAYS_RUN_STEP_KEYS):
+        return True
+    if global_config['nightly'] == '1':
+        return True
+    if step.optional:
+        return False
+    if is_amd_gpu_device(step.device) and (not step.dind) and _source_file_dependencies_match(AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES, list_file_diff):
+        return True
+    if global_config['run_all']:
+        return True
+    return _source_file_dependencies_match(step.source_file_dependencies, list_file_diff)

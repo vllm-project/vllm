@@ -1,0 +1,13 @@
+{
+  "files": [
+    "__init__.py",
+    "amd.py",
+    "buildkite_step.py",
+    "constants.py",
+    "global_config.py",
+    "main.py",
+    "pipeline_generator.py",
+    "step.py"
+  ],
+  "upstream_commit": "d2859b61efd012f124565e5fe90f4b18ba493e6a"
+}

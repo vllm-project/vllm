@@ -1,0 +1,9 @@
+def _source_file_dependencies_match(source_file_dependencies: Optional[List[str]], list_file_diff: List[str]) -> bool:
+    if not source_file_dependencies:
+        return False
+    includes = [d for d in source_file_dependencies if not d.startswith('!')]
+    excludes = [d[1:] for d in source_file_dependencies if d.startswith('!')]
+    for diff_file in list_file_diff:
+        if any((_matches_source_dependency(inc, diff_file) for inc in includes)) and (not any((_matches_source_dependency(exc, diff_file) for exc in excludes))):
+            return True
+    return False

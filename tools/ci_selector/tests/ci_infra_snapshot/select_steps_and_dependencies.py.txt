@@ -1,0 +1,25 @@
+def select_steps_and_dependencies(steps: List[Step], requested_step_keys: Optional[FrozenSet[str]]) -> Tuple[List[Step], Optional[FrozenSet[str]]]:
+    if requested_step_keys is None:
+        return (steps, None)
+    steps_by_key = {}
+    for step in steps:
+        if not step.key:
+            continue
+        if step.key in steps_by_key:
+            raise ValueError(f'Duplicate CI step key: {step.key}')
+        steps_by_key[step.key] = step
+    missing = requested_step_keys - steps_by_key.keys()
+    if missing:
+        raise ValueError('Unknown CI step key(s): ' + ', '.join(sorted(missing)))
+    selected_step_keys = set(requested_step_keys)
+    pending = list(requested_step_keys)
+    while pending:
+        step_key = pending.pop()
+        for dependency in steps_by_key[step_key].depends_on or []:
+            if dependency not in steps_by_key:
+                raise ValueError(f'CI step {step_key} depends on unknown step {dependency}.')
+            if dependency not in selected_step_keys:
+                selected_step_keys.add(dependency)
+                pending.append(dependency)
+    selected = [step for step in steps if step.key in selected_step_keys]
+    return (selected, frozenset(selected_step_keys))
