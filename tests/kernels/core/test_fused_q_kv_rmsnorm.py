@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.deepseek_v4.common.ops import fused_mtp_input_rmsnorm
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -27,6 +28,39 @@ def _ref_rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
     variance = x_f32.pow(2).mean(dim=-1, keepdim=True)
     y = x_f32 * torch.rsqrt(variance + eps) * w.to(torch.float32)
     return y.to(x.dtype)
+
+
+def test_fused_mtp_input_rmsnorm_preserves_all_input_rows():
+    torch.manual_seed(0)
+    device = "cuda"
+    dtype = torch.bfloat16
+    num_tokens, hidden_size, hc_mult = 3, 128, 2
+    inputs_embeds = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    previous_hidden_states = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=dtype, device=device
+    )
+    enorm_weight = torch.randn(hidden_size, dtype=dtype, device=device)
+    hnorm_weight = torch.randn(hidden_size, dtype=dtype, device=device)
+    eps = 1e-6
+
+    enorm_out, hnorm_out = fused_mtp_input_rmsnorm(
+        inputs_embeds,
+        previous_hidden_states,
+        enorm_weight,
+        hnorm_weight,
+        eps,
+        hc_mult,
+    )
+
+    torch.testing.assert_close(
+        enorm_out, _ref_rmsnorm(inputs_embeds, enorm_weight, eps), rtol=1e-2, atol=1e-2
+    )
+    torch.testing.assert_close(
+        hnorm_out,
+        _ref_rmsnorm(previous_hidden_states, hnorm_weight, eps),
+        rtol=1e-2,
+        atol=1e-2,
+    )
 
 
 @pytest.mark.parametrize("num_tokens", [1, 17, 1024, 8192])
