@@ -51,6 +51,9 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    from vllm.entrypoints.openai.cli_args import propagate_flash_late_interaction
+
+    propagate_flash_late_interaction(args, engine_args)
     if client_config:
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)
