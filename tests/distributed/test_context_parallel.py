@@ -17,7 +17,12 @@ import lm_eval
 import pytest
 import torch
 
-from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
+from tests.models.utils import check_outputs_equal
+from tests.utils import (
+    RemoteOpenAIServer,
+    create_new_process_for_each_test,
+    multi_gpu_test,
+)
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -316,4 +321,57 @@ def test_cp_generation(
         num_gpus_available,
         method="generate",
         is_multimodal=False,
+    )
+
+
+def _make_token_prompt(length: int, offset: int) -> list[int]:
+    # Gemma's BOS token followed by deterministic, non-special token IDs.
+    return [2] + [100 + (offset + i * 37) % 20000 for i in range(length - 1)]
+
+
+@multi_gpu_test(num_gpus=2)
+def test_flashinfer_dcp_generation_matches_tp(vllm_runner) -> None:
+    """FlashInfer DCP must match TP-only generation after block-table reuse."""
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip(reason="GQA/MQA+DCP requires compute capability of 9.0")
+
+    # MLA models select a separate backend, so use a small MQA model to exercise
+    # the FlashInfer metadata builder fixed by this PR.
+    model = "unsloth/gemma-2b"
+    warmup_prompts = [
+        _make_token_prompt(1000, 0),
+        _make_token_prompt(992, 10000),
+    ]
+    test_prompts = [
+        _make_token_prompt(384, 20000),
+        _make_token_prompt(320, 30000),
+    ]
+
+    def generate(
+        decode_context_parallel_size: int,
+    ) -> list[tuple[list[int], str]]:
+        with vllm_runner(
+            model,
+            dtype="bfloat16",
+            max_model_len=2048,
+            max_num_seqs=2,
+            tensor_parallel_size=2,
+            decode_context_parallel_size=decode_context_parallel_size,
+            attention_backend="FLASHINFER",
+            distributed_executor_backend="mp",
+            enable_chunked_prefill=True,
+        ) as runner:
+            # Populate the block table beyond the shorter test prompts' local
+            # page counts so overclaimed pages contain stale KV data.
+            runner.generate_greedy(warmup_prompts, max_tokens=1)
+            return runner.generate_greedy(test_prompts, max_tokens=32)
+
+    tp_outputs = generate(decode_context_parallel_size=1)
+    dcp_outputs = generate(decode_context_parallel_size=2)
+
+    check_outputs_equal(
+        outputs_0_lst=tp_outputs,
+        outputs_1_lst=dcp_outputs,
+        name_0="TP=2",
+        name_1="TP=2/DCP=2",
     )
