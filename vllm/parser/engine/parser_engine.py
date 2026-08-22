@@ -27,6 +27,7 @@ from vllm.parser.abstract_parser import Parser, StreamState
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
@@ -437,26 +438,38 @@ class ParserEngine(Parser):
         finished: bool,
     ) -> DeltaMessage | None:
         self._initialize_history_tool_call_cnt(request)
-        if not self._prompt_streaming_prepared and prompt_token_ids is not None:
-            # NOTE: call the hook BEFORE setting the flag, because the hook
-            # may invoke ``_reset`` (e.g. via ``initialize_streaming``) which
-            # clears ``_prompt_streaming_prepared``.
-            self.adjust_initial_state_from_prompt(prompt_token_ids)
-            self._prompt_streaming_prepared = True
-        self._check_skip_tool_parsing(request)
-        events = self._feed(delta_text, delta_token_ids)
-        if finished:
-            events.extend(self._engine.finish())
-        result = self._events_to_delta(events, finished=finished)
-        result = self._strip_trailing_reasoning(result)
+        is_tool_called: bool | Exception = False
+        try:
+            if not self._prompt_streaming_prepared and prompt_token_ids is not None:
+                # NOTE: call the hook BEFORE setting the flag, because the hook
+                # may invoke ``_reset`` (e.g. via ``initialize_streaming``) which
+                # clears ``_prompt_streaming_prepared``.
+                self.adjust_initial_state_from_prompt(prompt_token_ids)
+                self._prompt_streaming_prepared = True
+            self._check_skip_tool_parsing(request)
+            events = self._feed(delta_text, delta_token_ids)
+            if finished:
+                events.extend(self._engine.finish())
+            result = self._events_to_delta(events, finished=finished)
+            result = self._strip_trailing_reasoning(result)
 
-        # Suppress reasoning deltas if not requested
-        if result and not request.include_reasoning:
-            result.reasoning = None
-            if not result.content and not result.tool_calls:
-                result = None
+            # Suppress reasoning deltas if not requested
+            if result and not request.include_reasoning:
+                result.reasoning = None
+                if not result.content and not result.tool_calls:
+                    result = None
 
-        return result
+            is_tool_called = bool(result and result.tool_calls)
+            return result
+        except Exception as e:
+            is_tool_called = e
+            raise
+        finally:
+            record_tool_parser_invocation(
+                is_tool_called=is_tool_called,
+                is_streaming=True,
+                request=request,
+            )
 
     def _strip_trailing_reasoning(
         self,
@@ -670,24 +683,36 @@ class ParserEngine(Parser):
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
-        self._check_skip_tool_parsing(request)
-        reasoning, content, tool_call_info = self._single_pass_parse(
-            model_output,
-            model_output_token_ids,
-        )
+        is_tool_called: bool | Exception = False
+        try:
+            self._check_skip_tool_parsing(request)
+            reasoning, content, tool_call_info = self._single_pass_parse(
+                model_output,
+                model_output_token_ids,
+            )
 
-        tool_calls: list[FunctionCall] | None = None
-        if tool_call_info.tools_called:
-            tool_calls = [
-                FunctionCall(
-                    id=tc.id,
-                    name=tc.function.name,
-                    arguments=tc.function.arguments,
-                )
-                for tc in tool_call_info.tool_calls
-            ]
+            tool_calls: list[FunctionCall] | None = None
+            if tool_call_info.tools_called:
+                tool_calls = [
+                    FunctionCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=tc.function.arguments,
+                    )
+                    for tc in tool_call_info.tool_calls
+                ]
 
-        return reasoning, content, tool_calls
+            is_tool_called = bool(tool_calls)
+            return reasoning, content, tool_calls
+        except Exception as e:
+            is_tool_called = e
+            raise
+        finally:
+            record_tool_parser_invocation(
+                is_tool_called=is_tool_called,
+                is_streaming=False,
+                request=request,
+            )
 
     # ── Event-to-delta conversion ─────────────────────────────────────
 
