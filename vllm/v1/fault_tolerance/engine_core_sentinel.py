@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """EngineCoreSentinel and fault_tolerant_wrapper for the engine core."""
 
-import json
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -13,7 +12,7 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.utils import stateless_init_torch_distributed_process_group
 from vllm.logger import init_logger
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import bind_ephemeral
 from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     EngineCoreOutputs,
@@ -143,31 +142,44 @@ class EngineCoreSentinel:
             return {}
 
         parallel_config = engine.vllm_config.parallel_config
-        worker_key = f"ft_worker_dp_ports_{self._dp_reinit_epoch}"
         engine_key = f"ft_engine_dp_port_{self._dp_reinit_epoch}"
+        reinit_epoch = self._dp_reinit_epoch
         self._dp_reinit_epoch += 1
 
+        listen_socket = None
         if parallel_config.data_parallel_rank == 0:
-            worker_ports = [get_open_port() for _ in range(parallel_config.world_size)]
-            engine_port = get_open_port()
-            engine.dp_store.set(worker_key, json.dumps(worker_ports).encode())
-            engine.dp_store.set(engine_key, str(engine_port).encode())
+            listen_socket, engine_port = bind_ephemeral(
+                parallel_config.data_parallel_master_ip
+            )
+            try:
+                engine.dp_store.set(engine_key, str(engine_port).encode())
+            except Exception:
+                listen_socket.close()
+                raise
         else:
-            worker_ports = json.loads(engine.dp_store.get(worker_key).decode())
             engine_port = int(engine.dp_store.get(engine_key).decode())
 
         stateless_destroy_torch_distributed_process_group(engine.dp_group)
-        engine.dp_group, engine.dp_store = (
-            stateless_init_torch_distributed_process_group(
-                parallel_config.data_parallel_master_ip,
-                engine_port,
-                parallel_config.data_parallel_rank,
-                parallel_config.data_parallel_size,
-                backend="gloo",
-                return_store=True,
+        try:
+            engine.dp_group, engine.dp_store = (
+                stateless_init_torch_distributed_process_group(
+                    parallel_config.data_parallel_master_ip,
+                    engine_port,
+                    parallel_config.data_parallel_rank,
+                    parallel_config.data_parallel_size,
+                    backend="gloo",
+                    return_store=True,
+                    listen_socket=listen_socket,
+                )
             )
-        )
-        return {"new_stateless_dp_group_ports": worker_ports}
+        except Exception:
+            if listen_socket is not None:
+                listen_socket.close()
+            raise
+        return {
+            "new_stateless_dp_group_coord_port": engine_port,
+            "new_stateless_dp_group_epoch": reinit_epoch,
+        }
 
 
 def fault_tolerant_wrapper(busy_loop_func: Callable):
