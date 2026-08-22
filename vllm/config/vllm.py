@@ -649,9 +649,6 @@ class VllmConfig:
         if self.model_config is not None and self.model_config.is_diffusion:
             return True
 
-        if not self._is_default_v2_model_runner_model():
-            return False
-
         if not HAS_TRITON:
             logger.warning_once(
                 "Model Runner V2 requires Triton; using the V1 model runner instead."
@@ -691,9 +688,6 @@ class VllmConfig:
         layer_types = getattr(draft_config.hf_config, "layer_types", None) or []
         num_sliding = sum(lt == "sliding_attention" for lt in layer_types)
         return 0 < num_sliding < len(layer_types)
-
-    def _is_default_v2_model_runner_model(self) -> bool:
-        return self.model_config is not None
 
     def _uses_breakable_cudagraph_by_default(self) -> bool:
         model_config = self.model_config
