@@ -394,6 +394,54 @@ def get_load_balance_assignment(
     return (shuffle_indices, gpu_sample_counts, gpu_loads)
 
 
+def get_dummy_mrope_grid_thw(
+    vision_model: torch.nn.Module,
+    rope_type: Literal["rope_3d", "rope_2d"],
+) -> list[int]:
+    """Return the smallest merge-aligned grid used to pad empty DP ranks.
+
+    Dummy images must be merge-aligned so the vision encoder produces a
+    well-defined number of output tokens that can be sliced off after the
+    local forward. This keeps every rank on a non-empty local batch when the
+    image count does not divide TP (see issue #52654).
+    """
+    if rope_type == "rope_2d":
+        kernel_h, kernel_w = vision_model.merge_kernel_size
+        return [int(kernel_h), int(kernel_w)]
+    merge = int(vision_model.spatial_merge_size)
+    return [1, merge, merge]
+
+
+def pad_local_mrope_vision_inputs(
+    pixel_values_local: torch.Tensor,
+    local_grid_thw_list: list[list[int]],
+    *,
+    target_num_images: int,
+    dummy_grid: list[int],
+) -> tuple[torch.Tensor, list[list[int]], int]:
+    """Pad this rank's images so every DP rank runs the same local count.
+
+    Returns:
+        pixel_values_local: Concatenated real + dummy patches.
+        local_grid_thw_list: Grids including trailing dummy images.
+        n_pad: Number of dummy images appended (0 if already at target).
+    """
+    n_pad = target_num_images - len(local_grid_thw_list)
+    if n_pad <= 0:
+        return pixel_values_local, local_grid_thw_list, 0
+
+    dummy_patches = math.prod(dummy_grid)
+    dummy_pixels = pixel_values_local.new_zeros(
+        (dummy_patches * n_pad, pixel_values_local.shape[1])
+    )
+    if pixel_values_local.shape[0] == 0:
+        pixel_values_local = dummy_pixels
+    else:
+        pixel_values_local = torch.cat([pixel_values_local, dummy_pixels], dim=0)
+    padded_grids = local_grid_thw_list + [list(dummy_grid) for _ in range(n_pad)]
+    return pixel_values_local, padded_grids, n_pad
+
+
 def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
@@ -487,6 +535,21 @@ def run_dp_sharded_mrope_vision_model(
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
+    # Pad short/empty ranks so every rank runs a uniform, non-empty local
+    # batch when there is any global work. Empty ranks otherwise skip the
+    # encoder and hit attention kernels with 0-token sequences.
+    dummy_grid = get_dummy_mrope_grid_thw(vision_model, rope_type)
+    target_num_images = max(gpu_sample_counts)
+    if patches_per_image:
+        target_num_images = max(target_num_images, 1)
+    pixel_values_local, local_grid_thw_list, n_pad = pad_local_mrope_vision_inputs(
+        pixel_values_local,
+        local_grid_thw_list,
+        target_num_images=target_num_images,
+        dummy_grid=dummy_grid,
+    )
+    dummy_out_tokens = n_pad * (math.prod(dummy_grid) // embed_dim_reduction_factor)
+
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
         if pixel_values_local.shape[0] > 0:
@@ -495,6 +558,8 @@ def run_dp_sharded_mrope_vision_model(
             )
             if isinstance(image_embeds_local, list):
                 image_embeds_local = torch.cat(image_embeds_local, dim=0)
+            if dummy_out_tokens > 0:
+                image_embeds_local = image_embeds_local[:-dummy_out_tokens]
         else:
             out_dim = getattr(vision_model.config, "hidden_size", None)
             image_embeds_local = torch.empty(
@@ -505,6 +570,8 @@ def run_dp_sharded_mrope_vision_model(
     else:
         if pixel_values_local.shape[0] > 0:
             image_embeds_local = vision_model(pixel_values_local, local_grid_thw_list)
+            if dummy_out_tokens > 0:
+                image_embeds_local = image_embeds_local[:-dummy_out_tokens]
         else:
             # Handle empty case
             image_embeds_local = torch.empty(

@@ -330,6 +330,11 @@ def flashinfer_wrapper(
     v_scale: torch.Tensor | None = None,
     o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
+    if q.numel() == 0:
+        # FlashInfer's cuDNN prefill calls torch::stable::empty_like and
+        # fails on 0-token queries (seen with DP ViT empty ranks, #52654).
+        return torch.empty_like(q, dtype=o_data_type or q.dtype)
+
     from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
 
     is_reshaped = q.dim() == 4
