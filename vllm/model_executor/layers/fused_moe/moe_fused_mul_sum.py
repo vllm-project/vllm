@@ -25,7 +25,7 @@ def moe_fused_mul_sum_kernel(
     pid_k = tl.program_id(0)
     pid_m = tl.program_id(1)
 
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_m = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
     offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
 
     m_mask = offs_m < num_tokens
