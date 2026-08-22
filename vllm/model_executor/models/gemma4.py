@@ -67,6 +67,9 @@ from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
+from vllm.utils.platform_utils import is_uva_available
+from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
 from .interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
@@ -976,12 +979,33 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             and self.hidden_size_per_layer_input > 0
         ):
             total_ple_dim = self.hidden_size_per_layer_input * config.num_hidden_layers
-            self.embed_tokens_per_layer = VocabParallelEmbedding(
-                self.vocab_size_per_layer_input,
-                total_ple_dim,
-                quant_config=quant_config,
-                prefix=f"{prefix}.embed_tokens_per_layer",
-            )
+
+            # make_layers에 offloader 함수 존재 
+            # 이는 zero-copy uva(unified virtual mem)를 통해 ram의 메모리를 gpu가 참고할 수 있도록 하는것
+            # pin_memory 
+            # VocabParallelEmbedding (PLE) 는 해당 함수로 만들지 않아 임의로 패치
+            # VocabParallelEmbedding는 인덱싱을 통한 look up이라 해당 형태의 구현이 가능한 것
+
+            _ple_on_cpu = is_uva_available()
+            _ctx = torch.device("cpu") if _ple_on_cpu else torch.device("cuda")
+            with _ctx:
+                self.embed_tokens_per_layer = VocabParallelEmbedding(
+                    self.vocab_size_per_layer_input,
+                    total_ple_dim,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.embed_tokens_per_layer",
+                )
+            if _ple_on_cpu:
+                _w = self.embed_tokens_per_layer.weight
+                _cpu = _w.data.to("cpu").pin_memory()
+                _w.data = get_accelerator_view_from_cpu_tensor(_cpu)
+                _w._vllm_is_uva_offloaded = True
+                import vllm.logger as _vl
+                _vl.init_logger(__name__).info(
+                    "[PATCH-PLE-UVA-OFFLOAD] PLE created on CPU + UVA view, "
+                    "%.2f GB off-GPU",
+                    _cpu.numel() * _cpu.element_size() / 1e9,
+                )
             # Scaled embedding factor (from config, not hardcoded)
             # Register as buffer so it moves to GPU with the model
             # and interacts correctly with torch.compile AOT caching.
