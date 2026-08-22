@@ -47,9 +47,11 @@ class CPUOffloadingManager(OffloadingManager):
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
+        tokens_per_chunk: int = 0,
     ):
         self.medium: Medium = Medium.CPU
         self._num_blocks: int = num_blocks
+        self._tokens_per_chunk: int = tokens_per_chunk
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -301,6 +303,12 @@ class CPUOffloadingManager(OffloadingManager):
         )
         usage = num_used / self._num_blocks if self._num_blocks > 0 else 0.0
         stats.set_gauge(CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC, usage)
+
+        if self._tokens_per_chunk > 0:
+            stats.set_gauge(
+                CPUOffloadingMetrics.CPU_CAPACITY_TOKENS,
+                self._num_blocks * self._tokens_per_chunk,
+            )
 
         for allocation_size in self.allocation_sizes_in_current_batch:
             stats.observe_histogram(

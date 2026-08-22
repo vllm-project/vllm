@@ -98,9 +98,11 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
+        tokens_per_chunk: int = 0,
     ):
         super().__init__(
             num_blocks=num_blocks,
+            tokens_per_chunk=tokens_per_chunk,
             cache_policy=cache_policy,
             cache_policy_module_path=cache_policy_module_path,
             enable_events=enable_events,
