@@ -377,6 +377,60 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
     _compare_objs(input_batch, ref_input_batch)
 
 
+@pytest.mark.parametrize("device", DEVICES)
+def test_swap_states_preserves_allowed_token_ids_mask(device: str):
+    """swap_states() must exchange the two allowed_token_ids_mask rows.
+
+    Swapping row views via a tuple assignment
+    (t[i1], t[i2] = t[i2], t[i1]) aliases them, so both rows collapse to the
+    second row's contents and one request silently loses its token
+    restriction. This is the sibling of the condense() leak fixed for
+    https://github.com/vllm-project/vllm/issues/43894.
+    """
+    allowed_token_id = 13
+    input_batch = InputBatch(
+        max_num_reqs=2,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
+    )
+
+    def _make_req(suffix: int, allowed_token_ids=None) -> CachedRequestState:
+        return CachedRequestState(
+            req_id=f"req_id_{suffix}",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params=SamplingParams(allowed_token_ids=allowed_token_ids),
+            pooling_params=None,
+            mm_features=[],
+            block_ids=([],),
+            generator=None,
+            num_computed_tokens=0,
+            output_token_ids=[],
+        )
+
+    # Row 0 is constrained to a single token; row 1 is unconstrained.
+    assert input_batch.add_request(_make_req(0, [allowed_token_id])) == 0
+    assert input_batch.add_request(_make_req(1)) == 1
+
+    mask = input_batch.allowed_token_ids_mask_cpu_tensor
+    assert mask is not None
+    assert int(mask[0].sum().item()) == VOCAB_SIZE - 1
+    assert not mask[0][allowed_token_id].item()
+    assert int(mask[1].sum().item()) == 0
+
+    input_batch.swap_states(0, 1)
+
+    # The constrained request now sits at row 1 and must keep its mask; the
+    # unconstrained request now sits at row 0 and must stay open.
+    assert int(mask[1].sum().item()) == VOCAB_SIZE - 1
+    assert not mask[1][allowed_token_id].item()
+    assert int(mask[0].sum().item()) == 0
+
+
 def _construct_pooling_request(req_id_suffix: int, pooling_params=None):
     from vllm.pooling_params import PoolingParams
 
