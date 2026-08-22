@@ -122,6 +122,7 @@ class TokenspeedMLABackend(MLACommonBackend):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
+        has_sliding_window: bool,
     ) -> str | None:
         # Surface a clear install hint up front rather than letting a raw
         # ModuleNotFoundError fire deep inside `forward_mqa` at first request.

@@ -164,6 +164,7 @@ class FlashInferMLABackend(MLACommonBackend):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
+        has_sliding_window: bool,
     ) -> str | None:
         vllm_config = get_current_vllm_config()
         speculative_config = vllm_config.speculative_config

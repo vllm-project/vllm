@@ -541,6 +541,55 @@ def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
     assert not FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
 
 
+def test_flash_attn_fp8_kv_rejected_with_local_attention_on_blackwell(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """On Blackwell with head_size=256, local attention forces FA4 -> FA2,
+    which cannot serve fp8 KV cache, so FLASH_ATTN must be rejected during
+    backend selection instead of failing at runtime (issue #51828)."""
+    fa_interface = pytest.importorskip(
+        "vllm.vllm_flash_attn.flash_attn_interface", exc_type=ImportError
+    )
+    import vllm.v1.attention.backends.fa_utils as fa_utils_mod
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    sm100 = DeviceCapability(10, 0)
+    monkeypatch.setattr(fa_utils_mod.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(fa_utils_mod.current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(
+        fa_utils_mod.current_platform, "get_device_capability", lambda: sm100
+    )
+    monkeypatch.setattr(
+        fa_utils_mod.current_platform,
+        "is_device_capability_family",
+        lambda family: family == 100,
+    )
+    monkeypatch.setattr(
+        fa_interface, "is_fa_version_supported", lambda version: version in (2, 4)
+    )
+
+    common = dict(
+        head_size=256,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="fp8_e4m3",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        device_capability=sm100,
+    )
+    assert (
+        FlashAttentionBackend.supports_combination(**common, has_sliding_window=False)
+        is None
+    )
+    reason = FlashAttentionBackend.supports_combination(
+        **common, has_sliding_window=True
+    )
+    assert reason is not None and "FP8 KV cache" in reason
+
+
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
 def test_flash_attn_accepts_handled_fp8_variants(
     kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch

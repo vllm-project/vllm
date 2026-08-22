@@ -99,6 +99,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
+        has_sliding_window: bool,
     ) -> str | None:
         from vllm.config import get_current_vllm_config
 
@@ -166,6 +167,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         use_sparse: bool,
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
+        has_sliding_window: bool,
     ) -> str | None:
         from vllm.config import get_current_vllm_config
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
