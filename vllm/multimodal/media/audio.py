@@ -45,6 +45,10 @@ except ImportError:
 _BAD_SF_CODES = {0, 1, 3, 4}
 
 
+class AudioDecodeLimitExceededError(ValueError):
+    """Audio rejected by a decode guard (duration or decoded-byte limit)."""
+
+
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
@@ -93,7 +97,7 @@ def load_audio_pyav(
                     metadata_duration_s is not None
                     and metadata_duration_s > max_duration_s
                 ):
-                    raise ValueError(
+                    raise AudioDecodeLimitExceededError(
                         f"Audio exceeds maximum allowed duration of "
                         f"{max_duration_s}s (metadata reports "
                         f"{metadata_duration_s:.1f}s). Set "
@@ -134,7 +138,7 @@ def load_audio_pyav(
                     chunks.append(arr)
 
                 if max_samples is not None and total_samples > max_samples:
-                    raise ValueError(
+                    raise AudioDecodeLimitExceededError(
                         f"Audio exceeds maximum allowed duration of "
                         f"{max_duration_s}s (decoded {total_samples} "
                         f"samples at {sr}Hz). Set "
@@ -145,7 +149,7 @@ def load_audio_pyav(
                     max_decode_bytes is not None
                     and total_decode_bytes > max_decode_bytes
                 ):
-                    raise ValueError(
+                    raise AudioDecodeLimitExceededError(
                         f"Audio decode exceeded "
                         f"{max_decode_bytes / MiB_bytes:.0f} MiB memory "
                         f"limit ({total_decode_bytes / MiB_bytes:.0f} MiB "
@@ -185,7 +189,7 @@ def load_audio_soundfile(
         if max_duration_s is not None:
             file_duration_s = f.frames / native_sr
             if file_duration_s > max_duration_s:
-                raise ValueError(
+                raise AudioDecodeLimitExceededError(
                     f"Audio exceeds maximum allowed duration of "
                     f"{max_duration_s}s (file contains "
                     f"{file_duration_s:.1f}s at {native_sr}Hz). Set "
@@ -195,7 +199,7 @@ def load_audio_soundfile(
         if max_decode_bytes is not None:
             estimated_bytes = f.frames * f.channels * np.dtype(np.float32).itemsize
             if estimated_bytes > max_decode_bytes:
-                raise ValueError(
+                raise AudioDecodeLimitExceededError(
                     f"Audio would allocate {estimated_bytes / MiB_bytes:.0f} "
                     f"MiB of PCM ({f.frames} frames x {f.channels} channels"
                     f" x 4B), exceeding the "
@@ -254,6 +258,8 @@ def load_audio(
         )
     except ImportError:
         raise  # Let PlaceholderModule's message ("install vllm[audio]") propagate.
+    except AudioDecodeLimitExceededError:
+        raise
     except Exception as pyav_exc:
         raise ValueError("Invalid or unsupported audio file.") from pyav_exc
 
