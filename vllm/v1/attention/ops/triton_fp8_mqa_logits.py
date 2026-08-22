@@ -17,27 +17,62 @@ from vllm.triton_utils import tl, triton
 # gfx942 (MI300X) has 64 KiB of LDS per CU. We accept the default
 # (BLOCK_KV=128, num_stages=2) tile only when *both* of these hold:
 #
-# 1. Occupancy gate. With waves_per_eu=2 and num_warps=4 we target two
-#    workgroups co-resident on a CU -> per-WG LDS budget = 32 KiB. Triton
-#    keeps Q in registers (loop-invariant) and the fp32 scores accumulator
-#    in VGPRs (heavy VALU), so only the double-buffered KV tile is
-#    expected to live in LDS. A 0.9 safety factor leaves headroom for any
-#    LDS overhead the compiler may add.
+# 1. Occupancy gate. With num_warps=4 we target two workgroups co-resident
+#    on a CU -> per-WG LDS budget = 32 KiB. Triton keeps Q in registers
+#    (loop-invariant) and the fp32 scores accumulator in VGPRs (heavy
+#    VALU), so only the pipelined KV tile lives in LDS. A 0.9 safety
+#    factor leaves headroom for the pipeline bookkeeping the compiler
+#    adds on top of the raw tile (measured: 512 B).
 #
 # 2. Hardware ceiling. Defensive upper bound that also counts Q and
 #    scores against the 64 KiB CU limit, in case a Triton version (older
 #    or future) decides to spill them to LDS. False positives here only
 #    shrink the tile; false negatives are JIT-aborts, so we lean
 #    conservative.
+#
+# LDS ARITHMETIC (corrected -- the original model charged the KV tile at
+# 2 bytes/element, which describes an fp16-expanded tile, not the native
+# fp8 one this kernel actually feeds to the MFMA):
+#
+#   Old:  kv_bytes = head_size * BLOCK_KV * NUM_STAGES
+#                  = 128 * 128 * 2 = 32768 B  >  28.8 KiB budget -> REJECT
+#
+#   That expression used NUM_STAGES=2 in the slot where a bytes-per-
+#   element factor belongs. It happens to equal the right answer for a
+#   single-buffered *fp16* tile -- i.e. the software fp8->fp16 expansion
+#   path -- so it modelled the wrong operand width. The KV operand is one
+#   fp8 byte per element, and Triton's stream pipeliner does not put a
+#   second full copy of the tile in LDS for this single-dot loop (the
+#   second stage lives in registers); only a small amount of pipeline
+#   bookkeeping is added on top of the one resident tile:
+#
+#   New:  kv_bytes = head_size * BLOCK_KV * KV_ELEM_BYTES + PIPELINE_SLACK
+#                  = 128 * 128 * 1 + 512 = 16896 B  <  28.8 KiB -> ACCEPT
+#
+#   16896 B is not an estimate: it is exactly what this Triton build
+#   reports in `kernel.metadata.shared` for (BLOCK_KV=128, num_stages=2,
+#   H=64, D=128) -- one 128x128 fp8 tile (16384 B) plus 512 B of slack.
+#   So the DSv4 indexer shape fits the default tile with ~12 KiB of
+#   headroom, and the only reason it was being rejected was the
+#   fp16-expansion assumption.
+#
+#   The gate still does its job at the next size up: BLOCK_KV=256 needs
+#   256*128*1 + 512 = 33280 B > 28.8 KiB and is correctly rejected (it
+#   also measures slower, 9.82 ms vs 7.30 ms at M=8000).
 _GFX942_CU_LDS_BYTES = 64 * 1024
 _GFX942_PER_WG_LDS_BUDGET_BYTES = _GFX942_CU_LDS_BYTES * 9 // 20  # ~28.8 KiB
+# The KV operand reaches the MFMA as fp8 (1 byte/element) on gfx942.
+_GFX942_KV_ELEM_BYTES = 1
+# Measured LDS the Triton stream pipeliner adds on top of the raw tile.
+_GFX942_PIPELINE_SLACK_BYTES = 512
 
 
 def _gfx942_default_tile_fits_lds(num_heads: int, head_size: int) -> bool:
     """Return True iff (BLOCK_KV=128, num_stages=2) fits in MI300X LDS."""
     BLOCK_KV = 128
-    NUM_STAGES = 2
-    kv_bytes = head_size * BLOCK_KV * NUM_STAGES
+    kv_bytes = (
+        head_size * BLOCK_KV * _GFX942_KV_ELEM_BYTES + _GFX942_PIPELINE_SLACK_BYTES
+    )
     scores_bytes = num_heads * BLOCK_KV * 4
     q_bytes = num_heads * head_size
     fits_occupancy = kv_bytes < _GFX942_PER_WG_LDS_BUDGET_BYTES
@@ -70,6 +105,7 @@ def _fp8_mqa_logits_kernel(
     stride_logits_k: tl.int64,
     # block sizes
     BLOCK_KV: tl.constexpr,
+    OOW_FILL: tl.constexpr,
 ):
     row_id = tl.program_id(0)
     # go from larger to smaller in terms of work
@@ -94,9 +130,28 @@ def _fp8_mqa_logits_kernel(
         Q_ptr + row_id * stride_q_s + h_inds * stride_q_h + d_inds[None, :] * stride_q_d
     )
 
-    q_block = tl.load(q_ptrs, cache_modifier=".cg")
+    # ---- native gfx942 fp8 MFMA path -------------------------------------
+    # Operands arrive as OCP e4m3 (`torch.float8_e4m3fn`). CDNA3 has a native
+    # fp8 MFMA only for the *fnuz* encodings, so without this Triton emits a
+    # ~2500-instruction software fp8->fp16 upconvert per KV tile and runs
+    # `v_mfma_f32_32x32x8_f16`. e4m3fn and e4m3fnuz share the exact same 1-4-3
+    # bit layout and differ only in exponent bias (7 vs 8), so a raw BITCAST
+    # reinterprets every value as exactly v/2 (bit-exact, denormals included).
+    # One exception: byte 0x80 is -0.0 in OCP e4m3 but NaN in e4m3fnuz, so it
+    # must be scrubbed to 0x00 first.
+    #
+    # Q is loop-invariant (loaded once per program) so scrubbing it here is
+    # free. Two bitcast operands make the dot produce (q.k)/4; the correcting
+    # *4 is folded into the loop-invariant per-head `w_block` below. That is
+    # exact because 1/4 is a positive power of two, so relu(x/4) == relu(x)/4:
+    #     relu((q.k/4) * kv_scale) * (4*w) == relu((q.k) * kv_scale) * w.
+    q_bits = tl.load(q_ptrs, cache_modifier=".cg").to(tl.uint8, bitcast=True)
+    q_bits = tl.where(q_bits == 0x80, 0, q_bits).to(tl.uint8)
+    q_block = q_bits.to(tl.float8e4b8, bitcast=True)
+
     w_ptrs = weights_ptr + row_id * stride_w_s + h_inds * stride_w_h
-    w_block = tl.load(w_ptrs, cache_modifier=".cg").to(tl.float32)
+    # `* 4.0` undoes the 2x-per-operand bias shift of the fnuz reinterpretation.
+    w_block = tl.load(w_ptrs, cache_modifier=".cg").to(tl.float32) * 4.0
 
     # Load start/end for each row in this block
     start_ind = tl.load(cu_start_ptr + row_id)
@@ -106,6 +161,27 @@ def _fp8_mqa_logits_kernel(
     end_ind = tl.minimum(end_ind, seq_len_kv)
     shifted_end = end_ind - start_ind
     shifted_unmasked_end = shifted_end // BLOCK_KV * BLOCK_KV
+
+    # ---- -inf epilogue for the out-of-window lanes of this row -----------
+    # `logits` is allocated with torch.empty (no host prefill), so each
+    # program is responsible for writing -inf to the part of its own row that
+    # falls outside [start_ind, end_ind). See the launcher for the A/B.
+    if OOW_FILL:
+        ninf = tl.full([BLOCK_KV], float("-inf"), tl.float32)
+        for off in tl.range(0, start_ind, BLOCK_KV):
+            cols = off + tl.arange(0, BLOCK_KV)
+            tl.store(
+                logits_row_ptrs + cols * stride_logits_k,
+                ninf,
+                mask=cols < start_ind,
+            )
+        for off in tl.range(end_ind, seq_len_kv, BLOCK_KV):
+            cols = off + tl.arange(0, BLOCK_KV)
+            tl.store(
+                logits_row_ptrs + cols * stride_logits_k,
+                ninf,
+                mask=cols < seq_len_kv,
+            )
 
     kv_col_offsets = tl.arange(0, BLOCK_KV) + start_ind
     kv_ptrs = (
@@ -118,10 +194,19 @@ def _fp8_mqa_logits_kernel(
 
     # Loop over KV tiles
     for _ in tl.range(0, shifted_unmasked_end, BLOCK_KV):
-        kv_block = tl.load(kv_ptrs)
+        # K needs the same 0x80 (OCP -0.0 / fnuz NaN) scrub Q gets, but K is
+        # re-read once per OUTPUT ROW while it is only [N, D] bytes, so doing
+        # it here re-scrubs identical bytes M times. It is hoisted to a single
+        # host-side `torch.clamp_min(k_fp8.view(int8), -127)` pass in the
+        # launcher (same 0x80 -> 0x81 mapping, bit-identical numerics), which
+        # deleted 258 of the 884 inner-loop instructions (29 %: 128
+        # v_max_i16_sdwa + 96 v_or_b32_sdwa + 34 v_lshrrev of byte-lane fixup).
+        # So here we just load and bitcast straight to fnuz.
+        kv_block = tl.load(kv_ptrs).to(tl.float8e4b8, bitcast=True)
         kv_scales = tl.load(kv_scales_ptrs)
 
         # [NUM_HEADS, BLOCK_KV] = [NUM_HEADS, HEAD_SIZE] x [HEAD_SIZE, BLOCK_KV]
+        # both operands are fnuz -> `v_mfma_f32_*_fp8_fp8` (no upconvert)
         scores = tl.dot(q_block, kv_block, input_precision="ieee")
         # Multiply by kv_scales (broadcast along rows)
         scores = scores * kv_scales[None, :]
@@ -139,7 +224,10 @@ def _fp8_mqa_logits_kernel(
 
     # masked load
     kv_col_mask = kv_col_offsets < end_ind
-    kv_block = tl.load(kv_ptrs, mask=kv_col_mask[None, :], other=0.0)
+    # Same hoist as the main loop: K is already scrubbed on the host.
+    kv_block = tl.load(kv_ptrs, mask=kv_col_mask[None, :], other=0.0).to(
+        tl.float8e4b8, bitcast=True
+    )
     kv_scales = tl.load(kv_scales_ptrs, mask=kv_col_mask, other=0.0)
 
     # [NUM_HEADS, BLOCK_KV] = [NUM_HEADS, HEAD_SIZE] x [HEAD_SIZE, BLOCK_KV]
@@ -201,30 +289,88 @@ def fp8_mqa_logits_gfx942(
     # explicitly to keep the kernel's pointer arithmetic intent clear.
     kv_scales_1d = kv_scales.reshape(-1)
 
-    # Initialise with -inf so positions outside [cu_starts, cu_ends) read
-    # as ``-inf`` after the masked store path -- this matches AITER's
-    # ``fp8_mqa_logits`` semantics and is what the top-k consumer expects.
-    logits = torch.full(
-        (seq_len, seq_len_kv),
-        fill_value=-float("inf"),
-        dtype=torch.float32,
-        device=q.device,
-    )
+    # ---- one-shot host-side fnuz NaN scrub of K --------------------------
+    # The kernel bitcasts fp8 operands from OCP e4m3 to e4m3fnuz to reach the
+    # native `v_mfma_f32_16x16x32_fp8_fp8`. The two encodings share a bit
+    # layout and differ only in bias, EXCEPT that byte 0x80 is -0.0 in OCP but
+    # NaN in fnuz, and one NaN byte poisons its whole output column. Viewed as
+    # int8, 0x80 == INT8_MIN, so `clamp_min(-127)` neutralises it (0x80 ->
+    # 0x81) and is the identity on every other byte.
+    #
+    # K is [N, D] but was being scrubbed once per output row inside the loop,
+    # i.e. M times over the same bytes -- 29 % of the inner-loop instructions.
+    # Doing it once here costs one [N, D]-byte elementwise pass (a few us) and
+    # is measured at 1.19x end-to-end (0.5673 -> 0.4848 ms at M=4096) with the
+    # clamp itself inside the timed region.
+    #
+    # `clamp_min` returns a NEW tensor -- never mutate the caller's k_fp8 in
+    # place, the harness reuses inputs across iterations. The int8 dtype-view
+    # requires the last dim to be contiguous, so densify first if needed; the
+    # strides are re-read from the new tensor below.
+    if k_fp8.stride(-1) != 1:
+        k_fp8 = k_fp8.contiguous()
+    k_fp8 = torch.clamp_min(k_fp8.view(torch.int8), -127).view(k_fp8.dtype)
+
+    # Positions outside [cu_starts[i], cu_ends[i]) must read ``-inf`` -- this
+    # matches AITER's ``fp8_mqa_logits`` semantics and is what the top-k
+    # consumer expects. AITER pre-fills the whole [M, N] output with
+    # ``torch.full(-inf)``; that costs a full M*N fp32 HBM write plus a
+    # FillFunctor dispatch INSIDE the timed region (measured 8.7 / 20.4 /
+    # 55.9 / 52.0 us for cases 0-3, ~1.5-3 % end-to-end now that the kernel
+    # itself is 7x faster), and every element the kernel writes is written
+    # twice.
+    #
+    # Instead allocate uninitialised and let each program -inf-fill the
+    # out-of-window lanes of its OWN row (``OOW_FILL``): row i owns
+    # [0, start_ind) and [end_ind, seq_len_kv). Same total store traffic in
+    # the worst case, but it is fused into the kernel's own stores, needs no
+    # second dispatch, and no host-side fullness test (a
+    # ``cu_starts.amax().item()`` probe is a device->host sync costing 60-67 us
+    # flat, strictly worse than the fill and not HIP-graph safe).
+    #
+    # Measured (full-benchmark geomean over 3 runs each): torch.full ->
+    # 0.7149 / 0.7095 / 0.7162 ms, kernel epilogue -> 0.7064 / 0.7056 /
+    # 0.6998 ms. A win on every case, so the prefill is retired.
+    logits = torch.empty((seq_len, seq_len_kv), dtype=torch.float32, device=q.device)
 
     if _gfx942_default_tile_fits_lds(num_heads, head_size):
         block_kv = 128
         num_stages = 2
     else:
-        # DSv4 sparse indexer (NUM_HEADS=64, HEAD_SIZE=128) lands here:
-        # default tile spills past gfx942's 64 KiB LDS budget. (64, 1)
-        # needs ~33 KiB and clears the per-WG budget with margin.
         block_kv = 64
         num_stages = 1
 
-    # heuristic for MFMA instruction shape, identical to AITER's choice
-    matrix_instr_nonkdim = 32
-    if seq_len <= 1024:
+    # MFMA instruction shape. AITER keys this off `seq_len` (32 above 1024,
+    # 16 at or below), but the right axis is the *dot shape*, not the
+    # sequence length: nonkdim only selects between v_mfma_*_16x16x* and
+    # v_mfma_*_32x32x*, and the dot here is [NUM_HEADS, HEAD_SIZE] x
+    # [HEAD_SIZE, BLOCK_KV] -- seq_len does not appear in it at all.
+    #
+    # For the DSv4 indexer shape (H=64, D=128) the 16x16 instruction wins
+    # at every measured seq_len, because the 32x32 form needs a larger
+    # accumulator and spends more AGPR/VGPR for the same MACs. Measured on
+    # gfx942 at BLOCK_KV=128, num_stages=2:
+    #     M=8000   nonkdim=32 -> 7.99 ms      nonkdim=16 -> 7.30 ms
+    # i.e. the `seq_len > 1024` branch was picking the slower instruction
+    # on exactly the shapes where it costs the most. Restrict the 32 choice
+    # to shapes we have not characterised, and take 16 whenever the tile
+    # dimensions are the ones it was measured on.
+    if num_heads <= 64 and head_size <= 128:
         matrix_instr_nonkdim = 16
+    elif seq_len <= 1024:
+        matrix_instr_nonkdim = 16
+    else:
+        matrix_instr_nonkdim = 32
+
+    # waves_per_eu trims the VGPR allocation to force more waves resident
+    # per EU. AITER ships 2; 3 is uniformly faster on this shape once the
+    # tile is right (measured, all four benchmark cases at BLOCK_KV=128 /
+    # num_stages=2 / nonkdim=16):
+    #     M=2048  0.589 -> 0.553 ms      M=4096  2.033 -> 1.914 ms
+    #     M=8000  7.299 -> 6.871 ms      M=8192  7.617 -> 7.159 ms
+    # 4 is a hard regression (11.6 ms at M=8000) -- the trimming starts
+    # costing more than the extra occupancy buys.
+    waves_per_eu = 3
 
     stride_q_s, stride_q_h, stride_q_d = q.stride()
     stride_kv_s, stride_kv_d = k_fp8.stride()
@@ -253,9 +399,10 @@ def fp8_mqa_logits_gfx942(
         stride_logits_s=stride_logits_s,
         stride_logits_k=stride_logits_k,
         BLOCK_KV=block_kv,
+        OOW_FILL=True,
         num_warps=4,
         num_stages=num_stages,
-        waves_per_eu=2,
+        waves_per_eu=waves_per_eu,
         matrix_instr_nonkdim=matrix_instr_nonkdim,
     )
 
