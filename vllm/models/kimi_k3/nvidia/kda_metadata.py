@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3 specialization of GDN attention metadata.
 
+Shared by the NVIDIA and ROCm paths; the ROCm builder subclasses it and
+overrides the prefill chunk-metadata hook.
+
 The request classification and cudagraph staging intentionally mirror
 ``GDNAttentionMetadataBuilder``. Kimi-K3 builds the metadata required by its
 prefill KDA kernel internally, so this builder omits the shared FLA chunk
@@ -11,9 +14,10 @@ For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
+import copy
 from dataclasses import dataclass, field
 from functools import cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
@@ -242,6 +246,103 @@ def stage_spec_decode_metadata(
     )
 
 
+@triton.jit(do_not_specialize=["num_spec_decodes", "batch_size"])
+def _stage_reused_spec_state_indices_kernel(
+    block_table_ptr,
+    seq_lens_ptr,
+    staged_state_indices_ptr,
+    block_table_stride_0: tl.constexpr,
+    block_table_stride_1: tl.constexpr,
+    seq_lens_stride: tl.constexpr,
+    staged_state_indices_stride_0: tl.constexpr,
+    staged_state_indices_stride_1: tl.constexpr,
+    num_spec_decodes,
+    batch_size,
+    CACHE_BLOCK_SIZE: tl.constexpr,
+    NUM_STATE_SLOTS: tl.constexpr,
+    BLOCK_STATE_SLOTS: tl.constexpr,
+    NULL_STATE_ID: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+    launch_pdl: tl.constexpr,
+):
+    """Stage one cache group's state indices into its graph-local buffer."""
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
+
+    rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+    real_request = rows < num_spec_decodes
+    seq_lens = tl.load(
+        seq_lens_ptr + rows * seq_lens_stride,
+        mask=real_request,
+        other=1,
+    )
+    first_state_slot = tl.maximum((seq_lens - 1) // CACHE_BLOCK_SIZE, 0)
+
+    state_slots = tl.arange(0, BLOCK_STATE_SLOTS)
+    valid_state_slot = state_slots < NUM_STATE_SLOTS
+    state_indices = tl.load(
+        block_table_ptr
+        + rows[:, None] * block_table_stride_0
+        + (first_state_slot[:, None] + state_slots[None, :]) * block_table_stride_1,
+        mask=real_request[:, None] & valid_state_slot[None, :],
+        other=NULL_STATE_ID,
+    )
+    tl.store(
+        staged_state_indices_ptr
+        + rows[:, None] * staged_state_indices_stride_0
+        + state_slots[None, :] * staged_state_indices_stride_1,
+        state_indices,
+        mask=(rows < batch_size)[:, None] & valid_state_slot[None, :],
+    )
+
+
+def stage_reused_spec_state_indices(
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    staged_state_indices: torch.Tensor,
+    *,
+    num_spec_decodes: int,
+    cache_block_size: int,
+    aligned: bool,
+) -> None:
+    """Update only the group-local state indices for metadata reuse."""
+    assert block_table.is_cuda and seq_lens.is_cuda
+    assert staged_state_indices.is_cuda
+    if not aligned:
+        # Unaligned cache modes keep the raw block table, so the state columns
+        # are a contiguous prefix. A slice copy beats a Triton launch here: the
+        # kernel is tiny and its dispatch, not its work, dominates.
+        batch_size, num_state_slots = staged_state_indices.shape
+        staged_state_indices[:num_spec_decodes].copy_(
+            block_table[:num_spec_decodes, :num_state_slots]
+        )
+        if num_spec_decodes < batch_size:
+            staged_state_indices[num_spec_decodes:].fill_(NULL_BLOCK_ID)
+        return
+    batch_size, num_state_slots = staged_state_indices.shape
+    block_rows = 32
+    _stage_reused_spec_state_indices_kernel[(triton.cdiv(batch_size, block_rows),)](
+        block_table,
+        seq_lens,
+        staged_state_indices,
+        block_table.stride(0),
+        block_table.stride(1),
+        seq_lens.stride(0),
+        staged_state_indices.stride(0),
+        staged_state_indices.stride(1),
+        num_spec_decodes,
+        batch_size,
+        CACHE_BLOCK_SIZE=cache_block_size,
+        NUM_STATE_SLOTS=num_state_slots,
+        BLOCK_STATE_SLOTS=triton.next_power_of_2(num_state_slots),
+        NULL_STATE_ID=NULL_BLOCK_ID,
+        BLOCK_ROWS=block_rows,
+        num_warps=1,
+        launch_pdl=_metadata_launch_pdl(),
+    )
+
+
 @dataclass
 class KDARecoverSSMAlignMetadata:
     block_table: torch.Tensor
@@ -263,6 +364,11 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
     )
+
+    # The aligned state-table column is common across cache groups. Retaining
+    # the graph-stable sequence-length view lets another group update only its
+    # own state-index buffer without rebuilding common speculative metadata.
+    state_seq_lens: torch.Tensor | None = None
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -296,6 +402,10 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
 
 
 class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    # Narrower than supports_update_block_table: can_reuse_metadata() rejects
+    # mixed and prefill batches, which fall back to a normal build.
+    supports_metadata_reuse = True
+
     def __init__(
         self,
         kv_cache_spec: MambaSpec,
@@ -339,6 +449,95 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         self.recoverssm_context = context
         return context
+
+    def get_metadata_reuse_key(self) -> tuple[object, ...]:
+        return (
+            self.num_spec,
+            self.decode_cudagraph_max_bs,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )
+
+    reusable_metadata_buffers: ClassVar[tuple[str, ...]] = (
+        "spec_query_start_loc",
+        "num_accepted_tokens",
+    )
+
+    def share_reusable_metadata_buffers(
+        self, source: "KimiK3KDAMetadataBuilder"
+    ) -> None:
+        """Share only common, read-only-at-execution graph inputs.
+
+        State indices remain local because each KDA cache group owns a
+        different block table. Query offsets and accepted counts describe the
+        request batch and are identical for every compatible group.
+        """
+        if not (self.use_full_cuda_graph and self.use_spec_decode):
+            return
+        # recoverssm keeps both groups on the normal build, where each one
+        # stages into its own buffer; sharing would make them collide.
+        if self.use_recoverssm:
+            return
+        super().share_reusable_metadata_buffers(source)
+
+    def can_reuse_metadata(self, metadata: KimiK3KDAMetadata) -> bool:
+        """Limit the fast path to uniform speculative FULL-graph decode."""
+        return (
+            self.use_full_cuda_graph
+            # recoverssm collapses spec_state_slots to 1 and owns its own
+            # commit path; leave that regime on the normal build.
+            and not self.use_recoverssm
+            and metadata.num_spec_decodes > 0
+            and metadata.num_prefills == 0
+            and metadata.num_decodes == 0
+            and metadata.state_seq_lens is not None
+            and metadata.spec_state_indices_tensor is not None
+            and metadata.spec_query_start_loc is not None
+            and metadata.num_accepted_tokens is not None
+            # build() only stages into the persistent graph buffers when the
+            # batch fits them. If it bailed out, these views point at the
+            # request tensors instead and must not be reused.
+            and metadata.spec_query_start_loc.data_ptr()
+            == self.spec_query_start_loc.data_ptr()
+        )
+
+    def update_block_table(
+        self,
+        metadata: KimiK3KDAMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> KimiK3KDAMetadata:
+        """Reuse batch-common decode metadata for another KDA cache group."""
+        assert self.can_reuse_metadata(metadata)
+        assert metadata.state_seq_lens is not None
+        assert metadata.spec_state_indices_tensor is not None
+        batch_size = metadata.spec_state_indices_tensor.shape[0]
+        state_indices = self.spec_state_indices_tensor[:batch_size]
+        stage_reused_spec_state_indices(
+            blk_table,
+            metadata.state_seq_lens,
+            state_indices,
+            num_spec_decodes=metadata.num_spec_decodes,
+            cache_block_size=self.kv_cache_spec.block_size,
+            aligned=self.vllm_config.cache_config.mamba_cache_mode
+            not in ("all", "none"),
+        )
+        # copy.copy rather than dataclasses.replace: replace() re-runs __init__
+        # over every field, and this is a per-group hot path.
+        updated = copy.copy(metadata)
+        updated.spec_state_indices_tensor = state_indices
+        updated.spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
+        updated.num_accepted_tokens = self.num_accepted_tokens[:batch_size]
+        return updated
+
+    def _build_chunk_metadata(
+        self,
+        prefill_query_start_loc: torch.Tensor,
+        prefill_query_start_loc_cpu: torch.Tensor,
+        device: torch.device,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        # NVIDIA KDA builds this metadata inside its prefill kernel. ROCm
+        # overrides this hook to build it on device for the chunk KDA kernel.
+        return None, None
 
     def build(  # type: ignore[override]
         self,
@@ -543,16 +742,48 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         # Unlike the shared GDN layer, Kimi-K3's prefill KDA wrapper prepares
         # its own chunk indices. Only causal-convolution metadata is needed here.
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+        chunk_indices, chunk_offsets = None, None
+        prefill_query_start_loc = None
+        prefill_state_indices = None
+        prefill_has_initial_state = None
         if num_prefills > 0:
+            assert non_spec_query_start_loc is not None
+            assert non_spec_query_start_loc_cpu is not None
+            assert non_spec_state_indices_tensor is not None
+
+            # A mixed non-spec batch needs prefill-only views of the query
+            # offsets; the chunk KDA path consumes them.
+            if num_spec_decodes == 0 and num_decodes > 0:
+                prefill_query_start_loc = (
+                    non_spec_query_start_loc[num_decodes:] - num_decode_tokens
+                )
+                prefill_query_start_loc_cpu = (
+                    non_spec_query_start_loc_cpu[num_decodes:] - num_decode_tokens
+                )
+                prefill_state_indices = non_spec_state_indices_tensor[num_decodes:]
+            else:
+                prefill_query_start_loc = non_spec_query_start_loc
+                prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
+                prefill_state_indices = non_spec_state_indices_tensor
+
             has_initial_state = m.compute_num_computed_tokens() > 0
             if num_spec_decodes > 0:
                 has_initial_state = has_initial_state[active_non_spec_mask_cpu]
-                assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
                     non_spec_query_start_loc_cpu,
                     device=query_start_loc.device,
                 )
+            )
+            chunk_indices, chunk_offsets = self._build_chunk_metadata(
+                prefill_query_start_loc,
+                prefill_query_start_loc_cpu,
+                query_start_loc.device,
+            )
+            prefill_has_initial_state = (
+                has_initial_state[num_decodes:]
+                if num_spec_decodes == 0 and num_decodes > 0
+                else has_initial_state
             )
         else:
             has_initial_state = None
@@ -647,6 +878,12 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            prefill_query_start_loc=prefill_query_start_loc,
+            prefill_state_indices=prefill_state_indices,
+            prefill_has_initial_state=prefill_has_initial_state,
+            state_seq_lens=m.seq_lens,
         )
 
 

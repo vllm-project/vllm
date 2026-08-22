@@ -2,20 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm Kimi-K3 specialization of GDN attention metadata.
 
-The request classification and cudagraph staging intentionally mirror
-``GDNAttentionMetadataBuilder``. Only the FLA chunk metadata is built
-differently on device rather than on the host.
+The shared Kimi-K3 builder provides the low-overhead decode metadata path.
+ROCm overrides only the FLA chunk metadata hook so prefill metadata also stays
+on device.
 """
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
-    GDNAttentionMetadataBuilder,
 )
 
 logger = init_logger(__name__)
@@ -85,7 +85,7 @@ def prepare_chunk_metadata_device(
     return chunk_indices, chunk_offsets
 
 
-class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
+class KimiK3ROCmKDAMetadataBuilder(KimiK3KDAMetadataBuilder):
     def _build_chunk_metadata(
         self,
         prefill_query_start_loc: torch.Tensor,

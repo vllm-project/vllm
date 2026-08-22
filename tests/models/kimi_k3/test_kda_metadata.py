@@ -14,11 +14,13 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDAMetadataBuilder
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
     KimiK3KDAMetadataBuilder,
     _mamba_get_block_table_tensor,
+    stage_reused_spec_state_indices,
     stage_spec_decode_metadata,
 )
 from vllm.v1.attention.backend import AttentionMetadataBuilder
@@ -41,9 +43,6 @@ DEVICE = torch.device("cpu")
 PRUNED_METADATA_FIELDS = {
     "chunk_indices",
     "chunk_offsets",
-    "prefill_query_start_loc",
-    "prefill_state_indices",
-    "prefill_has_initial_state",
     "spec_sequence_masks",
 }
 
@@ -55,6 +54,9 @@ def _assert_matches_shared_gdn(
     assert actual.recoverssm_context is None
     for field in fields(GDNAttentionMetadata):
         actual_value = getattr(actual, field.name)
+        if field.name == "state_seq_lens":
+            assert actual_value is not None
+            continue
         expected_value = getattr(reference, field.name)
         if field.name in PRUNED_METADATA_FIELDS:
             assert actual_value is None
@@ -454,6 +456,8 @@ def test_kimi_k3_kda_backend_uses_private_metadata_builder():
     assert issubclass(KimiK3KDAAttentionBackend, GDNAttentionBackend)
     assert issubclass(KimiK3KDAMetadata, GDNAttentionMetadata)
     assert issubclass(KimiK3KDAMetadataBuilder, GDNAttentionMetadataBuilder)
+    assert not KimiK3KDAMetadataBuilder.supports_update_block_table
+    assert KimiK3KDAMetadataBuilder.supports_metadata_reuse
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -516,6 +520,168 @@ def test_stage_spec_decode_metadata_matches_pytorch():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+def test_reused_kda_metadata_uses_shared_common_and_group_local_graph_buffers(
+    mamba_cache_mode: str,
+):
+    # "none" is the default. Only the aligned modes offset the state column by
+    # sequence position, so a reuse path that always applies the offset reads
+    # the wrong block-table column here (seq_lens 50/30 over BLOCK_SIZE 16 give
+    # offsets 3 and 1).
+    device = torch.device("cuda")
+    batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 3])
+    first_common = create_common_attn_metadata(batch, BLOCK_SIZE, device).replace(
+        is_prefilling=torch.tensor([False, False])
+    )
+    second_common = first_common.replace(
+        block_table_tensor=first_common.block_table_tensor.clone().add_(1000)
+    )
+    builders = [
+        _make_builder(
+            KimiK3KDAMetadataBuilder,
+            num_speculative_tokens=2,
+            full_cuda_graph=True,
+            device=device,
+            mamba_cache_mode=mamba_cache_mode,
+        )
+        for _ in range(3)
+    ]
+    source, reused, reference = builders
+    reused.share_reusable_metadata_buffers(source)
+    assert (
+        reused.spec_query_start_loc.data_ptr() == source.spec_query_start_loc.data_ptr()
+    )
+    assert (
+        reused.num_accepted_tokens.data_ptr() == source.num_accepted_tokens.data_ptr()
+    )
+    assert (
+        reused.spec_state_indices_tensor.data_ptr()
+        != source.spec_state_indices_tensor.data_ptr()
+    )
+
+    accepted = torch.tensor([3, 2], dtype=torch.int32, device=device)
+    drafts = torch.tensor([2, 2], dtype=torch.int32)
+    source_metadata = source.build(
+        0,
+        first_common,
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=drafts,
+    )
+    reused_metadata = reused.update_block_table(
+        source_metadata,
+        second_common.block_table_tensor,
+        second_common.slot_mapping,
+    )
+    reference_metadata = reference.build(
+        0,
+        second_common,
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=drafts,
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(
+        reused_metadata.spec_state_indices_tensor,
+        reference_metadata.spec_state_indices_tensor,
+        rtol=0,
+        atol=0,
+    )
+
+    source_state = torch.empty_like(source_metadata.spec_state_indices_tensor)
+    reused_state = torch.empty_like(reused_metadata.spec_state_indices_tensor)
+    source_query = torch.empty_like(source_metadata.spec_query_start_loc)
+    reused_query = torch.empty_like(reused_metadata.spec_query_start_loc)
+    source_accepted = torch.empty_like(source_metadata.num_accepted_tokens)
+    reused_accepted = torch.empty_like(reused_metadata.num_accepted_tokens)
+    source_graph = torch.cuda.CUDAGraph()
+    reused_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(source_graph):
+        source_state.copy_(source_metadata.spec_state_indices_tensor)
+        source_query.copy_(source_metadata.spec_query_start_loc)
+        source_accepted.copy_(source_metadata.num_accepted_tokens)
+    with torch.cuda.graph(reused_graph):
+        reused_state.copy_(reused_metadata.spec_state_indices_tensor)
+        reused_query.copy_(reused_metadata.spec_query_start_loc)
+        reused_accepted.copy_(reused_metadata.num_accepted_tokens)
+
+    first_common.block_table_tensor.add_(7)
+    second_common.block_table_tensor.add_(11)
+    first_common.seq_lens.add_(16)
+    accepted.copy_(torch.tensor([1, 3], dtype=torch.int32, device=device))
+    source_metadata = source.build(
+        0,
+        first_common,
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=drafts,
+    )
+    reused_metadata = reused.update_block_table(
+        source_metadata,
+        second_common.block_table_tensor,
+        second_common.slot_mapping,
+    )
+    reference_metadata = reference.build(
+        0,
+        second_common,
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=drafts,
+    )
+    source_graph.replay()
+    reused_graph.replay()
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(
+        source_state, source_metadata.spec_state_indices_tensor, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        reused_state, reference_metadata.spec_state_indices_tensor, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        source_query, source_metadata.spec_query_start_loc, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        reused_query, reference_metadata.spec_query_start_loc, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        source_accepted, source_metadata.num_accepted_tokens, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        reused_accepted, reference_metadata.num_accepted_tokens, rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_stage_reused_spec_state_indices_matches_aligned_reference():
+    device = torch.device("cuda")
+    num_spec_decodes = 33
+    batch_size = 65
+    block_table = torch.arange(
+        batch_size * 128, dtype=torch.int32, device=device
+    ).reshape(batch_size, 128)[:, ::2]
+    seq_lens = torch.arange(batch_size, dtype=torch.int32, device=device) * 17
+    staged = torch.empty((batch_size, 3), dtype=torch.int32, device=device)
+    stage_reused_spec_state_indices(
+        block_table,
+        seq_lens,
+        staged,
+        num_spec_decodes=num_spec_decodes,
+        cache_block_size=BLOCK_SIZE,
+        aligned=True,
+    )
+    expected = torch.full_like(staged, NULL_BLOCK_ID)
+    expected[:num_spec_decodes] = _mamba_get_block_table_tensor(
+        block_table[:num_spec_decodes],
+        seq_lens[:num_spec_decodes],
+        MambaSpec(
+            block_size=BLOCK_SIZE,
+            shapes=((16, 64),),
+            dtypes=(torch.float16,),
+            num_speculative_blocks=2,
+        ),
+        "align",
+    )
+    torch.testing.assert_close(staged, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_aligned_block_table_matches_shared_gdn():
     device = torch.device("cuda")
     seq_lens = torch.tensor(
@@ -550,3 +716,59 @@ def test_aligned_block_table_matches_shared_gdn():
     )
 
     torch.testing.assert_close(actual, expected)
+
+
+def test_mixed_regular_decode_and_prefill_preserves_prefill_views():
+    batch = BatchSpec(seq_lens=[65, 100], query_lens=[1, 50])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor([False, True]))
+    actual = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+    ).build(0, common_attn_metadata)
+
+    assert actual.num_decodes == 1
+    assert actual.num_prefills == 1
+    assert actual.prefill_query_start_loc is not None
+    assert actual.prefill_state_indices is not None
+    assert actual.prefill_has_initial_state is not None
+    torch.testing.assert_close(
+        actual.prefill_query_start_loc,
+        torch.tensor([0, 50], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        actual.prefill_state_indices,
+        actual.non_spec_state_indices_tensor[1:],
+    )
+    torch.testing.assert_close(
+        actual.prefill_has_initial_state,
+        torch.tensor([True]),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_rocm_kimi_k3_prefill_builds_chunk_metadata_on_device():
+    device = torch.device("cuda")
+    batch = BatchSpec(seq_lens=[1024, 513], query_lens=[1024, 513])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device
+    ).replace(is_prefilling=torch.tensor([True, True]))
+    reference = _make_builder(
+        GDNAttentionMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+        device=device,
+    ).build(0, common_attn_metadata)
+    actual = _make_builder(
+        KimiK3ROCmKDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+        device=device,
+    ).build(0, common_attn_metadata)
+
+    assert actual.chunk_indices is not None
+    assert actual.chunk_offsets is not None
+    torch.testing.assert_close(actual.chunk_indices, reference.chunk_indices)
+    torch.testing.assert_close(actual.chunk_offsets, reference.chunk_offsets)

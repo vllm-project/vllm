@@ -12,6 +12,8 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
+    AttentionMetadata,
+    AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import (
@@ -249,6 +251,21 @@ def build_attn_metadata(
         seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
+    # cache key -> (builder that produced the metadata, the metadata)
+    reuse_cache: dict[
+        tuple[object, ...], tuple[AttentionMetadataBuilder, AttentionMetadata]
+    ] = {}
+
+    def value_identity(value: object) -> object:
+        if isinstance(value, torch.Tensor):
+            return (
+                value.data_ptr(),
+                tuple(value.shape),
+                value.dtype,
+                value.device,
+            )
+        return value
+
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
         block_table = block_tables[i]
@@ -290,7 +307,32 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            if for_cudagraph_capture:
+            kv_cache_spec = kv_cache_config.kv_cache_groups[i].kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
+            cache_key = (
+                kv_cache_spec,
+                type(attn_metadata_builder),
+                attn_metadata_builder.get_metadata_reuse_key(),
+                value_identity(group_causal),
+                value_identity(group_is_prefilling),
+            )
+            cached_builder, cached_metadata = reuse_cache.get(cache_key, (None, None))
+            if cached_builder is not None:
+                attn_metadata_builder.share_reusable_metadata_buffers(cached_builder)
+            can_reuse = (
+                not for_cudagraph_capture
+                and cached_metadata is not None
+                and attn_metadata_builder.can_reuse_metadata(cached_metadata)
+            )
+            if can_reuse:
+                assert cached_metadata is not None
+                metadata = attn_metadata_builder.update_block_table(
+                    cached_metadata,
+                    common_attn_metadata.block_table_tensor,
+                    common_attn_metadata.slot_mapping,
+                )
+            elif for_cudagraph_capture:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
                     common_attn_metadata
                 )
@@ -308,6 +350,10 @@ def build_attn_metadata(
                     common_attn_metadata=common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
+            reuse_cache[cache_key] = (
+                attn_metadata_builder,
+                cached_metadata if can_reuse else metadata,
+            )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
