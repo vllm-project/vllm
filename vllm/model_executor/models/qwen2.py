@@ -36,6 +36,7 @@ from transformers import Qwen2Config
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed.pp_payload import add_pp_aux_hidden_states
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -412,18 +413,35 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        aux_hidden_states: list[torch.Tensor] = []
+        aux_hidden_state_layer_ids: list[int] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states,
+                0,
+                hidden_states,
+                residual,
+                aux_hidden_state_layer_ids,
+            )
         for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
-                aux_hidden_states, idx + 1, hidden_states, residual
+                aux_hidden_states,
+                idx + 1,
+                hidden_states,
+                residual,
+                aux_hidden_state_layer_ids,
             )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
+            output = IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
+            )
+            return add_pp_aux_hidden_states(
+                output, aux_hidden_state_layer_ids, aux_hidden_states
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)

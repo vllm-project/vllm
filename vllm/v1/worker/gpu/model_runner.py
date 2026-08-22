@@ -35,6 +35,10 @@ from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
 )
+from vllm.distributed.pp_payload import (
+    PPForwardPayload,
+    merge_pp_aux_hidden_states,
+)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -136,6 +140,9 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
+)
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
+    get_target_topk_indices_buffer,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
@@ -242,6 +249,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Speculative decoding.
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
+        self.pp_topk_indices_buffer: torch.Tensor | None = None
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
@@ -255,11 +264,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
-                if self.use_pp:
-                    raise ValueError(
-                        f"{self.speculative_config.method} with pipeline parallel "
-                        "is not supported."
-                    )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -377,7 +381,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
-                set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
+                self.aux_hidden_state_layers = set_eagle3_aux_hidden_state_layers(
+                    self.model, self.speculative_config
+                )
+            if self.use_pp and self.speculative_config is not None:
+                self.pp_topk_indices_buffer = get_target_topk_indices_buffer(self.model)
             if isinstance(self.speculator, DraftModelSpeculator):
                 with use_workspace_lane(self._draft_workspace_lane):
                     self.speculator.load_model(self.model)
@@ -1595,6 +1603,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ec_connector_output,
             )
 
+        incoming_pp_payload: PPForwardPayload | None = None
         model_inputs = {
             "input_ids": input_ids,
             "positions": input_batch.positions,
@@ -1612,13 +1621,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare the intermediate tensors.
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
+            incoming_pp_payload = PPForwardPayload.from_intermediate_tensors(
+                intermediate_tensors
+            )
             n = input_batch.num_tokens_after_padding
             new_tensors = {
                 k: v[:n]
                 if dummy_run
-                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                else v[:n].copy_(
+                    incoming_pp_payload.intermediate_tensors.tensors[k][:n]
+                )
                 for k, v in self.intermediate_tensors.tensors.items()
             }
+            if self.pp_topk_indices_buffer is not None:
+                incoming_pp_payload.copy_topk_indices_to(self.pp_topk_indices_buffer, n)
+            incoming_pp_payload.discard_intermediate_tensors()
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             del intermediate_tensors
 
@@ -1672,8 +1689,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
-                assert isinstance(model_output, tuple)
-                hidden_states, aux_hidden_states = model_output
+                if isinstance(model_output, tuple):
+                    hidden_states, aux_hidden_states = model_output
+                else:
+                    assert isinstance(model_output, torch.Tensor)
+                    hidden_states = model_output
+                    aux_hidden_states = []
+                if self.use_pp:
+                    aux_hidden_states = merge_pp_aux_hidden_states(
+                        incoming_pp_payload,
+                        self.aux_hidden_state_layers,
+                        aux_hidden_states,
+                    )
             else:
                 assert isinstance(model_output, torch.Tensor)
                 hidden_states = model_output
@@ -1683,7 +1710,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert isinstance(model_output, IntermediateTensors)
             hidden_states = None
             aux_hidden_states = None
-            output_intermediate_tensors = model_output
+            output_payload = PPForwardPayload.from_intermediate_tensors(model_output)
+            if incoming_pp_payload is not None:
+                output_payload = incoming_pp_payload.carry(
+                    output_payload.to_intermediate_tensors()
+                )
+            if self.pp_topk_indices_buffer is not None:
+                output_payload.set_topk_indices(
+                    self.pp_topk_indices_buffer[: input_batch.num_tokens_after_padding]
+                )
+            output_intermediate_tensors = output_payload.to_intermediate_tensors()
 
         routed_experts = None
         if not dummy_run and (capturer := self.routed_experts_capturer) is not None:

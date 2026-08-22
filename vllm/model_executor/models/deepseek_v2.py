@@ -45,6 +45,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.distributed.pp_payload import add_pp_aux_hidden_states
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
@@ -1508,6 +1509,7 @@ class DeepseekV2Model(nn.Module):
             llama_4_scaling = None
 
         aux_hidden_states = []
+        aux_hidden_state_layer_ids: list[int] = []
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -1531,13 +1533,17 @@ class DeepseekV2Model(nn.Module):
                     )
                     aux_hidden_state = aux_hidden_state[: positions.shape[0]]
                 aux_hidden_states.append(aux_hidden_state)
+                aux_hidden_state_layer_ids.append(idx)
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
+            output = IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
+            )
+            return add_pp_aux_hidden_states(
+                output, aux_hidden_state_layer_ids, aux_hidden_states
             )
 
         if hidden_states.shape[0] != positions.shape[0]:
@@ -1550,6 +1556,7 @@ class DeepseekV2Model(nn.Module):
 
         if self.end_layer in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states + residual)
+            aux_hidden_state_layer_ids.append(self.end_layer)
 
         hidden_states, _ = self.norm(hidden_states, residual)
         if len(aux_hidden_states) > 0:

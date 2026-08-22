@@ -558,9 +558,12 @@ class ModelCudaGraphManager(CudaGraphManager):
 
                 if self.is_last_pp_rank:
                     # Last PP rank (common case).
-                    if self.use_aux_hidden_state_outputs:
+                    if self.use_aux_hidden_state_outputs and isinstance(
+                        model_output, tuple
+                    ):
                         hidden_states, aux_hidden_states = model_output
                     else:
+                        assert isinstance(model_output, torch.Tensor)
                         hidden_states = model_output
                         aux_hidden_states = []
                     if self.hidden_states is None:
