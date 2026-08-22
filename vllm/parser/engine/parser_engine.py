@@ -83,6 +83,9 @@ class ParserEngine(Parser):
     complete output format for a model (reasoning + tool calls).
     """
 
+    structural_tag_model: str | None = None
+    supports_required_and_named: bool = True
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
@@ -204,7 +207,44 @@ class ParserEngine(Parser):
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        request.skip_special_tokens = False
+        return self._apply_structural_tag(request)
+
+    def _apply_structural_tag(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        if (
+            self.structural_tag_model is None
+            or not request.tools
+            or (structured_outputs := getattr(request, "structured_outputs", None))
+            is not None
+            and structured_outputs.structural_tag is not None
+        ):
+            return request
+
+        from vllm import envs
+        from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+        from vllm.sampling_params import StructuredOutputsParams
+        from vllm.tool_parsers.structural_tag_registry import (
+            get_model_structural_tag,
+        )
+
+        if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
+            return request
+        structural_tag = get_model_structural_tag(
+            model=self.structural_tag_model,
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            reasoning=False,
+        )
+        if structural_tag is None:
+            return request
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag=json.dumps(structural_tag.model_dump())
+        )
+        if isinstance(request, ResponsesRequest):
+            request.text = None
+        else:
+            request.response_format = None
         return request
 
     def _preprocess_feed(

@@ -46,6 +46,9 @@ class NemotronV3Parser(Qwen3Parser):
     reasoning and content.
     """
 
+    structural_tag_model = None
+    supports_required_and_named = True
+
     def __init__(
         self,
         tokenizer: TokenizerLike,

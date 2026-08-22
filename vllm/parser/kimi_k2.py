@@ -150,6 +150,15 @@ def kimi_k2_config(thinking: bool = True) -> ParserEngineConfig:
 class KimiK2Parser(ParserEngine):
     """Kimi K2 parser backed by the declarative parser engine."""
 
+    structural_tag_model = "kimi"
+    supports_required_and_named = False
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request.skip_special_tokens = False
+        return super().adjust_request(request)
+
     def __init__(
         self,
         tokenizer: TokenizerLike,

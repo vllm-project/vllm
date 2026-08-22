@@ -5,4 +5,4 @@ from vllm.parser.engine.registered_adapters import DeepSeekV4ParserToolAdapter
 
 
 class DeepSeekV4EngineToolParser(DeepSeekV4ParserToolAdapter):  # type: ignore[valid-type, misc]
-    structural_tag_model = "deepseek_v4"
+    """Legacy tool-parser name backed by the DeepSeek V4 parser engine."""
