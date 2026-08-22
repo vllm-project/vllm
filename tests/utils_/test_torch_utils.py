@@ -72,6 +72,9 @@ def test_is_lossless_cast(src_dtype, tgt_dtype, expected_result):
         ([torch.bool, torch.int8], torch.int8),
         ([torch.bool, torch.int8, torch.float16], torch.float16),
         ([torch.bool, torch.int8, torch.float16, torch.complex32], torch.complex32),  # noqa: E501
+        # Neither input is a lossless cast target for the other
+        ([torch.float16, torch.bfloat16], torch.float32),
+        ([torch.bfloat16, torch.float16], torch.float32),
     ],
 )
 def test_common_broadcastable_dtype(dtypes, expected_result):
