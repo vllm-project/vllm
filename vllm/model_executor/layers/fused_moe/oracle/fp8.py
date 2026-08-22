@@ -375,7 +375,7 @@ def select_fp8_moe_backend(
         skip_aiter_moe = (
             not envs.VLLM_ROCM_USE_AITER
             or not envs.VLLM_ROCM_USE_AITER_MOE
-            or rocm_aiter_ops.is_rdna_aiter_enabled()
+            or not rocm_aiter_ops.is_fused_moe_enabled()
         )
         if skip_aiter_moe:
             if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:

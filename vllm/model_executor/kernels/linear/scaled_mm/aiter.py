@@ -48,7 +48,10 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         except Exception:
             return False, "requires `aiter` to be installed."
 
-        if not rocm_aiter_ops.is_linear_enabled():
+        if not (
+            rocm_aiter_ops.is_linear_enabled()
+            or rocm_aiter_ops.is_gfx1100_linear_enabled()
+        ):
             return (
                 False,
                 "requires setting `VLLM_ROCM_USE_AITER=1` "
@@ -61,6 +64,15 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
             return False, "supports symmetric quantization only."
+        # The gfx1100 Triton W8A8 kernel requires one activation scale per
+        # token and one weight scale per output channel.
+        if rocm_aiter_ops.is_gfx1100() and (
+            c.is_static_input_scheme or not c.is_channelwise
+        ):
+            return (
+                False,
+                "requires dynamic input and channelwise weight scales on gfx1100.",
+            )
         return True, None
 
     def apply_weights(

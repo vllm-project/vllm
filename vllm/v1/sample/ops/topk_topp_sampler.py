@@ -116,7 +116,10 @@ class TopKTopPSampler(nn.Module):
                 self.forward = self.forward_native
         elif (
             logprobs_mode not in PROCESSED_LOGPROBS_MODES
-            and rocm_aiter_ops.is_enabled()
+            and (
+                rocm_aiter_ops.is_enabled()
+                or rocm_aiter_ops.is_gfx1100_aiter_base_enabled()
+            )
             and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable
         ):
             self.aiter_ops = None
