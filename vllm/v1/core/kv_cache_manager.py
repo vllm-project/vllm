@@ -14,7 +14,11 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    KVCacheBlockCopy,
+    truncate_downward_closed_groups,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -329,19 +333,34 @@ class KVCacheManager:
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0, False
 
-        fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, request.num_tokens - 1
         )
-        if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
-            # A lagging group hit deeper than full attention means its
-            # full-attention blocks were evicted; use the reconciled boundary
-            # that every group agrees on.
+        # Report the shortest dense hit, then reconcile deeper sparse hits.
+        dense_hits = [
+            per_group_hits[group_id]
+            for group_id in coordinator.full_attention_group_ids
+        ]
+        num_local = min(dense_hits)
+        if any(
+            hit > num_local
+            and not coordinator.single_type_managers[group_id].is_downward_closed
+            for group_id, hit in enumerate(per_group_hits)
+        ):
             return *self.get_computed_blocks(request), False
 
-        num_local = per_group_hits[fa_group_id]
-        blocks = self.create_kv_cache_blocks(computed)
-        # Per-group lookups do not detect an uncached shared prefix (boundary 0).
+        # Trim deeper downward-closed block lists to the reported length.
+        hit_blocks = [list(blocks) for blocks in computed]
+        truncate_downward_closed_groups(
+            ((g.spec, g.group_ids) for g in coordinator.attention_groups),
+            num_local,
+            hit_blocks,
+            # Keep the divergence flag based on the original hit lengths.
+            list(per_group_hits),
+            lambda gid: coordinator.single_type_managers[gid].block_size,
+        )
+        blocks = self.create_kv_cache_blocks(tuple(hit_blocks))
+        # Per-group lookups do not detect an uncached shared prefix.
         return blocks, num_local, 0, min(per_group_hits) < num_local
 
     def allocate_slots(
@@ -547,6 +566,7 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
+            num_new_tokens,
         )
 
         # P/D: delay caching blocks if we have to recv from

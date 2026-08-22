@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Sequence
 from typing import ClassVar
 
@@ -40,6 +40,17 @@ class SingleTypeKVCacheManager(ABC):
     """
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+
+    is_downward_closed: ClassVar[bool] = False
+    """Whether a hit at length N implies a hit at every shorter length.
+
+    A downward-closed manager is looked up once against the coordinator's
+    initial candidate length and then skipped on later fixed-point passes, so
+    whatever reduced the reconciled length afterwards leaves its block list too
+    long. Callers that reconcile across groups must trim every such group at
+    the end. Declared here rather than tested with ``isinstance`` at each site,
+    because the same omission has been fixed three times in different files.
+    """
 
     def __init__(
         self,
@@ -325,7 +336,11 @@ class SingleTypeKVCacheManager(ABC):
             self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_new_tokens: int | None = None,
     ) -> list[KVCacheBlock]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -338,6 +353,7 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens_main_model: The number of tokens for the main model (aka target
                 model in spec decode). w/o spec decode, it is num_tokens;
                 with spec decode, it is num_tokens - num_lookahead_tokens.
+            num_new_tokens: The number of tokens newly scheduled in this step.
         Returns:
             The new allocated blocks.
         """
@@ -426,6 +442,7 @@ class SingleTypeKVCacheManager(ABC):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        extra_block_mask: list[bool] | None = None,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -438,6 +455,12 @@ class SingleTypeKVCacheManager(ABC):
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
+            extra_block_mask: Optional mask aligned with
+                ``blocks[num_cached_blocks:num_full_blocks]``, intersected with this
+                manager's own ``reachable_block_mask``. A manager whose blocks
+                only sometimes hold the content the hash they would be keyed
+                under describes uses this to withhold the ones that do not. It
+                can only remove admissions, never add them.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -461,6 +484,16 @@ class SingleTypeKVCacheManager(ABC):
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
         )
+        if extra_block_mask is not None:
+            assert len(extra_block_mask) == num_full_blocks - num_cached_blocks
+            block_mask = (
+                extra_block_mask
+                if block_mask is None
+                else [
+                    reachable and admitted
+                    for reachable, admitted in zip(block_mask, extra_block_mask)
+                ]
+            )
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
@@ -679,6 +712,7 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+    is_downward_closed: ClassVar[bool] = True
 
     @classmethod
     def find_longest_cache_hit(
@@ -783,8 +817,14 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        extra_block_mask: list[bool] | None = None,
     ) -> None:
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            extra_block_mask=extra_block_mask,
+        )
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
             return
@@ -917,7 +957,15 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
-        # Fine-grained partial hits are not supported for sliding window now
+        # The scan below indexes `block_hashes` in whole blocks, so a finer
+        # alignment would read the wrong entries. The coordinator keeps this
+        # unreachable by disabling partial hash hits for models containing a
+        # group that only supports block-aligned lookup.
+        # TODO: supporting them here would let a mamba-"align" + sliding-window
+        # model keep its partial hits instead of falling back. It needs a
+        # block-size view for the scan, a partial-tail cache entry, a
+        # sub-block-aligned `reachable_block_mask`, and a contiguous-block
+        # requirement derived from the tail length rather than the window.
         assert alignment_tokens % kv_cache_spec.block_size == 0, (
             "SlidingWindowManager does not support fine-grained (partial) cache hits"
         )
@@ -1290,6 +1338,8 @@ class MambaManager(SingleTypeKVCacheManager):
             # into a private cow_block; we record that block for connector
             # offload (see _pending_partial_tail_offloads).
             self._producer_partial_tail_reqs: dict[str, int] = {}
+            # Pending state-write positions, in scheduling order.
+            self._state_write_tokens: dict[str, deque[int]] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1501,11 +1551,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 apply_admission_cap=apply_admission_cap,
             )
         else:
-            # We don't allocate blocks for lookahead tokens in align mode, because if
-            # x * block_size tokens are scheduled, num_tokens is
-            # x * block_size + num_lookahead_tokens and breaks the alignment.
-            # We can ignore lookahead tokens because current draft models don't have
-            # mamba layers.
+            # Align mode ignores lookahead tokens; draft models have no Mamba layers.
             num_tokens = num_tokens_main_model
 
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
@@ -1545,7 +1591,11 @@ class MambaManager(SingleTypeKVCacheManager):
             return num_new_blocks + num_evictable_computed_blocks
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_new_tokens: int | None = None,
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
@@ -1563,6 +1613,12 @@ class MambaManager(SingleTypeKVCacheManager):
             # We can ignore lookahead tokens because current draft models don't have
             # mamba layers.
             num_tokens = num_tokens_main_model
+            assert num_new_tokens is not None
+            pending_writes = self._state_write_tokens.setdefault(request_id, deque())
+            step_start = num_tokens_main_model - num_new_tokens
+            while pending_writes and pending_writes[-1] > step_start:
+                pending_writes.pop()
+            pending_writes.append(num_tokens_main_model)
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
@@ -1671,6 +1727,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
+            self._state_write_tokens.pop(request_id, None)
             # A hand-off whose request died in this same scheduling pass must
             # not reach the connector: its unpin hook (free) has already run.
             self._pending_partial_tail_offloads = [
@@ -1693,9 +1750,34 @@ class MambaManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        extra_block_mask: list[bool] | None = None,
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        boundary_mask = self._boundary_state_block_mask(
+            request,
+            start_block=num_cached_blocks_before,
+            end_block=num_tokens // self.block_size,
+        )
+        if extra_block_mask is not None:
+            # A `None` boundary mask means non-align mode, where this manager
+            # imposes no per-block constraint, so the caller's mask stands on
+            # its own rather than being intersected with anything.
+            boundary_mask = (
+                extra_block_mask
+                if boundary_mask is None
+                else [
+                    caller and boundary
+                    for caller, boundary in zip(
+                        extra_block_mask, boundary_mask, strict=True
+                    )
+                ]
+            )
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            extra_block_mask=boundary_mask,
+        )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
             partial_hash = self._cache_partial_tail_block(request, num_tokens)
@@ -1712,6 +1794,31 @@ class MambaManager(SingleTypeKVCacheManager):
                 if block.is_null or block.block_hash is None:
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
+
+    def _boundary_state_block_mask(
+        self,
+        request: Request,
+        start_block: int,
+        end_block: int,
+    ) -> list[bool] | None:
+        """Admit committed state writes that land on block boundaries.
+
+        Non-align mode uses dense caching and has no boundary mask.
+        """
+        if self.mamba_cache_mode != "align":
+            return None
+        pending_writes = self._state_write_tokens.get(request.request_id)
+        mask = [False] * max(end_block - start_block, 0)
+        if pending_writes is None:
+            return mask
+        while pending_writes and pending_writes[0] <= request.num_tokens:
+            num_state_tokens = pending_writes.popleft()
+            if num_state_tokens % self.block_size != 0:
+                continue
+            boundary_block = num_state_tokens // self.block_size - 1
+            if start_block <= boundary_block < end_block:
+                mask[boundary_block - start_block] = True
+        return mask
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
@@ -1788,6 +1895,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        extra_block_mask: list[bool] | None = None,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
