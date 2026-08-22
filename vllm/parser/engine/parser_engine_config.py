@@ -40,6 +40,10 @@ class Transition:
     next_state: ParserState
     events: tuple[EventType, ...] = field(default_factory=tuple)
     skip_in_token_id_mode: bool = False
+    # Treat this transition as a provisional tool-call recovery path. The
+    # engine buffers its semantic events, validates the completed tool name
+    # through a parser-supplied callback, and commits only after the call ends.
+    provisional_tool_call: bool = False
 
 
 @dataclass(frozen=True)
