@@ -1037,7 +1037,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
         # Select LinearMethod implementation based on quant_algo (FP8 pattern).
         # NVFP4         -> W4A4: cutlass NVFP4 GEMM with input quantization
-        # W4A16_NVFP4   -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
+        # W4A16_NVFP4   -> W4A16: flashinfer cute-dsl or Marlin with 16-bit inputs
         if quant_method == "NVFP4":
             self.LinearMethodCls = ModelOptNvFp4LinearMethod
         elif quant_method == "W4A16_NVFP4":
