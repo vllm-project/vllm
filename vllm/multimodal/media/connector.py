@@ -31,11 +31,29 @@ from vllm.utils.registry import ExtensionManager
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
 from .base import MediaIO, MediaWithBytes
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
+from .metrics import observe_media_decode, observe_media_download
 from .video import VideoMediaIO
 
 logger = init_logger(__name__)
 
 _M = TypeVar("_M")
+
+
+def _get_media_type_label(media_io: MediaIO[Any]) -> str:
+    """Return a stable, low-cardinality label for a MediaIO instance."""
+    media_io_type = type(media_io).__name__
+    media_type = media_io_type.removesuffix("MediaIO").removesuffix("Embedding")
+    return media_type.lower() or media_io_type.lower()
+
+
+def _load_bytes_with_metrics(data: bytes, media_io: MediaIO[_M]) -> _M:
+    start_time = time.perf_counter()
+    result = media_io.load_bytes(data)
+    observe_media_decode(
+        _get_media_type_label(media_io), time.perf_counter() - start_time
+    )
+    return result
+
 
 global_thread_pool = ThreadPoolExecutor(
     max_workers=envs.VLLM_MEDIA_LOADING_THREAD_COUNT
@@ -314,7 +332,12 @@ class MediaConnector:
             raise NotImplementedError(msg)
 
         media_type = media_type.partition(";")[0]
-        return media_io.load_base64(media_type, data)
+        start_time = time.perf_counter()
+        result = media_io.load_base64(media_type, data)
+        observe_media_decode(
+            _get_media_type_label(media_io), time.perf_counter() - start_time
+        )
+        return result
 
     def _load_file_url(
         self,
@@ -336,7 +359,12 @@ class MediaConnector:
                 f"of `--allowed-local-media-path {allowed_local_media_path}`."
             )
 
-        return media_io.load_file(filepath)
+        start_time = time.perf_counter()
+        result = media_io.load_file(filepath)
+        observe_media_decode(
+            _get_media_type_label(media_io), time.perf_counter() - start_time
+        )
+        return result
 
     def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
         if (
@@ -366,10 +394,11 @@ class MediaConnector:
 
             cached = self._get_cached_bytes(url)
             if cached is not None:
-                return media_io.load_bytes(cached)
+                return _load_bytes_with_metrics(cached, media_io)
 
             connection = self.connection
             try:
+                download_start_time = time.perf_counter()
                 data = connection.get_bytes(
                     url_spec.url,
                     timeout=fetch_timeout,
@@ -381,8 +410,13 @@ class MediaConnector:
                     raise wrapped from e
                 raise
 
+            observe_media_download(
+                _get_media_type_label(media_io),
+                time.perf_counter() - download_start_time,
+                len(data),
+            )
             self._put_cached_bytes(url, data)
-            return media_io.load_bytes(data)
+            return _load_bytes_with_metrics(data, media_io)
 
         if url_spec.scheme == "file":
             return self._load_file_url(url_spec, media_io)
@@ -415,12 +449,13 @@ class MediaConnector:
             )
             if cached is not None:
                 future = loop.run_in_executor(
-                    global_thread_pool, media_io.load_bytes, cached
+                    global_thread_pool, _load_bytes_with_metrics, cached, media_io
                 )
                 return await future
 
             connection = self.connection
             try:
+                download_start_time = time.perf_counter()
                 data = await connection.async_get_bytes(
                     url_spec.url,
                     timeout=fetch_timeout,
@@ -432,10 +467,17 @@ class MediaConnector:
                     raise wrapped from e
                 raise
 
+            observe_media_download(
+                _get_media_type_label(media_io),
+                time.perf_counter() - download_start_time,
+                len(data),
+            )
             await loop.run_in_executor(
                 global_thread_pool, self._put_cached_bytes, url, data
             )
-            future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
+            future = loop.run_in_executor(
+                global_thread_pool, _load_bytes_with_metrics, data, media_io
+            )
             return await future
 
         if url_spec.scheme == "file":
