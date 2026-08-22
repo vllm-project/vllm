@@ -17,7 +17,10 @@ from vllm.model_executor.model_loader.modelexpress_loader import (
 from vllm.model_executor.model_loader.runai_streamer_loader import (
     RunaiModelStreamerLoader,
 )
-from vllm.model_executor.model_loader.sharded_state_loader import ShardedStateLoader
+from vllm.model_executor.model_loader.sharded_state_loader import (
+    FastSafetensorsShardedStateLoader,
+    ShardedStateLoader,
+)
 from vllm.model_executor.model_loader.tensorizer_loader import TensorizerLoader
 from vllm.model_executor.model_loader.utils import (
     get_architecture_class_name,
@@ -34,6 +37,7 @@ LoadFormats = Literal[
     "hf",
     "dummy",
     "fastsafetensors",
+    "fastsafetensors_sharded",
     "instanttensor",
     "mistral",
     "modelexpress",
@@ -50,6 +54,7 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "hf": DefaultModelLoader,
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
+    "fastsafetensors_sharded": FastSafetensorsShardedStateLoader,
     "instanttensor": DefaultModelLoader,
     "mistral": DefaultModelLoader,
     "modelexpress": ModelExpressModelLoader,
@@ -150,6 +155,7 @@ __all__ = [
     "ModelExpressModelLoader",
     "DefaultModelLoader",
     "DummyModelLoader",
+    "FastSafetensorsShardedStateLoader",
     "RunaiModelStreamerLoader",
     "ShardedStateLoader",
     "TensorizerLoader",
