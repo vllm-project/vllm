@@ -688,6 +688,18 @@ class MoRIIOConnectorScheduler:
                 assert request.kv_transfer_params is not None, (
                     "kv_transfer_params should not be None"
                 )
+                extra = self.kv_transfer_config.kv_connector_extra_config
+                if extra.get("remote_hosts") and not request.kv_transfer_params.get(
+                    "remote_hosts"
+                ):
+                    request.kv_transfer_params["remote_hosts"] = extra["remote_hosts"]
+                if extra.get("remote_dp_size_local") not in (
+                    None,
+                    "",
+                ) and not request.kv_transfer_params.get("remote_dp_size_local"):
+                    request.kv_transfer_params["remote_dp_size_local"] = extra[
+                        "remote_dp_size_local"
+                    ]
 
                 remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
 
@@ -726,10 +738,15 @@ class MoRIIOConnectorScheduler:
 
                 # Only the owning rank originates notify (exactly-once).
                 # Priority: is_request_leader > remote_dp_rank_override > _is_kv_master
+                # Honor a router-pinned remote_dp_rank even without override;
+                # child-pod ranks are not _is_kv_master and would otherwise skip notify.
                 _leader_flag = request.kv_transfer_params.get("is_request_leader")
                 if _leader_flag is not None:
                     _should_notify = bool(_leader_flag)
-                elif request.kv_transfer_params.get("remote_dp_rank_override"):
+                elif (
+                    request.kv_transfer_params.get("remote_dp_rank_override")
+                    or "remote_dp_rank" in request.kv_transfer_params
+                ):
                     _should_notify = self._global_dp_rank == remote_dp_rank
                 else:
                     _should_notify = self._is_kv_master
