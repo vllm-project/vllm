@@ -49,3 +49,14 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+def test_non_int_top_k_raises_validation_error_not_comparison_error():
+    """top_k's isinstance check must run before the `< -1` comparison.
+
+    Comparing a non-numeric top_k against -1 first raises a bare TypeError
+    ("'<' not supported between instances of 'str' and 'int'") that is not a
+    VLLMValidationError, so it never reaches the 4xx mapping.
+    """
+    with pytest.raises(VLLMValidationError, match="top_k must be an integer, got str"):
+        SamplingParams(top_k="bad")
