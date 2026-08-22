@@ -115,6 +115,7 @@ def test_no_load_chat_template_literallike():
     [
         "Qwen/Qwen2-VL-2B-Instruct",  # chat_template is of type str
         "NousResearch/Hermes-3-Llama-3.1-8B",  # chat_template is of type dict
+        "Qwen/Qwen3-VL-Reranker-8B",  # chat_templates are in additional_chat_templates
     ],
 )
 @pytest.mark.parametrize("use_tools", [True, False])
