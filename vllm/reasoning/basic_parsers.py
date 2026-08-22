@@ -166,13 +166,20 @@ class BaseThinkingReasoningParser(ReasoningParser):
         # Check if the start token is present in the model output, remove it
         # if it is present.
         model_output_parts = model_output.partition(self.start_token)
+        start_found = bool(model_output_parts[1])
         model_output = (
-            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
+            model_output_parts[2] if start_found else model_output_parts[0]
         )
 
-        # For models that may not generate start token,
-        # assume the reasoning content is always at the start.
         if self.end_token not in model_output:
+            if not start_found:
+                # No think block was generated at all (e.g. reasoning was
+                # skipped because include_reasoning=False with structured
+                # output causes grammar to prevent <think> generation).
+                # Treat the entire output as content.
+                return None, model_output or None
+            # Start token was found but end token was not: incomplete think
+            # block (e.g. truncated at max_tokens). Treat as reasoning only.
             return model_output, None
         else:
             reasoning, _, content = model_output.partition(self.end_token)

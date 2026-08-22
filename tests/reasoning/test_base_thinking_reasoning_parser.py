@@ -236,25 +236,36 @@ class TestBaseThinkingReasoningParserExtraction:
         assert content == "This is content"
 
     def test_extract_reasoning_no_end_token(self, test_tokenizer):
-        """Test extraction when no end token is present."""
+        """No think block at all: output is content, not reasoning."""
         parser = TestThinkingReasoningParser(test_tokenizer)
         request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "This is just content"
         reasoning, content = parser.extract_reasoning(model_output, request)
 
-        assert reasoning == "This is just content"
+        assert reasoning is None
+        assert content == "This is just content"
+
+    def test_extract_reasoning_start_no_end(self, test_tokenizer):
+        """Start token present but end token absent: incomplete think block."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        request = ChatCompletionRequest(messages=[], model="test-model")
+
+        model_output = "<test:think>Truncated thinking without end"
+        reasoning, content = parser.extract_reasoning(model_output, request)
+
+        assert reasoning == "Truncated thinking without end"
         assert content is None
 
     def test_extract_reasoning_empty_output(self, test_tokenizer):
-        """Test extraction with empty output."""
+        """Empty output with no think block returns (None, None)."""
         parser = TestThinkingReasoningParser(test_tokenizer)
         request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = ""
         reasoning, content = parser.extract_reasoning(model_output, request)
 
-        assert reasoning == ""
+        assert reasoning is None
         assert content is None
 
     def test_extract_reasoning_only_tokens(self, test_tokenizer):
@@ -433,6 +444,22 @@ class TestBaseThinkingReasoningParserEdgeCases:
         model_output = "<test:thinking>Not a real token</test:thinking>Content"
         reasoning, content = run_reasoning_extraction(parser, [model_output])
 
-        # Should treat as regular content since tokens don't match exactly
-        assert reasoning == ("<test:thinking>Not a real token</test:thinking>Content")
-        assert content is None
+        # Neither start nor end token matched: treat entire output as content
+        assert reasoning is None
+        assert content == "<test:thinking>Not a real token</test:thinking>Content"
+
+    def test_no_think_block_json_output(self, test_tokenizer):
+        """Regression: JSON output with no think block must not become null content.
+
+        When include_reasoning=False is combined with a structured output
+        grammar, vllm prevents <think> generation entirely. The parser must
+        treat the raw JSON as content, not as reasoning.
+        """
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        request = ChatCompletionRequest(messages=[], model="test-model")
+
+        model_output = '{"answer": 42}'
+        reasoning, content = parser.extract_reasoning(model_output, request)
+
+        assert reasoning is None
+        assert content == '{"answer": 42}'
