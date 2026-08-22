@@ -58,6 +58,7 @@ impl HfChatBackend {
                 },
                 tokenizer.clone(),
                 options.limit_mm_per_prompt.clone(),
+                options.media_access.clone(),
             )?
         };
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
@@ -235,6 +236,7 @@ mod tests {
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
+                media_access: Default::default(),
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
             },
@@ -334,6 +336,7 @@ mod tests {
                 language_model_only: true,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
+                media_access: Default::default(),
                 default_chat_template_kwargs: HashMap::new(),
                 ..Default::default()
             },
@@ -352,6 +355,7 @@ mod tests {
             LoadModelBackendsOptions {
                 chat_template_content_format: Default::default(),
                 chat_template: None,
+                media_access: Default::default(),
                 default_chat_template_kwargs: HashMap::new(),
                 ..Default::default()
             },
