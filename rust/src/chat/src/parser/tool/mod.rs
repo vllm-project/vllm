@@ -8,9 +8,9 @@ use std::sync::{Arc, LazyLock};
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
-    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
-    MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    Internlm2ToolParser, KimiK2ToolParser, Lfm2ToolParser, Llama3JsonToolParser,
+    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -34,6 +34,7 @@ pub mod names {
     pub const INTERNLM: &str = "internlm";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const KIMI_K3: &str = "kimi_k3";
+    pub const LFM2: &str = "lfm2";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
     pub const MINIMAX_M2: &str = "minimax_m2";
@@ -80,6 +81,7 @@ impl ToolParserFactory {
             .register_parser::<Internlm2ToolParser>(names::INTERNLM)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_unified_dummy(names::KIMI_K3)
+            .register_parser::<Lfm2ToolParser>(names::LFM2)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
@@ -123,6 +125,7 @@ impl ToolParserFactory {
             .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("granite-4", names::GRANITE4)
             .register_pattern("kimi-k2", names::KIMI_K2)
+            .register_pattern("lfm2", names::LFM2)
             .register_pattern("minimax-m3", names::MINIMAX_M3)
             .register_pattern("mm-m3", names::MINIMAX_M3)
             .register_pattern("minimax", names::MINIMAX_M2)
