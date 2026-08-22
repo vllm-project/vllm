@@ -189,6 +189,8 @@ class ApplyRotaryEmb(CustomOp):
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        *,
+        upcast_input: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Size, torch.dtype]:
         origin_shape = x.shape
         if len(origin_shape) == 3:
@@ -197,7 +199,8 @@ class ApplyRotaryEmb(CustomOp):
 
         origin_dtype = x.dtype
         if self.enable_fp32_compute:
-            x = x.float()
+            if upcast_input:
+                x = x.float()
             cos = cos.float()
             sin = sin.float()
 
@@ -234,7 +237,9 @@ class ApplyRotaryEmb(CustomOp):
     ) -> torch.Tensor:
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
-        x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
+        x, cos, sin, origin_shape, origin_dtype = self._pre_process(
+            x, cos, sin, upcast_input=False
+        )
 
         """
         Arguments of apply_rotary_emb() in vllm_flash_attn:
