@@ -71,6 +71,17 @@ class QuantizeMethodBase(ABC):
         """
         return
 
+    def init_kernels_after_ipc_load(self, layer: nn.Module) -> None:
+        """Rebuild non-tensor state for weights mapped from a weight cache daemon.
+
+        The daemon exports tensors that already went through
+        `process_weights_after_loading`, so re-running it on the client would
+        process them twice. Only state that tensor export cannot carry -- the
+        selected kernels and derived Python attributes -- has to be recreated
+        here. Methods that keep no such state need no override.
+        """
+        return
+
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:
     """

@@ -152,16 +152,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # optional w{13,2}_bias references and SwiGLU gate params. Since
             # weight updates mutate those bias tensors in place, the kernel
             # does not need to be re-built.
-            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            assert self.moe_quant_config is not None
-            assert self.experts_cls is not None
-            self.moe_kernel = make_unquantized_moe_kernel(
-                quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                backend=self.unquantized_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-            )
+            self._init_moe_kernel(layer)
 
             if self.unquantized_backend == UnquantizedMoeBackend.CPU:
                 # The CPU experts need the layer itself for the setup that
@@ -169,7 +160,26 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 # it only sees the two weight tensors: padding and prepacking
                 # into the grouped-gemm layout (bias included), and capturing
                 # the router config that monolithic apply() cannot carry.
+                assert self.moe_kernel is not None
                 self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+
+    def _init_moe_kernel(self, layer: "RoutedExperts") -> None:
+        """Build the MoE kernel from the layer's current (shuffled) weights."""
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        self.moe_kernel = make_unquantized_moe_kernel(
+            quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            backend=self.unquantized_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+        )
+
+    def init_kernels_after_ipc_load(self, layer: "RoutedExperts") -> None:
+        # The daemon exported weights already shuffled to runtime format, so
+        # only the kernel itself has to be rebuilt.
+        self._init_moe_kernel(layer)
 
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)

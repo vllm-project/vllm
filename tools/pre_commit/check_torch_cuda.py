@@ -20,6 +20,8 @@ ALLOWED_FILES = {
     "vllm/platforms/",
     "vllm/device_allocator/",
     "vllm/distributed/weight_transfer/ipc_engine.py",
+    "vllm/model_executor/model_loader/weight_cache/",
+    "tests/model_executor/model_loader/test_weight_cache.py",
     "tests/distributed/test_packed_tensor.py",
 }
 
