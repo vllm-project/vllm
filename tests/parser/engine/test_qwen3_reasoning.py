@@ -79,6 +79,17 @@ class TestNonStreaming:
         assert reasoning == "Hello, no reasoning here."
         assert content is None
 
+    def test_grammar_constrained_output_is_content(self, mock_tokenizer):
+        """A grammar that starts at token one suppresses Qwen's think block."""
+        parser = Qwen3Parser(
+            mock_tokenizer,
+            structured_output_in_reasoning=True,
+        )
+        text = '{"reasoning":"</think>","tool":"<tool_call>"}'
+        reasoning, content = parser.extract_reasoning(text, None)
+        assert reasoning is None
+        assert content == text
+
     def test_multiline_reasoning(self, parser):
         text = (
             "<think>Step 1: parse.\nStep 2: compute.\nStep 3: output.</think>Result: 7."
@@ -213,6 +224,32 @@ class TestDelegatingPromptDetection:
 
 
 class TestStreaming:
+    def test_grammar_constrained_output_is_content(self, mock_tokenizer):
+        """Grammar-constrained JSON must stream in the content channel."""
+        parser = Qwen3Parser(
+            mock_tokenizer,
+            structured_output_in_reasoning=True,
+        )
+        reasoning, content = simulate_reasoning_streaming(
+            parser,
+            [
+                '{"reasoning":"',
+                "</think>",
+                '","tool":"',
+                "<tool_call>",
+                '"}',
+            ],
+            [
+                (_TEXT_ID,),
+                (_THINK_END_ID,),
+                (_TEXT_ID,),
+                (_TOOL_CALL_ID,),
+                (_TEXT_ID,),
+            ],
+        )
+        assert reasoning == ""
+        assert content == '{"reasoning":"</think>","tool":"<tool_call>"}'
+
     def test_basic_streaming(self, parser):
         reasoning, content = simulate_reasoning_streaming(
             parser,
