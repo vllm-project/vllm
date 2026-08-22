@@ -11,7 +11,7 @@ import zmq
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
@@ -318,9 +318,9 @@ class LMCacheMPSchedulerAdapter:
         start: int = 0,
         end: int = 0,
         request_id: str | None = None,
-    ) -> IPCCacheEngineKey:
+    ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key"""
-        return IPCCacheEngineKey(
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,
@@ -328,20 +328,27 @@ class LMCacheMPSchedulerAdapter:
             start=start,
             end=end,
             request_id=request_id,
-            tp_size=self.tp_size,
+            use_mla=self.parallel_strategy.use_mla,
         )
 
     def _create_hash_key(
         self, chunk_hash: bytes, request_id: str | None = None
-    ) -> IPCCacheEngineKey:
-        """Create a hash-mode IPC cache engine key"""
-        return IPCCacheEngineKey(
-            model_name=self.model_name,
-            world_size=self.world_size,
-            worker_id=None,
-            chunk_hash=chunk_hash,
-            request_id=request_id,
-            tp_size=self.tp_size,
+    ) -> IPCCacheServerKey:
+        """Create a hash-mode IPC cache engine key.
+
+        .. deprecated::
+            The current ``IPCCacheServerKey`` API is token-based (no
+            ``chunk_hash`` field).  Hash-mode keys are no longer
+            supported.  This method is retained for API compatibility
+            with callers that haven't been migrated to the token-based
+            ``_create_key`` path.  When the lmcache package is installed
+            (the normal case), the LMCache-tree adapter is used instead
+            of this vendored fallback, so this method is never reached.
+        """
+        raise NotImplementedError(
+            "Hash-mode IPCCacheServerKey is no longer supported. "
+            "Use _create_key (token-based) instead, or install the "
+            "lmcache package to use the LMCache-tree adapter."
         )
 
 
@@ -513,7 +520,7 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        all_keys: list[IPCCacheEngineKey] = []
+        all_keys: list[IPCCacheServerKey] = []
         block_ids: list[int] = []
         for request_id, op in zip(request_ids, ops, strict=False):
             if op.block_hashes is not None:
@@ -562,7 +569,7 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        all_keys: list[IPCCacheEngineKey] = []
+        all_keys: list[IPCCacheServerKey] = []
         block_ids: list[int] = []
         for request_id, op in zip(request_ids, ops, strict=False):
             if op.block_hashes is not None:
@@ -711,9 +718,9 @@ class LMCacheMPWorkerAdapter:
         start: int = 0,
         end: int = 0,
         request_id: str | None = None,
-    ) -> IPCCacheEngineKey:
+    ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key"""
-        return IPCCacheEngineKey(
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,
@@ -721,16 +728,20 @@ class LMCacheMPWorkerAdapter:
             start=start,
             end=end,
             request_id=request_id,
+            use_mla=self.parallel_strategy.use_mla,
         )
 
     def _create_hash_key(
         self, chunk_hash: bytes, request_id: str | None = None
-    ) -> IPCCacheEngineKey:
-        """Create a hash-mode IPC cache engine key"""
-        return IPCCacheEngineKey(
-            model_name=self.model_name,
-            world_size=self.world_size,
-            worker_id=self.worker_id,
-            chunk_hash=chunk_hash,
-            request_id=request_id,
+    ) -> IPCCacheServerKey:
+        """Create a hash-mode IPC cache engine key.
+
+        .. deprecated::
+            Hash-mode keys are no longer supported by the current
+            ``IPCCacheServerKey`` API (token-based only).  See the
+            scheduler adapter's ``_create_hash_key`` for details.
+        """
+        raise NotImplementedError(
+            "Hash-mode IPCCacheServerKey is no longer supported. "
+            "Use _create_key (token-based) instead."
         )
