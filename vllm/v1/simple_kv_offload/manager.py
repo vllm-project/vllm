@@ -138,6 +138,9 @@ class SimpleCPUOffloadScheduler:
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
         )
+        # CPU transfers and block IDs are physical-block-aligned. Keep external
+        # lookups coarse even when the GPU coordinator supports fine DCP hits.
+        self.cpu_coordinator.enable_partial_hash_hits = False
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
         # GPU block pool reference - bound after scheduler builds kv_cache_manager
         self._gpu_block_pool: BlockPool | None = None
@@ -342,7 +345,6 @@ class SimpleCPUOffloadScheduler:
 
         # Build transfer pairs across all groups.
         total_computed_tokens = num_computed_tokens + num_external_tokens
-        kv_cache_groups = self.cpu_kv_cache_config.kv_cache_groups
 
         # The scheduler may have accepted fewer blocks than
         # get_num_new_matched_tokens() reported.
@@ -351,9 +353,7 @@ class SimpleCPUOffloadScheduler:
         # the rest will be released along with the temp pin below.
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
-            g_block_size = (
-                kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
-            )
+            g_block_size = self.cpu_coordinator.single_type_managers[g].block_size
             assert num_external_tokens % g_block_size == 0, (
                 f"num_external_tokens={num_external_tokens} not aligned to "
                 f"group {g} block_size={g_block_size}"
@@ -372,9 +372,7 @@ class SimpleCPUOffloadScheduler:
                 continue
 
             # Number of blocks in the computed range for this group.
-            g_block_size = (
-                kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
-            )
+            g_block_size = self.cpu_coordinator.single_type_managers[g].block_size
             n_computed_g = cdiv(total_computed_tokens, g_block_size)
 
             # Back-trace: ext blocks sit at the tail of the computed range.
@@ -591,9 +589,7 @@ class SimpleCPUOffloadScheduler:
                 already_stored_g = state.num_stored_blocks[g]
                 group_gpu_ids = block_ids_by_group[g]
 
-                g_block_size = (
-                    kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
-                )
+                g_block_size = self.cpu_coordinator.single_type_managers[g].block_size
                 ready_blocks_g = aligned_tokens // g_block_size
                 scannable = group_gpu_ids[already_stored_g:ready_blocks_g]
 

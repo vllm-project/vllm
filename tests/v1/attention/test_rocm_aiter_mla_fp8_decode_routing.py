@@ -80,6 +80,27 @@ def test_large_head_counts_never_use_gluon(kv_cache_dtype, num_heads, max_qo_len
     assert not AiterMLAHelper.use_gluon_verify(num_heads, max_qo_len, kv_cache_dtype)
 
 
+@pytest.mark.parametrize("num_heads", [16, 32, 96])
+@pytest.mark.parametrize("max_qo_len", [2, 3, 8])
+def test_gathered_head_counts_only_reach_gluon_verify_under_dcp(
+    monkeypatch, gluon_available, num_heads, max_qo_len
+):
+    """Only a DCP-gathered head count unlocks the wider Gluon head bound.
+
+    aiter tiles the head range up to 96 (ROCm/aiter#4412), which is what a
+    DCP-gathered verify needs; the flatten exists to give that verify a per-row
+    LSE and a window in global positions. Without DCP the asm verify serves
+    these head counts and is faster, so the bound must stay where it was --
+    DeepSeek-R1 at TP8 (16 local heads) with MTP keeps the asm path.
+    """
+    monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_max_bh16_heads", lambda: 96)
+
+    assert not AiterMLAHelper.use_gluon_verify(num_heads, max_qo_len, "bfloat16")
+    assert AiterMLAHelper.use_gluon_verify(
+        num_heads, max_qo_len, "bfloat16", dcp_world_size=8
+    )
+
+
 @pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
 @pytest.mark.parametrize("num_heads", [1, 2, 4, 8])
 def test_unquantized_divisor_heads_keep_gluon_decode(

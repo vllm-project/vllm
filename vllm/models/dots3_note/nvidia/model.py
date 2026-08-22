@@ -9,7 +9,6 @@ from dataclasses import replace
 import torch
 from torch import nn
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -51,6 +50,7 @@ from vllm.models.deepseek_v32.nvidia.model import (
     DeepseekV32Model,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.ops.dcp import resolve_dcp_q_replicate
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from .attention import (
@@ -355,11 +355,7 @@ class Dots3NoteSlidingAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fused_qkv_a_proj",
         )
-        qrep_enabled = (
-            envs.VLLM_DCP_Q_REPLICATE
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
-            and vllm_config.parallel_config.prefill_context_parallel_size <= 1
-        )
+        qrep_enabled = resolve_dcp_q_replicate(vllm_config.parallel_config)
         q_proj_cls = (
             DCPGroupColumnParallelLinear if qrep_enabled else ColumnParallelLinear
         )
