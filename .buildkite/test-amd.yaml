@@ -649,6 +649,8 @@ steps:
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
   # Different from CUDA, Qwen requires +rms_norm and +quant_fp8 as rms+quant fusion is only supported on AITER
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
+  # DeepSeek-Coder uses the portable static-FP8 MLA fusion path on ROCm.
+  - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and +quant_fp8 and DeepSeek-Coder and TRITON_MLA and not True'"
 
 - label: ":amd: (MI300) PyTorch Compilation Passes" # TBD
   timeout_in_minutes: 180
@@ -3327,6 +3329,82 @@ steps:
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
   - pytest -v -s tests/v1/distributed/test_dbo.py
 
+- label: ":amd: (MI355) Fusion E2E TP2 Quick" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/compilation/
+  - vllm/distributed/
+  - vllm/model_executor/
+  - vllm/v1/attention/
+  - tests/compile/fusions_e2e/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+    -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+    not +quant_fp8 and not +rms_norm and Llama-3 and
+    ROCM_AITER_UNIFIED_ATTN'
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+    -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+    +quant_fp8 and +rms_norm and qwen3 and
+    ROCM_AITER_UNIFIED_ATTN'
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+    -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+    not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
+    ROCM_AITER_MLA'
+
+#------------------------------------------------------  mi355 · disaggregated  -------------------------------------------------------#
+
+- label: ":amd: (MI355) DSv4-Flash Disaggregated DP EP" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_8
+  num_gpus: 8
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - requirements/kv_connectors_rocm.txt
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/models/deepseek_v4/
+  - vllm/v1/attention/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - >-
+    VLLM_ROCM_USE_AITER=1
+    ENABLE_HMA_FLAG=1
+    DP_EP=1
+    GPU_MEMORY_UTILIZATION=0.85
+    PREFILLER_TP_SIZE=4
+    DECODER_TP_SIZE=4
+    PREFILL_BLOCK_SIZE=256
+    DECODE_BLOCK_SIZE=256
+    MODEL_NAMES=deepseek-ai/DeepSeek-V4-Flash
+    VLLM_SERVE_EXTRA_ARGS=--trust-remote-code,--kv-cache-dtype,fp8
+    bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Entrypoints Integration (API Server)" # TBD
@@ -3493,6 +3571,31 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-mi355.txt
 
+- label: ":amd: (MI355) LM Eval Spec Decode" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/evals/gsm8k/test_gsm8k_correctness.py
+  - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-FP8-TP4-ROCm.yaml
+  - tests/evals/gsm8k/configs/models-spec-decode-rocm.txt
+  - vllm/models/deepseek_v4/
+  - vllm/model_executor/models/qwen3_dspark.py
+  - vllm/v1/spec_decode/metrics.py
+  - vllm/v1/worker/gpu/spec_decode/dspark/
+  - vllm/v1/worker/gpu/spec_decode/rejection_sampler.py
+  - vllm/v1/worker/gpu/spec_decode/speculator.py
+  - vllm/model_executor/layers/quantization/
+  - vllm/v1/attention/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode-rocm.txt
+
 - label: ":amd: (MI355) LM Eval Small Models" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3512,6 +3615,30 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
+
+- label: ":amd: (MI355) LM Eval Small Models Distributed" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - tests/evals/gsm8k/test_gsm8k_correctness.py
+  - tests/evals/gsm8k/configs/models-small-tp.txt
+  - tests/evals/gsm8k/configs/DiffusionGemma-26B-A4B-it-FP8-dynamic.yaml
+  - vllm/model_executor/models/config.py
+  - vllm/model_executor/models/diffusion_gemma.py
+  - vllm/model_executor/layers/quantization/
+  - vllm/transformers_utils/configs/diffusion_gemma.py
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/ops/
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
 
 - label: ":amd: (MI355) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy" # TBD
   timeout_in_minutes: 180
@@ -4172,6 +4299,31 @@ steps:
   - tests/v1/spec_decode
   commands:
   - pytest -v -s -m 'not slow_test' v1/spec_decode
+
+- label: ":amd: (MI355) Spec Decode AL MTP + Other Acceptance Nightly" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - vllm/v1/worker/gpu_model_runner.py
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/models/gemma4.py
+  - vllm/model_executor/models/gemma4_mm.py
+  - vllm/model_executor/models/gemma4_mtp.py
+  - vllm/model_executor/models/llama.py
+  - vllm/model_executor/models/llama_eagle3.py
+  - vllm/model_executor/models/medusa.py
+  - vllm/model_executor/models/registry.py
+  - tests/evals/gsm8k/
+  - tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/
 
 #------------------------------------------------------  mi355 · weight_loading  -------------------------------------------------------#
 

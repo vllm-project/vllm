@@ -376,6 +376,18 @@ if current_platform.is_cuda():
     ]
     BACKENDS_MLA_FP8 = [AttentionBackendEnum.TRITON_MLA]
     BACKENDS_MLA_FP4 = [AttentionBackendEnum.TRITON_MLA]
+elif current_platform.is_rocm():
+    # ROCm supports the static-FP8 output-quant fusion through AITER MLA.
+    # Per-group FP8 still relies on the CUDA-only CUTLASS block-scaled
+    # kernel, and NVFP4 is NVIDIA-specific.
+    MLA_DIMS = [(16, 128, 64, 128, 512)]
+    PATTERN_TEST_MODELS_MLA_FP8 = [
+        (
+            "deepseek-ai/DeepSeek-V2-Lite",
+            TestMLAAttentionFp8StaticQuantPatternModel,
+        )
+    ]
+    BACKENDS_MLA_FP8 = [AttentionBackendEnum.ROCM_AITER_MLA]
 
 
 @pytest.mark.parametrize(
@@ -390,7 +402,11 @@ if current_platform.is_cuda():
         flat_product(
             BACKENDS_MLA_FP8,
             PATTERN_TEST_MODELS_MLA_FP8,
-            ["+quant_fp8", "-quant_fp8"],
+            (
+                ["+quant_fp8", "-quant_fp8"]
+                if current_platform.is_cuda()
+                else ["-quant_fp8"]
+            ),
         )
     )
     + list(
@@ -420,6 +436,7 @@ def test_mla_attention_quant_pattern(
     backend: AttentionBackendEnum,
     dist_init,
     disable_vllm_compile_cache,
+    workspace_init,
 ):
     """Test MLA AttentionQuantPattern fusion pass"""
     if (
