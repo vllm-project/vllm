@@ -177,9 +177,10 @@ created the prefix.
 
 The list may contain any positive integer TP sizes. Sharing is enabled on an
 endpoint only when the selected Store TP is at least its local TP, is divisible
-by the local TP, and satisfies the existing topology and KV-head constraints.
-Malformed lists and unsupported endpoints fall back to an isolated rank-local
-key layout, so they cannot read incompatible shared entries. When
+by the local TP, the local KV cache uses HND layout, and the endpoint satisfies
+the existing topology and KV-head constraints. Malformed lists and unsupported
+endpoints fall back to an isolated rank-local key layout, so they cannot read
+incompatible shared entries. When
 `enable_store_tp_lcm` is absent or false, `prefill_tp_sizes` has no effect and
 the existing `store_tp_size` behavior is unchanged.
 
@@ -278,7 +279,7 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
-- `store_tp_size` (int): Store KV heads in a layout shared by different local TP sizes. Set this to the prefill TP size on both prefill and decode instances. The first implementation requires `store_tp_size >= local_tp_size` and `store_tp_size % local_tp_size == 0`. It supports a single full-attention cache group with PCP/DCP disabled and cross-layer blocks disabled. For GQA and MHA, the total KV-head count must also be divisible by `store_tp_size`; KV heads are stored in canonical shards of this width. The canonical payload uses a layout-independent head-major order, so NHD and HND instances can share the same objects. Prefill and decode must use the same pipeline-parallel size; the PP size is part of the opt-in Store namespace, so different PP layouts safely miss instead of reading incompatible objects. Configurations outside these conditions remain valid and use the existing rank-local layout in a compatibility-specific namespace, but do not gain heterogeneous-TP hits.
+- `store_tp_size` (int): Store KV heads in a layout shared by different local TP sizes. Set this to the prefill TP size on both prefill and decode instances. The first implementation requires HND KV cache layout, `store_tp_size >= local_tp_size`, and `store_tp_size % local_tp_size == 0`. It supports a single full-attention cache group with PCP/DCP disabled and cross-layer blocks disabled. For GQA and MHA, the total KV-head count must also be divisible by `store_tp_size`; KV heads are stored in canonical head-major HND shards of this width. Prefill and decode must use the same pipeline-parallel size; the PP size is part of the opt-in Store namespace, so different PP layouts safely miss instead of reading incompatible objects. Configurations outside these conditions, including explicit NHD layouts, remain valid and use the existing rank-local layout in a compatibility-specific namespace, but do not gain heterogeneous-TP hits.
 
 For example, with prefill TP 4, decode TP 2, and eight KV heads, set
 `store_tp_size` to 4 on both instances. Each decode rank reads and writes two

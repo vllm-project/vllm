@@ -57,9 +57,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
     RESP_ERR,
     RESP_OK,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.tp_layout import (  # noqa: E501
-    TPSharedStagingBuffer,
-)
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
@@ -517,7 +514,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_group_semantics: bool = False,
         supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
-        tp_staging_buffer: TPSharedStagingBuffer | None = None,
     ):
         super().__init__(
             store,
@@ -548,7 +544,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.replicate_config = replicate_config
         self.enable_group_semantics = enable_group_semantics
         self.supports_group_ids = supports_group_ids
-        self.tp_staging_buffer = tp_staging_buffer
 
         # Pause store requests when CPU/disk offloading is under pressure.
         self._store_pressure_active = False
@@ -1013,8 +1008,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             addrs: list[list[int]] = []
             sizes: list[list[int]] = []
-            staging_block_ids: list[int] = []
-            staging_shard_ids: list[int] = []
             stored_events: list[BlockStored] = []
             chunks_per_group: list[list[tuple[int, int]]] = [
                 [] for _ in self.token_databases
@@ -1030,31 +1023,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunks_per_group[g_idx].append((start, end))
                 if store_shard_id is not None:
                     shards_per_group[g_idx].append(store_shard_id)
-            if self.tp_staging_buffer is not None:
-                db = self.token_databases[0]
-                assert isinstance(db, TPSharedChunkedTokenDatabase)
-                staging_block_ids, staging_shard_ids = db.staging_metadata(
-                    chunks_per_group[0],
-                    block_ids_per_group[0],
-                    shards_per_group[0],
-                )
-            else:
-                for g_idx, chunks in enumerate(chunks_per_group):
-                    if not chunks:
-                        continue
-                    db = self.token_databases[g_idx]
-                    if isinstance(db, TPSharedChunkedTokenDatabase):
-                        group_addrs, group_sizes, _ = db.prepare_values_for_shards(
-                            chunks,
-                            block_ids_per_group[g_idx],
-                            shards_per_group[g_idx],
-                        )
-                    else:
-                        group_addrs, group_sizes, _ = db.prepare_values(
-                            chunks, block_ids_per_group[g_idx]
-                        )
-                    addrs.extend(group_addrs)
-                    sizes.extend(group_sizes)
+            for g_idx, chunks in enumerate(chunks_per_group):
+                if not chunks:
+                    continue
+                db = self.token_databases[g_idx]
+                if isinstance(db, TPSharedChunkedTokenDatabase):
+                    group_addrs, group_sizes, _ = db.prepare_values_for_shards(
+                        chunks,
+                        block_ids_per_group[g_idx],
+                        shards_per_group[g_idx],
+                    )
+                else:
+                    group_addrs, group_sizes, _ = db.prepare_values(
+                        chunks, block_ids_per_group[g_idx]
+                    )
+                addrs.extend(group_addrs)
+                sizes.extend(group_sizes)
 
             if self.enable_kv_event:
                 new_block_hashes = [
@@ -1100,105 +1084,52 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             if group_ids is not None:
                 assert len(group_ids) == len(keys)
+                self.replicate_config.group_ids = group_ids
 
-            capacity = (
-                self.tp_staging_buffer.capacity_objects
-                if self.tp_staging_buffer is not None
-                else len(keys)
-            )
             failed_indices: set[int] = set()
             put_had_exception = False
-            for batch_start in range(0, len(keys), capacity):
-                batch_end = min(batch_start + capacity, len(keys))
-                batch_keys = keys[batch_start:batch_end]
-                if self.tp_staging_buffer is not None:
-                    pack_start = time.perf_counter()
-                    try:
-                        self.tp_staging_buffer.pack(
-                            staging_block_ids[batch_start:batch_end],
-                            staging_shard_ids[batch_start:batch_end],
-                        )
-                    except Exception as e:
-                        self._record_operation(
-                            "save_pack",
-                            pack_start,
-                            len(batch_keys),
-                            num_bytes=(
-                                len(batch_keys) * self.tp_staging_buffer.object_nbytes
-                            ),
-                            status="error",
-                            num_failed_keys=len(batch_keys),
-                        )
-                        logger.error(
-                            "Failed to pack TP-shared KV objects for %s: %s",
-                            req_id,
-                            e,
-                        )
-                        put_had_exception = True
-                        break
-                    self._record_operation(
-                        "save_pack",
-                        pack_start,
-                        len(batch_keys),
-                        num_bytes=(
-                            len(batch_keys) * self.tp_staging_buffer.object_nbytes
-                        ),
-                    )
-                    batch_addrs, batch_sizes = (
-                        self.tp_staging_buffer.transfer_descriptors(len(batch_keys))
-                    )
-                else:
-                    batch_addrs = addrs[batch_start:batch_end]
-                    batch_sizes = sizes[batch_start:batch_end]
-
-                if group_ids is not None:
-                    self.replicate_config.group_ids = group_ids[batch_start:batch_end]
-                batch_bytes = _sum_batch_bytes(batch_sizes)
-                put_start = time.perf_counter()
-                try:
-                    res = self.store.batch_put_from_multi_buffers(
-                        batch_keys,
-                        batch_addrs,
-                        batch_sizes,
-                        self.replicate_config,
-                    )
-                except Exception as e:
-                    self._record_operation(
-                        "save_put",
-                        put_start,
-                        len(batch_keys),
-                        num_bytes=batch_bytes,
-                        status="error",
-                        num_failed_keys=len(batch_keys),
-                    )
-                    logger.error("Failed to put key %s, error: %s", batch_keys, e)
-                    put_had_exception = True
-                    break
-
-                batch_failed = [i for i, value in enumerate(res) if value < 0]
+            batch_bytes = _sum_batch_bytes(sizes)
+            put_start = time.perf_counter()
+            try:
+                res = self.store.batch_put_from_multi_buffers(
+                    keys,
+                    addrs,
+                    sizes,
+                    self.replicate_config,
+                )
+            except Exception as e:
                 self._record_operation(
                     "save_put",
                     put_start,
-                    len(batch_keys),
+                    len(keys),
                     num_bytes=batch_bytes,
-                    status="partial_failure" if batch_failed else "ok",
-                    num_failed_keys=len(batch_failed),
+                    status="error",
+                    num_failed_keys=len(keys),
                 )
-                if not batch_failed:
-                    continue
-
-                failed_indices.update(batch_start + i for i in batch_failed)
-                failed_codes = {res[i] for i in batch_failed}
-                logger.warning(
-                    "batch_put failed: %d/%d keys failed "
-                    "(codes=%s, batch_bytes=%d, num_keys=%d), first_key=%s",
-                    len(batch_failed),
-                    len(batch_keys),
-                    failed_codes,
-                    batch_bytes,
-                    len(batch_keys),
-                    batch_keys[0],
+                logger.error("Failed to put key %s, error: %s", keys, e)
+                stored_events.clear()
+                put_had_exception = True
+            else:
+                failed_indices = {i for i, value in enumerate(res) if value < 0}
+                self._record_operation(
+                    "save_put",
+                    put_start,
+                    len(keys),
+                    num_bytes=batch_bytes,
+                    status="partial_failure" if failed_indices else "ok",
+                    num_failed_keys=len(failed_indices),
                 )
+                failed_codes = {res[i] for i in failed_indices}
+                if failed_indices:
+                    logger.warning(
+                        "batch_put failed: %d/%d keys failed "
+                        "(codes=%s, batch_bytes=%d), first_key=%s",
+                        len(failed_indices),
+                        len(keys),
+                        failed_codes,
+                        batch_bytes,
+                        keys[0],
+                    )
                 if (
                     MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes
                     and not self._mark_request_skipped_for_pressure(req_meta)
@@ -1210,23 +1141,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         req_id,
                     )
 
-            if put_had_exception:
-                stored_events.clear()
-            elif failed_indices:
-                if self.enable_kv_event:
-                    stored_events = [
-                        event
-                        for i, event in enumerate(stored_events)
-                        if i not in failed_indices
-                    ]
-            else:
-                self._record_saved(req_meta, token_len)
-                save_completed = True
-                if self._clear_store_pressure():
-                    logger.info(
-                        "Mooncake CPU/disk offloading pressure cleared "
-                        "after a successful store batch"
-                    )
+            if not put_had_exception:
+                if failed_indices:
+                    if self.enable_kv_event:
+                        stored_events = [
+                            event
+                            for i, event in enumerate(stored_events)
+                            if i not in failed_indices
+                        ]
+                else:
+                    self._record_saved(req_meta, token_len)
+                    save_completed = True
+                    if self._clear_store_pressure():
+                        logger.info(
+                            "Mooncake CPU/disk offloading pressure cleared "
+                            "after a successful store batch"
+                        )
 
             if self.enable_kv_event and stored_events:
                 self.update_kv_event(stored_events)
@@ -1256,7 +1186,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         disk_offload_buffer_budget_bytes: int | None = None,
         record_operation: Callable[..., None] | None = None,
         request_queue: queue.Queue[Any] | None = None,
-        tp_staging_buffer: TPSharedStagingBuffer | None = None,
     ):
         super().__init__(
             store,
@@ -1280,7 +1209,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             )
         )
         self.coord = coord
-        self.tp_staging_buffer = tp_staging_buffer
 
     def _add_load_error_block_ids(self, block_ids: list[int]) -> None:
         with self._invalid_block_ids_lock:
@@ -1309,7 +1237,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         size_list: list[list[int]] = []
         key_list: list[str] = []
         block_id_list: list[int] = []
-        staging_shard_id_list: list[int] = []
         for g_idx, db in enumerate(self.token_databases):
             mask = load_mask_per_group[g_idx]
             chunks: list[tuple[int, int]] = []
@@ -1332,23 +1259,11 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     key_list.append(db.key_for(block_hash))
                     chunks.append((start, end))
             if isinstance(db, TPSharedChunkedTokenDatabase):
-                if self.tp_staging_buffer is not None:
-                    g_block_ids, g_shard_ids = db.staging_metadata(
-                        chunks,
-                        req_meta.block_ids[g_idx],
-                        store_shard_ids,
-                    )
-                    g_addrs = [[] for _ in g_block_ids]
-                    g_sizes = [
-                        [self.tp_staging_buffer.object_nbytes] for _ in g_block_ids
-                    ]
-                    staging_shard_id_list.extend(g_shard_ids)
-                else:
-                    g_addrs, g_sizes, g_block_ids = db.prepare_values_for_shards(
-                        chunks,
-                        req_meta.block_ids[g_idx],
-                        store_shard_ids,
-                    )
+                g_addrs, g_sizes, g_block_ids = db.prepare_values_for_shards(
+                    chunks,
+                    req_meta.block_ids[g_idx],
+                    store_shard_ids,
+                )
             else:
                 g_addrs, g_sizes, g_block_ids = db.prepare_values(
                     chunks, req_meta.block_ids[g_idx]
@@ -1363,7 +1278,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         addr_list_c = _rotate_list(addr_list, rotation)
         size_list_c = _rotate_list(size_list, rotation)
         block_id_list_c = _rotate_list(block_id_list, rotation)
-        staging_shard_id_list_c = _rotate_list(staging_shard_id_list, rotation)
 
         load_batches = [
             (
@@ -1371,7 +1285,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 addr_list_c,
                 size_list_c,
                 block_id_list_c,
-                staging_shard_id_list_c,
             )
         ]
         if self.usable_disk_offload_buffer_budget_bytes is not None:
@@ -1414,44 +1327,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     batch_block_ids = block_id_list_c[
                         block_id_offset:next_block_id_offset
                     ]
-                    batch_shard_ids = staging_shard_id_list_c[
-                        block_id_offset:next_block_id_offset
-                    ]
                     load_batches.append(
                         (
                             batch_keys,
                             batch_addrs,
                             batch_sizes,
                             batch_block_ids,
-                            batch_shard_ids,
                         )
                     )
                     block_id_offset = next_block_id_offset
-
-        if self.tp_staging_buffer is not None:
-            staged_load_batches: list[
-                tuple[
-                    list[str],
-                    list[list[int]],
-                    list[list[int]],
-                    list[int],
-                    list[int],
-                ]
-            ] = []
-            capacity = self.tp_staging_buffer.capacity_objects
-            for keys, addrs, sizes, block_ids, shard_ids in load_batches:
-                for start in range(0, len(keys), capacity):
-                    end = min(start + capacity, len(keys))
-                    staged_load_batches.append(
-                        (
-                            keys[start:end],
-                            addrs[start:end],
-                            sizes[start:end],
-                            block_ids[start:end],
-                            shard_ids[start:end],
-                        )
-                    )
-            load_batches = staged_load_batches
 
         current_batch_keys: list[str] = key_list_c
         current_batch_block_ids: list[int] = block_id_list_c
@@ -1462,14 +1346,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 batch_addrs,
                 batch_sizes,
                 batch_block_ids,
-                batch_shard_ids,
             ) in load_batches:
                 current_batch_keys = batch_keys
                 current_batch_block_ids = batch_block_ids
-                if self.tp_staging_buffer is not None:
-                    batch_addrs, batch_sizes = (
-                        self.tp_staging_buffer.transfer_descriptors(len(batch_keys))
-                    )
                 batch_bytes = _sum_batch_bytes(batch_sizes)
                 tiers_by_key: dict[str, str] | None = None
                 if envs.VLLM_MOONCAKE_STORE_TIER_LOG:
@@ -1498,49 +1377,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     status="partial_failure" if failed else "ok",
                     num_failed_keys=len(failed),
                 )
-                if self.tp_staging_buffer is not None:
-                    failed_slots = {
-                        index for index, value in enumerate(res) if value < 0
-                    }
-                    successful_slots = [
-                        index
-                        for index in range(len(batch_keys))
-                        if index not in failed_slots
-                    ]
-                    unpack_start = time.perf_counter()
-                    try:
-                        self.tp_staging_buffer.unpack(
-                            [batch_block_ids[index] for index in successful_slots],
-                            [batch_shard_ids[index] for index in successful_slots],
-                            successful_slots,
-                        )
-                    except Exception as e:
-                        self._add_load_error_block_ids(batch_block_ids)
-                        self._record_operation(
-                            "load_unpack",
-                            unpack_start,
-                            len(successful_slots),
-                            num_bytes=(
-                                len(successful_slots)
-                                * self.tp_staging_buffer.object_nbytes
-                            ),
-                            status="error",
-                            num_failed_keys=len(successful_slots),
-                        )
-                        logger.warning(
-                            "Failed to unpack TP-shared KV objects for %s: %s",
-                            req_id,
-                            e,
-                        )
-                        break
-                    self._record_operation(
-                        "load_unpack",
-                        unpack_start,
-                        len(successful_slots),
-                        num_bytes=(
-                            len(successful_slots) * self.tp_staging_buffer.object_nbytes
-                        ),
-                    )
                 if failed:
                     self._add_load_error_block_ids(
                         [block_id for _, _, block_id in failed]
@@ -1778,8 +1614,10 @@ class MooncakeStoreWorker:
             lcm_store_tp_enabled or extra_config.get("store_tp_size") is not None
         )
         requested_store_tp_size = resolve_store_tp_size(extra_config)
+        cache_layout = get_kv_cache_layout()
         share_tp_topology = (
-            self.pcp_size == 1
+            cache_layout == "HND"
+            and self.pcp_size == 1
             and self.dcp_size == 1
             and len(self._kv_cache_groups) == 1
             and type(self._kv_cache_groups[0].kv_cache_spec) is FullAttentionSpec
@@ -1813,10 +1651,9 @@ class MooncakeStoreWorker:
                 requested_store_tp_size,
             )
         elif store_tp_requested:
-            layout = get_kv_cache_layout() or "unknown"
             store_namespace = (
                 f"@store_pp:{self.pp_size}@store_format:"
-                f"rank_local_tp{self.tp_size}_layout_{layout}"
+                f"rank_local_tp{self.tp_size}_layout_{cache_layout or 'unknown'}"
             )
             requested_topology = (
                 extra_config.get("prefill_tp_sizes")
@@ -1825,9 +1662,10 @@ class MooncakeStoreWorker:
             )
             logger.warning(
                 "Mooncake heterogeneous-TP store sharing is disabled for "
-                "Store TP configuration %r; using a compatibility-namespaced "
-                "rank-local store layout",
+                "Store TP configuration %r with KV layout %s; using a "
+                "compatibility-namespaced rank-local store layout",
                 requested_topology,
+                cache_layout,
             )
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
@@ -2046,29 +1884,6 @@ class MooncakeStoreWorker:
                 db.set_kv_caches_base_addr(addrs)
                 db.set_block_len(block_lens)
 
-        def create_tp_staging_buffer() -> TPSharedStagingBuffer | None:
-            if self.store_tp_size is None:
-                return None
-            db = self.token_dbs[0]
-            assert isinstance(db, TPSharedChunkedTokenDatabase)
-            staging = db.create_staging_buffer()
-            if staging is None:
-                return None
-            ret = self.store.register_buffer(staging.data_ptr, staging.nbytes)
-            if ret != 0:
-                raise RuntimeError(
-                    "register_buffer failed for TP-shared staging arena "
-                    f"(addr={staging.data_ptr:#x}, len={staging.nbytes}, ret={ret})"
-                )
-            logger.info(
-                "Registered TP-shared NHD staging arena: bytes=%d, "
-                "object_bytes=%d, capacity_objects=%d",
-                staging.nbytes,
-                staging.object_nbytes,
-                staging.capacity_objects,
-            )
-            return staging
-
         # Start transfer threads
         if self.can_put:
             ready_event_sending = threading.Event()
@@ -2086,7 +1901,6 @@ class MooncakeStoreWorker:
                 enable_group_semantics=self.enable_group_semantics,
                 supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
-                tp_staging_buffer=create_tp_staging_buffer(),
             )
             self.kv_send_thread.start()
 
@@ -2104,7 +1918,6 @@ class MooncakeStoreWorker:
                 disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
                 record_operation=self._record_kv_connector_operation,
                 request_queue=self.recv_request_queue,
-                tp_staging_buffer=create_tp_staging_buffer(),
             )
             recv_thread.name = f"KVCacheStoreRecvingThread-{i}"
             recv_thread.start()

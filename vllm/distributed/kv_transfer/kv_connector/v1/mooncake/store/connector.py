@@ -98,8 +98,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return None
         logger.info_once(
             "MooncakeStoreConnector setting KV cache layout to HND for "
-            "efficient heterogeneous TP store sharing. Set "
-            "VLLM_KV_CACHE_LAYOUT=NHD to use NHD explicitly."
+            "heterogeneous TP store sharing."
         )
         return "HND"
 

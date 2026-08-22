@@ -81,27 +81,17 @@ def _default_send_coord() -> mooncake_store_worker.MooncakeStoreCoordinator:
     )
 
 
-def _make_tp_shared_db(
-    layout: str = "NHD",
-) -> tuple[TPSharedChunkedTokenDatabase, torch.Tensor]:
+def _make_tp_shared_db() -> tuple[TPSharedChunkedTokenDatabase, torch.Tensor]:
     num_blocks = 2
     local_heads = 4
     block_size = 16
     content_size = 4
-    if layout == "NHD":
-        strides = (
-            block_size * local_heads * content_size,
-            content_size,
-            local_heads * content_size,
-            1,
-        )
-    else:
-        strides = (
-            local_heads * block_size * content_size,
-            block_size * content_size,
-            content_size,
-            1,
-        )
+    strides = (
+        local_heads * block_size * content_size,
+        block_size * content_size,
+        content_size,
+        1,
+    )
     tensor = torch.empty_strided(
         (num_blocks, local_heads, block_size, content_size),
         strides,
@@ -137,7 +127,6 @@ def _make_store_sending_thread(
     replicate_config: object | None = None,
     enable_group_semantics: bool = False,
     supports_group_ids: bool = False,
-    tp_staging_buffer=None,
 ) -> mooncake_store_worker.KVCacheStoreSendingThread:
     if coord is None:
         coord = _default_send_coord()
@@ -158,32 +147,9 @@ def _make_store_sending_thread(
         replicate_config=replicate_config,
         enable_group_semantics=enable_group_semantics,
         supports_group_ids=supports_group_ids,
-        tp_staging_buffer=tp_staging_buffer,
     )
     thread.request_queue.task_done = MagicMock()
     return thread
-
-
-class _FakeTPStagingBuffer:
-    def __init__(self, capacity_objects: int = 2, object_nbytes: int = 256):
-        self.capacity_objects = capacity_objects
-        self.object_nbytes = object_nbytes
-        self.pack_calls: list[tuple[list[int], list[int]]] = []
-        self.unpack_calls: list[tuple[list[int], list[int], list[int]]] = []
-
-    def transfer_descriptors(self, count: int):
-        return (
-            [[0xA000 + index * self.object_nbytes] for index in range(count)],
-            [[self.object_nbytes] for _ in range(count)],
-        )
-
-    def pack(self, block_ids, store_shard_ids):
-        self.pack_calls.append((list(block_ids), list(store_shard_ids)))
-
-    def unpack(self, block_ids, store_shard_ids, staging_slots):
-        self.unpack_calls.append(
-            (list(block_ids), list(store_shard_ids), list(staging_slots))
-        )
 
 
 def _make_store_recving_thread(
@@ -381,6 +347,7 @@ def _patch_worker_runtime(
     tp_rank: int = 0,
     tp_size: int = 1,
     dcp_size: int = 1,
+    kv_cache_layout: str = "HND",
 ) -> None:
     single_rank_group = SimpleNamespace(world_size=1, rank_in_group=0)
     # DCP groups are contiguous splits of the TP group (see
@@ -391,7 +358,7 @@ def _patch_worker_runtime(
     monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
     monkeypatch.setattr(worker, "get_dcp_group", lambda: dcp_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
-    monkeypatch.setattr(worker, "get_kv_cache_layout", lambda: "NHD")
+    monkeypatch.setattr(worker, "get_kv_cache_layout", lambda: kv_cache_layout)
     monkeypatch.setattr(worker, "LookupKeyServer", MagicMock())
 
 
@@ -420,16 +387,10 @@ def test_pool_key_store_tp_namespace():
     assert key.to_string() == f"{_tp_shared_prefix(2)}@deadbeef"
 
 
-@pytest.mark.parametrize(
-    ("producer_layout", "consumer_layout"),
-    tuple(itertools.product(("NHD", "HND"), repeat=2)),
-)
-def test_tp_shared_layout_round_trips_prefill_shards_into_decode(
-    producer_layout: str, consumer_layout: str
-):
+def test_tp_shared_hnd_round_trips_prefill_shards_into_decode():
     block_size = 16
     shape = (1, 2, block_size, 4)
-    producer_strides = (128, 4, 8, 1) if producer_layout == "NHD" else (128, 64, 4, 1)
+    producer_strides = (128, 64, 4, 1)
 
     stored: dict[int, bytes] = {}
     producer_tensors = []
@@ -466,7 +427,7 @@ def test_tp_shared_layout_round_trips_prefill_shards_into_decode(
     for tp_rank in range(2):
         tensor = torch.empty_strided(
             (1, 4, block_size, 4),
-            (256, 4, 16, 1) if consumer_layout == "NHD" else (256, 64, 4, 1),
+            (256, 64, 4, 1),
             dtype=torch.float16,
         )
         tensor.zero_()
@@ -524,29 +485,6 @@ def test_tp_shared_sending_writes_each_canonical_shard():
     assert len(addrs) == len(sizes) == 4
 
 
-def test_tp_shared_staging_put_batches_use_one_segment_per_object():
-    store = MagicMock()
-    store.batch_is_exist.return_value = [0, 0, 0, 0]
-    store.batch_put_from_multi_buffers.side_effect = ([256, 256], [256, 256])
-    db, _ = _make_tp_shared_db()
-    staging = _FakeTPStagingBuffer()
-    thread = _make_store_sending_thread(
-        store,
-        token_databases=[db],
-        replicate_config=SimpleNamespace(),
-        tp_staging_buffer=staging,
-    )
-
-    _run_store_req(thread, _make_store_req("req", [b"h0", b"h1"]))
-
-    assert staging.pack_calls == [([1, 1], [0, 1]), ([2, 2], [0, 1])]
-    assert store.batch_put_from_multi_buffers.call_count == 2
-    for call in store.batch_put_from_multi_buffers.call_args_list:
-        _keys, addrs, sizes, _config = call.args
-        assert all(len(value) == 1 for value in addrs)
-        assert sizes == [[256], [256]]
-
-
 def test_tp_shared_receiving_reads_each_local_canonical_shard():
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
@@ -579,117 +517,6 @@ def test_tp_shared_receiving_reads_each_local_canonical_shard():
         f"{_tp_shared_prefix(1)}@6831",
     ]
     assert len(addrs) == len(sizes) == 4
-
-
-@pytest.mark.parametrize(
-    ("results", "expected_unpack"),
-    [
-        ([256, -7], ([0], [0], [0])),
-        ([-7, 256], ([0], [1], [1])),
-    ],
-)
-def test_tp_shared_staging_get_only_unpacks_successful_objects(
-    results, expected_unpack
-):
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
-
-    store = MagicMock()
-    store.batch_get_into_multi_buffers.return_value = results
-    db, _ = _make_tp_shared_db()
-    staging = _FakeTPStagingBuffer()
-    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["layer0"], spec)],
-        scheduler_block_size=16,
-        hash_block_size=16,
-    )
-    thread = mooncake_store_worker.KVCacheStoreRecvingThread(
-        store=store,
-        token_databases=[db],
-        block_size=16,
-        tp_rank=0,
-        ready_event=threading.Event(),
-        coord=coord,
-        tp_staging_buffer=staging,
-    )
-    thread.request_queue.task_done = MagicMock()
-
-    thread._handle_request(_make_load_req("req", [b"h0", b"h1"], token_len=32))
-
-    assert store.batch_get_into_multi_buffers.call_count == 1
-    _keys, addrs, sizes = store.batch_get_into_multi_buffers.call_args.args
-    assert all(len(value) == 1 for value in addrs)
-    assert sizes == [[256], [256]]
-    assert staging.unpack_calls == [expected_unpack]
-    assert thread.get_and_clear_block_ids_with_load_errors() == {0}
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_tp_shared_triton_staging_round_trip_nhd():
-    num_blocks = 2
-    local_heads = 4
-    block_size = 16
-    content_size = 8
-    shape = (num_blocks, local_heads, block_size, content_size)
-    strides = (
-        block_size * local_heads * content_size,
-        content_size,
-        local_heads * content_size,
-        1,
-    )
-    tensors = [
-        torch.empty_strided(shape, strides, dtype=torch.float16, device="cuda")
-        for _ in range(2)
-    ]
-    for layer_idx, tensor in enumerate(tensors):
-        values = torch.arange(tensor.numel(), device="cuda").reshape(shape) % 127
-        tensor.copy_(values + layer_idx * 256)
-    originals = [tensor.clone() for tensor in tensors]
-
-    db = TPSharedChunkedTokenDatabase(
-        KeyMetadata(
-            "test-model",
-            0,
-            0,
-            0,
-            0,
-            store_namespace=_TP_SHARED_NAMESPACE,
-        ),
-        block_size,
-        local_tp_size=2,
-        store_tp_size=4,
-        tp_rank=0,
-        num_kv_heads=8,
-    )
-    db.set_kv_cache_tensors(tensors, num_blocks)
-    staging = db.create_staging_buffer(target_bytes=4096)
-    assert staging is not None
-
-    staging.pack([0, 1], [0, 1])
-    for slot, (block_id, head_start) in enumerate(((0, 0), (1, 2))):
-        expected = torch.cat(
-            [
-                tensor[block_id, head_start : head_start + 2]
-                .contiguous()
-                .view(torch.uint8)
-                .flatten()
-                for tensor in originals
-            ]
-        )
-        offset = slot * staging.object_nbytes
-        torch.testing.assert_close(
-            staging.buffer[offset : offset + staging.object_nbytes], expected
-        )
-
-    for tensor in tensors:
-        tensor.zero_()
-    staging.unpack([0, 1], [0, 1], [0, 1])
-
-    for tensor, original in zip(tensors, originals, strict=True):
-        expected = torch.zeros_like(tensor)
-        expected[0, :2].copy_(original[0, :2])
-        expected[1, 2:].copy_(original[1, 2:])
-        torch.testing.assert_close(tensor, expected)
 
 
 def test_pool_key_cache_prefix_namespaces_and_disambiguates():
@@ -2127,6 +1954,36 @@ def test_worker_enables_canonical_store_tp_layout(tmp_path, monkeypatch):
     assert len(w._lookup_key_prefixes[0]) == 4
 
 
+def test_store_tp_nhd_falls_back_to_rank_local_namespace(tmp_path, monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch, tp_size=2, kv_cache_layout="NHD")
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(extra_config={"store_tp_size": 4}),
+        _make_kv_cache_config(),
+    )
+
+    assert w.store_tp_size is None
+    assert type(w.token_dbs[0]) is ChunkedTokenDatabase
+    key = w.token_dbs[0].key_for(BlockHash(b"h"))
+    assert "@store_tp:" not in key
+    assert "@store_format:rank_local_tp2_layout_NHD" in key
+
+
 @pytest.mark.parametrize(
     ("extra_config", "expected"),
     [
@@ -2265,7 +2122,7 @@ def test_worker_keeps_rank_local_layout_for_unsupported_store_tp(
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
-    _patch_worker_runtime(monkeypatch, tp_size=2)
+    _patch_worker_runtime(monkeypatch, tp_size=2, kv_cache_layout="NHD")
     monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
     monkeypatch.setenv(
         "MOONCAKE_CONFIG_PATH",
