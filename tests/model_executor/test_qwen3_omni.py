@@ -239,6 +239,9 @@ def test_qwen3_omni_exposes_eagle3_to_its_text_backbone():
             super().__init__()
             self.model = DummyBackbone()
 
+        def embed_input_ids(self, input_ids):
+            return input_ids
+
     model = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(
         Qwen3OmniMoeThinkerForConditionalGeneration
     )
@@ -277,7 +280,7 @@ def test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states():
         "vllm.model_executor.models.qwen3_omni_moe_thinker.get_pp_group",
         return_value=pp_group,
     ):
-        output, aux_hidden_states = model(
+        output, aux_hidden_states = model.forward(
             input_ids=None,
             positions=torch.tensor([0]),
             inputs_embeds=inputs_embeds,
