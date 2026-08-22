@@ -37,11 +37,15 @@ class MLAPrefillSelectorConfig(NamedTuple):
         qk_rope_head_dim=0,
         v_head_dim=0,
     )
+    cache_dtype: str = "auto"
+    dcp_world_size: int = 1
 
     def __repr__(self):
         return (
             f"MLAPrefillSelectorConfig(dtype={self.dtype}, "
-            f"mla_dimensions={self.mla_dimensions})"
+            f"mla_dimensions={self.mla_dimensions}, "
+            f"cache_dtype={self.cache_dtype}, "
+            f"dcp_world_size={self.dcp_world_size})"
         )
 
 
@@ -59,12 +63,6 @@ def _get_mla_prefill_backend_priorities(
         List of backends in priority order (highest priority first).
     """
     from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        return [
-            MLAPrefillBackendEnum.ROCM_AITER_FA,
-            MLAPrefillBackendEnum.FLASH_ATTN,
-        ]
 
     if device_capability.major == 10:  # Blackwell
         if mla_dimensions == MLADimensions(
@@ -84,10 +82,25 @@ def _get_mla_prefill_backend_priorities(
             MLAPrefillBackendEnum.FLASHINFER,
             MLAPrefillBackendEnum.TOKENSPEED_MLA,
         ]
-    else:  # Hopper (SM90) and older
+    elif current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        if on_gfx950():
+            # AITER ASM is preferred with FP8 KV cache; falls through to the
+            # AITER FlashAttention backend (then plain FA) when not using FP8 KV.
+            return [
+                MLAPrefillBackendEnum.AITER_ASM,
+                MLAPrefillBackendEnum.ROCM_AITER_FA,
+                MLAPrefillBackendEnum.FLASH_ATTN,
+            ]
         return [
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
             MLAPrefillBackendEnum.FLASH_ATTN,
         ]
+    # Hopper (SM90) and older
+    return [
+        MLAPrefillBackendEnum.FLASH_ATTN,
+    ]
 
 
 def get_mla_prefill_backend(
@@ -118,9 +131,15 @@ def get_mla_prefill_backend(
 
     attention_config = vllm_config.attention_config
 
+    cache_dtype = vllm_config.cache_config.cache_dtype
+    dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
     model_config = vllm_config.model_config
     if model_config is None:
-        selector_config = MLAPrefillSelectorConfig(dtype=torch.get_default_dtype())
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.get_default_dtype(),
+            cache_dtype=cache_dtype,
+            dcp_world_size=dcp_world_size,
+        )
     else:
         hf_text_config = model_config.hf_text_config
         selector_config = MLAPrefillSelectorConfig(
@@ -130,6 +149,8 @@ def get_mla_prefill_backend(
                 qk_rope_head_dim=getattr(hf_text_config, "qk_rope_head_dim", 0),
                 v_head_dim=getattr(hf_text_config, "v_head_dim", 0),
             ),
+            cache_dtype=cache_dtype,
+            dcp_world_size=dcp_world_size,
         )
 
     if attention_config.mla_prefill_backend is not None:
