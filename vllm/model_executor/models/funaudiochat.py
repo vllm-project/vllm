@@ -612,21 +612,31 @@ class FunAudioChatDummyInputsBuilder(
 class FunAudioChatMultiModalProcessor(
     BaseMultiModalProcessor[FunAudioChatProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         tokenizer = self.info.get_tokenizer()
-        input_ids = torch.tensor([tokenizer.encode(prompt, **tok_kwargs)])
+        input_ids = torch.tensor([tokenizer.encode(prompt_text)])
 
         audios = mm_data.get("audios", [])
         if not audios:
-            return BatchFeature({"input_ids": input_ids})
+            processed_data = BatchFeature({"input_ids": input_ids})
+            processed_data.update(passthrough_data)
+            return processed_data
 
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
 
@@ -677,16 +687,9 @@ class FunAudioChatMultiModalProcessor(
             "feature_exist_mask": torch.ones((len(wavs),), dtype=torch.bool),
         }
 
-        return BatchFeature({"input_ids": input_ids, **mm_inputs})
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
+        processed_data = BatchFeature({"input_ids": input_ids, **mm_inputs})
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_mm_fields_config(
         self,
