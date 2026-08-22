@@ -52,6 +52,7 @@ except (ImportError, AttributeError):
 _FI_SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 
 
+@torch.compiler.assume_constant_result
 def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | None:
     """Workspace token budget for flashinfer fused all-reduce, or None if the
     current world size / device is unsupported. Mirrors ``FlashInferAllReduce``."""
@@ -62,6 +63,26 @@ def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | 
         return None
     element_size = torch.tensor([], dtype=dtype).element_size()
     return int(max_size_mb * MiB) // (hidden_size * element_size)
+
+
+@torch.compiler.assume_constant_result
+def _has_flashinfer_workspace(
+    tp_size: int,
+    max_token_num: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+) -> bool:
+    return (
+        get_fi_ar_workspace(
+            world_size=tp_size,
+            rank=get_tensor_model_parallel_rank(),
+            max_token_num=max_token_num,
+            hidden_dim=hidden_size,
+            dtype=dtype,
+            group=get_tp_group().cpu_group,
+        )
+        is not None
+    )
 
 
 def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool, int]:
@@ -87,15 +108,9 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
 
     # Lazily create / fetch the (globally cached) workspace; returns None on
     # GPUs without NVSwitch, in which case we fall back gracefully.
-    workspace = get_fi_ar_workspace(
-        world_size=tp_size,
-        rank=get_tensor_model_parallel_rank(),
-        max_token_num=max_token_num,
-        hidden_dim=hidden_size,
-        dtype=hidden_states.dtype,
-        group=get_tp_group().cpu_group,
-    )
-    if workspace is None:
+    if not _has_flashinfer_workspace(
+        tp_size, max_token_num, hidden_size, hidden_states.dtype
+    ):
         return False, 0
     return True, max_token_num
 

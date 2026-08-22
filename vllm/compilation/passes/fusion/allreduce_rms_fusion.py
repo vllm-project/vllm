@@ -179,6 +179,7 @@ def _select_flashinfer_allreduce_use_oneshot(
 if flashinfer_comm is not None:
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (
         destroy_fi_ar_workspace,
+        get_fi_ar_packed_quant_workspace,
         get_fi_ar_quant_workspace,
         get_fi_ar_workspace,
     )
@@ -200,6 +201,7 @@ if flashinfer_comm is not None:
         scale_out: torch.Tensor | None = None,
         scale_factor: torch.Tensor | None = None,
         weight_bias: float = 0.0,
+        block_quant_group_size: int = 0,
     ) -> None:
         # handle transformers backend passing outer batch dim.
         if allreduce_in.dim() != 2:
@@ -222,13 +224,32 @@ if flashinfer_comm is not None:
 
         # Select workspace based on pattern: quant patterns use the quant
         # workspace, non-quant patterns use the primary workspace.
-        is_quant_pattern = pattern_code in (
+        packed_quant_patterns = [
+            pattern
+            for name in (
+                "kARResidualRMSNormPerTokenGroupFP8PackedQuant",
+                "kARResidualRMSNormOutPerTokenGroupFP8PackedQuant",
+            )
+            if (pattern := getattr(ar_fusion_patterns, name, None)) is not None
+        ]
+        quant_patterns = [
             ar_fusion_patterns.kARResidualRMSNormFP8Quant,
             ar_fusion_patterns.kARResidualRMSNormFP4Quant,
+        ]
+        quant_patterns.extend(
+            pattern
+            for name in (
+                "kARResidualRMSNormDynamicFP8Quant",
+                "kARResidualRMSNormOutDynamicFP8Quant",
+            )
+            if (pattern := getattr(ar_fusion_patterns, name, None)) is not None
         )
-        get_workspace_fn = (
-            get_fi_ar_quant_workspace if is_quant_pattern else get_fi_ar_workspace
-        )
+        if pattern_code in packed_quant_patterns:
+            get_workspace_fn = get_fi_ar_packed_quant_workspace
+        elif pattern_code in quant_patterns:
+            get_workspace_fn = get_fi_ar_quant_workspace
+        else:
+            get_workspace_fn = get_fi_ar_workspace
         workspace = get_workspace_fn(
             world_size=world_size,
             rank=get_tensor_model_parallel_rank(),
@@ -262,6 +283,11 @@ if flashinfer_comm is not None:
         if workspace.backend in ("trtllm", "mnnvl"):
             layout_code = flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4
 
+        block_quant_kwargs = (
+            {"block_quant_group_size": block_quant_group_size}
+            if block_quant_group_size
+            else {}
+        )
         flashinfer_comm.allreduce_fusion(
             input=allreduce_in,
             workspace=workspace,
@@ -280,6 +306,7 @@ if flashinfer_comm is not None:
             use_oneshot=use_oneshot,
             fp32_acc=fp32_acc,
             weight_bias=weight_bias,
+            **block_quant_kwargs,
             # The one-shot Lamport all-reduce signals PDL completion before its
             # output buffer is committed when trigger_completion_at_end is
             # False, so the next PDL-launched kernel can read the uninitialized
@@ -308,6 +335,7 @@ if flashinfer_comm is not None:
         scale_out: torch.Tensor | None = None,
         scale_factor: torch.Tensor | None = None,
         weight_bias: float = 0.0,
+        block_quant_group_size: int = 0,
     ) -> None:
         pass
 
