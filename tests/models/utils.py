@@ -614,3 +614,31 @@ def check_transformers_version(
         min_transformers_version=min_transformers_version,
         max_transformers_version=max_transformers_version,
     ).check_transformers_version(on_fail="skip")
+
+
+def skip_if_capability_restricted(model_arch: str) -> None:
+    """Skip when this GPU lacks the kernels an architecture requires.
+
+    `CudaPlatform.verify_model_arch` rejects these architectures during model
+    resolution, so any test that resolves one would error instead of skipping.
+    """
+    import pytest
+
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda():
+        return
+    # Imported lazily: vllm.platforms.cuda assumes a CUDA platform at import.
+    from vllm.platforms.cuda import _CAPABILITY_RESTRICTED_MODELS
+
+    unsupported_majors = _CAPABILITY_RESTRICTED_MODELS.get(model_arch)
+    if unsupported_majors is None:
+        return
+    capability = current_platform.get_device_capability()
+    if capability and capability.major in unsupported_majors:
+        families = " / ".join(f"{major}.x" for major in unsupported_majors)
+        pytest.skip(
+            f"{model_arch} has no working kernel on compute capability "
+            f"{families}. Current device has compute capability "
+            f"{capability.major}.{capability.minor}"
+        )

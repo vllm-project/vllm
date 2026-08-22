@@ -27,10 +27,48 @@ def bucket_max_seqlen_q(max_seqlen_q: int) -> int:
     return 1 << max(0, max_seqlen_q - 1).bit_length()
 
 
+# What the vendored FA4 relative-attention forward supports, by compute
+# capability major. Kept together because all three describe the same external
+# kernel and move as one when cmake/external_projects/tml_fa4.cmake is bumped.
+#
+# SM12x is listed as unsupported rather than allow-listing the architectures
+# that work: SM8x also lacks a paged-KV FA4 forward, but a FlexAttention
+# fallback carrying the relative bias through score_mod has been shown to serve
+# Inkling end-to-end there, so it is left open for that path.
+_NO_PAGED_KV_MAJORS = (12,)
+_SHEARED_BIAS_MAJORS = (10, 11)
+_SPLIT_KV_MAJORS = (10, 11)
+
+
 @cache
 def _use_sheared_bias() -> bool:
     capability = current_platform.get_device_capability()
-    return capability is not None and capability.major in (10, 11)
+    return capability is not None and capability.major in _SHEARED_BIAS_MAJORS
+
+
+def check_inkling_fa4_support() -> None:
+    """Reject GPUs with no paged-KV path for Inkling relative attention.
+
+    vLLM always attends over the paged KV cache, so on SM12x the FA4 kernel
+    asserts during the first forward pass -- long after the weights are loaded
+    and the KV cache is sized. Fail while the model is still being constructed
+    instead.
+
+    Raises:
+        ValueError: If the device has no paged-KV relative-attention path.
+    """
+    capability = current_platform.get_device_capability()
+    # None means the capability could not be queried (non-CUDA, or NVML
+    # unavailable); assume supported rather than blocking startup.
+    if capability is None or capability.major not in _NO_PAGED_KV_MAJORS:
+        return
+    raise ValueError(
+        f"Inkling is not supported on {current_platform.get_device_name()} "
+        f"(compute capability {capability.major}.{capability.minor}): the FA4 "
+        f"relative-attention kernel has no paged-KV forward on SM"
+        f"{capability.major}x, and vLLM always attends over the paged KV "
+        f"cache. See vllm-project/vllm#51405."
+    )
 
 
 @cache
@@ -79,7 +117,7 @@ def inkling_fa4_num_splits(
 ) -> int:
     """Return the split-KV cap for Inkling relative attention."""
     capability = current_platform.get_device_capability()
-    if capability is not None and capability.major == 9:
+    if capability is not None and capability.major not in _SPLIT_KV_MAJORS:
         return 1
     if is_local:
         return 1
