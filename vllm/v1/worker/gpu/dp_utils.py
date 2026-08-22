@@ -7,6 +7,7 @@ import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
+from vllm.v1.worker.dp_utils import DPProfilerSync
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -23,6 +24,7 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
+    profiler_sync: DPProfilerSync | None = None,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
@@ -31,12 +33,21 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
+    # Row 4 (profiler start request) only added under VLLM_ENABLE_MULTINODE_PROFILING.
+    tensor = torch.zeros(
+        5 if profiler_sync is not None else 4, dp_size, dtype=torch.int32, device="cpu"
+    )
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
+    if profiler_sync is not None:
+        tensor[4][dp_rank] = 1 if profiler_sync._pending else 0
     dist.all_reduce(tensor, group=group)
+
+    # Latch the OR-reduced profiler start request across ranks.
+    if profiler_sync is not None:
+        profiler_sync.observe(bool(tensor[4].any().item()))
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
@@ -105,6 +116,7 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
+    profiler_sync: DPProfilerSync | None = None,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
@@ -139,4 +151,5 @@ def dispatch_cg_and_sync_dp(
         dp_rank,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
+        profiler_sync=profiler_sync,
     )

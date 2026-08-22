@@ -219,7 +219,7 @@ from vllm.v1.worker.cp_utils import (
     get_dcp_dummy_context_len,
     prepare_dcp_dummy_context_metadata,
 )
-from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
+from vllm.v1.worker.dp_utils import DPProfilerSync, coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -518,6 +518,24 @@ class GPUModelRunner(
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
+
+        # Syncs torch profiler start across DP ranks (see DPProfilerSync).
+        self.dp_profiler_sync: DPProfilerSync | None = (
+            DPProfilerSync()
+            if (
+                envs.VLLM_ENABLE_MULTINODE_PROFILING
+                and self.parallel_config.data_parallel_size > 1
+            )
+            else None
+        )
+        logger.info(
+            "[dp-prof-debug] DPProfilerSync created=%s multinode_env=%s dp_size=%s "
+            "dp_rank=%s",
+            self.dp_profiler_sync is not None,
+            envs.VLLM_ENABLE_MULTINODE_PROFILING,
+            self.parallel_config.data_parallel_size,
+            self.parallel_config.data_parallel_rank,
+        )
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -4128,6 +4146,7 @@ class GPUModelRunner(
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
                     cudagraph_mode=cudagraph_mode.value,
+                    profiler_sync=self.dp_profiler_sync,
                 )
             )
 

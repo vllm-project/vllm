@@ -315,6 +315,9 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
+    VLLM_ENABLE_MULTINODE_PROFILING: bool = False
+    """If set, synchronize torch profiler start across DP ranks so
+    multi-node traces cover the same iterations."""
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
@@ -2118,6 +2121,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # memory allocation. Enabled by default as of v0.21.0
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
+    ),
+    # If set to 1, synchronize torch profiler start across DP ranks so
+    # multi-node traces cover the same iterations.
+    "VLLM_ENABLE_MULTINODE_PROFILING": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_MULTINODE_PROFILING", "0"))
     ),
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(

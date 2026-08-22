@@ -5,6 +5,7 @@ import importlib
 import inspect
 import json
 import os
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -120,11 +121,10 @@ class WorkerProfiler(ABC):
             and self._running
             and self._profiling_for_iters > self._max_iters
         ):
-            # Automatically stop the profiler after max iters
-            # will be marked as not running, but leave as active so that stop
-            # can clean up properly
+            # Use stop(), not _call_stop(), so _active resets too --
+            # otherwise a later start_profile is ignored forever.
             logger.info_once("Max profiling iterations reached. Stopping profiler...")
-            self._call_stop()
+            self.stop()
             return
 
     def _profiler_step(self) -> bool:
@@ -210,6 +210,20 @@ class TorchProfilerWrapper(WorkerProfiler):
                 use_gzip=profiler_config.torch_profiler_use_gzip,
             )
 
+        def _async_trace_ready(prof: torch.profiler.profile) -> None:
+            """Export the trace on a background thread so gzip/JSON export
+            doesn't block the worker's next step."""
+
+            def run() -> None:
+                try:
+                    trace_handler(prof)
+                except Exception as e:
+                    logger.warning("Failed to export profiler trace: %s", e)
+
+            threading.Thread(
+                target=run, name="vllm-profiler-trace-export", daemon=True
+            ).start()
+
         self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
 
         # Create profiler schedule if warmup or wait iterations are configured
@@ -237,7 +251,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             profile_memory=profiler_config.torch_profiler_with_memory,
             with_stack=profiler_config.torch_profiler_with_stack,
             with_flops=profiler_config.torch_profiler_with_flops,
-            on_trace_ready=trace_handler,
+            on_trace_ready=_async_trace_ready,
         )
 
         # Track if we're using a schedule (need to call step())
