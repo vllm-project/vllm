@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import regex as re
+from prometheus_client import REGISTRY
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -24,7 +25,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
     FunctionDefinition,
 )
+from vllm.parser import metrics as parser_metrics
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.engine import parser_engine as parser_engine_module
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -810,6 +813,167 @@ class TestEngineBasedPath:
         )
         assert result is not None
         assert len(result.tool_calls) > 0
+
+    @pytest.mark.parametrize(
+        ("text", "expected_tool_call"),
+        [
+            ("Hello", False),
+            ('<tool_call>{"name": "f", "arguments": {}}</tool_call>', True),
+        ],
+        ids=["no_tool_call", "tool_call"],
+    )
+    def test_parse_records_tool_parser_invocation(
+        self, mock_request, monkeypatch, text, expected_tool_call
+    ):
+        recorder = MagicMock()
+        monkeypatch.setattr(
+            parser_engine_module,
+            "record_tool_parser_invocation",
+            recorder,
+            raising=False,
+        )
+        engine = _make_engine(_hermes_config())
+
+        _, _, tool_calls = engine.parse(text, mock_request)
+
+        assert bool(tool_calls) is expected_tool_call
+        recorder.assert_called_once_with(
+            is_tool_called=expected_tool_call,
+            is_streaming=False,
+            request=mock_request,
+        )
+
+    @pytest.mark.parametrize(
+        ("text", "expected_tool_call"),
+        [
+            ("Hello", False),
+            ('<tool_call>{"name": "f", "arguments": {}}</tool_call>', True),
+        ],
+        ids=["no_tool_call", "tool_call"],
+    )
+    def test_parse_delta_records_tool_parser_invocation(
+        self, mock_request, monkeypatch, text, expected_tool_call
+    ):
+        recorder = MagicMock()
+        monkeypatch.setattr(
+            parser_engine_module,
+            "record_tool_parser_invocation",
+            recorder,
+            raising=False,
+        )
+        engine = _make_engine(_hermes_config())
+        engine._streaming_initialized = True
+
+        result = engine.parse_delta(text, [], mock_request, finished=True)
+
+        assert bool(result and result.tool_calls) is expected_tool_call
+        recorder.assert_called_once_with(
+            is_tool_called=expected_tool_call,
+            is_streaming=True,
+            request=mock_request,
+        )
+
+    def test_parse_records_parser_exception(self, mock_request, monkeypatch):
+        recorder = MagicMock()
+        monkeypatch.setattr(
+            parser_engine_module,
+            "record_tool_parser_invocation",
+            recorder,
+            raising=False,
+        )
+        engine = _make_engine(_hermes_config())
+        error = RuntimeError("parser failure")
+
+        def fail(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(engine, "_single_pass_parse", fail)
+
+        with pytest.raises(RuntimeError, match="parser failure"):
+            engine.parse("Hello", mock_request)
+
+        recorder.assert_called_once_with(
+            is_tool_called=error,
+            is_streaming=False,
+            request=mock_request,
+        )
+
+    def test_parse_delta_records_parser_exception(self, mock_request, monkeypatch):
+        recorder = MagicMock()
+        monkeypatch.setattr(
+            parser_engine_module,
+            "record_tool_parser_invocation",
+            recorder,
+            raising=False,
+        )
+        engine = _make_engine(_hermes_config())
+        engine._streaming_initialized = True
+        error = RuntimeError("parser failure")
+
+        def fail(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(engine, "_feed", fail)
+
+        with pytest.raises(RuntimeError, match="parser failure"):
+            engine.parse_delta("Hello", [], mock_request, finished=False)
+
+        recorder.assert_called_once_with(
+            is_tool_called=error,
+            is_streaming=True,
+            request=mock_request,
+        )
+
+    def test_parse_records_prometheus_metrics(self):
+        model_name = f"parser-engine-test-{id(self)}"
+        labels = {
+            "model_name": model_name,
+            "outcome": "no_tool_call",
+            "request_type": "chat_completions",
+        }
+        metric_name = "vllm:tool_call_parser_invocations"
+        previous_model_name = parser_metrics._model_name
+        previous_counter = parser_metrics._tool_call_parser_invocations
+        previous_collector = REGISTRY._names_to_collectors.get(metric_name)
+        test_counter = None
+        try:
+            parser_metrics.init_parser_metrics(model_name=model_name)
+            test_counter = parser_metrics._tool_call_parser_invocations
+            request = ChatCompletionRequest(messages=[], model="test")
+
+            non_streaming_labels = {**labels, "mode": "non_streaming"}
+            assert (
+                REGISTRY.get_sample_value(
+                    "vllm:tool_call_parser_invocations_total",
+                    non_streaming_labels,
+                )
+                == 0
+            )
+            engine = _make_engine(_hermes_config())
+            engine.parse("Hello", request)
+            assert (
+                REGISTRY.get_sample_value(
+                    "vllm:tool_call_parser_invocations_total",
+                    non_streaming_labels,
+                )
+                == 1
+            )
+
+            streaming_labels = {**labels, "mode": "streaming"}
+            engine.initialize_streaming()
+            engine.parse_delta("Hello", [], request, finished=False)
+            engine.parse_delta("", [], request, finished=True)
+            assert (
+                REGISTRY.get_sample_value(
+                    "vllm:tool_call_parser_invocations_total", streaming_labels
+                )
+                == 2
+            )
+        finally:
+            parser_metrics._model_name = previous_model_name
+            parser_metrics._tool_call_parser_invocations = previous_counter
+            if previous_collector is None and test_counter is not None:
+                REGISTRY.unregister(test_counter)
 
 
 # ── TestParseTokenIdPassthrough ────────────────────────────────────
