@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
+    kFp8Static128BlockE8M0Sym,
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
@@ -225,7 +226,11 @@ class QuarkW8A8Fp8PerBlock(QuarkScheme):
         self.weight_config = weight_config
         self.weight_block_size = list(block_size)
         self.activation_quant_key = kFp8Dynamic128Sym
-        self.weight_quant_key = kFp8Static128BlockSym
+        self.weight_quant_key = (
+            kFp8Static128BlockE8M0Sym
+            if self.weight_config.get("scale_type") == "float8_e8m0fnu"
+            else kFp8Static128BlockSym
+        )
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 

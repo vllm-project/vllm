@@ -63,6 +63,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
+    kFp8Static128BlockE8M0Sym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
@@ -278,9 +279,16 @@ class Fp8LinearMethod(LinearMethodBase):
                 static=self.act_q_static,
                 group_shape=GroupShape(1, self.weight_block_size[0]),
             )
-            self.weight_quant_key = create_fp8_quant_key(
-                static=True, group_shape=GroupShape(*self.weight_block_size)
-            )
+            if self.is_scale_e8m0 and self.weight_block_size == [128, 128]:
+                self.weight_quant_key = kFp8Static128BlockE8M0Sym
+            else:
+                self.weight_quant_key = create_fp8_quant_key(
+                    static=True,
+                    group_shape=GroupShape(*self.weight_block_size),
+                    scale_dtype=(
+                        torch.float8_e8m0fnu if self.is_scale_e8m0 else torch.float32
+                    ),
+                )
         else:
             self.weight_quant_key = kFp8StaticTensorSym
             # Use per-token quantization for better perf if dynamic and cutlass

@@ -198,6 +198,18 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "XPUFp8BlockScaledMM only support on XPU"
         return True, None
 
+    @classmethod
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        if config.weight_quant_key.scale.dtype == torch.float8_e8m0fnu:
+            return False, "does not support float8_e8m0fnu weight scales."
+        return True, None
+
     def process_weights_after_loading(self, layer: torch.nn.Module):
         super().process_weights_after_loading(layer)
         scale_attr = (
