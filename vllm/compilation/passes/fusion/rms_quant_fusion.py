@@ -678,6 +678,7 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     def uuid(self) -> str:
         return self.hash_source(
             self,
+            MatcherQuantFP8,
             RMSNormGroupQuantPattern,
             RMSNormQuantPattern,
             RMSNormStaticQuantPattern,
