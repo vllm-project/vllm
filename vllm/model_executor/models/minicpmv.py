@@ -88,6 +88,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
     ResolvedPromptUpdate,
+    cached_encode,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -1066,7 +1067,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             image_size = images.get_image_size(item_idx)
 
             return PromptUpdateDetails.select_token_ids(
-                tokenizer.encode(
+                cached_encode(
+                    tokenizer,
                     self.get_image_prompt_texts(image_size, item_idx),
                     add_special_tokens=False,
                 ),
@@ -1082,7 +1084,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             num_frames = videos.get_num_frames(item_idx)
 
             return PromptUpdateDetails.select_token_ids(
-                tokenizer.encode(
+                cached_encode(
+                    tokenizer,
                     self.get_video_prompt_texts(frame_size, num_frames),
                     add_special_tokens=False,
                 ),
@@ -1097,7 +1100,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         return [
             PromptReplacement(
                 modality=modality,
-                target=tokenizer.encode(pattern, add_special_tokens=False),
+                target=cached_encode(tokenizer, pattern, add_special_tokens=False),
                 replacement=get_replacement[modality],
             )
             for modality, pattern in placeholders
@@ -1135,7 +1138,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             embed_text = getattr(tokenizer, "image_token", "<unk>")
             new_update = new_update.with_content(
                 PromptUpdateDetails.select_token_ids(
-                    tokenizer.encode(
+                    cached_encode(
+                        tokenizer,
                         text.replace(
                             f"{im_start}{prev_item_idx}{im_end}",
                             f"{im_start}{new_item_idx}{im_end}",
@@ -1143,7 +1147,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                         ),
                         add_special_tokens=False,
                     ),
-                    tokenizer.encode(embed_text, add_special_tokens=False),
+                    cached_encode(tokenizer, embed_text, add_special_tokens=False),
                 )
             )
 

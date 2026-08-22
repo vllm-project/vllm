@@ -21,7 +21,7 @@ from transformers import (
 from transformers.processing_utils import ProcessorMixin
 
 from vllm.multimodal.image import convert_image_mode
-from vllm.multimodal.processing import PromptUpdateDetails
+from vllm.multimodal.processing import PromptUpdateDetails, cached_encode
 from vllm.tokenizers.hf import HfTokenizer
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -453,7 +453,7 @@ class InternVLProcessor(ProcessorMixin):
         repl_features = self.ctx_image_token * num_features
         repl_full = self.start_image_token + repl_features + self.end_image_token
 
-        full_ids = self.tokenizer.encode(repl_full, add_special_tokens=False)
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
 
         return PromptUpdateDetails.select_token_id(full_ids, self.ctx_image_token_id)
 
@@ -469,7 +469,7 @@ class InternVLProcessor(ProcessorMixin):
             [f"Frame{i + 1}: {repl_features_with_sep}" for i in range(num_patches)]
         )
 
-        full_ids = self.tokenizer.encode(repl_full, add_special_tokens=False)
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
         assert self.ctx_video_token_id is not None
 
         return PromptUpdateDetails.select_token_id(full_ids, self.ctx_video_token_id)

@@ -39,6 +39,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
@@ -327,7 +328,8 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
                 # `UltravoxProcessingInfo.get_hf_processor`, but it is not
                 # guaranteed to be a single vocab entry, so match the encoded
                 # placeholder text instead of `replacement_id`
-                target=tokenizer.encode(
+                target=cached_encode(
+                    tokenizer,
                     hf_processor.audio_token_replacement,  # type: ignore
                     add_special_tokens=False,
                 ),

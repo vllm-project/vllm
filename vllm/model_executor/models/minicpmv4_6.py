@@ -36,6 +36,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdateDetails,
     ResolvedPromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -348,7 +349,8 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             )
             image_size = images.get_image_size(item_idx)
             return PromptUpdateDetails.select_token_ids(
-                tokenizer.encode(
+                cached_encode(
+                    tokenizer,
                     self.get_image_prompt_texts(
                         image_size,
                         item_idx,
@@ -376,7 +378,8 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                         height=int(image_sizes[0, 1].item()),
                     )
                     return PromptUpdateDetails.select_token_ids(
-                        tokenizer.encode(
+                        cached_encode(
+                            tokenizer,
                             self.get_video_prompt_texts(
                                 frame_size,
                                 num_frames,
@@ -395,7 +398,8 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             frame_size = videos.get_frame_size(item_idx)
             num_frames = videos.get_num_frames(item_idx)
             return PromptUpdateDetails.select_token_ids(
-                tokenizer.encode(
+                cached_encode(
+                    tokenizer,
                     self.get_video_prompt_texts(
                         frame_size,
                         num_frames,
@@ -415,7 +419,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         return [
             PromptReplacement(
                 modality=modality,
-                target=tokenizer.encode(pattern, add_special_tokens=False),
+                target=cached_encode(tokenizer, pattern, add_special_tokens=False),
                 replacement=get_replacement[modality],
             )
             for modality, pattern in placeholders
@@ -440,7 +444,8 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
 
             new_update = new_update.with_content(
                 PromptUpdateDetails.select_token_ids(
-                    tokenizer.encode(
+                    cached_encode(
+                        tokenizer,
                         text.replace(
                             f"{id_start}{prev_item_idx}{id_end}",
                             f"{id_start}{new_item_idx}{id_end}",
@@ -448,7 +453,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                         ),
                         add_special_tokens=False,
                     ),
-                    tokenizer.encode(video_token, add_special_tokens=False),
+                    cached_encode(tokenizer, video_token, add_special_tokens=False),
                 )
             )
         return new_update

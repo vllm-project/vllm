@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_video_processor_from_config
@@ -355,11 +356,9 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = hf_processor.tokenizer
-        video_token_id = tokenizer.encode(
-            hf_processor.video_token, add_special_tokens=False
-        )
-        assert len(video_token_id) == 1
-        video_token_id = video_token_id[0]
+        vocab = tokenizer.get_vocab()
+
+        video_token_id = vocab[hf_processor.video_token]
 
         prompt_text = re.sub(
             hf_processor.image_token, "<image_placeholder>", prompt_text
@@ -475,7 +474,7 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
         video_token = hf_processor.video_token
 
         tokenizer = self.info.get_tokenizer()
-        video_token_id = tokenizer.encode(video_token, add_special_tokens=False)
+        video_token_id = cached_encode(tokenizer, video_token, add_special_tokens=False)
         assert len(video_token_id) == 1
         video_token_id = video_token_id[0]
 
@@ -507,7 +506,9 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
 
             repl_features = img_context_token * feature_size
             repl_full = start_image_token + repl_features + end_image_token
-            repl_full_ids = tokenizer.encode(repl_full, add_special_tokens=False)
+            repl_full_ids = cached_encode(
+                tokenizer, repl_full, add_special_tokens=False
+            )
             return PromptUpdateDetails.select_token_id(
                 repl_full_ids, img_context_token_id
             )
@@ -521,7 +522,9 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
                 [f"Frame{i + 1}: {repl_features_with_sep}" for i in range(num_patches)]
             )
 
-            repl_full_ids = tokenizer.encode(repl_full, add_special_tokens=False)
+            repl_full_ids = cached_encode(
+                tokenizer, repl_full, add_special_tokens=False
+            )
             return PromptUpdateDetails.select_token_id(repl_full_ids, video_token_id)
 
         return [

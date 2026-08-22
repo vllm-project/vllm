@@ -54,6 +54,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
     ResolvedPromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -439,7 +440,8 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         tokenizer = self.info.get_tokenizer()
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
         image_token_ids = [
-            tokenizer.encode(tok, add_special_tokens=False) for tok in image_tokens
+            cached_encode(tokenizer, tok, add_special_tokens=False)
+            for tok in image_tokens
         ]
 
         def get_replacement_phi3v(item_idx: int):
@@ -482,7 +484,9 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             tokenizer = self.info.get_tokenizer()
             image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
             new_update = new_update.with_target(
-                tokenizer.encode(image_tokens[new_item_idx], add_special_tokens=False)
+                cached_encode(
+                    tokenizer, image_tokens[new_item_idx], add_special_tokens=False
+                )
             )
 
         return new_update

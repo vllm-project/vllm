@@ -61,6 +61,7 @@ from vllm.multimodal.processing import (
     PromptInsertion,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -1264,7 +1265,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             PromptInsertion(
                 modality="image",
                 target=PromptIndexTargets.prefix(
-                    tokenizer.encode("<|endoftext|>", add_special_tokens=False),
+                    cached_encode(tokenizer, "<|endoftext|>", add_special_tokens=False),
                 ),
                 insertion=get_insertion_molmo,
             )

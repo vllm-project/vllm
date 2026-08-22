@@ -43,6 +43,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.internvl import (
@@ -300,7 +301,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return PromptReplacement(
             modality="image",
-            target=tokenizer.encode("<image>", add_special_tokens=False),
+            target=cached_encode(tokenizer, "<image>", add_special_tokens=False),
             replacement=get_replacement_internvl,
         )
 
@@ -518,7 +519,7 @@ class InternVLMultiModalProcessor(
 
         return PromptReplacement(
             modality="video",
-            target=tokenizer.encode("<video>", add_special_tokens=False),
+            target=cached_encode(tokenizer, "<video>", add_special_tokens=False),
             replacement=get_video_replacement_internvl,
         )
 

@@ -56,6 +56,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
     TimingContext,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -704,7 +705,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
 
         def get_target_token_ids(token: str | int | Sequence[int]) -> list[int]:
             if isinstance(token, str):
-                return tokenizer.encode(token, add_special_tokens=False)
+                return cached_encode(tokenizer, token, add_special_tokens=False)
             if isinstance(token, int):
                 return [token]
             return list(token)

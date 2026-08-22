@@ -94,6 +94,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import get_processor_cls_name_from_config
@@ -1724,8 +1725,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=tokenizer.encode(
-                    hf_processor.image_token, add_special_tokens=False
+                target=cached_encode(
+                    tokenizer, hf_processor.image_token, add_special_tokens=False
                 ),
                 replacement=get_image_replacement,
             ),

@@ -33,6 +33,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -554,7 +555,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         return [
             PromptReplacement(
                 modality="image",
-                target=tokenizer.encode("<image>", add_special_tokens=False),
+                target=cached_encode(tokenizer, "<image>", add_special_tokens=False),
                 replacement=get_replacement,
             ),
         ]

@@ -49,6 +49,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -330,7 +331,9 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
                 mm_kwargs=hf_processor_mm_kwargs,
             )
 
-            image_repl_ids = tokenizer.encode(image_repl, add_special_tokens=False)
+            image_repl_ids = cached_encode(
+                tokenizer, image_repl, add_special_tokens=False
+            )
             return PromptUpdateDetails.select_token_id(
                 image_repl_ids,
                 image_token_id,

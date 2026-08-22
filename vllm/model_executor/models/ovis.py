@@ -52,6 +52,7 @@ from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
+    cached_encode,
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
@@ -395,7 +396,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=tokenizer.encode(IMAGE_TOKEN, add_special_tokens=False),
+                target=cached_encode(tokenizer, IMAGE_TOKEN, add_special_tokens=False),
                 replacement=get_replacement_ovis,
             ),
         ]

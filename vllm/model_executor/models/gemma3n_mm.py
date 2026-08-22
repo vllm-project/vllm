@@ -51,6 +51,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
     replace_token_matches,
 )
 from vllm.sequence import IntermediateTensors
@@ -190,8 +191,8 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         For Gemma3n, this should return the full_image_sequence which includes
         BOI token, repeated image tokens, and EOI token.
         """
-        full_token_ids = processor.tokenizer.encode(
-            processor.full_image_sequence, add_special_tokens=False
+        full_token_ids = cached_encode(
+            processor.tokenizer, processor.full_image_sequence, add_special_tokens=False
         )
         return PromptUpdateDetails.select_token_id(
             full_token_ids, processor.image_token_id
@@ -209,8 +210,8 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         BOA token, repeated audio tokens, and EOA token.
         """
         # Return the full audio sequence as defined by the processor
-        full_token_ids = processor.tokenizer.encode(
-            processor.full_audio_sequence, add_special_tokens=False
+        full_token_ids = cached_encode(
+            processor.tokenizer, processor.full_audio_sequence, add_special_tokens=False
         )
         return PromptUpdateDetails.select_token_id(
             full_token_ids, processor.audio_token_id

@@ -25,6 +25,7 @@ from vllm.multimodal.processing.processor import (
     ProcessorInputs,
     PromptReplacement,
     TimingContext,
+    cached_encode,
 )
 from vllm.transformers_utils.processors.h2ovl import H2OVLImageProcessor, H2OVLProcessor
 
@@ -129,7 +130,7 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
 
         return PromptReplacement(
             modality="image",
-            target=tokenizer.encode("<image>", add_special_tokens=False),
+            target=cached_encode(tokenizer, "<image>", add_special_tokens=False),
             replacement=get_replacement_internvl,
         )
 

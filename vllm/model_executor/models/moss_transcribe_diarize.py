@@ -64,6 +64,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.multimodal.processing.processor import ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -546,7 +547,9 @@ class MossTranscribeDiarizeMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=tokenizer.encode(AUDIO_PLACEHOLDER, add_special_tokens=False),
+                target=cached_encode(
+                    tokenizer, AUDIO_PLACEHOLDER, add_special_tokens=False
+                ),
                 replacement=get_replacement,
             ),
         ]

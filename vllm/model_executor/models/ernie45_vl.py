@@ -69,6 +69,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -1223,16 +1224,16 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
                 )
             else:
                 num_tokens = int(grid_thw.prod()) // merge_length
-            placeholder_ids = tokenizer.encode(
-                after_placeholder[modality], add_special_tokens=False
+            placeholder_ids = cached_encode(
+                tokenizer, after_placeholder[modality], add_special_tokens=False
             )
             return placeholder_ids * num_tokens
 
         return [
             PromptReplacement(
                 modality=modality,
-                target=tokenizer.encode(
-                    before_placeholder[modality], add_special_tokens=False
+                target=cached_encode(
+                    tokenizer, before_placeholder[modality], add_special_tokens=False
                 ),
                 replacement=partial(get_replacement_ernie45vl, modality=modality),
             )

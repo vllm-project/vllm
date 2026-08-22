@@ -70,6 +70,7 @@ from vllm.multimodal.processing.processor import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.multimodal.video_prune.evs import (
     compute_retained_tokens_count,
@@ -551,7 +552,7 @@ class NanoNemotronVLMultiModalProcessor(
 
         return PromptReplacement(
             modality="video",
-            target=tokenizer.encode("<video>", add_special_tokens=False),
+            target=cached_encode(tokenizer, "<video>", add_special_tokens=False),
             replacement=get_video_replacement,
         )
 
@@ -569,7 +570,7 @@ class NanoNemotronVLMultiModalProcessor(
 
         return PromptReplacement(
             modality="audio",
-            target=tokenizer.encode(AUDIO_CONTEXT, add_special_tokens=False),
+            target=cached_encode(tokenizer, AUDIO_CONTEXT, add_special_tokens=False),
             replacement=get_audio_replacement,
         )
 

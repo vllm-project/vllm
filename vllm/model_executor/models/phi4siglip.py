@@ -34,6 +34,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -209,7 +210,9 @@ class Phi4SiglipMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="image",
-                target=tokenizer.encode(DEFAULT_IMAGE_TOKEN, add_special_tokens=False),
+                target=cached_encode(
+                    tokenizer, DEFAULT_IMAGE_TOKEN, add_special_tokens=False
+                ),
                 replacement=get_replacement,
             ),
         ]

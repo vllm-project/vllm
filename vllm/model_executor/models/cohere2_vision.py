@@ -40,6 +40,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -297,7 +298,7 @@ class Cohere2VisionMultiModalProcessor(
             patch_tokens = image_token * img_tokens_per_tile + img_line_break_token
             repl = f"{boi_token}{patch_tokens * num_patches}{eoi_token}"
 
-            repl_ids = tokenizer.encode(repl, add_special_tokens=False)
+            repl_ids = cached_encode(tokenizer, repl, add_special_tokens=False)
             return PromptUpdateDetails.select_token_id(repl_ids, image_token_id)
 
         return [

@@ -42,6 +42,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
@@ -464,7 +465,9 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
                 processor=hf_processor,
                 mm_kwargs=hf_processor_mm_kwargs,
             )
-            image_repl_ids = tokenizer.encode(image_repl, add_special_tokens=False)
+            image_repl_ids = cached_encode(
+                tokenizer, image_repl, add_special_tokens=False
+            )
             return PromptUpdateDetails.select_token_id(
                 image_repl_ids,
                 image_token_id,

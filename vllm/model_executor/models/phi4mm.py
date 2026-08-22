@@ -47,6 +47,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
     ResolvedPromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -938,10 +939,12 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
         image_token_ids = [
-            tokenizer.encode(tok, add_special_tokens=False) for tok in image_tokens
+            cached_encode(tokenizer, tok, add_special_tokens=False)
+            for tok in image_tokens
         ]
         audio_token_ids = [
-            tokenizer.encode(tok, add_special_tokens=False) for tok in audio_tokens
+            cached_encode(tokenizer, tok, add_special_tokens=False)
+            for tok in audio_tokens
         ]
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
@@ -1002,12 +1005,16 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         if cached_update.modality == "image":
             image_tokens: list[str] = self.info.image_tokens  # type: ignore
             new_update = new_update.with_target(
-                tokenizer.encode(image_tokens[new_item_idx], add_special_tokens=False)
+                cached_encode(
+                    tokenizer, image_tokens[new_item_idx], add_special_tokens=False
+                )
             )
         elif cached_update.modality == "audio":
             audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
             new_update = new_update.with_target(
-                tokenizer.encode(audio_tokens[new_item_idx], add_special_tokens=False)
+                cached_encode(
+                    tokenizer, audio_tokens[new_item_idx], add_special_tokens=False
+                )
             )
 
         return new_update

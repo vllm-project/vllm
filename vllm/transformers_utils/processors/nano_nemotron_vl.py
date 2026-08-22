@@ -24,7 +24,7 @@ from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.model_executor.models.parakeet import ParakeetExtractor
 from vllm.multimodal.inputs import AudioItem
-from vllm.multimodal.processing.processor import PromptUpdateDetails
+from vllm.multimodal.processing.processor import PromptUpdateDetails, cached_encode
 from vllm.multimodal.video_prune.evs import compute_retained_tokens_count
 from vllm.platforms import current_platform
 from vllm.tokenizers.hf import HfTokenizer
@@ -1091,7 +1091,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
 
-        full_ids = self.tokenizer.encode(repl_full, add_special_tokens=False)
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
 
         return PromptUpdateDetails.select_token_ids(
             full_ids, self._img_context_token_ids
@@ -1105,8 +1105,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         num_tokens = self.audio_extractor.audio_token_count(len(audio))
         repl_full = f"{AUDIO_START}{AUDIO_CONTEXT * num_tokens}{AUDIO_END}"
 
-        full_ids = self.tokenizer.encode(repl_full, add_special_tokens=False)
-        ctx_token_ids = self.tokenizer.encode(AUDIO_CONTEXT, add_special_tokens=False)
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
+        ctx_token_ids = cached_encode(
+            self.tokenizer, AUDIO_CONTEXT, add_special_tokens=False
+        )
 
         return PromptUpdateDetails.select_token_ids(full_ids, ctx_token_ids)
 

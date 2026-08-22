@@ -54,6 +54,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -451,8 +452,8 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
     ) -> Sequence[PromptUpdate]:
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
-        image_pad_token_ids = tokenizer.encode(
-            "<|image_pad|>", add_special_tokens=False
+        image_pad_token_ids = cached_encode(
+            tokenizer, "<|image_pad|>", add_special_tokens=False
         )
 
         pixel_shuffle_scale = getattr(image_processor, "pixel_shuffle_scale", 2)
@@ -470,7 +471,7 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
         return [
             PromptReplacement(
                 modality="image",
-                target=tokenizer.encode("<image>", add_special_tokens=False),
+                target=cached_encode(tokenizer, "<image>", add_special_tokens=False),
                 replacement=get_replacement_isaac,
             )
         ]

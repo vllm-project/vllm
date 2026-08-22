@@ -32,6 +32,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
     replace_token_matches,
 )
 from vllm.sequence import IntermediateTensors
@@ -189,7 +190,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         tokenizer = processor.tokenizer
         vocab = tokenizer.get_vocab()
         image_token_id = vocab[tokenizer.image_token]
-        repl_full_ids = tokenizer.encode(repl_full, add_special_tokens=False)
+        repl_full_ids = cached_encode(tokenizer, repl_full, add_special_tokens=False)
 
         return PromptUpdateDetails.select_token_id(repl_full_ids, image_token_id)
 

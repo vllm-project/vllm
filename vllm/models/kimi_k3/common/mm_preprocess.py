@@ -25,6 +25,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.processor import cached_get_image_processor
@@ -298,14 +299,16 @@ class KimiK3MultiModalProcessor(BaseMultiModalProcessor[KimiK3ProcessingInfo]):
             )
 
             return PromptUpdateDetails.select_token_id(
-                tokenizer.encode(full, add_special_tokens=False),
+                cached_encode(tokenizer, full, add_special_tokens=False),
                 media_token_id,
             )
 
         return [
             PromptReplacement(
                 modality="image",
-                target=tokenizer.encode(image_placeholder, add_special_tokens=False),
+                target=cached_encode(
+                    tokenizer, image_placeholder, add_special_tokens=False
+                ),
                 replacement=get_replacement,
             ),
         ]

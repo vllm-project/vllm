@@ -70,6 +70,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -669,8 +670,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
         img_patch_token = hf_processor.img_patch_token
 
         tokenizer = self.info.get_tokenizer()
-        img_patch_token_ids = tokenizer.encode(
-            img_patch_token, add_special_tokens=False
+        img_patch_token_ids = cached_encode(
+            tokenizer, img_patch_token, add_special_tokens=False
         )
 
         def get_replacement(item_idx: int):
@@ -682,7 +683,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                 num_patches_per_chunk=num_patches_per_chunk,
             )
 
-            repl_ids = tokenizer.encode(repl, add_special_tokens=False)
+            repl_ids = cached_encode(tokenizer, repl, add_special_tokens=False)
             return PromptUpdateDetails.select_token_ids(repl_ids, img_patch_token_ids)
 
         return [

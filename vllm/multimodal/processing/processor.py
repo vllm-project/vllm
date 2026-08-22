@@ -5,6 +5,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -50,6 +51,17 @@ else:
     BaseMultiModalProcessorCache = object
 
 logger = init_logger(__name__)
+
+
+@lru_cache(maxsize=2048)
+def cached_encode(
+    tokenizer: TokenizerLike,
+    text: str,
+    *,
+    add_special_tokens: bool = True,
+) -> list[int]:
+    """Encode text while caching repeated tokenizer calls."""
+    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
 
 
 class _GetMatchIndex(Protocol):
@@ -1549,11 +1561,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             # let BPE merge tokens across a segment boundary, silently
             # changing how a non-special-token placeholder is tokenized.
             new_token_ids = flatten_2d_lists(
-                [tokenizer.encode(text, add_special_tokens=False) for text in out_texts]
+                [
+                    cached_encode(tokenizer, text, add_special_tokens=False)
+                    for text in out_texts
+                ]
             )
         else:
-            new_token_ids = tokenizer.encode(
-                "".join(out_texts), add_special_tokens=False
+            new_token_ids = cached_encode(
+                tokenizer, "".join(out_texts), add_special_tokens=False
             )
 
         return new_token_ids, result

@@ -26,6 +26,7 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.transformers_utils.processors.internvl import InternVLImageProcessor
 from vllm.transformers_utils.processors.nvlm_d import NVLMProcessor
@@ -142,7 +143,7 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
 
             # `repl.full` ends in the special `</Image>` token, so there is
             # no BPE merge across the boundary with the newline
-            newline_ids = tokenizer.encode("\n", add_special_tokens=False)
+            newline_ids = cached_encode(tokenizer, "\n", add_special_tokens=False)
 
             return PromptUpdateDetails.select_token_id(
                 repl.full + newline_ids, hf_processor.ctx_image_token_id
@@ -151,7 +152,7 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
         # See note in dummy data regarding why we have the extra newline
         return PromptReplacement(
             modality="image",
-            target=tokenizer.encode("<image>\n", add_special_tokens=False),
+            target=cached_encode(tokenizer, "<image>\n", add_special_tokens=False),
             replacement=get_replacement_nvlm,
         )
 
