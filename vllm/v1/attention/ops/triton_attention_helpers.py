@@ -157,6 +157,7 @@ def compute_tile_loop_bounds(
     USE_PER_SEQ_CAUSAL: tl.constexpr = False,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    USE_TD: tl.constexpr = False,
 ):
     """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
     derived ``max_seq_prefix_len`` used for per-tile masking.
@@ -173,6 +174,14 @@ def compute_tile_loop_bounds(
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
        segment's slice via ``(segm_idx * tiles_per_segment,
        (segm_idx + 1) * tiles_per_segment)``.
+
+    Returns:
+        A tuple ``(loop_lo, loop_hi, max_seq_prefix_len, tile_base)``.
+        ``tile_base`` is the per-slot offset added on top of
+        ``j * TILE_SIZE`` so the sliding-window/chunked loop starts exactly
+        at ``first_allowed_key`` instead of its tile floor (issue #44575).
+        It is non-zero only for the 2D-pointer SWA/chunked path; the USE_TD
+        and 3D-segmented paths index in absolute tile units and keep it 0.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -198,6 +207,7 @@ def compute_tile_loop_bounds(
     # Default: keep previous global behavior
     tile_start = 0
     tile_end = num_tiles
+    tile_base = 0
     # TODO(Isotr0py): sliding window pruning with image bidirectional mask
     if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
         # Query rows covered by this Q-block
@@ -227,6 +237,15 @@ def compute_tile_loop_bounds(
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
+        # Issue #44575: start exactly at first_allowed_key (not its tile
+        # floor) so a window of W keys spans ceil(W / TILE_SIZE) tiles, not
+        # ceil((r + W) / TILE_SIZE) where r = first_allowed_key % TILE_SIZE.
+        # Only the 2D-pointer path (per-slot block index) can absorb a
+        # non-tile-aligned base; USE_TD and IS_3D index in absolute tile
+        # units, so they keep tile_base = 0. tile_end (from last_allowed_key)
+        # is unchanged, so the iteration count never grows.
+        if not USE_TD and not IS_3D:
+            tile_base = tl.maximum(0, first_allowed_key) - tile_start * TILE_SIZE
 
     if IS_3D:
         loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
@@ -235,7 +254,7 @@ def compute_tile_loop_bounds(
         loop_lo = tile_start
         loop_hi = tile_end
 
-    return loop_lo, loop_hi, max_seq_prefix_len
+    return loop_lo, loop_hi, max_seq_prefix_len, tile_base
 
 
 @triton.jit
