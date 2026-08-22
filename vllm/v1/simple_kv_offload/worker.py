@@ -11,7 +11,12 @@ from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
-from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
+from vllm.v1.simple_kv_offload.disk_backend import (
+    _DEFAULT_DIRECT_IO_ALIGNMENT,
+    DiskBackend,
+    get_num_disk_slots,
+    get_padded_slot_size,
+)
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
@@ -36,6 +41,7 @@ class SimpleCPUOffloadWorker:
         disk_capacity_bytes: int = 0,
         disk_buffer_slots: int = 2,
         use_page_cache: bool = False,
+        direct_io_alignment: int = _DEFAULT_DIRECT_IO_ALIGNMENT,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -44,6 +50,7 @@ class SimpleCPUOffloadWorker:
         self.disk_capacity_bytes = disk_capacity_bytes
         self.disk_buffer_slots = disk_buffer_slots
         self.use_page_cache = use_page_cache
+        self.direct_io_alignment = direct_io_alignment
         self.disk_mode = kv_offload_backend == "disk"
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -174,14 +181,24 @@ class SimpleCPUOffloadWorker:
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
-        num_disk_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
+        padded_block_bytes = get_padded_slot_size(
+            total_bytes_per_block,
+            self.direct_io_alignment,
+            self.use_page_cache,
+        )
+        num_disk_slots = get_num_disk_slots(
+            self.disk_capacity_bytes,
+            total_bytes_per_block,
+            self.direct_io_alignment,
+            self.use_page_cache,
+        )
         self.num_cpu_blocks = num_disk_slots
 
         logger.info(
             "SimpleCPUOffloadWorker [DISK]: %d tensors, %d disk slots (%.2f GB)",
             len(unique_gpu_caches),
             num_disk_slots,
-            (num_disk_slots * total_bytes_per_block) / (1024**3),
+            (num_disk_slots * padded_block_bytes) / (1024**3),
         )
 
         assert self.disk_path is not None
@@ -194,9 +211,9 @@ class SimpleCPUOffloadWorker:
             self.store_stream,
             rank_path,
             num_disk_slots,
-            total_bytes_per_block,
             self.disk_buffer_slots,
             self.use_page_cache,
+            self.direct_io_alignment,
         )
 
     def _init_cpu_mode(

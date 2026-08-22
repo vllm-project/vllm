@@ -9,6 +9,7 @@ read partially written / stale blocks and silently corrupt the CPU cache.
 
 from __future__ import annotations
 
+import ctypes
 import time
 
 import pytest
@@ -19,11 +20,13 @@ from vllm.platforms import current_platform
 if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
+import vllm.v1.simple_kv_offload.cuda_mem_ops as cuda_mem_ops
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
     build_params,
+    copy_blocks,
     pin_tensor,
 )
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
@@ -188,3 +191,38 @@ def test_build_params_src_access_order():
         gpu, cpu, stream, src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_STREAM
     )
     assert ordered.attrs.srcAccessOrder == CU_MEMCPY_SRC_ACCESS_ORDER_STREAM
+
+
+def test_build_params_requires_explicit_copy_size_for_strided_rows():
+    """Strided disk views must provide payload sizes; normal copies must match."""
+    gpu = {"k": torch.zeros((4, 64), dtype=torch.int8, device="cuda")}
+    flat = torch.zeros((4, 128), dtype=torch.int8, device="cpu")
+    strided = {"k": flat[:, :64]}
+    stream = torch.cuda.Stream()
+
+    with pytest.raises(AssertionError, match="row strides must match"):
+        build_params(gpu, strided, stream)
+
+    params = build_params(gpu, strided, stream, copy_sizes=[64])
+    assert params.src_strides.tolist() == [64]
+    assert params.dst_strides.tolist() == [128]
+    assert params.copy_sizes.tolist() == [64]
+
+
+def test_copy_blocks_uses_explicit_payload_size(monkeypatch):
+    """Padded row strides must not change the payload copied by DMA."""
+    gpu = {"k": torch.zeros((4, 64), dtype=torch.int8, device="cuda")}
+    flat = torch.zeros((4, 128), dtype=torch.int8, device="cpu")
+    stream = torch.cuda.Stream()
+    params = build_params(gpu, {"k": flat[:, :64]}, stream, copy_sizes=[64])
+    copied_sizes = []
+
+    def record_copy(_dst, _src, sizes, count, *_args):
+        copied_sizes.extend((ctypes.c_uint64 * count).from_address(sizes))
+        return 0
+
+    monkeypatch.setattr(cuda_mem_ops, "_batch_memcpy_fn", record_copy)
+
+    copy_blocks([0, 1], [2, 3], params)
+
+    assert copied_sizes == [64, 64]
