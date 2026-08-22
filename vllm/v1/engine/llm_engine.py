@@ -227,6 +227,7 @@ class LLMEngine:
         priority: int = 0,
         session_id: str | None = None,
         prompt_text: str | None = None,
+        operation_name: str | None = None,
     ) -> str:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -259,8 +260,12 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 priority=priority,
                 session_id=session_id,
+                operation_name=operation_name,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
+
+        if operation_name is not None:
+            request.operation_name = operation_name
 
         self.input_processor.assign_request_id(request)
 

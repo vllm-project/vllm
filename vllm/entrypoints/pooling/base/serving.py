@@ -175,6 +175,7 @@ class PoolingBaseServing(ABC, BaseServing):
                 lora_request=engine_input["lora_requests"],
                 priority=engine_input["priorities"],
                 trace_headers=trace_headers,
+                operation_name=getattr(self, "gen_ai_operation_name", None),
             )
 
             generators.append(generator)
