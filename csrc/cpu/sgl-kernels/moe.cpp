@@ -5,6 +5,8 @@
 
 #include "moe.h"
 
+#include "cpu/moe_numa_parallel.hpp"
+
 #include "common.h"
 #include "gemm.h"
 
@@ -443,7 +445,7 @@ void fused_experts_kernel_impl(
   const bool use_brgemm = can_use_brgemm<scalar_t>(avg_M);
 
   // here we only parallel on half of 2N to fuse silu_and_mul with gemm
-  parallel_2d(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+  parallel_2d_numa_or_plain(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
     // get local pointers
     int tid = get_thread_num();
     scalar_t* __restrict__ A = A_tmp + tid * BLOCK_M * K;
@@ -574,7 +576,7 @@ void fused_experts_kernel_impl(
   const int64_t stride_oc = IC;
 
   // parallel on [MB2, NB2]
-  parallel_2d(MB2, NB2, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+  parallel_2d_numa_or_plain(MB2, NB2, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
     // get local pointers
     int tid = get_thread_num();
     // we won't be using C1 for gemm2
@@ -677,7 +679,7 @@ void shared_expert_kernel_impl(
   const bool apply_scaling_factor = fused_experts_out != nullptr;
 
   // here we only parallel on half of 2N to fuse silu_and_mul with gemm
-  parallel_2d(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+  parallel_2d_numa_or_plain(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
     // get local pointers
     int tid = get_thread_num();
     float* __restrict__ C0 = C_tmp + tid * 2 * BLOCK_M * BLOCK_N;
@@ -757,7 +759,7 @@ void shared_expert_kernel_impl(
   const int64_t stride_oc = IC;
 
   // parallel on [MB2, NB2]
-  parallel_2d(MB2, NB2, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+  parallel_2d_numa_or_plain(MB2, NB2, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
     // get local pointers
     int tid = get_thread_num();
     // we won't be using C1 for gemm2
