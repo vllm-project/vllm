@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import torch
 from torch import nn
@@ -34,9 +34,6 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
-
-if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.eager_scratch import DeepseekV4EagerScratchPool
 
 
 def _prefer_two_stage_compressor() -> bool:
@@ -77,25 +74,6 @@ class CompressorBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["CompressorMetadataBuilder"]:
         return CompressorMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        assert num_kv_heads == 1
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
 
 
 @dataclass
@@ -188,6 +166,10 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         else:
             raise ValueError(f"Invalid compress ratio: {compress_ratio}")
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # fp8_ds_mla is the UE8M0 paged layout and needs 576B alignment. Plain
         # full-cache rows share state pages with contiguous KV pages, so padding
@@ -229,7 +211,6 @@ class DeepseekCompressor(nn.Module):
         prefix: str = "",
         k_cache_prefix="",
         use_fp4_cache: bool = False,
-        eager_scratch_pool: "DeepseekV4EagerScratchPool | None" = None,
     ):
         super().__init__()
         self.compress_ratio = compress_ratio
@@ -239,7 +220,6 @@ class DeepseekCompressor(nn.Module):
         self.prefix = prefix
         self.k_cache_prefix = k_cache_prefix
         self.use_fp4_cache = use_fp4_cache
-        self.eager_scratch_pool = eager_scratch_pool
 
         config = vllm_config.model_config.hf_config
         self.rope_head_dim = config.qk_rope_head_dim
@@ -433,10 +413,6 @@ class DeepseekCompressor(nn.Module):
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
             )
-            if not self.overlap and self.eager_scratch_pool is not None:
-                extra_kwargs["compress_scratch"] = (
-                    self.eager_scratch_pool.compressor_scratch(num_actual)
-                )
         elif self._use_two_stage_fused_compressor:
             # head=512 cr>=128 (no overlap): two-pass split compressor on the
             # prefill suffix, single-pass on the decode prefix.

@@ -19,7 +19,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
-    get_current_attn_backend,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -56,10 +55,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -83,36 +80,6 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
 
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        if any(
-            [
-                isinstance(group.kv_cache_spec, MambaSpec)
-                for group in self.kv_cache_config.kv_cache_groups
-            ]
-        ):
-            # Hybrid SSM models do not yet support cross-layer layout
-            return False
-
-        backend = get_current_attn_backend(self._vllm_config)
-        if backend.get_name() not in (
-            "FLASH_ATTN",
-            "FLASHINFER",
-            "TRITON_ATTN",
-        ):
-            return False
-
-        # For now there is no benefit to run cross layers when backend
-        # does not support on HND
-        if get_kv_cache_layout() != "HND":
-            return False
-
-        extra_config = self.kv_transfer_config.kv_connector_extra_config
-        return (
-            str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
-            == "true"
-        )
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -129,6 +96,29 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
                 "and will be removed in a future release. Please set "
                 "kv_role='kv_producer' for prefill instances and "
                 "kv_role='kv_consumer' for decode instances. "
+            )
+
+        parallel_config = vllm_config.parallel_config
+        pcp_size = parallel_config.prefill_context_parallel_size
+        kv_role = vllm_config.kv_transfer_config.kv_role
+        if pcp_size > 1 and kv_role in ("kv_consumer", "kv_both"):
+            raise NotImplementedError(
+                "NixlConnector PCP currently supports kv_producer only. "
+                "Consumers and kv_both require "
+                "prefill_context_parallel_size=1."
+            )
+        if pcp_size > 1 and parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError(
+                "NixlConnector PCP producers currently require "
+                "decode_context_parallel_size=1."
+            )
+        # TODO: Support PCP with bidirectional KV transfer by tracking separate
+        # send and receive completion counts.
+        if pcp_size > 1 and vllm_config.kv_transfer_config.get_from_extra_config(
+            "bidirectional_kv_xfer", False
+        ):
+            raise NotImplementedError(
+                "NixlConnector PCP producers do not support bidirectional KV transfer."
             )
 
         self.kv_cache_config = kv_cache_config
@@ -156,13 +146,26 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             # which fallback to the default behavior.
             return None
         logger.info_once(
-            "NixlConnector setting KV cache layout to HND for better xfer performance."
+            "NixlConnector setting KV cache layout to LBHNC for "
+            "better xfer performance."
         )
-        return "HND"
+        return "LBHNC"
 
     ############################################################
     # Scheduler Side Methods
     ############################################################
+
+    def get_finished_count(self) -> int | None:
+        parallel_config = self._vllm_config.parallel_config
+        if (
+            self.kv_transfer_config.kv_role == "kv_producer"
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
+            return (
+                parallel_config.tensor_parallel_size
+                * parallel_config.pipeline_parallel_size
+            )
+        return None
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -231,12 +234,6 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
-    ):
-        assert self.connector_worker is not None
-        self.connector_worker.register_cross_layers_kv_caches(kv_cache)
-
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         assert self.connector_worker is not None
         self.connector_worker.set_host_xfer_buffer_ops(copy_operation)
@@ -244,7 +241,13 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_finished()
+        done_sending, done_recving = self.connector_worker.get_finished()
+        if (
+            self.kv_transfer_config.kv_role == "kv_producer"
+            and self.connector_worker.pcp_rank > 0
+        ):
+            done_sending.clear()
+        return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""
@@ -320,6 +323,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             None if no handshake metadata is available.
         """
         assert self.connector_worker is not None
+        if (
+            self.kv_transfer_config.kv_role == "kv_producer"
+            and self.connector_worker.pcp_rank > 0
+        ):
+            return None
         return self.connector_worker.xfer_handshake_metadata
 
 

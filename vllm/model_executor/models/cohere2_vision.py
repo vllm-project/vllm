@@ -222,26 +222,23 @@ class Cohere2VisionDummyInputsBuilder(
 class Cohere2VisionMultiModalProcessor(
     BaseMultiModalProcessor[Cohere2VisionProcessingInfo]
 ):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
-        )
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        # Ensure num_patches is available for proper tensor splitting
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not mm_data:
+            return processed_data
+
         if (
-            "num_patches" not in processed_outputs
+            "num_patches" not in processed_data
             and (images := mm_data.get("images")) is not None
         ):
-            hf_processor = self.info.get_hf_processor(**mm_kwargs)
+            hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
             # Fallback calculation if HF processor didn't provide num_patches
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
@@ -252,13 +249,13 @@ class Cohere2VisionMultiModalProcessor(
                     image_width=parsed_images.get_image_size(i).width,
                     image_height=parsed_images.get_image_size(i).height,
                     processor=hf_processor,
-                    mm_kwargs=mm_kwargs,
+                    mm_kwargs=hf_processor_mm_kwargs,
                 )
                 for i in range(len(parsed_images))
             ]
-            processed_outputs["num_patches"] = torch.tensor(num_patches)
+            processed_data["num_patches"] = torch.tensor(num_patches)
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -268,7 +265,7 @@ class Cohere2VisionMultiModalProcessor(
         num_patches = hf_inputs.get("num_patches", torch.empty(0))
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            num_patches=MultiModalFieldConfig.batched("image"),
+            num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 

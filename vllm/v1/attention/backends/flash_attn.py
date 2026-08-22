@@ -34,8 +34,10 @@ from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
     get_dcp_local_seq_lens,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp import (
+    cp_lse_ag_out_rs,
+    dcp_a2a_lse_reduce,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -62,7 +64,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
@@ -85,58 +86,13 @@ class FlashAttentionBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def _get_sm90_fa4_fp8_kv_block_size(
-        vllm_config: VllmConfig | None = None,
-    ) -> int | None:
-        if vllm_config is None:
-            vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is None or vllm_config.model_config is None:
-            return None
-
-        head_size = vllm_config.model_config.get_head_size()
-        if (
-            current_platform.is_device_capability_family(90)
-            and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
-            and head_size == 512
-            and get_flash_attn_version(head_size=head_size) == 4
-        ):
-            # The SM90 FP8-KV-dequant kernel uses a 64-token TMA tile/page.
-            return 64
-        return None
-
-    @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        if block_size := cls._get_sm90_fa4_fp8_kv_block_size():
-            # Sliding-window cache specs select the smallest advertised size.
-            # Report the kernel's exact page-size contract instead of the
-            # generic FlashAttention multiple-of-16 capability.
-            return [block_size]
-        return [MultipleOf(16)]
-
-    @classmethod
-    def get_supported_kernel_block_sizes_for_config(
-        cls, vllm_config: VllmConfig
-    ) -> list[int | MultipleOf]:
-        if block_size := cls._get_sm90_fa4_fp8_kv_block_size(vllm_config):
-            return [block_size]
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
     forward_includes_kv_cache_update: bool = False
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
-        if block_size := cls._get_sm90_fa4_fp8_kv_block_size():
-            return max(default_block_size, block_size)
-        if current_platform.is_xpu():
-            return max(default_block_size, 64)
-        return super().get_preferred_block_size(default_block_size)
-
-    @classmethod
-    def get_preferred_block_size_for_config(
-        cls, default_block_size: int, vllm_config: VllmConfig
-    ) -> int:
-        if block_size := cls._get_sm90_fa4_fp8_kv_block_size(vllm_config):
-            return max(default_block_size, block_size)
         if current_platform.is_xpu():
             return max(default_block_size, 64)
         return super().get_preferred_block_size(default_block_size)
@@ -179,43 +135,6 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
         return FlashAttentionMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*D).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*D)) to the actual memory
-        # layout we want.
-        cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
-            return (1, 0, 3, 2, 4)
-        elif cache_layout == "NHD":
-            # (num_blocks, block_size, num_kv_heads, 2*head_size)
-            stride_order = (0, 2, 1, 3)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, block_size, 2*head_size)
-            return (1, 2, 0, 3, 4)
-        elif cache_layout == "HND":
-            # (num_blocks, num_kv_heads, block_size, 2*head_size)
-            stride_order = (0, 1, 2, 3)
-        else:
-            raise ValueError(f"Unknown cache layout format {cache_layout}.")
-        return stride_order
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
@@ -939,17 +858,7 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-        # FA4's SM90 FP8-KV path consumes native FP16/BF16 Q and dequantizes
-        # FP8 K/V in-kernel. Other FA4 paths (notably SM100) still require Q,
-        # K, and V to have the same FP8 dtype.
-        uses_sm90_fa4_fp8_kv_dequant = (
-            self.vllm_flash_attn_version == 4
-            and current_platform.is_device_capability_family(90)
-            and self.kv_cache_dtype in ("fp8", "fp8_e4m3")
-        )
-        self.supports_quant_query_input = flash_attn_supports_quant_query_input() and (
-            not uses_sm90_fa4_fp8_kv_dequant
-        )
+        self.supports_quant_query_input = flash_attn_supports_quant_query_input()
 
         vllm_config = get_current_vllm_config_or_none()
         dcp_a2a = (

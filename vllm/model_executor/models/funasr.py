@@ -44,9 +44,12 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
+from vllm.multimodal.processing.processor import MultiModalProcessingInfo
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.funasr import FunASRFeatureExtractor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -747,29 +750,50 @@ class FunASRDummyInputsBuilder(BaseDummyInputsBuilder[FunASRProcessingInfo]):
 
 
 class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+
+        mm_data = dict(mm_data)
+        mm_data["audio"] = mm_data.pop("audios")
+
+        hf_processor_mm_kwargs = dict(
+            **hf_processor_mm_kwargs,
+            sampling_rate=feature_extractor.sampling_rate,
         )
-        if "labels" in processed_outputs:
-            processed_outputs["input_ids"] = processed_outputs.pop("labels")
-        return processed_outputs
+
+        return mm_data, hf_processor_mm_kwargs
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if "labels" in processed_data:
+            processed_data["input_ids"] = processed_data.pop("labels")
+
+        return processed_data
+
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingInfo:
+        # Dithering injects noise into the extracted features, so the
+        # feature extractor is not a pure function of its input. Since the
+        # processing cache assumes that processor outputs are invariant
+        # across calls, bypass the cache when dithering is active.
+        if self.info.get_feature_extractor().dither > 0:
+            return self._apply_hf_processor(inputs, timing_ctx)
+
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
     def _get_mm_fields_config(
         self,
@@ -779,7 +803,7 @@ class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
             speech_lengths=MultiModalFieldConfig.batched("audio"),
-            fake_token_lengths=MultiModalFieldConfig.batched("audio"),
+            fake_token_lengths=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
