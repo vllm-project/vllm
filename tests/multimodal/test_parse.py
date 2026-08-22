@@ -5,7 +5,11 @@ import pytest
 import torch
 from PIL import Image
 
-from vllm.multimodal.parse import ImageProcessorItems, VideoProcessorItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    MultiModalDataParser,
+    VideoProcessorItems,
+)
 
 H, W = 480, 640
 
@@ -49,3 +53,24 @@ def test_frame_size_hwc_chw(frame):
     items = VideoProcessorItems([[frame]])
 
     assert items.get_frame_size(0) == (W, H)
+
+
+def test_video_with_metadata_cpu_tensor_to_numpy():
+    """CPU tensor frames keep the existing conversion to numpy."""
+    frames = torch.zeros((4, H, W, 3), dtype=torch.uint8)
+    video, metadata = MultiModalDataParser()._get_video_with_metadata(frames)
+
+    assert isinstance(video, np.ndarray)
+    np.testing.assert_array_equal(video, frames.numpy())
+    assert metadata is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_video_with_metadata_keeps_device_tensor():
+    """Device-resident frames (e.g. NVDEC-decoded) pass through as tensors,
+    so a device-side HF processor can consume them without a D2H copy."""
+    frames = torch.zeros((4, H, W, 3), dtype=torch.uint8, device="cuda")
+    video, metadata = MultiModalDataParser()._get_video_with_metadata(frames)
+
+    assert video is frames
+    assert metadata is None

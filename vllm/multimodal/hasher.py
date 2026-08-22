@@ -89,9 +89,15 @@ class MultiModalHasher:
                 )
             return cls.iter_item_to_bytes("image", obj.original_bytes)
 
-        if isinstance(obj, MediaWithBytes) and isinstance(obj.media, np.ndarray):
+        if isinstance(obj, MediaWithBytes) and isinstance(
+            obj.media, (np.ndarray, torch.Tensor)
+        ):
             frames = obj.media
-            if frames.nbytes < len(obj.original_bytes):
+            if isinstance(frames, torch.Tensor):
+                frames_nbytes = frames.numel() * frames.element_size()
+            else:
+                frames_nbytes = frames.nbytes
+            if frames_nbytes < len(obj.original_bytes):
                 return cls.iter_item_to_bytes("video", frames)
             return cls.iter_item_to_bytes("video", obj.original_bytes)
 

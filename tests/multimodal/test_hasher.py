@@ -137,6 +137,33 @@ def test_hash_collision_video_num_frames():
     )
 
 
+def test_hash_video_tensor_frames():
+    """Videos holding tensor frames (e.g. NVDEC-decoded) hash like
+    array-framed ones, from the original bytes without a D2H copy."""
+    source = b"x" * 100
+
+    def item_for_hash(frames):
+        metadata = {
+            "total_num_frames": 2,
+            "fps": 2.0,
+            "duration": 1.0,
+            "video_backend": "torchcodec",
+            "frames_indices": [0, 1],
+            "do_sample_frames": False,
+        }
+        video = MediaWithBytes((frames, metadata), source)
+        items = MultiModalDataParser()._parse_video_data([video])
+        return items.get_all_items_for_hash()[0]
+
+    np_frames = np.zeros((2, 8, 8, 3), dtype=np.uint8)
+    torch_frames = torch.zeros((2, 8, 8, 3), dtype=torch.uint8)
+
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs("blake3", video=item_for_hash(np_frames)) == (
+        hasher.hash_kwargs("blake3", video=item_for_hash(torch_frames))
+    )
+
+
 def test_hash_non_contiguous_array():
     arr = np.arange(24).reshape(4, 6).T
     assert not arr.flags.c_contiguous

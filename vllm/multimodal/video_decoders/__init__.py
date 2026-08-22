@@ -22,6 +22,7 @@ _BACKEND_OPTION_DEFAULTS: dict[str, dict[str, Any]] = {
     "torchcodec": {
         "num_ffmpeg_threads": 0,
         "seek_mode": "exact",
+        "device": "cpu",
     },
     PYNVVIDEOCODEC_VIDEO_BACKEND: {
         "hw_decoders": PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,

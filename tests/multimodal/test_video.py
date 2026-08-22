@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 import pytest
+import torch
 from transformers import AutoVideoProcessor
 from transformers.video_utils import VideoMetadata
 
@@ -171,9 +172,14 @@ def test_decode_video_imports_only_selected_backend(
     [
         (
             "torchcodec",
-            {"min_frames": 4, "num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+            {
+                "min_frames": 4,
+                "num_ffmpeg_threads": 2,
+                "seek_mode": "approximate",
+                "device": "cuda",
+            },
             {"min_frames": 4},
-            {"num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+            {"num_ffmpeg_threads": 2, "seek_mode": "approximate", "device": "cuda"},
         ),
         (
             "deepstream",
@@ -202,6 +208,11 @@ def test_video_backend_rejects_options_for_another_decoder():
         ValueError, match="num_ffmpeg_threads is not supported by the 'pyav' backend"
     ):
         resolve_video_backend_kwargs("pyav", {"num_ffmpeg_threads": 2})
+
+    with pytest.raises(
+        ValueError, match="device is not supported by the 'opencv' backend"
+    ):
+        resolve_video_backend_kwargs("opencv", {"device": "cuda"})
 
 
 @pytest.mark.parametrize(
@@ -1292,6 +1303,30 @@ def test_torchcodec_backend_rejects_frame_recovery(dummy_video_path):
         loader.load_bytes(
             video_data, num_frames=8, backend="torchcodec", frame_recovery=True
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_torchcodec_backend_cuda_decodes_on_gpu(dummy_video_path):
+    """With device="cuda", torchcodec decodes via NVDEC and keeps the frames
+    on the GPU instead of returning a host-side numpy array."""
+    pytest.importorskip("torchcodec")
+
+    with open(dummy_video_path, "rb") as f:
+        video_data = f.read()
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    frames, metadata = loader.load_bytes(
+        video_data, num_frames=8, backend="torchcodec", device="cuda"
+    )
+
+    assert isinstance(frames, torch.Tensor)
+    assert frames.device.type == "cuda"
+    assert frames.dtype == torch.uint8
+    assert frames.ndim == 4
+    assert frames.shape[3] == 3  # RGB
+    assert frames.shape[0] == 8
+    assert frames.shape[0] == len(metadata["frames_indices"])
+    assert metadata["video_backend"] == "torchcodec"
 
 
 def test_torchcodec_backend_returns_target_frames_not_keyframes():
