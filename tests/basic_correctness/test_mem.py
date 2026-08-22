@@ -468,6 +468,7 @@ def test_gemma3n_level2_sleep_wake_preserves_generation(monkeypatch, tmp_path):
         attention_backend="TRITON_ATTN",
         max_model_len=256,
         max_num_seqs=1,
+        gpu_memory_utilization=0.2,
         seed=0,
         enable_prefix_caching=False,
         disable_log_stats=True,
