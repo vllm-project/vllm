@@ -581,3 +581,36 @@ class TestThinkingDisabled:
         reasoning, content = p.extract_reasoning("The answer is 42.", None)
         assert reasoning is None
         assert content == "The answer is 42."
+
+    def test_thinking_alias_disables_initial_state(self, mock_tokenizer):
+        """``thinking`` is accepted as an alias for ``enable_thinking``."""
+        p = Qwen3Parser(
+            mock_tokenizer,
+            chat_template_kwargs={"thinking": False},
+        )
+        assert p.parser_engine_config.initial_state == ParserState.CONTENT
+        assert p.thinking_enabled is False
+
+    def test_thinking_alias_enables_initial_state(self, mock_tokenizer):
+        p = Qwen3Parser(
+            mock_tokenizer,
+            chat_template_kwargs={"thinking": True},
+        )
+        assert p.parser_engine_config.initial_state == ParserState.REASONING
+        assert p.thinking_enabled is True
+
+    def test_thinking_alias_streaming_content_only(self, mock_tokenizer):
+        p = Qwen3Parser(
+            mock_tokenizer,
+            chat_template_kwargs={"thinking": False},
+        )
+        reasoning, content = simulate_reasoning_streaming(
+            p,
+            ["The answer", " is 42."],
+            [
+                (_TEXT_ID,),
+                (_TEXT_ID,),
+            ],
+        )
+        assert content == "The answer is 42."
+        assert reasoning == ""

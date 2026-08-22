@@ -29,6 +29,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.utils import resolve_enable_thinking
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -223,7 +224,7 @@ class Qwen3Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
+        self.thinking_enabled = resolve_enable_thinking(chat_kwargs, default=True)
         kwargs.setdefault(
             "parser_engine_config",
             qwen3_config(

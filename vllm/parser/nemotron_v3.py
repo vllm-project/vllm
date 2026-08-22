@@ -17,6 +17,7 @@ import functools
 from typing import TYPE_CHECKING
 
 from vllm.parser.qwen3 import Qwen3Parser, qwen3_config
+from vllm.parser.utils import resolve_enable_thinking
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -53,7 +54,7 @@ class NemotronV3Parser(Qwen3Parser):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        thinking = chat_kwargs.get("enable_thinking", True)
+        thinking = resolve_enable_thinking(chat_kwargs, default=True)
         super().__init__(
             tokenizer,
             tools,
@@ -84,7 +85,7 @@ class NemotronV3Parser(Qwen3Parser):
         return bool(
             chat_template_kwargs
             and (
-                chat_template_kwargs.get("enable_thinking") is False
+                not resolve_enable_thinking(chat_template_kwargs, default=True)
                 or chat_template_kwargs.get("force_nonempty_content") is True
             )
         )
