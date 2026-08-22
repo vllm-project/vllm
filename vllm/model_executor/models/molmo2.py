@@ -1948,7 +1948,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
 
@@ -2008,7 +2007,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 video_outputs = self.info.ctx.call_hf_processor(
                     patched_call,
                     dict(text=VIDEO_PROMPT, **video_mm_data),
-                    dict(**video_mm_kwargs, **tok_kwargs),
+                    video_mm_kwargs,
                 )
 
                 input_ids = video_outputs.pop("input_ids")
@@ -2058,7 +2057,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         processed_outputs = self.info.ctx.call_hf_processor(
             patched_call,
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            mm_kwargs,
         )
 
         if (images := mm_data.get("images")) is not None:
@@ -2127,26 +2126,30 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             image_token_pooling=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_pooled_patches
             ),
-            image_num_crops=MultiModalFieldConfig.batched("image"),
-            image_num_pooled_patches=MultiModalFieldConfig.batched("image"),
-            image_num_patches=MultiModalFieldConfig.batched("image"),
+            image_num_crops=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            image_num_pooled_patches=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
+            image_num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_tokens=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_image_tokens
             ),
-            num_image_tokens=MultiModalFieldConfig.batched("image"),
+            num_image_tokens=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_crops
             ),
             video_token_pooling=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_pooled_patches
             ),
-            video_num_crops=MultiModalFieldConfig.batched("video"),
-            video_num_pooled_patches=MultiModalFieldConfig.batched("video"),
-            video_num_patches=MultiModalFieldConfig.batched("video"),
+            video_num_crops=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            video_num_pooled_patches=MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            ),
+            video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             video_tokens=MultiModalFieldConfig.flat_from_sizes(
                 "video", num_video_tokens
             ),
-            num_video_tokens=MultiModalFieldConfig.batched("video"),
+            num_video_tokens=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(

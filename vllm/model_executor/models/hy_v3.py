@@ -167,7 +167,7 @@ class HYV3MoEFused(nn.Module):
                 intermediate_size=config.expert_hidden_dim * config.num_shared_experts,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                prefix=f"{prefix}",
+                prefix=f"{prefix}.shared_mlp",
                 reduce_results=False,
             )
         else:
@@ -710,10 +710,7 @@ class HYV3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                     continue
                 yield name, weight
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(_filter_weights(weights))
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
