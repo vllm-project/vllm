@@ -144,6 +144,11 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
+from vllm.v1.worker.gpu.ubatch_utils import (
+    UBatchRunner,
+    UBatchState,
+    maybe_build_ubatch_runner,
+)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
     KVBlockZeroer,
@@ -211,6 +216,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Data parallelism.
         self.dp_size = self.parallel_config.data_parallel_size
         self.dp_rank = self.parallel_config.data_parallel_rank
+
+        # Dual batch overlap. Created in initialize_kv_cache(), once everything
+        # it runs the microbatched forward with exists.
+        self.ubatch_runner: UBatchRunner | None = None
 
         # Detect EP all2all peer faults to prevent emitting corrupted output.
         # Only meaningful for MoE + DP with an FT-capable all2all backend.
@@ -571,6 +580,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states,
             self.block_tables,
             cls=self.pcp_manager_cls,
+        )
+        self.ubatch_runner = maybe_build_ubatch_runner(
+            self.vllm_config,
+            self.device,
+            self.model_state,
+            self.attn_groups,
+            self.kv_cache_config,
+            self.max_num_reqs,
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
@@ -1452,6 +1469,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
+            parallel_config=self.parallel_config,
+            allow_ubatching=(
+                self.ubatch_runner is not None and not skip_attn_for_dummy_run
+            ),
+            uniform_decode=uniform_tok_count == self.decode_query_len,
         )
 
         if batch_desc.num_tokens == 0:
@@ -1515,7 +1537,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         attn_metadata = None
         slot_mappings_by_layer = None
-        if not (dummy_run and skip_attn_for_dummy_run):
+        ubatch_state: UBatchState | None = None
+        if batch_desc.num_ubatches > 1:
+            assert self.ubatch_runner is not None
+            assert block_tables is not None and slot_mappings is not None
+            ubatch_state = self.ubatch_runner.prepare(
+                input_batch, block_tables, slot_mappings
+            )
+        elif not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
             slot_mappings_by_layer = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
@@ -1593,7 +1622,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             del intermediate_tensors
 
         # Update the EPLB meta.
-        self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
+        self.eplb.prepare_forward(
+            self.model_config,
+            input_batch.num_tokens,
+            ubatch_state.slices if ubatch_state is not None else None,
+        )
 
         self.step_timing.record_batch(
             input_batch, batch_desc.cg_mode == CUDAGraphMode.FULL
@@ -1609,7 +1642,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.pre_forward(scheduler_output)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
-            # For piecewise and eager mode, just call model().
+            # For piecewise and eager mode, just call model(). A microbatched
+            # step passes the same arguments with `attn_metadata` and
+            # `slot_mapping` still None -- its metadata lives in the
+            # per-microbatch contexts `ubatch_runner.prepare()` built -- so this
+            # context only covers the KV connector: `ubatch_runner.run()` clears
+            # it and the microbatch threads install their own.
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
                 has_lora=self.lora_config is not None,
@@ -1623,12 +1661,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cudagraph_runtime_mode=batch_desc.cg_mode,
                 num_tokens_across_dp=num_tokens_across_dp,
                 batch_descriptor=batch_descriptor,
+                ubatch_slices=(
+                    ubatch_state.slices if ubatch_state is not None else None
+                ),
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
-                if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                if ubatch_state is not None:
+                    assert self.ubatch_runner is not None
+                    model_output = self.ubatch_runner.run(
+                        self.model, model_inputs, ubatch_state
+                    )
+                elif batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                     # Run the PIECEWISE graph (compiled PW cudagraph or breakable
                     # cudagraph, chosen inside run_pw_graph). cg_mode is only
                     # PIECEWISE after the cudagraph manager exists.
