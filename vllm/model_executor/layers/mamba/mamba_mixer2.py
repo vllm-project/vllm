@@ -48,7 +48,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -905,67 +904,54 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # then chunk_stride = 2
                 chunk_stride = mamba_block_size // chunk_size
 
-                # The per-sequence loop below uses these as Python scalars.
-                # TODO avoid sync here?
-                with gpu_sync_allowed():
-                    block_idx_first_cpu = block_idx_first_scheduled_token_p.tolist()
-                    block_idx_last_cpu = block_idx_last_scheduled_token_p.tolist()
-                    num_computed_tokens_p_cpu = num_computed_tokens_p.tolist()
-                    last_chunk_indices_p_cpu = last_chunk_indices_p.tolist()
+                # Save state for sequences with more than just final state,
+                # batched over sequences so that the number of kernel launches
+                # does not scale with the number of prefills.
+                n_blocks_to_fill = (
+                    block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p
+                ).clamp(min=0)
+                total_fill = attn_metadata.num_state_writes_p
+                if total_fill > 0:
+                    first_chunk = torch.zeros_like(last_chunk_indices_p)
+                    first_chunk[1:] = last_chunk_indices_p[:-1] + 1
 
-                # Save state for sequences with more than just final state
-                for seq_idx in range(num_prefills):
-                    # Block index for the first scheduled token
-                    block_idx_first_scheduled_token = block_idx_first_cpu[seq_idx]
-
-                    # Block index for the last scheduled token
-                    block_idx_last_scheduled_token = block_idx_last_cpu[seq_idx]
-
-                    # Number of blocks that need to be written
-                    n_blocks_to_fill = (
-                        block_idx_last_scheduled_token - block_idx_first_scheduled_token
-                    )
-
-                    # Skip sequences that don't have any blocks to fill
-                    if n_blocks_to_fill == 0:
-                        continue
-
-                    # Look up the state indices
-                    cache_blocks_to_fill = state_indices_tensor_p[
-                        seq_idx,
-                        block_idx_first_scheduled_token:block_idx_last_scheduled_token,
-                    ]
-
-                    # First chunk index for this sequence
-                    if seq_idx == 0:
-                        first_chunk = 0
-                    else:
-                        first_chunk = 1 + last_chunk_indices_p_cpu[seq_idx - 1]
-
-                    # First chunk that is aligned on the mamba block boundary
-                    first_aligned_chunk = first_chunk + chunk_stride - 1
-
-                    # Calculate the number of computed tokens that were not
-                    # already cached
+                    # The chunk that completes this sequence's first mamba block.
+                    # A block spans chunk_stride chunks. When the sequence resumed
+                    # mid-block, the chunks before this step are not in varlen_states,
+                    # so subtract them: the boundary sits earlier by their count.
                     num_unaligned_computed_tokens = (
-                        num_computed_tokens_p_cpu[seq_idx] % mamba_block_size
+                        num_computed_tokens_p % mamba_block_size
+                    )
+                    unaligned_chunk_shift = num_unaligned_computed_tokens // chunk_size
+                    first_aligned_chunk = (
+                        first_chunk + (chunk_stride - 1) - unaligned_chunk_shift
                     )
 
-                    if num_unaligned_computed_tokens > 0:
-                        # If the number of computed tokens is not block aligned,
-                        # then we need to shift the index accordingly
-                        first_aligned_chunk -= (
-                            num_unaligned_computed_tokens // chunk_size
-                        )
+                    # Flatten all writes into one list: fill_counts=[2,1,2]
+                    # -> seq_ids=[0,0,1,2,2], write_offsets=[0,1,0,0,1]
+                    fill_counts = n_blocks_to_fill.long()
+                    # output_size, or repeat_interleave reads the size off the device
+                    seq_ids = torch.repeat_interleave(
+                        torch.arange(num_prefills, device=ssm_state.device),
+                        fill_counts,
+                        output_size=total_fill,
+                    )
+                    write_starts = torch.cumsum(fill_counts, dim=0) - fill_counts
+                    write_offsets = torch.arange(
+                        total_fill, device=ssm_state.device
+                    ) - torch.repeat_interleave(
+                        write_starts, fill_counts, output_size=total_fill
+                    )
 
-                    # Get states to write
-                    from_where = varlen_states[
-                        first_aligned_chunk : first_aligned_chunk
-                        + n_blocks_to_fill * chunk_stride : chunk_stride
+                    cache_blocks_to_fill = state_indices_tensor_p[
+                        seq_ids,
+                        block_idx_first_scheduled_token_p[seq_ids] + write_offsets,
                     ]
-
-                    # Write the states
-                    ssm_state[cache_blocks_to_fill] = from_where
+                    # Write the states. Each row goes to its own cache block,
+                    # so the indexed copy has no duplicate destinations.
+                    ssm_state[cache_blocks_to_fill] = varlen_states[
+                        first_aligned_chunk[seq_ids] + write_offsets * chunk_stride
+                    ]
 
                 # For all seqs, store the last state (note: might be partial):
                 assert state_indices_tensor_p is not None
