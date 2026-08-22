@@ -433,8 +433,23 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
     # The surrounding metadata may describe a longer resumed replay, but the
     # handoff identifies the exact state boundary to persist.
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(5)]
+    # DCP can expose the append-only full-attention boundary one step before
+    # Mamba creates its CoW block. That first handoff must not store anything
+    # under the shared boundary hash from Mamba's still-mutable request block.
+    step_a = ReqMeta(
+        req_id="r0",
+        token_len_chunk=0,
+        block_ids=([1], [2]),
+        block_hashes=hs,
+        can_save=True,
+        num_prompt_tokens=20,
+        partial_tail_offloads=[(0, 1, 12)],
+    )
+    assert send._maybe_offload_partial_tail(step_a)
+    assert store.puts == {}
+
     mamba_cow_block = 7
-    req = ReqMeta(
+    step_b = ReqMeta(
         req_id="r0",
         token_len_chunk=0,
         block_ids=([1], [2]),
@@ -444,7 +459,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         partial_tail_offloads=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_partial_tail(req)
+    assert send._maybe_offload_partial_tail(step_b)
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]

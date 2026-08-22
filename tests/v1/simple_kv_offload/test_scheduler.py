@@ -1864,7 +1864,9 @@ def test_dcp_mixed_attention_mamba_store_and_load_geometry() -> None:
     tensors = [
         KVCacheTensor(
             size=spec.page_size_bytes * num_gpu_blocks,
-            shared_by=group.layer_names,
+            layers=group.layer_names,
+            layer_stride=spec.page_size_bytes * num_gpu_blocks,
+            block_stride=spec.page_size_bytes,
         )
         for group, spec in zip(groups, (attention_spec, mamba_spec))
     ]

@@ -421,9 +421,9 @@ class SingleTypeKVCacheManager(ABC):
 
         Entries are ``(req_id, group_id, block, boundary_tokens)``.
 
-        Only mamba "align" populates this. The block lives off the request
-        block table, so the caller must pin it until the connector has read
-        it — nothing else keeps it alive once the CoW retention is released.
+        Mamba "align" contributes a CoW block that lives off the request block
+        table; DCP full attention contributes its append-only request block.
+        The caller must pin either source until the connector has read it.
         """
         pending = self._pending_partial_tail_offloads
         self._pending_partial_tail_offloads = []

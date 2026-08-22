@@ -368,12 +368,19 @@ def test_hybrid_load_failure_uses_runtime_manager_block_sizes(
         block_ids_by_group[invalid_group][invalid_idx],
     }
 
-    affected, _, _ = scheduler._update_requests_with_invalid_blocks(
-        [request],
-        invalid_block_ids,
-        num_scheduled_tokens={},
-        evict_blocks=False,
+    affected, total_affected_tokens, blocks_to_evict = (
+        scheduler._update_requests_with_invalid_blocks(
+            [request],
+            invalid_block_ids,
+            num_scheduled_tokens={},
+            evict_blocks=True,
+        )
     )
 
     assert affected == {"hybrid-request"}
     assert request.num_computed_tokens == expected_computed_tokens
+    assert total_affected_tokens == 62_976 - expected_computed_tokens
+    assert blocks_to_evict == {
+        *block_ids_by_group[0][expected_computed_tokens // 1_536 :],
+        *block_ids_by_group[1][expected_computed_tokens // 24_576 :],
+    }

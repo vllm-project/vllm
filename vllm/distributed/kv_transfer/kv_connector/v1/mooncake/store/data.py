@@ -406,10 +406,11 @@ class ReqMeta:
     # serve that purpose: it is reused once a preempted request resumes, so it
     # would release the wrong job's blocks.
     store_job_id: int | None = None
-    # Core-provided per-mamba-group
-    # (group_id, cow_block_id, boundary_tokens) for this request's partial tail.
-    # Present only on the producer's CoW step; drives the connector's offload
-    # (the FA group's block is derived from block_ids and boundary_tokens).
+    # Core-provided (group_id, durable_block_id, boundary_tokens) handoffs for
+    # this request's partial tail. Mamba contributes its CoW block; under DCP,
+    # full attention may contribute its append-only request block one step
+    # earlier. The worker must wait for every partial Mamba group to provide a
+    # CoW source before persisting the shared boundary.
     partial_tail_offloads: list[tuple[int, int, int]] | None = None
 
     @staticmethod

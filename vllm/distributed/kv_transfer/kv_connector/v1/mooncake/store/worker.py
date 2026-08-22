@@ -687,9 +687,30 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return True
         if boundary // hash_block_size - 1 >= len(req_meta.block_hashes):
             return True
-        mamba_offloads = {
+        offload_blocks_by_group = {
             group_id: block_id for group_id, block_id, _ in partial_tail_offloads
         }
+
+        # A partial Mamba block is mutable until core redirects the request to
+        # its CoW copy. A DCP full-attention handoff can arrive one step before
+        # that CoW handoff, so do not fall back to the live request block for a
+        # partial Mamba boundary. The later Mamba handoff will retry the whole
+        # boundary; append-only full-attention groups are safe to read then.
+        for g_idx, db in enumerate(self.token_databases):
+            spec = unwrap_kv_cache_spec(self.coord.kv_cache_groups[g_idx].kv_cache_spec)
+            if (
+                isinstance(spec, MambaSpec)
+                and boundary % db.block_size != 0
+                and g_idx not in offload_blocks_by_group
+            ):
+                logger.debug(
+                    "Deferring partial-tail offload for request %s at token %d "
+                    "until Mamba group %d has a durable CoW source",
+                    req_meta.req_id,
+                    boundary,
+                    g_idx,
+                )
+                return True
 
         keys: list[str] = []
         addrs: list[list[int]] = []
@@ -735,11 +756,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 for key_end, marker_only in key_ends:
                     key_hash = req_meta.block_hashes[key_end // hash_block_size - 1]
                     if (
-                        g_idx in mamba_offloads
+                        g_idx in offload_blocks_by_group
                         and key_end == boundary
                         and boundary % db.block_size != 0
                     ):
-                        block_id = mamba_offloads[g_idx]
+                        block_id = offload_blocks_by_group[g_idx]
                     else:
                         source_block_idx = (key_end - 1) // db.block_size
                         if source_block_idx >= len(group_blocks):
@@ -1446,9 +1467,16 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 
         current_batch_keys: list[str] = key_list_c
         current_batch_block_ids: list[int] = block_id_list_c
+        current_batch_idx = 0
         batch_bytes = 0
         try:
-            for batch_keys, batch_addrs, batch_sizes, batch_block_ids in load_batches:
+            for batch_idx, (
+                batch_keys,
+                batch_addrs,
+                batch_sizes,
+                batch_block_ids,
+            ) in enumerate(load_batches):
+                current_batch_idx = batch_idx
                 current_batch_keys = batch_keys
                 current_batch_block_ids = batch_block_ids
                 batch_bytes = _sum_batch_bytes(batch_sizes)
@@ -1480,8 +1508,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     num_failed_keys=len(failed),
                 )
                 if failed:
+                    unattempted_block_ids = [
+                        block_id
+                        for _, _, _, remaining_block_ids in load_batches[
+                            batch_idx + 1 :
+                        ]
+                        for block_id in remaining_block_ids
+                    ]
                     self._add_load_error_block_ids(
-                        [block_id for _, _, block_id in failed]
+                        [block_id for _, _, block_id in failed] + unattempted_block_ids
                     )
                     logger.warning(
                         "Failed to get %d Mooncake keys from sub-batch "
@@ -1492,7 +1527,16 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     )
                     break
         except Exception as e:
-            self._add_load_error_block_ids(current_batch_block_ids)
+            unattempted_block_ids = [
+                block_id
+                for _, _, _, remaining_block_ids in load_batches[
+                    current_batch_idx + 1 :
+                ]
+                for block_id in remaining_block_ids
+            ]
+            self._add_load_error_block_ids(
+                current_batch_block_ids + unattempted_block_ids
+            )
             self._record_operation(
                 "load_get",
                 load_get_start,

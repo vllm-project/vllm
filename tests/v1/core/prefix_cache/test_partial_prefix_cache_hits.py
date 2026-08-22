@@ -212,6 +212,7 @@ def test_dcp_eagle_retention_primes_first_mamba_consumer(
         use_eagle=True,
         hash_block_size=hash_block_size,
         mamba_partial_cache_hit=hash_block_size < block_size,
+        mamba_has_prefill_checkpoint_blocks=False,
     )
 
     token_ids = list(range(7621))

@@ -378,11 +378,12 @@ class MooncakeStoreScheduler:
                 if req_meta is not None:
                     meta.add_request(req_meta)
 
-        # Flush partial-tail offloads in the step they arrive: the CoW copy is
-        # enqueued before the connector event records, so this step's event
-        # fences the cow block. Ride the request's save meta when present, else
-        # emit an offload-only ReqMeta (token_len_chunk=0 skips the normal
-        # save; can_save=True takes the normal enqueue path).
+        # Flush partial-tail handoffs in the step they arrive. When a handoff
+        # references a CoW block, its copy is enqueued before the connector
+        # event records, so this step's event fences that block. Ride the
+        # request's save meta when present, else emit an offload-only ReqMeta
+        # (token_len_chunk=0 skips the normal save; can_save=True takes the
+        # normal enqueue path).
         step_partial_tails = getattr(scheduler_output, "partial_tail_offloads", None)
         if step_partial_tails and not is_consumer:
             pending = dict(step_partial_tails)

@@ -728,6 +728,93 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
     )
 
 
+def test_partial_tail_waits_for_durable_mamba_source():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    def put_sizes(keys, addrs, sizes, config):
+        return [sum(size) for size in sizes]
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = put_sizes
+
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+        scheduler_block_size=16,
+        hash_block_size=4,
+    )
+    full_db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=16,
+        hash_block_size=4,
+    )
+    full_db.set_kv_caches_base_addr([0x1000])
+    full_db.set_block_len([256])
+    mamba_db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+        hash_block_size=4,
+    )
+    mamba_db.set_kv_caches_base_addr([0x2000])
+    mamba_db.set_block_len([512])
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[full_db, mamba_db],
+    )
+    block_hashes = [b"a0", b"a1", b"a2"]
+
+    # Step A exposes the append-only full-attention block before Mamba has
+    # created its durable CoW source. Nothing may be stored under the shared
+    # boundary key yet, because the live Mamba block remains writable.
+    assert thread._maybe_offload_partial_tail(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=0,
+            block_ids=([1], [2]),
+            block_hashes=block_hashes,
+            can_save=True,
+            partial_tail_offloads=[(0, 1, 12)],
+        )
+    )
+    store.batch_is_exist.assert_not_called()
+    store.batch_put_from_multi_buffers.assert_not_called()
+
+    # Step B supplies Mamba's CoW target. The full-attention request block is
+    # append-only and safe to read, while Mamba must use the explicit CoW block.
+    assert thread._maybe_offload_partial_tail(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=0,
+            block_ids=([1], [2]),
+            block_hashes=block_hashes,
+            can_save=True,
+            partial_tail_offloads=[(1, 7, 12)],
+        )
+    )
+
+    keys, addrs, _sizes, _config = store.batch_put_from_multi_buffers.call_args.args
+    assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6132",
+    ]
+    assert addrs == [[0x1000 + 256], [0x2000 + 7 * 512]]
+
+
 def test_partial_tail_offload_skips_null_source_blocks():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
@@ -1780,7 +1867,54 @@ def test_recv_thread_stops_after_first_failing_disk_offload_sub_batch():
     thread._handle_request(req)
 
     assert store.batch_get_into_multi_buffers.call_count == 1
-    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
+
+
+def test_recv_thread_invalidates_unattempted_blocks_after_rotated_failure():
+    store = MagicMock()
+    # tp_rank=2 rotates [block0, block1, block2] to [block2, block0, block1].
+    # The first two-key batch loads block0 but fails block2; block1 is never
+    # attempted and must also be invalidated.
+    store.batch_get_into_multi_buffers.return_value = [-10, 256]
+    thread = _make_store_recving_thread(
+        store,
+        tp_rank=2,
+        disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT,
+    )
+    req = _make_load_req(
+        "req-a",
+        [b"a0", b"a1", b"a2"],
+        token_len=48,
+    )
+
+    thread._handle_request(req)
+
+    assert store.batch_get_into_multi_buffers.call_count == 1
+    assert store.batch_get_into_multi_buffers.call_args.args[0] == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+    ]
+    assert thread.get_and_clear_block_ids_with_load_errors() == {1, 2}
+
+
+def test_recv_thread_invalidates_unattempted_blocks_after_split_exception():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.side_effect = RuntimeError("boom")
+    thread = _make_store_recving_thread(
+        store,
+        disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT,
+    )
+    req = _make_load_req(
+        "req-a",
+        [b"a0", b"a1", b"a2"],
+        token_len=48,
+    )
+
+    thread._handle_request(req)
+
+    assert store.batch_get_into_multi_buffers.call_count == 1
+    assert thread.get_and_clear_finished_requests() == {"req-a"}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
 
 
 def test_recv_thread_skips_split_when_budget_holds_all_keys():

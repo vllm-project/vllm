@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
+import dataclasses
 from collections.abc import Sequence
 from typing import cast
 
@@ -402,7 +403,14 @@ class MooncakeStoreCoordinator:
 
 def unwrap_kv_cache_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
-        return next(iter(spec.kv_cache_specs.values()))
+        inner_spec = next(iter(spec.kv_cache_specs.values()))
+        # Worker-side UniformTypeKVCacheSpecs retain their per-layer specs when
+        # effective_kv_cache_groups() scales the outer DCP geometry. Preserve
+        # that effective block size when dispatching to the inner spec's cache
+        # manager; otherwise lookup/mask geometry disagrees with token_dbs.
+        if inner_spec.block_size != spec.block_size:
+            inner_spec = dataclasses.replace(inner_spec, block_size=spec.block_size)
+        return inner_spec
     return spec
 
 
