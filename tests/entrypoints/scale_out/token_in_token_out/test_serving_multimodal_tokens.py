@@ -174,7 +174,8 @@ async def test_content_parts_generates_tokens(client, test_image):
         },
     )
     render_resp.raise_for_status()
-    token_ids = render_resp.json()["token_ids"]
+    render_data = render_resp.json()
+    token_ids = render_data["token_ids"]
 
     gen_resp = await client.post(
         GEN_ENDPOINT,
@@ -182,6 +183,7 @@ async def test_content_parts_generates_tokens(client, test_image):
             "token_ids": token_ids,
             "content_parts": [{"type": "image_url", "url": data_url}],
             "sampling_params": {"max_tokens": 10, "temperature": 0.0},
+            "return_token_ids": True,
         },
     )
     gen_resp.raise_for_status()
@@ -191,6 +193,8 @@ async def test_content_parts_generates_tokens(client, test_image):
     choice = gen_data["choices"][0]
     assert "token_ids" in choice
     assert len(choice["token_ids"]) > 0
+    assert gen_data["prompt_token_ids"] == token_ids
+    assert gen_data["mm_placeholders"] == render_data["features"]["mm_placeholders"]
 
 
 @pytest.mark.asyncio
@@ -216,7 +220,8 @@ async def test_content_parts_streaming(client, test_image):
         },
     )
     render_resp.raise_for_status()
-    token_ids = render_resp.json()["token_ids"]
+    render_data = render_resp.json()
+    token_ids = render_data["token_ids"]
 
     async with client.stream(
         "POST",
@@ -226,6 +231,7 @@ async def test_content_parts_streaming(client, test_image):
             "content_parts": [{"type": "image_url", "url": data_url}],
             "sampling_params": {"max_tokens": 8, "temperature": 0.0},
             "stream": True,
+            "return_token_ids": True,
         },
     ) as resp:
         resp.raise_for_status()
@@ -235,3 +241,12 @@ async def test_content_parts_streaming(client, test_image):
                 chunks.append(json_mod.loads(line[6:]))
 
     assert len(chunks) > 0
+    prompt_metadata_chunks = [
+        chunk for chunk in chunks if chunk.get("prompt_token_ids") is not None
+    ]
+    assert len(prompt_metadata_chunks) == 1
+    assert prompt_metadata_chunks[0]["prompt_token_ids"] == token_ids
+    assert (
+        prompt_metadata_chunks[0]["mm_placeholders"]
+        == render_data["features"]["mm_placeholders"]
+    )
