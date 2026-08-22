@@ -438,7 +438,6 @@ def compute_global_topk_indices_and_lens(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
-    output_buffers: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -448,15 +447,8 @@ def compute_global_topk_indices_and_lens(
     3. Masking padding tokens to length 0
     """
     num_tokens = topk_indices.shape[0]
-    if output_buffers is None:
-        global_topk_indices = torch.empty_like(topk_indices)
-        topk_lens = torch.empty(
-            num_tokens, dtype=torch.int32, device=topk_indices.device
-        )
-    else:
-        global_topk_indices, topk_lens = output_buffers
-        assert global_topk_indices.shape == topk_indices.shape
-        assert topk_lens.shape == (num_tokens,)
+    global_topk_indices = torch.empty_like(topk_indices)
+    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
     _compute_global_topk_indices_and_lens_kernel[(num_tokens,)](
         global_topk_indices,
         global_topk_indices.stride(0),
@@ -477,15 +469,15 @@ def compute_global_topk_indices_and_lens(
 @triton.jit
 def _compute_global_topk_indices_and_lens_kernel(
     global_topk_indices_ptr,
-    global_topk_indices_stride,
+    global_topk_indices_stride: tl.constexpr,
     topk_lens_ptr,
     topk_indices_ptr,
-    topk_indices_stride,
-    topk,
+    topk_indices_stride: tl.constexpr,
+    topk: tl.constexpr,
     token_to_req_indices_ptr,
     block_table_ptr,
-    block_table_stride,
-    block_size,
+    block_table_stride: tl.constexpr,
+    block_size: tl.constexpr,
     is_valid_token_ptr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):

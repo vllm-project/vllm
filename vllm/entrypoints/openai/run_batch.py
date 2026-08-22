@@ -31,7 +31,7 @@ from vllm.config import config
 from vllm.connections import global_http_connection
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.api_server import init_app_state
+from vllm.entrypoints.launchers.api_server.entry import init_app_state
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -476,19 +476,27 @@ async def download_bytes_from_url(
             if "base64" in header:
                 return base64.b64decode(data)
             else:
-                raise ValueError(f"Unsupported data URL encoding: {header}")
+                raise VLLMValidationError(
+                    f"Unsupported data URL encoding: {header}",
+                    parameter="url",
+                )
         else:
-            raise ValueError(f"Invalid data URL format: {url}")
+            raise VLLMValidationError(
+                f"Invalid data URL format: {url}",
+                parameter="url",
+            )
 
     # Handle HTTP/HTTPS URLs
     elif parsed.scheme in ("http", "https"):
         if allowed_media_domains is not None:
             url_spec = parse_url(url)
             if url_spec.hostname not in allowed_media_domains:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The URL must be from one of the allowed domains: "
                     f"{allowed_media_domains}. Input URL domain: "
-                    f"{url_spec.hostname}"
+                    f"{url_spec.hostname}",
+                    parameter="url",
+                    value=url_spec.hostname,
                 )
             # Use the normalized URL to prevent parsing discrepancies
             # between urllib3 and aiohttp (e.g. backslash-@ attacks).
@@ -499,9 +507,11 @@ async def download_bytes_from_url(
         )
 
     else:
-        raise ValueError(
+        raise VLLMValidationError(
             f"Unsupported URL scheme: {parsed.scheme}. "
-            "Supported schemes: http, https, data"
+            "Supported schemes: http, https, data",
+            parameter="url",
+            value=parsed.scheme,
         )
 
 
@@ -836,8 +846,7 @@ async def run_batch(
                     error_msg=f"URL {request.url} was used. "
                     "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
                     " /v1/audio/transcriptions, /v1/audio/translations, /score, "
-                    " /rerank. See vllm/entrypoints/openai/api_server.py "
-                    "for supported score/rerank versions.",
+                    " /rerank.",
                 )
             )
 
@@ -848,7 +857,7 @@ async def run_batch(
 
 
 async def main(args: Namespace):
-    from vllm.entrypoints.openai.api_server import build_async_engine_client
+    from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client
     from vllm.usage.usage_lib import UsageContext
 
     validate_run_batch_args(args)

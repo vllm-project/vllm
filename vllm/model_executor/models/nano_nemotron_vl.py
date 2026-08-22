@@ -361,19 +361,8 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
 class NanoNemotronVLMultiModalProcessor(
     BaseMultiModalProcessor[NanoNemotronVLProcessingInfo]
 ):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """
-        Bypass `call_hf_processor_mm_only` by no-op overriding`_call_hf_processor`,
-        so it chooses this path:
-        `type(self)._call_hf_processor != BaseMultiModalProcessor._call_hf_processor`
-        """
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_image_fields_config(self, hf_inputs: BatchFeature):
         if self.info.is_dynamic_tiler:
@@ -386,10 +375,12 @@ class NanoNemotronVLMultiModalProcessor(
 
         return dict(
             pixel_values_flat=pixel_values_flat,
-            image_num_patches=MultiModalFieldConfig.batched("image"),
+            image_num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_embeds=MultiModalFieldConfig.batched("image"),
-            num_tokens_per_image=MultiModalFieldConfig.batched("image"),
-            imgs_sizes=MultiModalFieldConfig.batched("image"),
+            num_tokens_per_image=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
+            imgs_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_video_fields_config(self, hf_inputs: BatchFeature):
@@ -399,13 +390,15 @@ class NanoNemotronVLMultiModalProcessor(
             pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_patches
             ),
-            video_num_patches=MultiModalFieldConfig.batched("video"),
-            frames_indices=MultiModalFieldConfig.batched("video"),
-            frame_duration_ms=MultiModalFieldConfig.batched("video"),
+            video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            frames_indices=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            frame_duration_ms=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _get_audio_fields_config(self, hf_inputs: BatchFeature):
-        audio_num_clips = torch.as_tensor(hf_inputs["audio_num_clips"])
+        audio_num_clips = torch.as_tensor(
+            hf_inputs.get("audio_num_clips", torch.empty(0))
+        )
 
         return dict(
             input_audio_features=MultiModalFieldConfig.flat_from_sizes(
@@ -712,10 +705,8 @@ class NanoNemotronVLMultiModalProcessor(
         if not audio_items:
             return super().apply(inputs, timing_ctx)
 
-        prompt = inputs.prompt
         tokenizer = self.info.get_tokenizer()
-        if not isinstance(prompt, str):
-            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
+        prompt = tokenizer.decode(inputs.prompt, skip_special_tokens=False)
 
         # Inject AUDIO_CONTEXT only after <video> tokens whose video
         # actually contained an audio stream (preserving video-audio pairing).
@@ -731,17 +722,11 @@ class NanoNemotronVLMultiModalProcessor(
 
         inputs.prompt = tokenizer.encode(prompt, add_special_tokens=False)
 
-        if inputs.tokenization_kwargs is None:
-            inputs.tokenization_kwargs = {}
-
         # Bypass the cached path: the HF processor must receive the
         # prompt (with injected <so_embedding>) and the audio data
         # together so it can perform audio-token replacement natively.
-        (
-            prompt_ids,
-            mm_info,
-            is_update_applied,
-        ) = self._apply_hf_processor(inputs, timing_ctx)
+        mm_info = self._apply_hf_processor(inputs, timing_ctx)
+        prompt_ids = self._postprocess_prompt(inputs.prompt)
 
         with timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
@@ -749,7 +734,7 @@ class NanoNemotronVLMultiModalProcessor(
                 prompt_ids=prompt_ids,
                 mm_kwargs=mm_info.kwargs,
                 mm_prompt_updates=mm_info.prompt_updates,
-                is_update_applied=is_update_applied,
+                is_update_applied=self.renderer_applies_updates,
             )
 
         mm_placeholder_ranges = {
