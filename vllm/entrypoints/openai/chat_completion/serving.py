@@ -14,6 +14,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    has_message_level_tools,
     make_tool_call_id,
 )
 from vllm.entrypoints.generate.base.serving import (
@@ -1025,7 +1026,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
             # handle when there are tools and tool choice is auto
             elif (
-                request.tools
+                (request.tools or has_message_level_tools(request.messages))
                 and (request.tool_choice == "auto" or request.tool_choice is None)
                 and self.enable_auto_tools
                 and tool_parser_cls

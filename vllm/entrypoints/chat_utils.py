@@ -359,7 +359,7 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     """The reasoning content for interleaved thinking."""
 
     tools: list[ChatCompletionFunctionToolParam] | None
-    """The tools for developer role."""
+    """Tools declared on this message, for the `developer`/`system` roles."""
 
     task: str | None
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
@@ -396,7 +396,7 @@ class ConversationMessage(TypedDict, total=False):
     """Deprecated: The reasoning content for interleaved thinking."""
 
     tools: list[ChatCompletionFunctionToolParam] | None
-    """The tools for developer role."""
+    """Tools declared on this message, for the `developer`/`system` roles."""
 
     task: str | None
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
@@ -1830,6 +1830,31 @@ def _parse_chat_message_content_part(
 _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 
+MESSAGE_LEVEL_TOOL_ROLES = ("developer", "system")
+
+
+def iter_message_level_tools(messages: Any) -> Iterable[Any]:
+    """Yield every tool declared on an individual message, unvalidated."""
+    if not isinstance(messages, list):
+        return
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") not in MESSAGE_LEVEL_TOOL_ROLES:
+            continue
+        tools = message.get("tools")
+        if tools is None:
+            continue
+        if isinstance(tools, list):
+            yield from tools
+        else:
+            yield tools
+
+
+def has_message_level_tools(messages: Any) -> bool:
+    """Whether any message carries a tool declaration."""
+    return any(True for _ in iter_message_level_tools(messages))
+
 
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
@@ -1903,7 +1928,7 @@ def _parse_chat_message_content(
         if "task" in message and isinstance(message["task"], str):
             result_msg["task"] = message["task"]
 
-        if role == "developer":
+        if role in MESSAGE_LEVEL_TOOL_ROLES:
             result_msg["tools"] = message.get("tools", None)
     return result
 

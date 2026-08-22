@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
+from vllm.entrypoints.chat_utils import has_message_level_tools
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 
@@ -238,8 +239,10 @@ class KimiK3ReasoningParser(ReasoningParser):
     def _should_preserve_tool_channels(
         request: "ChatCompletionRequest | ResponsesRequest",
     ) -> bool:
-        return bool(getattr(request, "tools", None)) and (
-            getattr(request, "tool_choice", None) != "none"
+        if getattr(request, "tool_choice", None) == "none":
+            return False
+        return bool(getattr(request, "tools", None)) or has_message_level_tools(
+            getattr(request, "messages", None)
         )
 
     def _content_after_reasoning(

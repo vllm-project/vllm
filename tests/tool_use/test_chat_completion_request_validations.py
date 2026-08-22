@@ -182,3 +182,115 @@ def test_multiple_structured_outputs_rejected():
                 },
             }
         )
+
+
+TOOL_DECLARING_ROLES = ["developer", "system"]
+
+
+def _message_level_tools_request(role="developer", **kwargs):
+    """A request whose only tool is declared on a message."""
+    return {
+        "messages": [
+            {"role": role, "content": "", "tools": [SAMPLE_TOOL]},
+            {"role": "user", "content": "What is the weather?"},
+        ],
+        "model": "facebook/opt-125m",
+        **kwargs,
+    }
+
+
+@pytest.mark.parametrize("role", TOOL_DECLARING_ROLES)
+def test_message_level_tools_do_not_change_tool_choice_default(role):
+    """A message declaration must not switch the request into tool mode."""
+    request = ChatCompletionRequest.model_validate(_message_level_tools_request(role))
+    assert request.tools is None
+    assert request.tool_choice == "none"
+
+
+@pytest.mark.parametrize("role", TOOL_DECLARING_ROLES)
+def test_message_level_tools_allow_auto_tool_choice(role):
+    """`auto` needs no tool schema, so a message declaration satisfies it."""
+    request = ChatCompletionRequest.model_validate(
+        _message_level_tools_request(role, tool_choice="auto")
+    )
+    assert request.tools is None
+    assert request.tool_choice == "auto"
+
+
+@pytest.mark.parametrize("role", TOOL_DECLARING_ROLES)
+def test_message_level_tools_with_tool_choice_none(role):
+    request = ChatCompletionRequest.model_validate(
+        _message_level_tools_request(role, tool_choice="none")
+    )
+    assert request.tool_choice == "none"
+
+
+@pytest.mark.parametrize("role", TOOL_DECLARING_ROLES)
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_message_level_tools_reject_constrained_tool_choice(tool_choice, role):
+    """These need a grammar built from the request-level tool schemas."""
+    with pytest.raises(VLLMValidationError, match='Only `tool_choice` "auto"'):
+        ChatCompletionRequest.model_validate(
+            _message_level_tools_request(role, tool_choice=tool_choice)
+        )
+
+
+@pytest.mark.parametrize("role", ["user", "assistant", "tool"])
+def test_tools_on_unsupported_role_ignored(role):
+    """Only roles forwarded to the chat template declare tools."""
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": role, "content": "Hello", "tools": [SAMPLE_TOOL]},
+                {"role": "user", "content": "Hello"},
+            ],
+            "model": "facebook/opt-125m",
+        }
+    )
+    assert request.tool_choice == "none"
+
+
+@pytest.mark.parametrize("role", TOOL_DECLARING_ROLES)
+def test_empty_message_level_tools_do_not_enable_tools(role):
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": role, "content": "", "tools": []},
+                {"role": "user", "content": "Hello"},
+            ],
+            "model": "facebook/opt-125m",
+        }
+    )
+    assert request.tool_choice == "none"
+
+
+@pytest.mark.parametrize("role", TOOL_DECLARING_ROLES)
+@pytest.mark.parametrize(
+    "tools",
+    [
+        "not-a-list",
+        ["not-a-dict"],
+        [{"type": "function"}],
+        [{"type": "function", "function": {}}],
+        [{"type": "function", "function": {"name": 5}}],
+        [{"type": "not-a-function", "function": {"name": "get_weather"}}],
+    ],
+)
+def test_malformed_message_level_tools_rejected(tools, role):
+    """Message-level tools follow the request-level tool schema."""
+    with pytest.raises(VLLMValidationError, match="Invalid tool declared on a message"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {"role": role, "content": "", "tools": tools},
+                    {"role": "user", "content": "Hello"},
+                ],
+                "model": "facebook/opt-125m",
+            }
+        )
