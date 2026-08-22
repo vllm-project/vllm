@@ -11,15 +11,8 @@ from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-
-
-@pytest.fixture(autouse=True)
-def enable_hermes_required_named_parsing(monkeypatch):
-    # With VLLM_ENFORCE_STRICT_TOOL_CALLING (default on), Hermes sets
-    # supports_required_and_named=False and uses structural-tag guided tool
-    # calling. Force it True to test the non-guided JSON required/named parse path.
-    monkeypatch.setattr(Hermes2ProToolParser, "supports_required_and_named", True)
 
 
 class ThinkReasoningParser(BaseThinkingReasoningParser):
@@ -97,10 +90,16 @@ def request_obj():
     )
 
 
-def make_parser(tokenizer, reasoning=False, tool=False, **kwargs):
+def make_parser(
+    tokenizer,
+    reasoning=False,
+    tool=False,
+    tool_cls=Granite4ToolParser,
+    **kwargs,
+):
     class TestParser(DelegatingParser):
         reasoning_parser_cls = ThinkReasoningParser if reasoning else None
-        tool_parser_cls = Hermes2ProToolParser if tool else None
+        tool_parser_cls = tool_cls if tool else None
 
     return TestParser(tokenizer, **kwargs)
 
@@ -347,7 +346,9 @@ def test_parse_delta_finished_no_extra_args_when_fully_streamed(tokenizer, reque
 def test_parse_delta_finished_appends_remaining_args(tokenizer, request_obj):
     """When finished=True and the tool parser has unstreamed args,
     parse_delta appends the remaining arguments to the tool-call delta."""
-    parser = make_parser(tokenizer, reasoning=False, tool=True)
+    parser = make_parser(
+        tokenizer, reasoning=False, tool=True, tool_cls=Hermes2ProToolParser
+    )
     token_ids = tokenizer.encode(MODEL_OUTPUT, add_special_tokens=False)
 
     remainder = ',"unit":"celsius"}'
@@ -481,20 +482,20 @@ def test_parse_delta_required_tool_choice_kimi_k2_ids_after_history(
     assert all(tc.id in (None, "functions.get_current_weather:1") for tc in tool_calls)
 
 
-# ── Engine-based reasoning + non-engine tool parser (Qwen3 + Hermes) ──
+# ── Engine-based reasoning + non-engine tool parser (Qwen3 + Granite4) ──
 
 
-class Qwen3ReasoningHermesToolParser(DelegatingParser):
+class Qwen3ReasoningLegacyToolParser(DelegatingParser):
     reasoning_parser_cls = Qwen3ParserReasoningAdapter
-    tool_parser_cls = Hermes2ProToolParser
+    tool_parser_cls = Granite4ToolParser
 
 
-def test_engine_reasoning_hermes_tool_token_by_token(tokenizer, request_obj):
-    """Qwen3 engine reasoning + Hermes tool parser, token-by-token.
+def test_engine_reasoning_legacy_tool_token_by_token(tokenizer, request_obj):
+    """Qwen3 engine reasoning + legacy tool parser, token-by-token.
 
     Sanity check that the mixed engine/non-engine configuration works
     when tokens arrive one at a time (no deferred content)."""
-    parser = Qwen3ReasoningHermesToolParser(tokenizer)
+    parser = Qwen3ReasoningLegacyToolParser(tokenizer)
 
     assert parser._reasoning_parser.engine_based_streaming is True
     assert parser._tool_parser.engine_based_streaming is False
@@ -515,13 +516,13 @@ def test_engine_reasoning_hermes_tool_token_by_token(tokenizer, request_obj):
     assert json.loads(tool_args) == {"city": "Dallas"}
 
 
-def test_engine_reasoning_hermes_tool_boundary(tokenizer, request_obj):
-    """Qwen3 engine reasoning + Hermes tool parser, boundary chunks.
+def test_engine_reasoning_legacy_tool_boundary(tokenizer, request_obj):
+    """Qwen3 engine reasoning + legacy tool parser, boundary chunks.
 
     When </think> and <tool_call> are in the same chunk with aligned
     text and token IDs, the engine processes both terminals and returns
     the <tool_call> text as content."""
-    parser = Qwen3ReasoningHermesToolParser(tokenizer)
+    parser = Qwen3ReasoningLegacyToolParser(tokenizer)
     end_token_id = parser._reasoning_parser._parser_engine._reasoning_end_token_id
     chunks = _boundary_chunks(tokenizer, parser, end_token_id=end_token_id)
     results = stream_chunks(parser, tokenizer, chunks, request_obj)
@@ -538,8 +539,8 @@ def test_engine_reasoning_hermes_tool_boundary(tokenizer, request_obj):
     assert "tool_call" not in content
 
 
-def test_engine_reasoning_hermes_tool_text_holdback(tokenizer, request_obj):
-    """Qwen3 engine reasoning + Hermes tool parser with engine holdback.
+def test_engine_reasoning_legacy_tool_text_holdback(tokenizer, request_obj):
+    """Qwen3 engine reasoning + legacy tool parser with engine holdback.
 
     Simulates stream_interval > 1 where a batched delta contains
     '</think><'.  The '<' is a regular character token — not the
@@ -550,9 +551,9 @@ def test_engine_reasoning_hermes_tool_text_holdback(tokenizer, request_obj):
 
     Without the fix, finish_streaming() is never called at the
     reasoning->tool transition when _engine_based is False, so the '<'
-    is lost and the Hermes parser sees 'tool_call>...' instead of
+    is lost and the legacy parser sees 'tool_call>...' instead of
     '<tool_call>...'."""
-    parser = Qwen3ReasoningHermesToolParser(tokenizer)
+    parser = Qwen3ReasoningLegacyToolParser(tokenizer)
     vocab = tokenizer.get_vocab()
     think_end_id = vocab["</think>"]
     lt_id = vocab["<"]
@@ -636,7 +637,7 @@ def test_engine_reasoning_no_tool_batched_content_passthrough(tokenizer, request
     """Qwen3 engine reasoning with NO tool parser, batched boundary.
 
     The three mixed-parser tests above all pair the engine reasoning
-    parser with Hermes; none exercise the engine-reasoning-only path
+    parser with a legacy tool parser; none exercise the engine-reasoning-only path
     through the hoisted finish_streaming() transition (where
     ``_engine_based`` is True and there is no tool parser).  A single
     batched delta carries ``</think>`` plus the following content
@@ -686,7 +687,7 @@ def _decode_stream_deltas(tokenizer, groups):
     return pairs
 
 
-def test_engine_reasoning_hermes_tool_multibyte_holdback(tokenizer, request_obj):
+def test_engine_reasoning_legacy_tool_multibyte_holdback(tokenizer, request_obj):
     """Multi-token character across the reasoning->tool boundary.
 
     Extends the ASCII '<' hold-back guard with bbrowning's multi-token
@@ -694,7 +695,7 @@ def test_engine_reasoning_hermes_tool_multibyte_holdback(tokenizer, request_obj)
 
     1. The batched ``</think><`` delta relies on the hoisted
        finish_streaming() to recover the engine-buffered '<'.  Without
-       the fix the Hermes parser never sees ``<tool_call>`` and emits no
+       the fix the legacy parser never sees ``<tool_call>`` and emits no
        tool call at all.
     2. The tool-call arguments carry ``東京🧑\u200d🚀``; the astronaut
        ZWJ sequence's bytes span multiple Qwen3 tokens, so the rest of
@@ -703,7 +704,7 @@ def test_engine_reasoning_hermes_tool_multibyte_holdback(tokenizer, request_obj)
        character round-trip (a naive per-token decode would corrupt it),
        verifying the boundary stays byte-safe for multi-token
        characters."""
-    parser = Qwen3ReasoningHermesToolParser(tokenizer)
+    parser = Qwen3ReasoningLegacyToolParser(tokenizer)
     vocab = tokenizer.get_vocab()
     think_end_id = vocab["</think>"]
     lt_id = vocab["<"]
