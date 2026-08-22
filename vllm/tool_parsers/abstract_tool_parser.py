@@ -1,39 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import importlib
 import json
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
-from typing import Any
-
-from openai.types.responses import (
-    ResponseFormatTextJSONSchemaConfig,
-    ResponseTextConfig,
-)
-from openai.types.responses.function_tool import FunctionTool
+from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    ExtractedToolCallInformation,
-)
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
 from vllm.logger import init_logger
-from vllm.sampling_params import (
-    StructuredOutputsParams,
-)
-from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
+    from vllm.entrypoints.openai.engine.protocol import (
+        DeltaMessage,
+        ExtractedToolCallInformation,
+    )
+    from vllm.entrypoints.openai.responses.protocol import (
+        ResponsesRequest,
+    )
+    from vllm.tokenizers import TokenizerLike
+    from vllm.tool_parsers.utils import Tool
+else:
+    Tool = Any
 
 __all__ = ["Tool"]
 
@@ -83,7 +79,13 @@ class ToolParser:
 
         self.model_tokenizer = tokenizer
         if tools:
-            self.tools: list[ChatCompletionToolsParam | FunctionTool] = [
+            from openai.types.responses.function_tool import FunctionTool
+
+            from vllm.entrypoints.openai.chat_completion.protocol import (
+                ChatCompletionToolsParam,
+            )
+
+            self.tools = [
                 tool
                 for tool in tools
                 if isinstance(tool, (ChatCompletionToolsParam, FunctionTool))
@@ -120,6 +122,18 @@ class ToolParser:
         self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ChatCompletionRequest | ResponsesRequest:
+        from openai.types.responses import (
+            ResponseFormatTextJSONSchemaConfig,
+            ResponseTextConfig,
+        )
+
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionRequest,
+        )
+        from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+        from vllm.sampling_params import StructuredOutputsParams
+        from vllm.tool_parsers.utils import get_json_schema_from_tools
+
         # If there are no tools, return the request as is.
         if not request.tools:
             return request

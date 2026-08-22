@@ -8,7 +8,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolverRegistry
 from vllm.plugins.lora_resolvers.filesystem_resolver import FilesystemResolver
-from vllm.transformers_utils.repo_utils import hf_api
 
 logger = init_logger(__name__)
 
@@ -46,6 +45,8 @@ class HfHubResolver(FilesystemResolver):
 
         if maybe_repo is None or maybe_subpath is None:
             return None
+
+        from vllm.transformers_utils.repo_utils import hf_api
 
         repo_path = await asyncio.to_thread(
             hf_api().snapshot_download,
@@ -109,6 +110,8 @@ class HfHubResolver(FilesystemResolver):
         Args:
             repo_name: Name of the HF hub repo to inspect.
         """
+        from vllm.transformers_utils.repo_utils import hf_api
+
         repo_files = await asyncio.to_thread(
             hf_api().list_repo_files,
             repo_id=repo_name,

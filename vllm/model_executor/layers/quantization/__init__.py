@@ -171,7 +171,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # setdefault so a shorthand that is also a checkpoint method (e.g. "mxfp8")
     # keeps its checkpoint config; the shorthand still works via the
     # `--quantization` CLI path in `resolve_quantization_config`.
-    for shorthand in _ONLINE_SHORTHANDS:
+    for shorthand in _ONLINE_SHORTHANDS():
         method_to_config.setdefault(shorthand, OnlineQuantizationConfig)
 
     # Update the `method_to_config` with customized quantization methods.
