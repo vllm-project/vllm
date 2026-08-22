@@ -383,6 +383,7 @@ class DefaultModelLoader(BaseModelLoader):
         #   ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
         from vllm.distributed import (
             get_dp_group,
+            get_ep_group,
             get_pcp_group,
             get_tensor_model_parallel_rank,
         )
@@ -390,11 +391,15 @@ class DefaultModelLoader(BaseModelLoader):
         dp_size = parallel_config.data_parallel_size
         tp_size = parallel_config.tensor_parallel_size
         pcp_size = parallel_config.prefill_context_parallel_size
-        dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
-        tp_rank = get_tensor_model_parallel_rank() if tp_size > 1 else 0
-        pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
-        ep_size = dp_size * pcp_size * tp_size
-        ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
+        if parallel_config.expert_parallel_size is not None:
+            ep_size = get_ep_group().world_size
+            ep_rank = get_ep_group().rank_in_group
+        else:
+            dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
+            tp_rank = get_tensor_model_parallel_rank() if tp_size > 1 else 0
+            pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
+            ep_size = dp_size * pcp_size * tp_size
+            ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
 
         self.local_expert_ids = compute_local_expert_ids(
             num_experts,
