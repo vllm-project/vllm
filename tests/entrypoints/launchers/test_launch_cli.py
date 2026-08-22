@@ -3,6 +3,7 @@
 """Unit tests for the `vllm launch` CLI subcommand."""
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -185,29 +186,46 @@ assert os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == {worker_method!r}
 
 
 def test_snapshot_environment_contract(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ):
     from vllm.entrypoints.cli import main as cli_main
 
     for name in ("cli_env_setup", "apply_runtime_environment"):
-        monkeypatch.setattr(
-            cli_main, name, lambda: pytest.fail("snapshot mutated the environment")
-        )
-    monkeypatch.setattr(snapshot_cli, "run_inspect", lambda _args: None)
-    monkeypatch.setenv("VLLM_API_KEY", "secret")
-    monkeypatch.setenv("VLLM_USER_SETTING", "configured")
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
-    vllm_env = lambda: {
-        name: value for name, value in os.environ.items() if name.startswith("VLLM_")
-    }
-    before = vllm_env()
-
-    _run_cli(["snapshot", "inspect", "/tmp/vllm-snapshot"])
-
-    assert vllm_env() == before
+        monkeypatch.setattr(cli_main, name, pytest.fail)
+    secret = "snapshot-secret"
+    monkeypatch.setenv("VLLM_API_KEY", secret)
+    monkeypatch.setenv("VLLM_USER_SETTING", secret)
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", secret)
     environment = dict(LocalSnapshotTools()._environment_identity())
-    assert environment["VLLM_USER_SETTING"] == "configured"
+    assert (
+        environment["VLLM_USER_SETTING"]
+        == hashlib.sha256(b"VLLM_USER_SETTING\0snapshot-secret").hexdigest()
+    )
+    assert (
+        environment["VLLM_USER_SETTING"] != environment["VLLM_WORKER_MULTIPROC_METHOD"]
+    )
+    assert secret not in str(environment)
     assert "VLLM_API_KEY" not in environment
+
+    monkeypatch.setenv("VLLM_USER_SETTING", f"{secret}-changed")
+    changed_environment = dict(LocalSnapshotTools()._environment_identity())
+    assert changed_environment["VLLM_USER_SETTING"] != environment["VLLM_USER_SETTING"]
+
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    write_manifest_atomic(artifact, _manifest(environment=tuple(environment.items())))
+    before = os.environ.copy()
+
+    _run_cli(["snapshot", "inspect", str(artifact)])
+
+    assert os.environ == before
+    output = capsys.readouterr().out
+    assert secret not in output
+    inspected = json.loads(output)
+    inspected_environment = dict(inspected["environment"])
+    assert inspected_environment == environment
 
 
 def parse_snapshot(*argv: str):

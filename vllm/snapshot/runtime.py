@@ -606,7 +606,7 @@ class LocalSnapshotTools:
         prefixes = ("VLLM_", "CUDA_", "NCCL_", "TORCH_", "TRITON_")
         selected = tuple(
             sorted(
-                (key, value)
+                (key, hashlib.sha256(key.encode() + b"\0" + value.encode()).hexdigest())
                 for key, value in os.environ.items()
                 if key.startswith(prefixes)
                 and key not in {"VLLM_API_KEY", "VLLM_SNAPSHOT_TIMEOUT_S"}
