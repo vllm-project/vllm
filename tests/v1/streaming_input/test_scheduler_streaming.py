@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import torch
 
+import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -13,6 +14,12 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import (
+    get_request_block_hasher,
+    hash_block_tokens,
+    init_none_hash,
+)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -313,6 +320,56 @@ class TestStreamingScheduler(unittest.TestCase):
         # num_new_tokens = num_tokens - num_computed_tokens = 6 - 4 = 2
         num_new_tokens = session.num_tokens - session.num_computed_tokens
         assert num_new_tokens == 2
+
+    def test_update_request_as_session_drops_stale_block_hashes(self):
+        """A discarded sampled token must not stay fingerprinted in block_hashes.
+
+        Regression test for #49377. `update_block_hashes` only appends and the
+        hasher resumes at `len(block_hashes) * hash_block_size`, so if the
+        discarded token completed a hash block, that hash would keep
+        identifying the replaced sequence and later be committed under the
+        stale identity, letting a request whose prefix matches the old tokens
+        hit KV computed from the new ones.
+        """
+        init_none_hash(sha256)
+        hash_block_size = 16  # matches create_scheduler()
+        scheduler = create_scheduler()
+
+        # 15 prompt tokens, so the sampled token completes hash block 0.
+        prompt = list(range(1, hash_block_size))
+        discarded_token = 999
+        session = Request(
+            request_id="session",
+            prompt_token_ids=list(prompt),
+            sampling_params=SamplingParams(max_tokens=16),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(hash_block_size, sha256),
+            resumable=True,
+        )
+        session.append_output_token_ids(discarded_token)
+        assert len(session.block_hashes) == 1
+        stale_hash = session.block_hashes[0]
+
+        # The sampled token was never computed.
+        session.num_computed_tokens = len(prompt)
+
+        next_token = 42
+        update = StreamingUpdate.from_request(
+            DummyRequest(request_id="session", prompt_token_ids=[next_token])
+        )
+        scheduler._update_request_as_session(session, update)
+
+        assert list(session.all_token_ids) == prompt + [next_token]
+        assert len(session.block_hashes) == 1
+        expected = hash_block_tokens(
+            sha256, kv_cache_utils.NONE_HASH, tuple(prompt + [next_token])
+        )
+        assert session.block_hashes[0] == expected, (
+            "block_hashes[0] does not identify the current token sequence"
+        )
+        assert session.block_hashes[0] != stale_hash, (
+            "block_hashes[0] still fingerprints the discarded sampled token"
+        )
 
     def test_streaming_e2e_lifecycle(self):
         """
