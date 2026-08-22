@@ -36,9 +36,24 @@ class LoRARequest(
     `enable_mixed_moe_lora_format=True`; otherwise it is ignored and the
     on-disk format is inferred from the base model."""
 
+    lora_scale: float = 1.0
+    """Per-request multiplier applied on top of the adapter's own `alpha / r`
+    scaling. Two requests in the same batch may share the same `lora_int_id`
+    while using different `lora_scale` values: the scale is kept as
+    per-request state and applied inside the LoRA kernels, so a distinct
+    scale does not consume an extra adapter slot. `1.0` (the default)
+    reproduces the stock behavior exactly.
+
+    NOTE: This is deliberately *not* part of `__eq__` / `__hash__`, which key
+    on `lora_name` only. The adapter set passed to the LoRA manager is about
+    which weights to load; the scale is looked up per request index instead."""
+
     def __post_init__(self):
         if self.lora_int_id < 1:
             raise ValueError(f"id must be > 0, got {self.lora_int_id}")
+
+        if self.lora_scale < 0:
+            raise ValueError(f"lora_scale must be >= 0, got {self.lora_scale}")
 
         # Ensure lora_path is not empty
         assert self.lora_path, "lora_path cannot be empty"

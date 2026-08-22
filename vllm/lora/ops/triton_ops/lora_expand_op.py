@@ -42,6 +42,8 @@ def _lora_expand_kernel(
     output_d0_stride,
     output_d1_stride,  # 1
     output_hs_ptr,
+    request_scales_ptr,
+    token_to_req_ptr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -51,6 +53,7 @@ def _lora_expand_kernel(
     SLICE_NUM: tl.constexpr,
     SAME_STRIDE: tl.constexpr,
     USE_GDC: tl.constexpr,
+    APPLY_REQUEST_SCALE: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
@@ -119,6 +122,9 @@ def _lora_expand_kernel(
         # out ptr strides
         output_d0_stride,
         output_d1_stride,
+        # per-request lora scaling
+        request_scales_ptr,
+        token_to_req_ptr,
         # constants
         BLOCK_M,
         BLOCK_N,
@@ -129,6 +135,7 @@ def _lora_expand_kernel(
         CAST_TYPE,
         ADD_INPUTS,
         USE_GDC,
+        APPLY_REQUEST_SCALE,
     )
 
 
@@ -146,6 +153,8 @@ def _lora_expand(
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     offset_start: int = 0,
     add_inputs: bool = False,
+    request_scales: torch.Tensor | None = None,  # shape [num_reqs]
+    token_to_req: torch.Tensor | None = None,  # shape [num_tokens]
 ) -> None:
     """
     Args:
@@ -171,6 +180,13 @@ def _lora_expand(
             Defaults to 0.
         add_inputs (bool, optional): Whether to add the input tensor to the
             output tensor. Defaults to False.
+        request_scales (Optional[torch.Tensor]): Per-request LoRA strength
+            multipliers, shape [num_reqs]. When given (together with
+            token_to_req), each token's LoRA delta is additionally scaled by
+            request_scales[token_to_req[token]] before being written out.
+            This lets requests sharing one adapter use different strengths.
+        token_to_req (Optional[torch.Tensor]): int32 tensor of shape
+            [num_tokens] mapping each token to its request index.
     """
 
     assert no_lora_flag_cpu.numel() == 1
@@ -191,6 +207,14 @@ def _lora_expand(
     assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
     assert lora_token_start_loc.size(0) == lora_ids.size(0) + 1
+
+    APPLY_REQUEST_SCALE = request_scales is not None and token_to_req is not None
+    if APPLY_REQUEST_SCALE:
+        assert token_to_req is not None  # narrow for type checkers
+        assert token_to_req.size(0) >= M, (
+            f"token_to_req covers {token_to_req.size(0)} tokens, need {M}"
+        )
+        token_to_req = token_to_req[:M]
 
     (
         slice_start_tensor,
@@ -266,6 +290,8 @@ def _lora_expand(
         output_tensor.stride(0),
         output_tensor.stride(1),
         hidden_sizes_tensor,
+        request_scales,
+        token_to_req,
         BLOCK_M,
         BLOCK_N,
         BLOCK_K,
@@ -275,6 +301,7 @@ def _lora_expand(
         NUM_SLICES,
         same_stride,
         use_gdc,
+        APPLY_REQUEST_SCALE,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
@@ -297,6 +324,8 @@ def _lora_expand_fake(
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     offset_start: int = 0,
     add_inputs: bool = False,
+    request_scales: torch.Tensor | None = None,  # shape [num_reqs]
+    token_to_req: torch.Tensor | None = None,  # shape [num_tokens]
 ) -> None:
     return
 

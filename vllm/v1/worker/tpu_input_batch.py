@@ -497,7 +497,7 @@ class InputBatch:
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
-    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest], None]:
         """
         Given the num_scheduled_tokens for each request in the batch, return
         datastructures used to activate the current LoRAs.
@@ -507,6 +507,8 @@ class InputBatch:
             2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
                where, token_lora_mapping[i] is the LoRA id to use for ith token.
             3. lora_requests: Set of relevant LoRA requests.
+            4. Always None: per-request LoRA scaling is a GPU-kernel feature
+               and is not implemented for TPU.
         """
 
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]
@@ -516,7 +518,7 @@ class InputBatch:
             self.lora_id_to_lora_request.values()
         )
 
-        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+        return prompt_lora_mapping, token_lora_mapping, active_lora_requests, None
 
     @property
     def num_reqs(self) -> int:

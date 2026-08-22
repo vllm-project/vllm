@@ -37,9 +37,37 @@ class LoRAMapping:
     is_prefill: bool = False
     type: LoRAMappingType = LoRAMappingType.LANGUAGE
 
+    # Per-request LoRA strength. `index_mapping` / `prompt_mapping` say which
+    # adapter each token uses; these two say how strongly it is applied, so
+    # requests sharing one adapter can ask for different scales without
+    # consuming extra adapter slots.
+    #   request_scales[i]  -> scale for the i-th request in the batch
+    #   token_to_req[i]    -> request index of the i-th token of index_mapping
+    #   sample_to_req[i]   -> request index of the i-th entry of prompt_mapping
+    # All three are None when the feature is disabled, which is the default
+    # and reproduces stock behavior.
+    request_scales: tuple[float, ...] | None = None
+    token_to_req: tuple[int, ...] | None = None
+    sample_to_req: tuple[int, ...] | None = None
+
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)
         self.prompt_mapping = tuple(self.prompt_mapping)
+        if self.request_scales is not None:
+            self.request_scales = tuple(self.request_scales)
+            assert self.token_to_req is not None, (
+                "token_to_req is required alongside request_scales"
+            )
+            self.token_to_req = tuple(self.token_to_req)
+            assert len(self.token_to_req) == len(self.index_mapping)
+            if self.sample_to_req is not None:
+                self.sample_to_req = tuple(self.sample_to_req)
+                assert len(self.sample_to_req) == len(self.prompt_mapping)
+
+    @property
+    def has_request_scales(self) -> bool:
+        """True when any request asks for a scale other than the adapter's own."""
+        return self.request_scales is not None
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:

@@ -84,6 +84,15 @@ class LoRAConfig:
     experts (stored once with expert-dim 1) instead of per-expert. The shared
     factors are broadcast to the expert count at kernel time. Only meaningful for
     MoE models whose adapters use this layout; ignored otherwise."""
+    enable_per_request_lora_scale: bool = False
+    """If True, allow each request to carry its own `lora_scale` multiplier via
+    `LoRARequest.lora_scale`, applied on top of the adapter's own `alpha / r`.
+    Requests sharing a single adapter in the same batch may then use different
+    strengths without occupying separate adapter slots: the scale is kept as
+    per-request state (`[max_num_seqs]` floats) plus a token->request map, and
+    folded into the LoRA expand kernel. Adds a small per-token gather to the
+    expand kernel, hence opt-in. Not currently applied to fused-MoE LoRA
+    layers."""
 
     def compute_hash(self) -> str:
         """
@@ -105,6 +114,7 @@ class LoRAConfig:
         factors.append(self.enable_tower_connector_lora)
         factors.append(self.enable_mixed_moe_lora_format)
         factors.append(self.enable_moe_shared_loras)
+        factors.append(self.enable_per_request_lora_scale)
         # target_modules affects which modules get LoRA applied
         factors.append(
             tuple(sorted(self.target_modules)) if self.target_modules else None
