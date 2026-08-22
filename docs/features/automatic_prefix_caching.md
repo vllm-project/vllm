@@ -20,6 +20,29 @@ We describe two example workloads, where APC can provide huge performance benefi
 - Long document query, where the user repeatedly queries the same long document (e.g. software manual or annual report) with different queries. In this case, instead of processing the long document again and again, APC allows vLLM to process this long document *only once*, and all future requests can avoid recomputing this long document by reusing its KV cache. This allows vLLM to serve future requests with much higher throughput and much lower latency.
 - Multi-round conversation, where the user may chat with the application multiple times in the same chatting session. In this case, instead of processing the whole chatting history again and again, APC allows vLLM to reuse the processing results of the chat history across all future rounds of conversation, allowing vLLM to serve future requests with much higher throughput and much lower latency.
 
+## Session-aware continuation scheduling
+
+For concurrent multi-round workloads, V1 provides an opt-in scheduler that can
+promote cache-warm continuations from recently active sessions:
+
+```bash
+vllm serve <model> \
+  --enable-prefix-caching \
+  --async-scheduling \
+  --scheduler-cls \
+  vllm.v1.core.sched.session_affinity_scheduler.SessionAffinityScheduler
+```
+
+Requests must provide a typed `session_id` or the `X-Session-ID` header. The
+scheduler only reorders requests with an actual prefix-cache hit. It preserves
+preempted-request ordering and stops reordering when the FCFS head exceeds
+`--session-affinity-max-wait-s`. It requires asynchronous scheduling.
+
+Use `--session-affinity-window`, `--session-affinity-min-blocks`,
+`--session-affinity-max-wait-s`, and `--session-affinity-ttl-s` to tune the
+bounded lookup window, minimum reusable prefix, fairness deadline, and session
+activity lifetime.
+
 ## Limits
 
 APC in general does not reduce the performance of vLLM. With that being said, APC only reduces the time of processing the queries (the prefilling phase) and does not reduce the time of generating new tokens (the decoding phase). So APC does not bring performance gain when vLLM spends most of the time generating answers to the queries (e.g. when the length of the answer is long), or new queries do not share the same prefix with any of existing queries (so that the computation cannot be reused).

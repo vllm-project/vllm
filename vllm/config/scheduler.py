@@ -119,6 +119,19 @@ class SchedulerConfig:
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
 
+    session_affinity_window: int = Field(default=32, ge=2)
+    """Maximum number of FCFS waiting requests inspected by the optional
+    session-affinity scheduler."""
+
+    session_affinity_min_blocks: int = Field(default=4, ge=1)
+    """Minimum cached-prefix blocks required to promote a session continuation."""
+
+    session_affinity_max_wait_s: float = Field(default=0.5, gt=0.0)
+    """Maximum head-of-line wait before session-affinity reordering is disabled."""
+
+    session_affinity_ttl_s: float = Field(default=300.0, gt=0.0)
+    """How long a previously scheduled session remains eligible for affinity."""
+
     disable_hybrid_kv_cache_manager: bool | None = None
     """If set to True, KV cache manager will allocate the same size of KV cache
     for all attention layers even if there are multiple type of attention layers

@@ -214,6 +214,27 @@ def test_jit_monitor_verbose_arg():
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
 
 
+def test_session_affinity_scheduler_args():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--session-affinity-window",
+            "16",
+            "--session-affinity-min-blocks",
+            "8",
+            "--session-affinity-max-wait-s",
+            "1.5",
+            "--session-affinity-ttl-s",
+            "120",
+        ]
+    )
+
+    assert args.session_affinity_window == 16
+    assert args.session_affinity_min_blocks == 8
+    assert args.session_affinity_max_wait_s == 1.5
+    assert args.session_affinity_ttl_s == 120
+
+
 @pytest.mark.parametrize("mode", ["warn", "error"])
 def test_jit_monitor_mode_arg(mode):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
