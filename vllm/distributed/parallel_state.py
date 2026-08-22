@@ -149,6 +149,16 @@ def _apply_to_device_comms(
         action(dc)
 
 
+def suspend_device_comms() -> None:
+    """Release device communicator memory (collective; comms must be idle)."""
+    _apply_to_device_comms(lambda comm: comm.suspend())
+
+
+def resume_device_comms() -> None:
+    """Restore suspended device communicators (collective)."""
+    _apply_to_device_comms(lambda comm: comm.resume())
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()

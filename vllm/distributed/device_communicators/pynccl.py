@@ -27,6 +27,8 @@ logger = init_logger(__name__)
 
 _NCCL_SYMM_OPS_REGISTERED = False
 
+_NCCL_SUSPEND_MEM = 0x01
+
 
 def register_nccl_symmetric_ops(pynccl_comm):
     from vllm.distributed.device_communicators.pynccl_allocator import (
@@ -105,6 +107,7 @@ class PyNcclCommunicator:
 
         self.available = True
         self.disabled = False
+        self._suspended = False
 
         self.nccl_version = self.nccl.ncclGetRawVersion()
         if self.rank == 0:
@@ -478,6 +481,20 @@ class PyNcclCommunicator:
 
     def deregister_comm_window(self, window):
         return self.nccl.ncclCommWindowDeregister(self.comm, window)
+
+    def suspend(self):
+        """Release comm GPU memory (collective, idempotent); keeps topology."""
+        if self.disabled or self._suspended:
+            return
+        self.nccl.ncclCommSuspend(self.comm, _NCCL_SUSPEND_MEM)
+        self._suspended = True
+
+    def resume(self):
+        """Restore a suspended comm (collective); no-op unless suspended."""
+        if self.disabled or not self._suspended:
+            return
+        self.nccl.ncclCommResume(self.comm)
+        self._suspended = False
 
     def batch_isend_irecv(self, p2p_ops: list, stream=None):
         if self.disabled:

@@ -28,14 +28,64 @@ def test_cumem_capability_flags():
     # /health introspect to decide reinit / persistence behavior.
     assert CuMemBackend.is_supported() is True
     assert CuMemBackend.preserves_communicators() is True
+    assert CuMemBackend.requires_communicator_suspend() is True
     assert CuMemBackend.preserves_compiled_artifacts() is False
     assert CuMemBackend.preserves_graphs_with_communicators() is False
     assert CuMemBackend.supports_durable_storage() is False
+    assert SleepModeBackend.requires_communicator_suspend() is False
 
 
 def test_new_backend_starts_in_running_state():
     # Constructing a backend must not touch the GPU; only suspend/resume do.
     assert CuMemBackend().state() == "RUNNING"
+
+
+@pytest.mark.parametrize("requires_suspend", [True, False])
+def test_worker_drives_communicator_suspension(monkeypatch, requires_suspend):
+    """Comm walkers run around sleep/wake iff the backend requires them."""
+    from vllm.v1.worker.gpu_worker import Worker
+
+    calls: list[tuple[str, object]] = []
+
+    class Backend:
+        def suspend(self, level: int = 1) -> None:
+            calls.append(("backend.suspend", level))
+
+        def resume(self, tags: list[str] | None = None) -> None:
+            calls.append(("backend.resume", tuple(tags) if tags else None))
+
+        @classmethod
+        def requires_communicator_suspend(cls) -> bool:
+            return requires_suspend
+
+    worker = object.__new__(Worker)
+    worker._sleep_mode_backend = Backend()
+    worker._sleep_saved_buffers = {}
+    worker._sleep_saved_draft_buffers = {}
+
+    monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
+    monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (0, 0))
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_worker.suspend_device_comms",
+        lambda: calls.append(("comms.suspend", None)),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_worker.resume_device_comms",
+        lambda: calls.append(("comms.resume", None)),
+    )
+
+    worker.sleep(level=1)
+    worker.wake_up(tags=["weights"])
+
+    expected = [
+        ("backend.suspend", 1),
+        ("comms.suspend", None),
+        ("backend.resume", ("weights",)),
+        ("comms.resume", None),
+    ]
+    if not requires_suspend:
+        expected = [c for c in expected if not c[0].startswith("comms.")]
+    assert calls == expected
 
 
 def test_unknown_backend_raises():
