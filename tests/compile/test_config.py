@@ -16,8 +16,10 @@ from vllm.compilation.passes.utility.fix_functionalization import (
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
+    ModelConfig,
     ParallelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
 )
 from vllm.config.compilation import CompilationMode, PassConfig
@@ -674,6 +676,44 @@ def test_cudagraph_capture_sizes_respect_sequence_parallelism():
 
     assert all(size % 2 == 0 for size in compilation_config.cudagraph_capture_sizes)
     assert 544 in compilation_config.cudagraph_capture_sizes
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+def test_real_vllm_config_captures_widest_ngram_decode_batch():
+    """Real config post-init preserves the widest static ngram decode batch."""
+    model_config = ModelConfig(model="facebook/opt-125m")
+    speculative_config = SpeculativeConfig(
+        prompt_lookup_min=1,
+        prompt_lookup_max=1,
+        num_speculative_tokens=16,
+        method="ngram",
+    )
+    scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=32,
+        max_num_batched_tokens=32768,
+    )
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=False,
+    ):
+        config = VllmConfig(
+            model_config=model_config,
+            speculative_config=speculative_config,
+            scheduler_config=scheduler_config,
+            compilation_config=compilation_config,
+        )
+
+    assert 544 in config.compilation_config.cudagraph_capture_sizes
+    assert (
+        config.compilation_config.max_cudagraph_capture_size
+        == config.compilation_config.cudagraph_capture_sizes[-1]
+        == 544
+    )
 
 
 @pytest.mark.parametrize("max_num_seqs", [8, 32, 256, 300, 512, 600, 1024, 2048])
