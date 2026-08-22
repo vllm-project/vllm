@@ -881,7 +881,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
             image_inputs = {}
         else:
-            image_inputs = self._base_call_hf_processor(
+            image_inputs = self._call_hf_processor_on_prompts(
                 prompts=[self.info.image_pattern] * len(parsed_images),
                 mm_data={"images": [[image] for image in parsed_images]},
                 mm_kwargs=mm_kwargs,
@@ -906,7 +906,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
             video_inputs = {}
         else:
-            video_inputs = self._base_call_hf_processor(
+            video_inputs = self._call_hf_processor_on_prompts(
                 prompts=[
                     self.info.image_pattern * len(video) for video in parsed_videos
                 ],
@@ -983,7 +983,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return new_token_ids, placeholders
 
-    def _base_call_hf_processor(
+    def _call_hf_processor_on_prompts(
         self,
         prompts: list[str],
         mm_data: Mapping[str, Sequence[object]],
@@ -993,19 +993,19 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> dict[str, NestedTensors]:
         # This processor supports zipping prompt and mm_data together
         if self.info.get_model_version() in {(2, 6), (4, 0), (4, 5), (4, 6)}:
-            inputs = super()._call_hf_processor(
-                prompt=prompts,  # type: ignore
-                mm_data=mm_data,
-                mm_kwargs=mm_kwargs,
+            inputs = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**mm_kwargs),
+                dict(text=prompts, **mm_data),
+                mm_kwargs,
             )
         else:
             inputs = defaultdict[str, list[torch.Tensor]](list)
 
             for i, prompt in enumerate(prompts):
-                inputs_one = super()._call_hf_processor(
-                    prompt=prompt,
-                    mm_data={k: v[i] for k, v in mm_data.items()},
-                    mm_kwargs=mm_kwargs,
+                inputs_one = self.info.ctx.call_hf_processor(
+                    self.info.get_hf_processor(**mm_kwargs),
+                    dict(text=prompt, **{k: v[i] for k, v in mm_data.items()}),
+                    mm_kwargs,
                 )
 
                 for k, v in inputs_one.items():
@@ -1014,23 +1014,31 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return {k: inputs[k] for k in out_keys}
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         tokenizer = self.info.get_tokenizer()
 
-        input_ids = torch.tensor([tokenizer.encode(prompt)])
-        mm_inputs = self.process_mm_inputs(mm_data, mm_kwargs)
+        input_ids = torch.tensor([tokenizer.encode(prompt_text)])
+        mm_inputs = self.process_mm_inputs(mm_data, hf_processor_mm_kwargs)
 
-        return BatchFeature(
+        processed_data = BatchFeature(
             {
                 "input_ids": input_ids,
                 **mm_inputs,
             }
         )
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_prompt_updates(
         self,
