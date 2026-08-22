@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +15,8 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import (
+    has_flashinfer_moe_ep,
+    has_flashinfer_moe_ep_fault_tolerance,
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
@@ -1086,3 +1089,202 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             for _, handle in self.handle_cache._cache.items():
                 handle.destroy()
             self.handle_cache._cache.clear()
+
+
+class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
+    """All2All based on FlashInfer's `moe_ep` API (NCCL-EP transport).
+
+    Unlike the raw `nccl.ep` integration, this drives NVIDIA's nccl4py EP kernels
+    through the packaged, versioned `flashinfer.moe_ep` wrapper (create_fleet /
+    Fleet.create_handle / Handle.dispatch|combine|complete). The manager owns a
+    lazily-created, config-cached `Fleet` (durable transport sizing); the
+    prepare/finalize objects create a fresh per-forward `Handle` from it.
+
+    Subclasses fix the EP algorithm (LL vs HT) and the transport
+    (`_transport`: "nccl_ep" or "nixl_ep").
+    """
+
+    _transport = "nccl_ep"
+
+    def __init__(self, cpu_group, tcp_store_group=None):
+        assert has_flashinfer_moe_ep(self._transport), (
+            f"flashinfer.moe_ep with a built {self._transport} backend is "
+            "required for the flashinfer_ep_* all2all backends. Install "
+            "flashinfer with BUILD_NCCL_EP=1 / BUILD_NIXL_EP=1 "
+            "(see docker/Dockerfile.flashinfer-ep-pytorch)."
+        )
+        super().__init__(cpu_group, tcp_store_group)
+        # Rank masking is opt-in AND capability-gated: an operator asking for
+        # it on a build that cannot serve it should degrade to the previous
+        # (fail-fast) behaviour rather than silently pretend to be fault
+        # tolerant. HT overrides this to False unconditionally — see
+        # FlashInferEPHTAll2AllManager.
+        self.support_fault_tolerance = (
+            envs.VLLM_FLASHINFER_EP_FAULT_TOLERANCE and self._supports_fault_tolerance()
+        )
+        if envs.VLLM_FLASHINFER_EP_FAULT_TOLERANCE and not self.support_fault_tolerance:
+            logger.warning(
+                "VLLM_FLASHINFER_EP_FAULT_TOLERANCE is set but the %s backend "
+                "cannot serve the FlashInfer EP mask API here; continuing "
+                "without fault tolerance (a failed EP rank will abort).",
+                self._transport,
+            )
+        # Config-keyed Fleet cache (different layers may size differently).
+        self._fleets: dict[tuple, Any] = {}
+        self._ft_last_mask: torch.Tensor | None = None
+
+    def _supports_fault_tolerance(self) -> bool:
+        return has_flashinfer_moe_ep_fault_tolerance(self._transport)
+
+    def _algorithm(self):
+        raise NotImplementedError
+
+    def _make_fleet(self, args: dict[str, Any]):
+        from flashinfer.moe_ep import (
+            BootstrapConfig,
+            EpLayout,
+            FleetAlgoKnobAllocator,
+            FleetParams,
+            create_fleet,
+        )
+
+        # Mirror the EP process group so FlashInfer shares vLLM's EP membership
+        # instead of bootstrapping an unrelated WORLD comm. get_ep_group is
+        # valid here (get_handle runs after EP-group construction).
+        ep_pg = get_ep_group().device_group
+        bootstrap = BootstrapConfig(
+            world_size=self.world_size,
+            rank=self.rank,
+            stream=0,
+            process_group=ep_pg,
+        )
+        params = FleetParams(
+            num_experts=args["num_global_experts"],
+            max_tokens_per_rank=args["max_num_tokens_per_dp_rank"],
+            token_hidden_size=args["token_hidden_size"],
+            dtype_bytes=args.get("dtype_bytes", 2),
+            algorithm=self._algorithm(),
+            # HT ignores layout (always FLAT); LL uses EXPERT_MAJOR (BatchedExperts).
+            layout=EpLayout.EXPERT_MAJOR,
+        )
+        # Draw EP transport buffers from torch's caching allocator so they count
+        # against vLLM's memory budget rather than a hidden cudaMalloc arena.
+        # (nixl_ep does not consume this knob yet — its Buffer owns the RDMA
+        # arena; harmless to pass.)
+        knobs = [FleetAlgoKnobAllocator(torch_caching=True)]
+        if self.support_fault_tolerance:
+            from flashinfer.moe_ep import FleetAlgoKnobFaultTolerance
+
+            # Enable rank masking so a peer that stops responding is skipped
+            # rather than trapping the kernel. LL-only; FlashInfer rejects
+            # FT + HIGH_THROUGHPUT at fleet construction.
+            knobs.append(
+                FleetAlgoKnobFaultTolerance(
+                    timeout_ms=envs.VLLM_FLASHINFER_EP_TIMEOUT_MS
+                )
+            )
+            if self._transport == "nixl_ep":
+                from flashinfer.moe_ep import FleetAlgoKnobTopologyCapacity
+
+                # nixl sizes every per-rank array (RDMA, mask, sync) to this
+                # capacity once, at construction.
+                knobs.append(
+                    FleetAlgoKnobTopologyCapacity(n=envs.VLLM_NIXL_EP_MAX_NUM_RANKS)
+                )
+        return create_fleet(bootstrap, params, knobs, backend=self._transport)
+
+    def get_handle(self, kwargs):
+        """Return the (cached) FlashInfer `Fleet` for this MoE config.
+
+        `kwargs` is the `all_to_all_args` dict built in
+        `maybe_make_prepare_finalize` (num_global_experts /
+        max_num_tokens_per_dp_rank / token_hidden_size / ...).
+        """
+        key = tuple(sorted(kwargs.items()))
+        fleet = self._fleets.get(key)
+        if fleet is None:
+            logger.debug("Creating FlashInfer EP fleet with args %s", kwargs)
+            fleet = self._make_fleet(kwargs)
+            self._fleets[key] = fleet
+        return fleet
+
+    # ----------------------------------------------------------- fault tolerance
+
+    def _primary_fleet(self):
+        """The Fleet whose mask represents this EP group.
+
+        `self._fleets` holds one Fleet per distinct MoE sizing, but they all
+        share a single EP process group, so their masks describe the same set
+        of live ranks. Driving FT from one designated ("primary") Fleet keeps
+        the state single-valued and costs one store round per fault instead of
+        one per fleet; reconciling each independently would let them drift.
+        The first-created Fleet wins, and dict order makes that deterministic.
+        """
+        for fleet in self._fleets.values():
+            return fleet
+        return None
+
+    def query_active_mask(self) -> torch.Tensor:
+        """Per-rank liveness, `int32[world_size]`, **1 = active**.
+
+        NOTE the polarity: FlashInfer normalizes both transports to 1 = active,
+        whereas `NixlEPAll2AllManager`/`DeepEPLLAll2AllManager` return their raw
+        buffers (nonzero = *masked*). Masks are therefore not comparable across
+        manager types; consumers only diff a mask against itself.
+        """
+        fleet = self._primary_fleet()
+        if fleet is None:
+            # No fleet yet (no MoE forward has run): nothing can have failed.
+            return torch.ones(self.world_size, device="cuda", dtype=torch.int32)
+        return fleet.query_active_mask()
+
+    def query_fault(self) -> torch.Tensor:
+        """Returns has_fault scalar (device tensor, per the base contract)."""
+        current = self.query_active_mask()
+        if self._ft_last_mask is None or self._ft_last_mask.shape != current.shape:
+            self._ft_last_mask = torch.ones_like(current)
+        return (current != self._ft_last_mask).any()
+
+    def destroy(self):
+        for fleet in self._fleets.values():
+            with contextlib.suppress(Exception):
+                fleet.destroy()
+        self._fleets.clear()
+        self._ft_last_mask = None
+
+
+class FlashInferEPLLAll2AllManager(FlashInferEPAll2AllManagerBase):
+    """FlashInfer moe_ep low-latency (EXPERT_MAJOR / BatchedExperts)."""
+
+    def _algorithm(self):
+        from flashinfer.moe_ep import EpAlgorithm
+
+        return EpAlgorithm.LOW_LATENCY
+
+
+class FlashInferEPHTAll2AllManager(FlashInferEPAll2AllManagerBase):
+    """FlashInfer moe_ep high-throughput (FLAT / Standard)."""
+
+    def _supports_fault_tolerance(self) -> bool:
+        # Rank masking is LOW_LATENCY-only on both transports: nccl_ep leaves
+        # its mask buffer NULL under HT (the mask APIs then abort the process)
+        # and nixl_ep has no HT mask path at all. FlashInfer's
+        # validate_fleet_params rejects FT + HIGH_THROUGHPUT outright, so this
+        # must be forced off rather than inherited.
+        return False
+
+    def _algorithm(self):
+        from flashinfer.moe_ep import EpAlgorithm
+
+        return EpAlgorithm.HIGH_THROUGHPUT
+
+
+class FlashInferEPNixlAll2AllManager(FlashInferEPLLAll2AllManager):
+    """FlashInfer moe_ep low-latency over the NIXL-EP (UCX/GDAKI) transport.
+
+    Same LL EXPERT_MAJOR / BatchedExperts contract as the NCCL-EP LL manager —
+    the prepare/finalize adapter is shared — only the `flashinfer.moe_ep`
+    transport differs. The fleet derives its rendezvous store from the EP
+    process group (no separate TCPStore needed)."""
+
+    _transport = "nixl_ep"
