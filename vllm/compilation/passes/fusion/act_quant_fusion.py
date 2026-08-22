@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -38,6 +39,12 @@ silu_and_mul_nvfp4_quant_supported = current_platform.is_cuda() and hasattr(
 )
 if silu_and_mul_nvfp4_quant_supported:
     FUSED_OPS[kNvfp4Dynamic] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
+
+silu_and_mul_per_token_quant_supported = current_platform.is_cuda_alike() and hasattr(
+    torch.ops._C, "silu_and_mul_per_token_quant"
+)
+if silu_and_mul_per_token_quant_supported:
+    FUSED_OPS[kFp8DynamicTokenSym] = torch.ops._C.silu_and_mul_per_token_quant.default  # noqa: E501
 
 if current_platform.is_cuda_alike():
     FUSED_OPS[kFp8Dynamic128Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
@@ -280,6 +287,56 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
         return _replacement
 
 
+class SiluMulPerTokenQuantPattern(ActivationQuantPattern):
+    """
+    Fusion for SiluMul+BlockQuant (FP8 dynamic per-token) Pattern.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(kFp8DynamicTokenSym)
+        self.quant_matcher = MatcherQuantFP8(kFp8DynamicTokenSym)
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        return self.silu_and_mul_matcher.inputs()
+
+    @property
+    def pattern(self):
+        def _pattern(
+            input: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            silu_out = self.silu_and_mul_matcher(input)
+            result, scale = self.quant_matcher(silu_out)
+            return result, scale
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            input: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            d = input.shape[-1] // 2
+            output_shape = input.shape[:-1] + (d,)
+            result = torch.empty(
+                output_shape, device=input.device, dtype=self.quant_dtype
+            )
+            scale = torch.empty(
+                input.shape[:-1] + (1,),
+                device=input.device,
+                dtype=torch.float32,
+            )
+            at = auto_functionalized(
+                self.FUSED_OP,
+                result=result,
+                input=input,
+                scale=scale,
+                scale_ub=None,
+            )
+            return at[1], at[2]
+
+        return _replacement
+
+
 class ActivationQuantFusionPass(VllmFusionPatternMatcherPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
@@ -294,6 +351,9 @@ class ActivationQuantFusionPass(VllmFusionPatternMatcherPass):
         super().__init__(config, "activation_quant_fusion_pass")
 
         self.register(SiluMulFp8StaticQuantPattern())
+
+        if silu_and_mul_per_token_quant_supported:
+            self.register(SiluMulPerTokenQuantPattern())
 
         if silu_and_mul_nvfp4_quant_supported:
             self.register(SiluMulNvfp4QuantPattern())
