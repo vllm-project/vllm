@@ -80,7 +80,9 @@ class ShortConv(MambaBase, PluggableLayer):
             prefix=f"{prefix}.out_proj",
         )
 
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        self.num_spec = vllm_config.num_speculative_tokens
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -234,6 +236,8 @@ class ShortConv(MambaBase, PluggableLayer):
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             has_initial_states_p = attn_metadata.has_initial_states_p
             query_start_loc_p = attn_metadata.query_start_loc_p
+            num_accepted_tokens = attn_metadata.num_accepted_tokens
+            query_start_loc_d = attn_metadata.query_start_loc_d
 
         BCx, _ = self.in_proj(hidden_states)
 
@@ -296,14 +300,33 @@ class ShortConv(MambaBase, PluggableLayer):
 
         if has_decode:
             Bx_d = (B_d * x_d).contiguous()
-            Bx = causal_conv1d_update(
-                Bx_d,
-                conv_state,
-                conv_weights,
-                self.conv.bias,
-                activation=None,
-                conv_state_indices=state_indices_tensor_d,
-            )
+            if num_accepted_tokens is not None:
+                # Speculative decode: the verify step feeds >1 query token per
+                # decode request, so use the spec-aware conv update path
+                # (mirrors mamba_mixer2). state_indices_tensor_d is
+                # (num_decodes, 1 + num_spec_tokens) here.
+                assert state_indices_tensor_d is not None
+                Bx = causal_conv1d_update(
+                    Bx_d,
+                    conv_state,
+                    conv_weights,
+                    self.conv.bias,
+                    activation=None,
+                    conv_state_indices=state_indices_tensor_d,
+                    num_accepted_tokens=num_accepted_tokens,
+                    query_start_loc=query_start_loc_d,
+                    max_query_len=state_indices_tensor_d.size(-1),
+                )
+            else:
+                # Non-spec decode
+                Bx = causal_conv1d_update(
+                    Bx_d,
+                    conv_state,
+                    conv_weights,
+                    self.conv.bias,
+                    activation=None,
+                    conv_state_indices=state_indices_tensor_d,
+                )
             y = C_d * Bx
             conv_output_list.insert(0, y)
 
@@ -326,6 +349,7 @@ class ShortConv(MambaBase, PluggableLayer):
             tp_world_size=get_tensor_model_parallel_world_size(),
             intermediate_size=self.conv_dim,
             conv_kernel=self.L_cache,
+            num_spec=self.num_spec,
         )
 
     @property
