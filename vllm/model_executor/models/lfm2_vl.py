@@ -22,6 +22,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -392,47 +393,38 @@ class Lfm2VLDummyInputsBuilder(BaseDummyInputsBuilder[Lfm2VLProcessingInfo]):
 
 
 class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
-        # Text-only input not supported in composite processor
-        if not (images := mm_data.get("images", [])):
-            prompt_ids = self.info.get_tokenizer().encode(
-                prompt, add_special_tokens=False
-            )
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        if not mm_data:
+            return processed_data
 
-        processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
-        )
-
+        images = mm_data.get("images", [])
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
         parsed_images = mm_items.get_items("image", ImageProcessorItems)
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
         ]
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         num_patches = [
             self.info.get_num_patches(
                 image_width=size.width,
                 image_height=size.height,
                 processor=hf_processor,
-                mm_kwargs=mm_kwargs,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
             for size in image_sizes
         ]
-        processed_outputs["num_patches"] = torch.tensor(num_patches)
+        processed_data["num_patches"] = torch.tensor(num_patches)
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -499,16 +491,20 @@ class Lfm2VLMultiModalProjector(nn.Module):
         self.projector_use_layernorm = config.projector_use_layernorm
         if self.projector_use_layernorm:
             self.layer_norm = nn.LayerNorm(in_channels)
-        self.linear_1 = nn.Linear(
+        self.linear_1 = ReplicatedLinear(
             in_channels,
             config.projector_hidden_size,
             bias=config.projector_bias,
+            prefix=maybe_prefix(prefix, "linear_1"),
+            return_bias=False,
         )
         self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(
+        self.linear_2 = ReplicatedLinear(
             config.projector_hidden_size,
             config.text_config.hidden_size,
             bias=config.projector_bias,
+            prefix=maybe_prefix(prefix, "linear_2"),
+            return_bias=False,
         )
 
     def forward(
@@ -1259,3 +1255,13 @@ class Lfm2VLForConditionalGeneration(
             connector="multi_modal_projector",
             tower_model="vision_tower",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        downsample_factor = self.config.downsample_factor
+
+        return num_image_tokens * downsample_factor**2
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        downsample_factor = self.config.downsample_factor
+
+        return num_vision_tokens // downsample_factor**2

@@ -560,33 +560,22 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
-    def _apply_hf_processor_text_only(
+    def _apply_hf_processor_main(
         self,
-        prompt_text: str,
-        tokenization_kwargs: Mapping[str, object],
-    ) -> list[int]:
-        # Bypass the HF processor and tokenize directly.  The HF
-        # processor expands multimodal placeholders (<|video|>, etc.)
-        # via get_text_with_replacements, which raises StopIteration
-        # when the prompt contains placeholders without matching data.
-        # The text-only path only needs token IDs, so the tokenizer
-        # alone is sufficient.
-        processor = self.info.get_hf_processor()
-        text_inputs = processor.tokenizer([prompt_text], **tokenization_kwargs)
-        input_ids = text_inputs["input_ids"]
-        if not isinstance(input_ids, list):
-            input_ids = input_ids.tolist()
-        (prompt_ids,) = input_ids
-        return prompt_ids
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
         val, is_top_level_max_soft_tokens = _get_max_soft_tokens(merged_kwargs)
 
         if val is not None and val not in _SUPPORTED_SOFT_TOKENS:
@@ -631,16 +620,15 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 timestamps = [idx / fps for idx in frame_indices]
 
                 # Process frames as images with max_soft_tokens=70
-                video_mm_kwargs = dict(mm_kwargs)
+                video_mm_kwargs = dict(hf_processor_mm_kwargs)
                 video_mm_kwargs["max_soft_tokens"] = _VIDEO_MAX_SOFT_TOKENS
 
                 dummy_prompt = ("\t" + processor.image_token) * len(frames)
 
-                frame_outputs = super()._call_hf_processor(
-                    prompt=dummy_prompt,
-                    mm_data={"images": frames},
-                    mm_kwargs=video_mm_kwargs,
-                    tok_kwargs=tok_kwargs,
+                frame_outputs = self.info.ctx.call_hf_processor(
+                    self.info.get_hf_processor(**video_mm_kwargs),
+                    dict(text=dummy_prompt, **{"images": frames}),
+                    video_mm_kwargs,
                 )
 
                 # Remap HF key name
@@ -681,7 +669,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             # split-replace bug where replacement text (which itself
             # contains <|video|> tokens) collides with later splits.
             vt = processor.video_token
-            parts = prompt.split(vt, len(video_replacements))
+            parts = prompt_text.split(vt, len(video_replacements))
 
             # NOTE: len(parts) <= len(video_replacements) + 1
             parts_with_repl: list[str] = []
@@ -689,7 +677,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 parts_with_repl.extend([part, repl])
             parts_with_repl.extend(parts[len(video_replacements) :])
 
-            prompt = "".join(parts_with_repl)
+            prompt_text = "".join(parts_with_repl)
 
             video_outputs = {
                 "pixel_values_videos": torch.cat(all_video_pixel_values, dim=0),
@@ -733,46 +721,46 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # NOTE: This requires a corresponding type annotation on the
         # HF side (Gemma4ProcessorKwargs.images_kwargs) so that
         # _merge_kwargs routes max_soft_tokens into images_kwargs.
-        patched_mm_kwargs = dict(mm_kwargs)
+        patched_mm_kwargs = dict(hf_processor_mm_kwargs)
         if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
-        processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**patched_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
             patched_mm_kwargs,
-            tok_kwargs,
         )
 
         # HF uses 'image_position_ids'; vLLM uses 'pixel_position_ids'.
         # Remap here to keep a single translation point.
-        if "image_position_ids" in processed_outputs:
-            processed_outputs["pixel_position_ids"] = processed_outputs.pop(
+        if "image_position_ids" in processed_data:
+            processed_data["pixel_position_ids"] = processed_data.pop(
                 "image_position_ids"
             )
 
-        if "input_features" in processed_outputs:
+        if "input_features" in processed_data:
             # Unpad per-item so each item's cache entry is
             # self-contained. The batched() field config in
             # _get_mm_fields_config stacks equal-length items and leaves
             # the rest as a list; _process_audio_input re-pads that list
             # to the batch's max length.
-            masks = processed_outputs["input_features_mask"]
+            masks = processed_data["input_features_mask"]
             unpadded_features = [
                 f[mask]
                 for f, mask in zip(
-                    processed_outputs["input_features"],
+                    processed_data["input_features"],
                     masks,
                 )
             ]
             unpadded_masks = [mask[mask] for mask in masks]
-            processed_outputs["input_features"] = unpadded_features
-            processed_outputs["input_features_padded"] = unpadded_features
-            processed_outputs["input_features_mask"] = unpadded_masks
+            processed_data["input_features"] = unpadded_features
+            processed_data["input_features_padded"] = unpadded_features
+            processed_data["input_features_mask"] = unpadded_masks
 
-        # Merge video outputs into the final result
-        combined_outputs = dict(processed_outputs, **video_outputs)
-        return BatchFeature(combined_outputs)
+        processed_data.update(video_outputs)
+        processed_data.update(passthrough_data)
+
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -837,7 +825,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 image_size = images.get_image_size(item_idx)
                 # Resolve the effective max_soft_tokens by merging
                 # per-prompt kwargs with the config-level defaults,
-                # consistent with how _call_hf_processor resolves it.
+                # consistent with how _apply_hf_processor_main resolves it.
                 # Without this merge, a missing per-prompt override
                 # would fall back to vision_cfg.default_output_length
                 # instead of the config's mm_processor_kwargs default.
@@ -1000,6 +988,7 @@ class Gemma4ForConditionalGeneration(
     # window instead of dropping them (which would make image attention
     # causal-only for images larger than the sliding window).
     mm_prefix_clamp_sliding_window: bool = True
+    supports_tower_connector_lora = True
 
     packed_modules_mapping = {
         "qkv_proj": [

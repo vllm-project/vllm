@@ -910,7 +910,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def _get_vision_info(
@@ -1280,13 +1280,21 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         proc_impl = getattr(type(hf_processor), "replace_video_token", None)
         return proc_impl is not None and proc_impl is not mixin_impl
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         mm_data = dict(mm_data)
 
         # Separate video processing from image processing. Because the videos
@@ -1315,8 +1323,8 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 
                 # NOTE: a copy of is created to update do_sample_frames,
                 # otherwise mm_hash for the object will be incorrect.
-                video_mm_kwargs = dict(**mm_kwargs)
-                merged = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
+                video_mm_kwargs = dict(**hf_processor_mm_kwargs)
+                merged = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
                 if merged.keys() & {"size", "min_pixels", "max_pixels"}:
                     video_size = dict(self.info.get_video_processor().size)
                     size_override = merged.get("size")
@@ -1366,11 +1374,13 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 if "num_frames" in video_mm_kwargs and "fps" not in video_mm_kwargs:
                     video_mm_kwargs["fps"] = None
 
-                video_outputs = super()._call_hf_processor(
-                    prompt="<|vision_start|><|video_pad|><|vision_end|>",
-                    mm_data=video_mm_data,
-                    mm_kwargs=video_mm_kwargs,
-                    tok_kwargs=tok_kwargs,
+                video_outputs = self.info.ctx.call_hf_processor(
+                    self.info.get_hf_processor(**video_mm_kwargs),
+                    dict(
+                        text="<|vision_start|><|video_pad|><|vision_end|>",
+                        **video_mm_data,
+                    ),
+                    video_mm_kwargs,
                 )
 
                 # Discard HF output input_ids — we use get_video_repl below
@@ -1426,13 +1436,14 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         # fps/num_frames are video-only kwargs already consumed by the loop;
         # exclude them so the text/image processor call below never gets a list.
         non_video_mm_kwargs = {
-            k: v for k, v in mm_kwargs.items() if k not in ("fps", "num_frames")
+            k: v
+            for k, v in hf_processor_mm_kwargs.items()
+            if k not in ("fps", "num_frames")
         }
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=non_video_mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**non_video_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            non_video_mm_kwargs,
         )
 
         # Replace each placeholder with pre-computed video tokens.
@@ -1446,20 +1457,19 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     hf_config.video_token_id,
                     hf_config.vision_end_token_id,
                 ]
-            input_ids = processed_outputs.pop("input_ids")
+            input_ids = processed_data.pop("input_ids")
             if not isinstance(input_ids, list):
                 input_ids = input_ids.tolist()
             (prompt_ids,) = input_ids
             expanded_ids = _replace_video_token_placeholders(
                 prompt_ids, video_target, video_input_ids_lst
             )
-            processed_outputs["input_ids"] = [expanded_ids]
+            processed_data["input_ids"] = [expanded_ids]
 
-        combined_outputs = dict(
-            processed_outputs,
-            **video_outputs,
-        )
-        return BatchFeature(combined_outputs)
+        processed_data.update(video_outputs)
+        processed_data.update(passthrough_data)
+
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -1756,6 +1766,7 @@ class Qwen3VLForConditionalGeneration(
     }
 
     supports_encoder_tp_data = True
+    supports_tower_connector_lora = True
 
     supported_video_pruning_methods = ("evs", "vidcom2")
 

@@ -284,19 +284,18 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 def workspace_init():
     """Initialize the workspace manager for tests that need it.
 
-    This fixture initializes the workspace manager with a CUDA device
-    if available, and resets it after the test completes. Tests that
-    create a full vLLM engine should NOT use this fixture as the engine
-    will initialize the workspace manager itself.
+    This fixture initializes the workspace manager with the current
+    platform's accelerator device if available, and resets it after the test
+    completes. Tests that create a full vLLM engine should NOT use this
+    fixture as the engine will initialize the workspace manager itself.
     """
     from vllm.v1.worker.workspace import (
         init_workspace_manager,
         reset_workspace_manager,
     )
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda:0")
-        init_workspace_manager(device)
+    if torch.accelerator.is_available():
+        init_workspace_manager(torch.device(0))
     yield
     reset_workspace_manager()
 
@@ -893,12 +892,15 @@ class HfRunner:
         return self.model.predict(prompts, *args, convert_to_tensor=True, **kwargs)
 
     def __enter__(self):
-        if current_platform.is_rocm():
-            # Record starting memory usage stats on ROCm so that we can wait for
-            # memory to roughly settle back below these levels on shutdown. This is
-            # helpful in cases where the HfRunner is initialized after significant GPU
-            # memory is already occupied, e.g. in
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            # Record starting memory usage stats on ROCm/XPU so that we can
+            # wait for memory to roughly settle back below these levels on
+            # shutdown. This is helpful in cases where the HfRunner is
+            # initialized after significant GPU memory is already occupied,
+            # e.g. in
             # tests/basic_correctness/test_basic_correctness.py::test_models_distributed
+            # where vllm worker processes are still alive and holding GPU
+            # memory when hf_runner.__exit__ is called.
             from tests.utils import (
                 get_physical_device_indices,
                 record_gpu_memory_usage_stats,
@@ -918,8 +920,8 @@ class HfRunner:
 
         del self.model
         cleanup_dist_env_and_memory()
-        # ROCm frees VRAM lazily; wait so a runner started right after this HF
-        # model exits does not OOM on its startup memory guard.
+        # ROCm/XPU free VRAM lazily; wait so a runner started right after this
+        # HF model exits does not OOM on its startup memory guard.
         wait_for_memory_to_settle(
             threshold_ratio=getattr(self, "threshold_ratios", None)
         )

@@ -1110,22 +1110,20 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         pixel_values = pixel_values.to(hf_config.dtype)
         return pixel_values
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # when the prompt is not empty but the multimodal data is empty,
-        # directly invoke the tokenizer.
-        if "images" not in mm_data and "videos" not in mm_data and prompt != "":
-            tokenizer = self.info.get_tokenizer()
-            prompt_ids = tokenizer.encode(prompt)
-            tokenizer_output = BatchFeature(
-                dict(input_ids=[prompt_ids]), tensor_type="pt"
-            )
-            return tokenizer_output
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if "images" not in mm_data and "videos" not in mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
         if "images" not in mm_data:
             mm_data["images"] = []
@@ -1133,7 +1131,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             mm_data["videos"] = []
 
         # Check if HF processor supports video metadata
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         supports_video_metadata = getattr(
             hf_processor, "supports_video_metadata", False
         )
@@ -1150,8 +1148,10 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
 
         processor_output = self.info.ctx.call_hf_processor(
             hf_processor,
-            dict(text=[prompt], images=mm_data["images"], videos=mm_data["videos"]),
-            dict(**mm_kwargs, **tok_kwargs),
+            dict(
+                text=[prompt_text], images=mm_data["images"], videos=mm_data["videos"]
+            ),
+            hf_processor_mm_kwargs,
         )
 
         # Divide the processor_output into two modalities: image and video.
@@ -1159,7 +1159,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             pixel_values = processor_output["images"]
             if pixel_values is not None:
                 processor_output["images"] = self._pixel_values_norm(
-                    pixel_values, mm_kwargs
+                    pixel_values, hf_processor_mm_kwargs
                 )
             for key in list(processor_output.keys()):
                 if processor_output[key] is None:
@@ -1185,7 +1185,9 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
                     ]
                     del processor_output["images"]
 
-        return processor_output
+        processed_data = processor_output
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -1246,11 +1248,11 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_grid_sizes
             ),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_grid_sizes
             ),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
+            video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
 
@@ -1726,7 +1728,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # Eager fallback: run the full pipeline (ViT + resampler). The result
         # is scattered directly, so it must be the post-merge embeddings.
         pixel_values = mm_kwargs["pixel_values"].type(self.vision_model.dtype)
-        grid_thw = mm_kwargs["image_grid_thw"].to(self.vision_model.device)
+        grid_thw = mm_kwargs["image_grid_thw"].to(
+            self.vision_model.device, non_blocking=True
+        )
         image_features = self.vision_model(pixel_values, grid_thw)
         return self.resampler_model(image_features, grid_thw)
 
@@ -1744,11 +1748,13 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # the actual batch grid_thw, then scatter the post-merge embeddings.
         # Ernie only uses the single "default" encoder path.
         output = outputs["default"]
-        grid_thw = batch_mm_kwargs["image_grid_thw"].to(output.device)
+        grid_thw_cpu = batch_mm_kwargs["image_grid_thw"]
+        grid_thw = grid_thw_cpu.to(output.device, non_blocking=True)
         # The valid token count slices the graph output for the eager
         # resampler call, so it has to come back to the host.
-        with gpu_sync_allowed():
-            num_valid = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum())
+        num_valid = int(
+            (grid_thw_cpu[:, 0] * grid_thw_cpu[:, 1] * grid_thw_cpu[:, 2]).sum()
+        )
         image_embeds = self.resampler_model(output[:num_valid], grid_thw)
         scatter_output_slices(image_embeds, indices, per_item_out_tokens, dest, clone)
 

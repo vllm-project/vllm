@@ -1195,82 +1195,95 @@ Qwen3OmniMoeThinkerDummyInputsBuilder = Qwen2_5OmniThinkerDummyInputsBuilder
 class Qwen3OmniMoeThinkerMultiModalProcessor(
     Qwen2_5OmniThinkerMultiModalProcessor,
 ):
-    def _call_hf_processor(
+    def _get_hf_mm_data(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+        mm_items: MultiModalDataItems,
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
 
-        def pad_to_hop_length(x: np.ndarray, hop_length: int) -> np.ndarray:
-            length = x.shape[-1]
-            if length % hop_length != 0:
-                pad_length = hop_length - (length % hop_length)
-                x = np.pad(x, (0, pad_length), mode="constant", constant_values=0)
-            return x
-
-        # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        hop_length = feature_extractor.hop_length
+        audios = processor_data.get("audios")
         if audios:
-            # NOTE: Qwen3-Omni processor accept "audio"
+            feature_extractor = self.info.get_feature_extractor()
+            hop_length = feature_extractor.hop_length
+
+            def pad_to_hop_length(x: np.ndarray) -> np.ndarray:
+                length = x.shape[-1]
+                if length % hop_length != 0:
+                    pad_length = hop_length - (length % hop_length)
+                    x = np.pad(x, (0, pad_length), mode="constant", constant_values=0)
+                return x
+
             # To make sure the cache works with padding=True, we pre-padded
-            # the audio to multiple of hop_length.
-            mm_data["audio"] = [
-                pad_to_hop_length(audio, hop_length)
+            # the audio to a multiple of hop_length.
+            processor_data = dict(processor_data)
+            processor_data["audios"] = [
+                pad_to_hop_length(audio)
                 if isinstance(audio, np.ndarray)
-                else (pad_to_hop_length(audio[0], hop_length), audio[1])
+                else (pad_to_hop_length(audio[0]), audio[1])
                 for audio in audios
             ]
 
+        return processor_data, passthrough_data
+
+    def _apply_hf_processor_main(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if mm_items.get_all_counts().get("audio", 0):
             # TODO(Isotr0py): Remove this patch after upstream fix PR
             # released and Transformers version update:
             # https://github.com/huggingface/transformers/pull/41473
-            mm_kwargs = dict(mm_kwargs)
-            tok_kwargs = dict(tok_kwargs)
-            mm_kwargs["audio_kwargs"] = dict(mm_kwargs.get("audio_kwargs") or {})
-            mm_kwargs["text_kwargs"] = dict(mm_kwargs.get("text_kwargs") or {})
-        elif mm_kwargs.get("use_audio_in_video") and mm_data.get("videos"):
-            # mm_data can be empty on a multimodal-processor-cache hit, where
-            # there's nothing to (re-)process this call and the real result
-            # comes from the cache — not a genuine "no audio" case.
-            raise ValueError(
-                "Video doesn't have audio track with `audio_in_video=True`"
+            hf_processor_mm_kwargs = dict(hf_processor_mm_kwargs)
+            hf_processor_mm_kwargs["audio_kwargs"] = dict(
+                hf_processor_mm_kwargs.get("audio_kwargs") or {}
+            )
+            hf_processor_mm_kwargs["text_kwargs"] = dict(
+                hf_processor_mm_kwargs.get("text_kwargs") or {}
             )
 
-        hf_inputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        processed_data = super()._apply_hf_processor_main(
+            mm_items,
+            hf_processor_mm_kwargs,
         )
 
         if (
-            "audio_feature_lengths" in hf_inputs
-            and "feature_attention_mask" in hf_inputs
-            and (audios := mm_data.get("audio", []))
+            "audio_feature_lengths" in processed_data
+            and "feature_attention_mask" in processed_data
         ):
-            audio_num_frames = []
-            for _, audio in enumerate(audios):
-                audio_length = len(audio[0]) if isinstance(audio, tuple) else len(audio)
-                num_frame = (
-                    (audio_length // hop_length)
-                    if audio_length % hop_length == 0
-                    else (audio_length // hop_length - 1)
+            valid_mm_items = mm_items.select(
+                {k for k, c in mm_items.get_all_counts().items() if c > 0}
+            )
+            processor_data, _ = self._get_hf_mm_data(valid_mm_items)
+            audios = processor_data.get("audios", [])
+            if audios:
+                feature_extractor = self.info.get_feature_extractor(
+                    **hf_processor_mm_kwargs
                 )
-                if mm_kwargs.get("truncation", False):
-                    num_frame = min(
-                        num_frame, feature_extractor.n_samples // hop_length
+                hop_length = feature_extractor.hop_length
+
+                audio_num_frames = []
+                for audio in audios:
+                    audio_length = (
+                        len(audio[0]) if isinstance(audio, tuple) else len(audio)
                     )
-                audio_num_frames.append(num_frame)
-            hf_inputs["feature_attention_mask"] = [
-                torch.ones(num_frame) for num_frame in audio_num_frames
-            ]
-            hf_inputs["audio_feature_lengths"] = torch.tensor(audio_num_frames)
-        return hf_inputs
+                    num_frame = (
+                        (audio_length // hop_length)
+                        if audio_length % hop_length == 0
+                        else (audio_length // hop_length - 1)
+                    )
+                    if hf_processor_mm_kwargs.get("truncation", False):
+                        num_frame = min(
+                            num_frame, feature_extractor.n_samples // hop_length
+                        )
+                    audio_num_frames.append(num_frame)
+
+                processed_data["feature_attention_mask"] = [
+                    torch.ones(num_frame) for num_frame in audio_num_frames
+                ]
+                processed_data["audio_feature_lengths"] = torch.tensor(audio_num_frames)
+
+        return processed_data
 
     def _maybe_apply_prompt_updates(
         self,
@@ -1279,7 +1292,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         mm_kwargs: MultiModalKwargsItems,
         mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """
         Qwen3-Omni reimplements this function to handle `use_audio_in_video`.
         """
@@ -1553,7 +1566,11 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> tuple[torch.Tensor, ...]:
         input_features = audio_input["input_features"]
-        audio_feature_lengths = audio_input["audio_feature_lengths"]
+        # audio_feature_lengths is keep_on_cpu; the audio tower derives
+        # device placement from feature_lens, so move it explicitly.
+        audio_feature_lengths = audio_input["audio_feature_lengths"].to(
+            input_features.device, non_blocking=True
+        )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
@@ -1583,6 +1600,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             "thinker.lm_head.": "language_model.lm_head.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
+            "talker.": None,
+            "code2wav.": None,
         }
     )
 
@@ -1939,10 +1958,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["talker.", "code2wav."],
-        )
+        loader = AutoWeightsLoader(self)
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
         return loaded_weights
