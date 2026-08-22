@@ -234,7 +234,9 @@ def _fwd_kernel_ep_scatter_2(
             )
         else:
             to_copy_s = tl.load(
-                recv_x_scale + token_id * recv_x_scale_stride0 + offset_in_s,
+                recv_x_scale
+                + token_id * recv_x_scale_stride0
+                + offset_in_s * recv_x_scale_stride1,
                 mask=mask_s,
             )
 
