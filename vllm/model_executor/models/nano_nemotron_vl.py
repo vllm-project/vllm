@@ -734,7 +734,7 @@ class NanoNemotronVLMultiModalProcessor(
                 prompt_ids=prompt_ids,
                 mm_kwargs=mm_info.kwargs,
                 mm_prompt_updates=mm_info.prompt_updates,
-                is_update_applied=self.hf_processor_applies_updates,
+                is_update_applied=self.renderer_applies_updates,
             )
 
         mm_placeholder_ranges = {

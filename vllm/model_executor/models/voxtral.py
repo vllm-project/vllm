@@ -203,7 +203,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
 
 class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]):
     # The tokens are already inserted by the chat template
-    hf_processor_applies_updates = True
+    renderer_applies_updates = True
 
     def _get_mm_fields_config(
         self,
