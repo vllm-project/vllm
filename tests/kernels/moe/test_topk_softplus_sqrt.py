@@ -38,7 +38,11 @@ def _torch_topk_softplus_sqrt(
         assert input_ids is not None
         topk_ids = hash_indices_table[input_ids.long()]
     else:
-        topk_ids = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=True)[1]
+        # Match the kernels' deterministic tie-break. Expert columns are in ID
+        # order, so a stable descending sort selects lower IDs for equal scores.
+        topk_ids = torch.argsort(
+            scores_for_choice, dim=-1, descending=True, stable=True
+        )[:, :topk]
 
     topk_weights = original_scores.gather(1, topk_ids.long())
     if renormalize:
@@ -259,6 +263,8 @@ def test_fused_topk_softplus_sqrt_padding(
     indices_dtype = torch.int32
 
     gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
+    # Exercise top-k cutoff ties without relying on random low-precision collisions.
+    gating_output[0] = 0
 
     padding_rows = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
     padding_rows[1::2] = True
