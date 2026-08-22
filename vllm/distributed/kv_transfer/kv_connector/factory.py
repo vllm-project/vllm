@@ -210,6 +210,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "SparDALookaheadConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.sparda_lookahead_connector",
+    "SparDALookaheadConnector",
+)
+
+KVConnectorFactory.register_connector(
     "DecodeBenchConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector",
     "DecodeBenchConnector",
