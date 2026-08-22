@@ -167,6 +167,8 @@ class EagleMiniCPMModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.num_experts = getattr(self.config, "num_experts", 0)
         self._init_layers(prefix, config, cache_config, quant_config, start_layer)

@@ -699,6 +699,8 @@ class Zamba2Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         # Map hybrid layer indices to block indices

@@ -68,9 +68,11 @@ def _dequant_gather_triton(
     weight_scale: torch.Tensor,
     hidden: int,
     num_bits: int,
+    out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     n = ids.numel()
-    out = torch.empty(n, hidden, dtype=weight_scale.dtype, device=weight_packed.device)
+    dtype = out_dtype if out_dtype is not None else weight_scale.dtype
+    out = torch.empty(n, hidden, dtype=dtype, device=weight_packed.device)
     num_groups = weight_scale.shape[1]
     group_size = 0 if num_groups == 1 else hidden // num_groups
     block = min(triton.next_power_of_2(hidden), 1024)
@@ -153,6 +155,13 @@ class CompressedTensorsEmbeddingWNA16Int(QuantizeMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
         layer.register_parameter("weight_shape", weight_shape)
 
+        # Row indices for the full table, used by `apply` (tied lm_head logits)
+        # to gather+dequantize every row. Registered once as a buffer so it moves
+        # with the layer to the device and is not rebuilt on each call.
+        layer.register_buffer(
+            "all_row_ids", torch.arange(vocab_pp, dtype=torch.long), persistent=False
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
@@ -164,7 +173,38 @@ class CompressedTensorsEmbeddingWNA16Int(QuantizeMethodBase):
         )
         return deq.reshape(*input_.shape, hidden)
 
-    def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
-        raise NotImplementedError(
-            "CompressedTensorsEmbeddingWNA16Int supports embedding lookup only"
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Linear projection against the packed table (logits matmul).
+
+        Needed when a quantized embedding is reused as a tied ``lm_head``: the
+        logits step requires ``x @ W.T`` rather than a row gather. The full
+        table is dequantized once (reusing the gather kernel over all rows,
+        directly into ``x``'s dtype) and passed to ``F.linear``. A fused
+        dequant-GEMM would avoid materializing the dense weight; left as a
+        follow-up optimization.
+        """
+        weight = _dequant_gather_triton(
+            layer.all_row_ids,
+            layer.weight_packed,
+            layer.weight_scale,
+            layer.hidden_size,
+            self.num_bits,
+            out_dtype=x.dtype,
         )
+        return torch.nn.functional.linear(x, weight, bias)
+
+    def tie_weights(
+        self, layer: torch.nn.Module, embed_tokens: torch.nn.Module
+    ) -> torch.nn.Module:
+        """Reuse the quantized embedding module as the tied ``lm_head``.
+
+        The packed table exposes no plain ``weight`` to share, so instead of
+        aliasing a tensor return the embedding module itself; its ``apply``
+        then serves the ``lm_head`` logits matmul.
+        """
+        return embed_tokens

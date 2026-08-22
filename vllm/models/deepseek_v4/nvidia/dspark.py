@@ -83,6 +83,7 @@ class DSparkDeepseekV4Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=vllm_config.quant_config,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 

@@ -274,6 +274,8 @@ class InternLM2Model(nn.Module):
         self.tok_embeddings = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.tok_embeddings",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
