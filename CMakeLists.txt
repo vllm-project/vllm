@@ -392,6 +392,30 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 endif() # _C HIP endif
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  cuda_archs_loose_intersection(TURBOQUANT_ARCHS "8.0;9.0;10.0" "${CUDA_ARCHS}")
+  if(TURBOQUANT_ARCHS)
+    find_library(TURBOQUANT_TORCH_PYTHON_LIBRARY torch_python
+      PATHS "${TORCH_INSTALL_PREFIX}/lib"
+      NO_DEFAULT_PATH REQUIRED)
+    set(TURBOQUANT_SRC
+      "csrc/attention/turboquant/main.cpp"
+      "csrc/attention/turboquant/kernel.cu"
+      "csrc/attention/turboquant/mma_kernel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${TURBOQUANT_SRC}"
+      CUDA_ARCHS "${TURBOQUANT_ARCHS}")
+    define_extension_target(
+      _turboquant_C
+      DESTINATION vllm
+      LANGUAGE CUDA
+      SOURCES ${TURBOQUANT_SRC}
+      COMPILE_FLAGS ${VLLM_GPU_FLAGS} --use_fast_math
+      LIBRARIES ${TURBOQUANT_TORCH_PYTHON_LIBRARY}
+      WITH_SOABI)
+  endif()
+endif()
+
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)

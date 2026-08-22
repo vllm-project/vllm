@@ -484,7 +484,7 @@ def _get_layout(D, mse_bits, value_quant_bits, key_packed_size):
 
 def triton_turboquant_decode_attention(
     query: torch.Tensor,  # [B, Hq, D] — original query
-    kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, padded_slot] uint8
+    kv_cache: torch.Tensor,  # [num_blocks, Hk, 1, page_record_size] uint8
     block_table: torch.Tensor,  # [B, max_num_blocks] int32
     seq_lens: torch.Tensor,  # [B] int32
     Pi: torch.Tensor,  # [D, D] float32
@@ -509,12 +509,24 @@ def triton_turboquant_decode_attention(
     Returns: output tensor [B, Hq, D] in query's dtype.
     """
     B, Hq, D = query.shape
-    Hk = kv_cache.shape[2]
-    block_size = kv_cache.shape[1]
+    cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
+    Hk = kv_cache.shape[1]
+    per_token_bytes = key_packed_size + cfg["val_data_bytes"] + 4
+    aligned_token_bytes = per_token_bytes + per_token_bytes % 2
+    record_size = kv_cache.shape[-1]
+    if kv_cache.ndim != 4 or kv_cache.shape[2] != 1:
+        raise ValueError(
+            "TurboQuant cache must have shape "
+            "[num_blocks, num_kv_heads, 1, page_record_size]"
+        )
+    if record_size % aligned_token_bytes:
+        raise ValueError(
+            "TurboQuant page record is not divisible by its per-token payload: "
+            f"{record_size=} {aligned_token_bytes=}"
+        )
+    block_size = record_size // aligned_token_bytes
     kv_group_size = Hq // Hk
     device = query.device
-
-    cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
 
     # Opt#3 SoA layout constants (derived locally; match store-side values).
     key_data_bytes = D if key_fp8 else cfg["mse_bytes"]

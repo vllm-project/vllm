@@ -7,13 +7,14 @@ Prefill: Standard scaled dot-product attention on uncompressed K/V,
 Decode:  Compute TQ attention scores from compressed cache,
          unpack FP16 values, softmax + weighted sum.
 
-Cache layout (no leading 2 dimension):
-  (num_blocks, block_size, num_kv_heads, slot_size)
-  where slot_size = key_packed_size + value_fp16_size
+Framework cache layout (no leading 2 dimension):
+  (num_blocks, num_kv_heads, block_size, slot_size)
 
-Per-head per-position slot layout:
-  [key_packed (kps bytes) | value_fp16 (D*2 bytes)]
-  For turboquant_k3v4_nc head_dim=256: [100 bytes key | 512 bytes value] = 612
+Kernel-facing zero-copy view:
+  (num_blocks, num_kv_heads, 1, page_record_size)
+
+Per-head page record layout:
+  [key data | value data | key norms | value scales | value zeros | padding]
 """
 
 import contextlib
@@ -24,6 +25,11 @@ from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
+
+try:
+    from vllm import _turboquant_C  # type: ignore[attr-defined]
+except ImportError:
+    _turboquant_C = None
 
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
@@ -82,6 +88,7 @@ if _HAS_FLASH_ATTN:
 # kernel can read them efficiently. This avoids O(cached_len) dequant work
 # per continuation, eliminating the O(N²/chunk_size) collapse at long context.
 _CONTINUATION_DECODE_THRESHOLD = 128
+_OPTIMIZED_DECODE_CAPABILITIES = {(8, 0), (9, 0), (10, 0)}
 
 
 def _soa_imports():
@@ -158,7 +165,7 @@ class TurboQuantAttentionBackend(AttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        return (KVCacheLayout.LBNHC,)
+        return (KVCacheLayout.LBHNC,)
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -246,6 +253,37 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             ((max_num_reqs, num_heads), torch.float32),
         )
 
+        cache_dtype = self.vllm_config.cache_config.cache_dtype
+        if (
+            _turboquant_C is not None
+            and cache_dtype == "turboquant_4bit_nc"
+            and model_config.dtype == torch.bfloat16
+            and head_size in {64, 128, 256}
+            and torch.cuda.get_device_capability(self.device)
+            in _OPTIMIZED_DECODE_CAPABILITIES
+        ):
+            block_size = self.kv_cache_spec.block_size
+            max_model_len = model_config.max_model_len
+            page_table_stride = math.ceil(max_model_len / block_size)
+            device_index = self.device.index or 0
+            workspace_bytes = max(
+                _turboquant_C.workspace_size(
+                    batch_size,
+                    num_heads,
+                    num_kv_heads,
+                    page_table_stride,
+                    block_size,
+                    head_size,
+                    max_model_len,
+                    device_index,
+                )
+                for batch_size in range(1, max_num_reqs + 1)
+            )
+            current_workspace_manager().get_simultaneous(
+                ((workspace_bytes,), torch.uint8),
+                ((max_num_reqs, num_heads, head_size), model_config.dtype),
+            )
+
         reserve_continuation_prefill = (
             scheduler_config.enable_chunked_prefill
             and scheduler_config.max_num_batched_tokens > _CONTINUATION_DECODE_THRESHOLD
@@ -331,6 +369,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
+        self.alibi_slopes = alibi_slopes
+        self.sliding_window = sliding_window
+        self.logits_soft_cap = logits_soft_cap
 
         from vllm.model_executor.layers.quantization.turboquant.config import (
             TurboQuantConfig,
@@ -518,8 +559,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         k = key[:N].view(N, self.num_kv_heads, self.head_size)
         v = value[:N].view(N, self.num_kv_heads, self.head_size)
-        # (B, H, N, C) -> (B, N, H, C) for TQ kernels
-        kv_cache = kv_cache.transpose(1, 2)
+        kv_cache = kv_cache.view(kv_cache.shape[0], kv_cache.shape[1], 1, -1)
         self._store_kv(k, v, kv_cache, slot_mapping, layer)
 
     def forward(
@@ -547,14 +587,12 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         if attn_metadata is None:
             return output.fill_(0)
 
-        # (B, H, N, C) -> (B, N, H, C) for TQ kernels
-        kv_cache = kv_cache.transpose(1, 2)
-
         # Slice to actual tokens
         N = attn_metadata.num_actual_tokens
         if N <= 0:
             return output.fill_(0)
 
+        kv_cache = kv_cache.view(kv_cache.shape[0], kv_cache.shape[1], 1, -1)
         q = query[:N].view(N, self.num_heads, self.head_size)
 
         # Get TQ buffers, ensure on device (one-time migration).
@@ -678,7 +716,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self,
         key: torch.Tensor,  # (N, Hk, D)
         value: torch.Tensor,  # (N, Hk, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
+        kv_cache: torch.Tensor,  # (num_blocks, Hk, 1, page_record_size)
         slot_mapping: torch.Tensor,
         layer: Any,
     ):
@@ -725,7 +763,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         query: torch.Tensor,  # (N, Hq, D)
         key: torch.Tensor,  # (N, Hk, D)
         value: torch.Tensor,  # (N, Hk, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
+        kv_cache: torch.Tensor,  # (num_blocks, Hk, 1, page_record_size)
         attn_metadata: TurboQuantMetadata,
         Pi: torch.Tensor,
         centroids: torch.Tensor,
@@ -910,7 +948,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         query: torch.Tensor,  # (q_len, Hq, D)
         key_chunk: torch.Tensor,  # (q_len, Hk, D)
         val_chunk: torch.Tensor,  # (q_len, Hk, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
+        kv_cache: torch.Tensor,  # (num_blocks, Hk, 1, page_record_size)
         block_table: torch.Tensor,  # (1, max_num_blocks)
         cached_len: int,
         seq_len: int,
@@ -925,7 +963,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         q_len, Hq, D = query.shape
         Hk = key_chunk.shape[1]
         device = query.device
-        block_size = kv_cache.shape[1]
+        record_size = kv_cache.shape[-1]
+        slot_size = self.tq_config.slot_size_aligned
+        if record_size % slot_size:
+            raise ValueError(
+                "TurboQuant page record size must be divisible by its "
+                f"per-token payload: {record_size=} {slot_size=}"
+            )
+        block_size = record_size // slot_size
         BLOCK_D = triton.next_power_of_2(D)
 
         mse_bytes = self._mse_bytes
@@ -1011,13 +1056,12 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 v_cached.stride(2),
                 kv_cache.stride(0),
                 kv_cache.stride(1),
-                kv_cache.stride(2),
                 block_table.stride(0),
                 HEAD_DIM=D,
                 BLOCK_SIZE=block_size,
                 NUM_KV_HEADS=Hk,
-                MSE_BYTES=mse_bytes,
-                KPS=self.tq_config.key_packed_size,
+                KEY_DATA_BYTES=self._mse_bytes,
+                KEY_NORM_BYTES=0 if self.tq_config.key_fp8 else 2,
                 VQB=self.tq_config.effective_value_quant_bits,
                 VAL_DATA_BYTES=val_data_bytes,
                 MSE_BITS=self.tq_config.key_mse_bits,
@@ -1101,13 +1145,50 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     def _decode_attention(
         self,
         query: torch.Tensor,  # (B, Hq, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
+        kv_cache: torch.Tensor,  # (num_blocks, Hk, 1, page_record_size)
         attn_metadata: TurboQuantMetadata,
         Pi: torch.Tensor,
         centroids: torch.Tensor,
         PiT: torch.Tensor | None = None,
         layer: torch.nn.Module | None = None,
     ) -> torch.Tensor:
+        if self._can_use_optimized_decode(query, kv_cache, attn_metadata):
+            assert _turboquant_C is not None
+            B, Hq, D = query.shape
+            record_size = kv_cache.shape[-1]
+            page_size = record_size // self.tq_config.slot_size_aligned
+            page_table_stride = attn_metadata.block_table.stride(0)
+            max_seq_len = attn_metadata.max_seq_len
+            if torch.cuda.is_current_stream_capturing():
+                max_seq_len = attn_metadata.block_table.shape[1] * page_size
+            workspace_bytes = _turboquant_C.workspace_size(
+                B,
+                Hq,
+                self.num_kv_heads,
+                page_table_stride,
+                page_size,
+                D,
+                max_seq_len,
+                query.device.index or 0,
+            )
+            workspace, output = current_workspace_manager().get_simultaneous(
+                ((workspace_bytes,), torch.uint8),
+                ((B, Hq, D), query.dtype),
+            )
+            _turboquant_C.run_with_workspace(
+                query,
+                kv_cache,
+                attn_metadata.block_table,
+                attn_metadata.seq_lens,
+                Pi,
+                centroids,
+                workspace,
+                output,
+                page_size,
+                max_seq_len,
+            )
+            return output
+
         # Acquire shared decode scratch buffers from WorkspaceManager.
         # Layers execute sequentially so one set of buffers is sufficient.
         # Falls back to kernel-internal allocation if workspace unavailable.
@@ -1241,3 +1322,50 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 f"SoA decode does not support kwargs {sorted(dropped)}"
             )
         return soa_decode(**{k: v for k, v in kwargs.items() if k in accepted})
+
+    def _can_use_optimized_decode(
+        self,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: TurboQuantMetadata,
+    ) -> bool:
+        if (
+            _turboquant_C is None
+            or not is_workspace_manager_initialized()
+            or not query.is_cuda
+            or query.dtype != torch.bfloat16
+            or self.head_size not in {64, 128, 256}
+            or query.shape[2] != self.head_size
+            or self.tq_config.key_mse_bits != 4
+            or self.tq_config.effective_value_quant_bits != 4
+            or not self.tq_config.norm_correction
+            or self.tq_config.key_fp8
+            or not math.isclose(self.scale, 1 / math.sqrt(self.head_size))
+            or self.alibi_slopes is not None
+            or self.sliding_window is not None
+            or self.logits_soft_cap not in (None, 0.0)
+            or not query.is_contiguous()
+            or not kv_cache.is_contiguous()
+            or kv_cache.dtype != torch.uint8
+            or not attn_metadata.block_table.is_cuda
+            or attn_metadata.block_table.dtype != torch.int32
+            or attn_metadata.block_table.stride(1) != 1
+            or not attn_metadata.seq_lens.is_cuda
+            or attn_metadata.seq_lens.dtype != torch.int32
+            or not attn_metadata.seq_lens.is_contiguous()
+            or attn_metadata.max_seq_len <= 0
+            or torch.cuda.get_device_capability(query.device)
+            not in _OPTIMIZED_DECODE_CAPABILITIES
+        ):
+            return False
+        record_size = kv_cache.shape[-1]
+        slot_size = self.tq_config.slot_size_aligned
+        if record_size % slot_size:
+            return False
+        page_size = record_size // slot_size
+        return page_size in {
+            16,
+            32,
+            64,
+            128,
+        }

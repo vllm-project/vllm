@@ -893,7 +893,7 @@ def _get_pit_in_query_dtype(PiT: torch.Tensor, qdtype: torch.dtype) -> torch.Ten
 
 def triton_turboquant_unified_attention(
     query: torch.Tensor,  # [num_tokens, Hq, D] - fp16/bf16
-    kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, padded_slot] uint8
+    kv_cache: torch.Tensor,  # [num_blocks, Hk, 1, page_record_size] uint8
     block_table: torch.Tensor,  # [num_seqs, max_num_blocks] int32
     seq_lens: torch.Tensor,  # [num_seqs] int32
     query_start_loc: torch.Tensor,  # [num_seqs+1] int32
@@ -903,7 +903,7 @@ def triton_turboquant_unified_attention(
     mse_bits: int,
     key_packed_size: int,
     value_quant_bits: int,
-    value_packed_size: int,  # unused; kept for signature parity with v2
+    value_packed_size: int,
     key_fp8: bool = False,
     norm_correction: bool = False,
     PiT: torch.Tensor | None = None,
@@ -946,14 +946,22 @@ def triton_turboquant_unified_attention(
     """
     assert query.dim() == 3, f"query must be [N, Hq, D], got {query.shape}"
     num_tokens, Hq, D = query.shape
-    Hk = kv_cache.shape[2]
-    block_size = kv_cache.shape[1]
+    Hk = kv_cache.shape[1]
+    slot_size = key_packed_size + value_packed_size
+    slot_size += slot_size % 2
+    record_size = kv_cache.shape[-1]
+    if kv_cache.ndim != 4 or kv_cache.shape[2] != 1 or record_size % slot_size:
+        raise ValueError(
+            "TurboQuant cache must have shape "
+            "[num_blocks, num_kv_heads, 1, page_record_size] with a page "
+            "record divisible by the per-token payload"
+        )
+    block_size = record_size // slot_size
     kv_group_size = Hq // Hk
     num_seqs = int(query_start_loc.shape[0] - 1)
     device = query.device
 
     cfg = _get_layout(D, mse_bits, value_quant_bits)
-    _ = value_packed_size  # unused
 
     # Q-rotation strategy:
     #   * FP8-key path: no rotation at all (keys stored as fp8, no codebook).
