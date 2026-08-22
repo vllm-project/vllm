@@ -94,10 +94,11 @@ def _discover_pairings() -> list[_PairingInfo]:
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{engine_cls.__name__} (config.name={cfg.name!r})")
             continue
-        if cfg.name == "inkling":
+        if cfg.name in ("inkling", "llama_json"):
             # Inkling uses typed structural blocks and opts out of token-id
-            # terminal matching; combined-parser replay coverage lives in
-            # test_inkling.py.
+            # terminal matching; llama_json has no TOOL_END terminal (calls
+            # close at finish()).  Combined-parser replay coverage lives in
+            # test_inkling.py / test_llama_json.py.
             continue
 
         parser_cls = type(

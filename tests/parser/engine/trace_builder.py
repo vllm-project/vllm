@@ -35,6 +35,7 @@ from vllm.parser.engine.registered_adapters import (
     Glm47MoeParser,
     InklingParser,
     KimiK2Parser,
+    LlamaJsonParser,
     MinimaxM2Parser,
     NemotronV3Parser,
     Qwen3Parser,
@@ -276,6 +277,7 @@ def _validate_sample(sample: Sample, parser_cls: type, **kwargs) -> None:
         parser,
         sample.tokens,
         chunk_size=1,
+        finished_on_last=True,
         tools=sample.tools,
         prompt_token_ids=sample.prompt_token_ids,
     )
@@ -1020,6 +1022,45 @@ def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
+# ── Llama 3.x/4 JSON (bare JSON envelope, no reasoning) ─────────────
+
+_LLAMA_JSON_VOCAB: dict[str, int] = {"<|python_tag|>": 128010}
+
+
+def _llama_json_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        segs.append(("<|python_tag|>", True))
+        payloads = [
+            f'{{"name": "{tc.name}", "parameters": '
+            f"{json.dumps(tc.arguments, ensure_ascii=False)}}}"
+            for tc in scenario.tool_calls
+        ]
+        segs.append(("; ".join(payloads), False))
+    return segs
+
+
+def _build_llama_json(scenario: Scenario, validate: bool = True) -> Sample | None:
+    # Llama JSON has no reasoning phase and no empty-tool-block markup.
+    if scenario.reasoning is not None or scenario.tool_calls == []:
+        return None
+    sample = _make_sample(
+        sample_id=f"llama_json-{scenario.id}",
+        description=scenario.description,
+        vocab=_LLAMA_JSON_VOCAB,
+        segments=_llama_json_segments(scenario),
+        expected_reasoning=None,
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, LlamaJsonParser)
+    return sample
+
+
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
@@ -1031,6 +1072,7 @@ _BUILDERS: dict[str, Any] = {
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
+    "llama_json": _build_llama_json,
     "qwen3": _build_qwen3,
     "inkling": _build_inkling,
 }
