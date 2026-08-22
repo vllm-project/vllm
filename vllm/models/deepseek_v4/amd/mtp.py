@@ -38,7 +38,11 @@ from vllm.model_executor.model_loader.mtp_validation import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.utils import (
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 from vllm.models.deepseek_v4.common.ops import (
     fused_mtp_input_rmsnorm,
     mtp_shared_head_rmsnorm,
@@ -265,7 +269,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         return logits
 
 
-class DeepSeekV4MTP(nn.Module):
+class DeepSeekV4MTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -273,11 +277,22 @@ class DeepSeekV4MTP(nn.Module):
         self.model = DeepSeekV4MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # The MTP draft only ever runs on the last PP stage
+        # (see gpu/model_runner.py: init_speculator is guarded on
+        # is_last_pp_rank), so this factory exists to satisfy the
+        # SupportsPP protocol and is never actually consumed at forward
+        # time. Same pattern as DeepSeekMTP / NemotronHMTP.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    # MTP drafts take an extra `hidden_states` from the target; the drafter
+    # is only ever built on the last PP stage so the SupportsPP-shaped
+    # forward is never called on it.
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
