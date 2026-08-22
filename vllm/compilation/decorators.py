@@ -7,6 +7,7 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 from unittest.mock import patch
 
@@ -271,7 +272,7 @@ def _verify_source_unchanged(
     for source in source_info.inlined_sources:
         module = sys.modules[source.module]
         file = inspect.getfile(module)
-        vllm_config.compilation_config.traced_files.add(file)
+        vllm_config.compilation_config.traced_files.add(Path(file))
         file_contents[file] = source.content
     expected_checksum = _compute_code_hash_with_content(file_contents)
     actual_checksum = _compute_code_hash(set(file_contents.keys()))
@@ -601,7 +602,9 @@ def _support_torch_compile(
         # properly when any of these files change.
 
         # 1. the file containing the top-level forward function
-        self.compilation_config.traced_files.add(original_code_object.co_filename)
+        self.compilation_config.traced_files.add(
+            Path(original_code_object.co_filename)
+        )
 
         # 2. every time Dynamo sees a function call, it will inline
         # the function by calling InliningInstructionTranslator.inline_call_
@@ -611,7 +614,7 @@ def _support_torch_compile(
 
         def patched_inline_call(self_: Any) -> Any:
             code = self_.f_code
-            self.compilation_config.traced_files.add(code.co_filename)
+            self.compilation_config.traced_files.add(Path(code.co_filename))
             return inline_call(self_)
 
         # Disable the C++ compilation of symbolic shape guards. C++-fication
