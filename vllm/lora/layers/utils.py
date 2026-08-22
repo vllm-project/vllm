@@ -121,10 +121,19 @@ def try_get_optimal_moe_lora_config(
         "fused_moe_lora_w2_shrink",
     ]:
         block_size_n = config.get("BLOCK_SIZE_N")
-        config["BLOCK_SIZE_N"] = min(
+        new_block_size_n = min(
             block_size_n if block_size_n is not None else 64,
             next_power_of_2(rank),
         )
+        if current_platform.is_xpu():
+            # Triton's tl.dot on Intel XPU (PVC) requires N >= 16 (the
+            # systolic array's execution_size), or compilation fails with
+            # a CompilationError; CUDA/ROCm only require N >= 1, so only
+            # clamp this floor on XPU. Without it, small LoRA ranks (e.g.
+            # rank < 16, the common default rank=8) shrink BLOCK_SIZE_N
+            # below 16 via next_power_of_2(rank) and crash on XPU.
+            new_block_size_n = max(16, new_block_size_n)
+        config["BLOCK_SIZE_N"] = new_block_size_n
     elif op_type in [
         "fused_moe_lora_w13_expand",
         "fused_moe_lora_w2_expand",
