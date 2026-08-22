@@ -1,5 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Base classes for KV Connector metrics logging and Prometheus recording.
+
+The full data flow for NIXL transfer metrics is:
+
+1. Each TP rank records per-transfer telemetry via
+   :meth:`NixlKVConnectorStats.record_transfer` during worker execution.
+2. The connector periodically snapshots and resets the per-rank collectors
+   (:meth:`NixlKVConnectorStats.clone_and_reset`), shipping the snapshots
+   to the scheduler.
+3. Snapshots from all ranks are concatenated upstream, so the dict passed
+   to :meth:`KVConnectorLogging.observe` already contains observations from
+   every TP rank.
+4. ``observe`` rebuilds the stats object and merges it into the running
+   accumulator via :meth:`KVConnectorStats.aggregate`.
+5. On the logging interval, :meth:`KVConnectorLogging.log` calls
+   :meth:`KVConnectorStats.reduce` to produce the summary line and resets
+   the accumulator.
+6. Separately, :meth:`KVConnectorPromMetrics.observe` records every
+   observation into Prometheus histograms/counters.
+
+Because stats arrive pre-aggregated across workers, the summaries produced
+by ``reduce`` reflect the combined pool of observations from all TP ranks
+rather than any single rank. See
+:class:`NixlKVConnectorStats` for the exact semantics of each metric.
+"""
+
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias, TypeVar
 
@@ -63,12 +90,19 @@ class KVConnectorLogging:
         self.transfer_stats_accumulator: KVConnectorStats | None = None
 
     def observe(self, transfer_stats_data: dict[str, Any]):
+        """Accumulate connector stats received from the scheduler.
+
+        Called whenever the connector syncs with the scheduler, which is
+        not necessarily the logging interval. ``transfer_stats_data`` is
+        expected to be aggregated across all workers (each TP rank's
+        observations are concatenated upstream) and consist of observations
+        from a single connector or a MultiConnector. The data is rebuilt
+        into a stats object and merged into the running accumulator via
+        :meth:`KVConnectorStats.aggregate`, so the accumulator spans all
+        observations since the last :meth:`log` call.
+        """
         # Should not be called when a KVConnector is not configured.
         assert self.connector_cls is not None
-        # Called periodically when connector syncs with the scheduler.
-        # Note that this is not the same as the logging interval.
-        # We expect transfer_stats_data to be aggregated across all workers and
-        # consist of observations from a single connector or a MultiConnector.
         transfer_stats = self.connector_cls.build_kv_connector_stats(
             transfer_stats_data
         )
@@ -91,7 +125,15 @@ class KVConnectorLogging:
             )
 
     def log(self, log_fn=logger.info):
-        """Log transfer metrics periodically, similar to throughput logging"""
+        """Log the accumulated transfer metrics for the current interval.
+
+        Reduces the accumulator (which may hold observations aggregated across
+        all TP ranks) to a summary line via :meth:`KVConnectorStats.reduce`,
+        logs it, and resets the accumulator for the next interval. Intervals
+        with only failures still produce a log line with zero values so they
+        are not silently dropped — failure counts are surfaced through
+        Prometheus instead.
+        """
         if (
             self.transfer_stats_accumulator
             and not self.transfer_stats_accumulator.is_empty()
