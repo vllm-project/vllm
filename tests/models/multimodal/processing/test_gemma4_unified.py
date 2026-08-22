@@ -122,6 +122,44 @@ def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
 
 
 @pytest.mark.parametrize(
+    ("mm_processor_kwargs", "expected_video_tokens"),
+    [
+        ({}, 32 * (70 + 2 + 6)),
+        ({"videos_kwargs": {"max_soft_tokens": 140}}, 32 * (140 + 2 + 6)),
+        ({"videos_kwargs": {"max_soft_tokens": 560}}, 32 * (560 + 2 + 6)),
+        # Image and video budgets are configured independently.
+        (
+            {
+                "images_kwargs": {"max_soft_tokens": 1120},
+                "videos_kwargs": {"max_soft_tokens": 140},
+            },
+            32 * (140 + 2 + 6),
+        ),
+    ],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_UNIFIED_MODEL_ID])
+def test_get_mm_max_tokens_per_item_respects_video_max_soft_tokens(
+    model_id: str,
+    mm_processor_kwargs: dict[str, object],
+    expected_video_tokens: int,
+):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"video": 1},
+    )
+
+    assert tokens is not None
+    assert tokens["video"] == expected_video_tokens
+
+
+@pytest.mark.parametrize(
     ("limit_mm_per_prompt", "expected_video_tokens"),
     [
         ({"video": 1}, 32 * (70 + 2 + 6)),
