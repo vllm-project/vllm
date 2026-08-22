@@ -652,6 +652,7 @@ class SpecDecodeBaseProposer:
                 "input_ids": input_ids,
                 "positions": self._get_positions(input_batch_size),
                 "inputs_embeds": inputs_embeds,
+                "spec_step_idx": token_index,
             }
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
