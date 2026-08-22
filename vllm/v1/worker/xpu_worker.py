@@ -13,7 +13,10 @@ from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
-from vllm.v1.worker.workspace import init_workspace_manager
+from vllm.v1.worker.workspace import (
+    get_num_workspace_ubatches,
+    init_workspace_manager,
+)
 from vllm.v1.worker.xpu_model_runner import XPUModelRunner, XPUModelRunnerV2
 
 from .utils import request_memory
@@ -123,7 +126,7 @@ class XPUWorker(Worker):
         )
 
         # Initialize workspace manager
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        num_ubatches = get_num_workspace_ubatches(self.vllm_config.parallel_config)
         init_workspace_manager(self.device, num_ubatches)
 
         # Construct the model runner

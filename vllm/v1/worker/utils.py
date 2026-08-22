@@ -5,14 +5,15 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
@@ -23,6 +24,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadataBuilder,
     MultipleOf,
+    PersistentWorkspaceProfilingSupport,
 )
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
@@ -39,6 +41,47 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
+
+
+def requires_persistent_attention_workspace_profiling(
+    vllm_config: VllmConfig,
+) -> bool:
+    """Check whether every relevant builder supports the profiling lifecycle."""
+    if vllm_config.parallel_config.enable_elastic_ep:
+        # Elastic EP intentionally unlocks and regrows the shared workspace
+        # during reconfiguration. Its rewarm lifecycle must remain on the
+        # legacy accounting path until it can establish a new profiled bound.
+        return False
+    if vllm_config.speculative_config is not None:
+        # Draft-model builders have a separate ownership lifecycle. Keep the
+        # legacy CUDA graph accounting path until that lifecycle participates
+        # in the same pre-profile reservation contract.
+        return False
+
+    layer_type = cast(type[Any], AttentionLayerBase)
+    attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    found_required_builder = False
+    for attn_module in attn_layers.values():
+        kv_cache_spec = attn_module.get_kv_cache_spec(vllm_config)
+        if kv_cache_spec is None:
+            continue
+        builder_cls = attn_module.get_attn_backend().get_builder_cls()
+        support = builder_cls.get_persistent_workspace_memory_profiling_support(
+            vllm_config, kv_cache_spec
+        )
+        if support is PersistentWorkspaceProfilingSupport.UNSUPPORTED:
+            return False
+        if support is PersistentWorkspaceProfilingSupport.REQUIRED:
+            found_required_builder = True
+        elif support is not PersistentWorkspaceProfilingSupport.NEUTRAL:
+            logger.warning_once(
+                "Attention metadata builder %s returned invalid persistent "
+                "workspace profiling support %r; using legacy memory accounting",
+                getattr(builder_cls, "__name__", type(builder_cls).__name__),
+                support,
+            )
+            return False
+    return found_required_builder
 
 
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
@@ -270,6 +313,8 @@ class AttentionGroup:
             if kernel_block_size is not None
             else self.kv_cache_spec
         )
+        from vllm.v1.worker.workspace import use_workspace_ubatch_id
+
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width:
@@ -279,16 +324,17 @@ class AttentionGroup:
             builder_kwargs["block_table_width"] = get_block_table_width(
                 max_num_blocks, self.kv_cache_spec.block_size, kernel_block_size
             )
-        self.metadata_builders = [
-            builder_cls(
-                kv_cache_spec_builder,
-                self.layer_names,
-                vllm_config,
-                device,
-                **builder_kwargs,
-            )
-            for _ in range(num_metadata_builders)
-        ]
+        self.metadata_builders = []
+        for ubatch_id in range(num_metadata_builders):
+            with use_workspace_ubatch_id(ubatch_id):
+                builder = builder_cls(
+                    kv_cache_spec_builder,
+                    self.layer_names,
+                    vllm_config,
+                    device,
+                    **builder_kwargs,
+                )
+            self.metadata_builders.append(builder)
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id

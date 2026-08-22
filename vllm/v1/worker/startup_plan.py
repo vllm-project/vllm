@@ -35,7 +35,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-PLAN_SCHEMA_VERSION = 1
+# Schema 2 accounts for persistent attention workspaces before sizing KV cache.
+PLAN_SCHEMA_VERSION = 2
 
 
 def compute_plan_fingerprint(
