@@ -41,6 +41,7 @@ class HYV4HCPreLayer(nn.Module):
         base_noise_std: float = 0.0,
         hc_eps: float = 1e-6,
         layernorm_epsilon: float = 1e-5,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -57,6 +58,7 @@ class HYV4HCPreLayer(nn.Module):
             output_size=mix_hc,
             params_dtype=torch.float32,
             bias=False,
+            prefix=f"{prefix}.hc_fn",
         )
         self.hc_scale = nn.Parameter(torch.empty(2, dtype=torch.float32))
         self.hc_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
@@ -168,6 +170,7 @@ class HYV4HCHeadLayer(nn.Module):
         hc_eps: float = 1e-6,
         init_std: float = 6e-3,
         base_noise_std: float = 0.0,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -179,6 +182,7 @@ class HYV4HCHeadLayer(nn.Module):
             output_size=hc_mult,
             params_dtype=torch.float32,
             bias=False,
+            prefix=f"{prefix}.hc_head_fn",
         )
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
@@ -237,6 +241,7 @@ class HYV4HCLayer(nn.Module):
         layer_idx: int,
         init_std: float = 6e-3,
         base_noise_std: float = 0.0,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -252,6 +257,7 @@ class HYV4HCLayer(nn.Module):
                 base_noise_std,
                 config.hc_eps,
                 config.rms_norm_eps,
+                prefix=f"{prefix}.hc_pre",
             )
             self.hc_post = HYV4HCPostLayer(config)
 

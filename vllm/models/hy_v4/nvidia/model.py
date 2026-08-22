@@ -53,8 +53,8 @@ from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     get_pp_missing_layer_names,
-    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -142,8 +142,12 @@ class HYV4DecoderLayer(nn.Module):
             )
             self.block_type = "moe"
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.hc_attn_layer = HYV4HCLayer(config, layer_idx)
-        self.hc_mlp_layer = HYV4HCLayer(config, layer_idx)
+        self.hc_attn_layer = HYV4HCLayer(
+            config, layer_idx, prefix=f"{prefix}.hc_attn_layer"
+        )
+        self.hc_mlp_layer = HYV4HCLayer(
+            config, layer_idx, prefix=f"{prefix}.hc_mlp_layer"
+        )
 
     def forward(
         self,
@@ -266,6 +270,7 @@ class HYV4Model(nn.Module):
                     hidden_size=config.hidden_size,
                     hc_mult=config.hc_mult,
                     hc_eps=config.hc_eps,
+                    prefix=f"{prefix}.hc_head",
                 )
             else:
                 self.hc_head = PPMissingLayer()
@@ -414,20 +419,6 @@ class HYV4Model(nn.Module):
         return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            # HYV4 is MLA-only: no q/k/v projections, but the two latent
-            # down-projections are fused into one GEMM.
-            (".fused_qkv_a_proj", ".q_a_proj", 0),
-            (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-            # The indexer fuses wk and weights_proj into one GEMM. Anchor on
-            # the leading dot: a bare "wk" would also rewrite any future
-            # weight whose name merely contains it.
-            (".wk_weights_proj", ".wk", 0),
-            (".wk_weights_proj", ".weights_proj", 1),
-        ]
         # FP8 indexer wk dequant buffer (weight and scale arrive separately).
         pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
         pp_missing_layer_names = get_pp_missing_layer_names(self)
@@ -492,42 +483,14 @@ class HYV4Model(nn.Module):
                 continue
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
-            # KV-cache scale names are normalized upstream: AutoWeightsLoader
-            # applies quant_config.get_cache_scale_mapper() before dispatching
-            # here, so the scales arrive under their vLLM parameter names and
-            # are handled by the generic branch at the end of this loop.
-            is_found = False
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                if "mlp.experts" in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                if name not in params_dict:
-                    if _should_skip_missing_param(name):
-                        continue
-                    logger.warning_once(
-                        "Skipping unknown checkpoint weight: %s",
-                        name,
-                    )
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
-                is_found = True
-                break
-            if is_found:
-                continue
-
+            # Names and stacked shard ids are normalized upstream by
+            # AutoWeightsLoader, through quant_config.get_cache_scale_mapper()
+            # and hf_to_vllm_mapper.
+            stacked_shard_id = getattr(loaded_weight, "shard_id", None)
+            if ".indexer.wk." in name:
+                name = name.replace(".indexer.wk.", ".indexer.wk_weights_proj.")
+                stacked_shard_id = 0
+            # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
                 continue
 
@@ -647,13 +610,27 @@ class HYV4Model(nn.Module):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
-                    weight_loader(param, loaded_weight)
+                    if stacked_shard_id is None:
+                        weight_loader(param, loaded_weight)
+                    else:
+                        weight_loader(param, loaded_weight, stacked_shard_id)
             loaded_params.add(name)
 
         return loaded_params
 
 
 class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_a_proj": (".fused_qkv_a_proj", 0),
+            ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
+            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
+            ".indexer.weights_proj.": (".indexer.wk_weights_proj.", 1),
+        }
+    )
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         # MLA runs both latent down-projections as one GEMM.
@@ -730,21 +707,17 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        def _filter_weights(weights):
-            for name, weight in weights:
-                # Exclude both model.layers.<N>.* and model.mtp_layers.<i>.*
-                # from target loading when speculative MTP is enabled.
-                if name.startswith("model.mtp_layers."):
-                    continue
-                if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
-                    continue
-                yield name, weight
-
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(_filter_weights(weights))
+        # MTP layers are loaded by the MTP head, not by the target model. They
+        # appear as model.mtp_layers.<i>.* and as the layer ids past the backbone.
+        mtp_start = self.config.num_hidden_layers
+        skip_prefixes = ["model.mtp_layers."] + [
+            f"model.layers.{mtp_start + i}."
+            for i in range(getattr(self.config, "num_nextn_predict_layers", 0))
+        ]
+        if self.config.tie_word_embeddings:
+            skip_prefixes.append("lm_head.")
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
