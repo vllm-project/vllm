@@ -1110,6 +1110,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
 
+        num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
+
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
@@ -1125,6 +1127,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             expanded_local_pos = torch.zeros(
                 num_reqs, dtype=torch.int32, device=self.device
             )
+
+            # LoRA and mask replay require request-aligned logits.
+            if (
+                batch_req_state.has_prefill
+                and self.lora_config is None
+                and not self.model_config.return_sampling_mask
+            ):
+                num_logits = (
+                    num_computed_tokens_np + num_scheduled_tokens_np
+                    >= batch_req_state.prefill_len_np
+                ).astype(np.int32)
+                total_num_logits = int(num_logits.sum())
+                if total_num_logits != num_reqs:
+                    cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
+                    cu_num_logits_np[0] = 0
+                    np.cumsum(num_logits, out=cu_num_logits_np[1:])
+                    cu_num_logits = async_copy_to_gpu(
+                        cu_num_logits_np, device=self.device
+                    )
+                    if total_num_logits == 0:
+                        expanded_idx_mapping = idx_mapping[:0]
+                        expanded_local_pos = cu_num_logits[:0]
+                    else:
+                        expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
+                            idx_mapping,
+                            total_num_logits,
+                            cu_num_logits,
+                            max_expand_len=1,
+                        )
         else:
             num_draft_tokens_per_req = np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
@@ -1216,21 +1247,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
-        logits_indices = combine_sampled_and_draft_tokens(
-            self.input_buffers.input_ids,
-            idx_mapping,
-            self.req_states.last_sampled_tokens,
-            query_start_loc,
-            seq_lens,
-            self.req_states.prefill_len.gpu,
-            self.req_states.draft_tokens,
-            cu_num_logits,
-            total_num_logits,
-            self.model_state.num_new_sampled_tokens_per_step,
-        )
+        if total_num_logits == 0:
+            logits_indices = idx_mapping[:0]
+        else:
+            logits_indices = combine_sampled_and_draft_tokens(
+                self.input_buffers.input_ids,
+                idx_mapping,
+                self.req_states.last_sampled_tokens,
+                query_start_loc,
+                seq_lens,
+                self.req_states.prefill_len.gpu,
+                self.req_states.draft_tokens,
+                cu_num_logits,
+                total_num_logits,
+                self.model_state.num_new_sampled_tokens_per_step,
+            )
 
         # CPU upper bound on seq_lens; padded entries left at zero.
-        num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
         seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
         np.add(
             num_computed_tokens_np,
@@ -1325,6 +1358,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        if input_batch.logits_indices.numel() == 0:
+            num_reqs = input_batch.num_reqs
+            sampled_token_ids = torch.full(
+                (num_reqs, 1), -1, dtype=torch.int64, device=self.device
+            )
+            num_sampled = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
+            sampler_output = SamplerOutput(
+                sampled_token_ids=sampled_token_ids,
+                logprobs_tensors=None,
+                num_nans=num_sampled.clone()
+                if self.sampler is not None and self.sampler.compute_nans
+                else None,
+                num_sampled=num_sampled,
+                num_rejected=torch.zeros_like(num_sampled),
+            )
+            return sampler_output, num_sampled, sampler_output.num_rejected
+
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:

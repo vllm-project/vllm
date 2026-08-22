@@ -140,7 +140,13 @@ class Sampler:
         if self.trace_replay_state is not None:
             # Overwrite sampled tokens with the replay trace up-front so that
             # computed logprobs reflect the real distribution of the forced token.
-            self.trace_replay_state.apply_trace(sampled, idx_mapping)
+            # Non-spec batches may omit unfinished prefill rows from sampled.
+            trace_idx_mapping = (
+                expanded_idx_mapping
+                if input_batch.num_draft_tokens_per_req is None
+                else idx_mapping
+            )
+            self.trace_replay_state.apply_trace(sampled, trace_idx_mapping)
 
         if return_logprobs:
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
@@ -177,6 +183,19 @@ class Sampler:
             sampling_mask_tensors = SamplingMaskTensors.from_logits(
                 processed_logits, num_sampled
             )
+
+        if (
+            input_batch.num_draft_tokens_per_req is None
+            and sampled.shape[0] != input_batch.num_reqs
+        ):
+            sampled_mask = num_sampled.bool()
+            sampled = sampled.new_full((input_batch.num_reqs,), -1).masked_scatter_(
+                sampled_mask, sampled
+            )
+            if num_nans is not None:
+                num_nans = num_nans.new_zeros(input_batch.num_reqs).masked_scatter_(
+                    sampled_mask, num_nans
+                )
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
