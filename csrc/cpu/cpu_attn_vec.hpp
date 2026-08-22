@@ -109,8 +109,8 @@ class TileGemm82 {
       float* __restrict__ curr_m_a = curr_a;
       vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
         vec_op::FP32Vec16 a_reg(*curr_m_a);
-        c_regs[i * 2] = c_regs[i * 2] + a_reg * fp32_b_0_reg;
-        c_regs[i * 2 + 1] = c_regs[i * 2 + 1] + a_reg * fp32_b_1_reg;
+        vec_op::fma(c_regs[i * 2], a_reg, fp32_b_0_reg);
+        vec_op::fma(c_regs[i * 2 + 1], a_reg, fp32_b_1_reg);
 
         // update
         curr_m_a += lda;

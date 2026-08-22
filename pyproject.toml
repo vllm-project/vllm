@@ -154,6 +154,10 @@ k_ot = "k_ot"
 view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
 
+00abd0p = "00abd0p"
+03ede2p = "03ede2p"
+40daa4p = "40daa4p"
+
 [tool.typos.default.extend-words]
 Hel = "Hel"
 wether = "wether"
