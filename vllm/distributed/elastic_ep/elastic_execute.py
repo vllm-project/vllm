@@ -260,6 +260,7 @@ class ElasticEPScalingExecutor:
             coord_store_port=reconfig_request.coord_store_port,
             use_all2all=use_all2all,
             enable_eplb=parallel_config.enable_eplb,
+            eplb_communicator=parallel_config.eplb_config.communicator,
         )
         self.stage_standby_moe_quant_methods()
         self._prepare_eplb_communicator(get_standby_eplb_group())

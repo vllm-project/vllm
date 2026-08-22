@@ -34,6 +34,82 @@ def _make_executor(cudagraph_mode: CUDAGraphMode) -> ElasticEPScalingExecutor:
 
 
 @pytest.mark.parametrize(
+    ("communicator", "expected"),
+    [("nixl", False), ("pynccl", True), ("torch_nccl", True)],
+)
+def test_stateless_eplb_group_only_skips_device_communicator_for_nixl(
+    monkeypatch: pytest.MonkeyPatch,
+    communicator: str,
+    expected: bool,
+) -> None:
+    import vllm.distributed.parallel_state as parallel_state
+
+    group = object()
+    init_group = Mock(return_value=group)
+    monkeypatch.setattr(parallel_state, "_init_stateless_group", init_group)
+    ranks = [[0, 1]]
+    coord_store = object()
+
+    result = parallel_state._init_stateless_eplb_group(
+        ranks,
+        "127.0.0.1",
+        "nccl",
+        coord_store,
+        communicator,
+    )
+
+    assert result is group
+    init_group.assert_called_once_with(
+        ranks,
+        "eplb",
+        "127.0.0.1",
+        "nccl",
+        coord_store=coord_store,
+        use_device_communicator=expected,
+    )
+
+
+def test_prepare_reconfiguration_forwards_eplb_communicator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _make_executor(CUDAGraphMode.FULL_AND_PIECEWISE)
+    parallel_config = SimpleNamespace(
+        world_size=1,
+        enable_eplb=True,
+        eplb_config=SimpleNamespace(communicator="nixl"),
+    )
+    executor.worker.vllm_config.parallel_config = parallel_config
+    executor._wait_for_group_cleanup = Mock()
+    executor.stage_standby_moe_quant_methods = Mock()
+    executor._prepare_eplb_communicator = Mock()
+    executor.transfer_weights = Mock()
+    executor._maybe_warm_target_groups_during_prepare = Mock()
+
+    create_groups = Mock()
+    monkeypatch.setattr(elastic_execute, "create_standby_groups", create_groups)
+    monkeypatch.setattr(
+        elastic_execute, "get_dp_group", lambda: SimpleNamespace(world_size=2)
+    )
+
+    request = SimpleNamespace(
+        new_data_parallel_size=2,
+        new_data_parallel_master_ip="127.0.0.1",
+        coord_store_port=1234,
+    )
+    executor.prepare_reconfiguration(request, use_all2all=True)
+
+    create_groups.assert_called_once_with(
+        new_dp_size=2,
+        new_world_size_across_dp=2,
+        master_ip="127.0.0.1",
+        coord_store_port=1234,
+        use_all2all=True,
+        enable_eplb=True,
+        eplb_communicator="nixl",
+    )
+
+
+@pytest.mark.parametrize(
     ("is_rocm", "cudagraph_mode", "expected"),
     [
         (True, CUDAGraphMode.NONE, False),
