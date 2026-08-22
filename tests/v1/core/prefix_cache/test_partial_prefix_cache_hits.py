@@ -1484,6 +1484,85 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
     assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
 
 
+def test_dspark_miss_does_not_poison_next_prefix_lookup():
+    """A DSpark miss must not retain draft blocks past the joint hybrid hit."""
+    hash_block_size = 2
+    block_size = 8
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["target"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["draft"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=2,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        scheduler_block_size=block_size,
+        dcp_world_size=4,
+        use_eagle=True,
+        retention_interval=0,
+    )
+
+    def run_request(request_id: str, num_tokens: int) -> int:
+        request = make_request(
+            request_id, list(range(num_tokens)), hash_block_size, sha256
+        )
+        computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+        assert (
+            manager.allocate_slots(
+                request,
+                num_tokens - num_computed,
+                num_computed,
+                computed_blocks,
+            )
+            is not None
+        )
+        request.num_computed_tokens = num_tokens
+        manager.free(request)
+        manager.new_step_starts()
+        return num_computed
+
+    # Seed a six-token prefix; the first request has nothing to reuse.
+    assert run_request("first", 6) == 0
+    # The draft group finds stale candidate blocks, but EAGLE and Mamba
+    # reconciliation reduce the joint hit to zero. Those blocks must not be
+    # attached to this request.
+    assert run_request("second", 8) == 0
+    # The second request populated eight tokens correctly. EAGLE rewinds one
+    # two-token hash unit, so the next joint prefix hit is six tokens.
+    assert run_request("third", 10) == 6
+
+
 def test_hybrid_sliding_window_group_disables_partial_hash_hits():
     hash_block_size = 2
     sliding_window_block_size = 2 * hash_block_size
