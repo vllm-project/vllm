@@ -2496,12 +2496,6 @@ class VllmConfig:
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
             if (
-                speculative_config.method == "eagle3"
-                and self.parallel_config.pipeline_parallel_size > 1
-            ):
-                unsupported.append("EAGLE3 with pipeline parallelism")
-
-            if (
                 speculative_config.enable_adaptive_verification
                 and self.lora_config is not None
             ):

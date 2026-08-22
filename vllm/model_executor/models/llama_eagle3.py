@@ -278,9 +278,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         if getattr(self.config, "draft_vocab_size", None) is None:
             base_vocab_size = getattr(self.config, "vocab_size", None)
             self.config.draft_vocab_size = base_vocab_size
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        # Total, not this rank's slice, so the drafter's layer ids stay unique
+        # however the target is split across PP stages.
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
 
         # Store target layer count in draft config for
         # proper layer_types indexing in draft models

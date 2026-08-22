@@ -1504,8 +1504,41 @@ class LocalArgmaxMixin:
 class EagleModelMixin:
     aux_hidden_state_layers: tuple[int, ...] = ()
 
+    # Set by models that pack local aux taps into their forward output for the
+    # runner to carry along the PP handoff.
+    supports_aux_hidden_states_over_pp: ClassVar[bool] = False
+
+    AUX_HIDDEN_STATE_KEY: ClassVar[str] = "aux_hidden_states_"
+
+    # Cached at setup: get_pp_indices logs on uneven splits, and dynamo cannot
+    # trace logging inside the forward.
+    _aux_slot_base_cached: int = 0
+    _aux_upstream_total_cached: int = 0
+
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.aux_hidden_state_layers = layers
+        self._cache_aux_pp_layout()
+
+    def _cache_aux_pp_layout(self) -> None:
+        """Resolve this rank's slot layout, off the forward path."""
+        from vllm.distributed.parallel_state import (
+            get_pp_group,
+            model_parallel_is_initialized,
+        )
+
+        # Models are also built outside a worker, where there is no PP group
+        # and so nothing to forward.
+        if not model_parallel_is_initialized():
+            return
+        pp = get_pp_group()
+        if pp.world_size < 2:
+            return
+        self._aux_slot_base_cached = self._aux_slot_base(
+            pp.rank_in_group, pp.world_size
+        )
+        self._aux_upstream_total_cached = self._aux_slot_base(
+            pp.world_size - 1, pp.world_size
+        )
 
     def _maybe_add_hidden_state(
         self,
@@ -1518,6 +1551,94 @@ class EagleModelMixin:
             value = hidden_states + residual if residual is not None else hidden_states
             aux_hidden_states.append(value)
         return aux_hidden_states
+
+    @staticmethod
+    def local_aux_tap_ids(
+        start_layer: int,
+        end_layer: int,
+        aux_ids: tuple[int, ...],
+        is_first_rank: bool,
+    ) -> tuple[int, ...]:
+        """Tap ids this stage produces (not inherited from upstream)."""
+        out: list[int] = []
+        if is_first_rank and start_layer in aux_ids:
+            out.append(start_layer)
+        for layer_idx in range(start_layer, end_layer):
+            if (layer_idx + 1) in aux_ids:
+                out.append(layer_idx + 1)
+        return tuple(out)
+
+    def _total_num_layers(self) -> int:
+        num_layers = getattr(getattr(self, "config", None), "num_hidden_layers", None)
+        if num_layers is None:
+            raise RuntimeError(
+                "aux-over-PP transport needs config.num_hidden_layers on the model"
+            )
+        return num_layers
+
+    def _num_local_taps_on_rank(self, rank: int, pp_world_size: int) -> int:
+        """How many taps stage ``rank`` produces itself, without loading it."""
+        from vllm.distributed.utils import get_pp_indices
+
+        start, end = get_pp_indices(self._total_num_layers(), rank, pp_world_size)
+        return len(
+            self.local_aux_tap_ids(
+                start, end, tuple(self.aux_hidden_state_layers), rank == 0
+            )
+        )
+
+    def _aux_slot_base(self, rank: int, pp_world_size: int) -> int:
+        """Global slot index of ``rank``'s first tap.
+
+        One slot per tap, ordered by producer rank; every stage derives the same
+        numbering from the layer split, so slots need no negotiation.
+        """
+        return sum(self._num_local_taps_on_rank(r, pp_world_size) for r in range(rank))
+
+    def pack_local_aux_for_last(
+        self, aux_hidden_states: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """Expose this stage's own aux taps to the runner, keyed by global slot.
+
+        Pure packing, so the forward stays capturable by full CUDA graphs; the
+        taps then ride the ``IntermediateTensors`` handoff. Callers reach this
+        only off the last rank, which implies a PP world size above one.
+        """
+        if not aux_hidden_states:
+            return {}
+        base = self._aux_slot_base_cached
+        return {
+            f"{self.AUX_HIDDEN_STATE_KEY}{base + i}": t
+            for i, t in enumerate(aux_hidden_states)
+        }
+
+    def recv_remote_aux_from_producers(
+        self, intermediate_tensors: "IntermediateTensors | None"
+    ) -> list[torch.Tensor]:
+        """Collect earlier stages' aux taps on the last rank, in tap order.
+
+        The handoff has already landed them in the persistent buffer, so reading
+        fixed slots keeps the forward capturable by full CUDA graphs. Callers
+        gate on the last rank; the count is zero unless a split left taps
+        upstream, which cannot happen at a PP world size of one.
+        """
+        total = self._aux_upstream_total_cached
+        if total == 0:
+            return []
+
+        assert intermediate_tensors is not None
+        out: list[torch.Tensor] = []
+        for i in range(total):
+            key = f"{self.AUX_HIDDEN_STATE_KEY}{i}"
+            if key not in intermediate_tensors.tensors:
+                # Substituting zeros here would cost acceptance without failing.
+                raise RuntimeError(
+                    f"{key} missing from the last stage's intermediate-tensor "
+                    "buffer; the aux slots were not reserved "
+                    f"(got {sorted(intermediate_tensors.tensors)})"
+                )
+            out.append(intermediate_tensors[key])
+        return out
 
 
 @runtime_checkable

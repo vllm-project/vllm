@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import cast
 
+import torch
 import torch.nn as nn
 
 from vllm.config import SpeculativeConfig
@@ -30,6 +31,89 @@ def set_eagle3_aux_hidden_state_layers(
         aux_layers = eagle3_model.get_eagle3_default_aux_hidden_state_layers()
         logger.info("Using Eagle3 auxiliary layers from model: %s", aux_layers)
     eagle3_model.set_aux_hidden_state_layers(aux_layers)
+    reserve_aux_intermediate_tensor_slots(model)
+
+
+def _inner_decoder(model: nn.Module) -> nn.Module | None:
+    parent_ref = model
+    if hasattr(model, "get_language_model"):
+        parent_ref = model.get_language_model()
+    elif hasattr(model, "language_model"):
+        parent_ref = model.language_model
+    return getattr(parent_ref, "model", None)
+
+
+def supports_aux_hidden_states_over_pp(model: nn.Module) -> bool:
+    """Whether `model` carries its aux hidden states across pipeline stages.
+
+    EAGLE3-style drafting runs on the last PP rank but taps layers that may sit
+    on earlier stages, so the target has to get those tensors to that rank.
+    Models that do opt in via
+    `EagleModelMixin.supports_aux_hidden_states_over_pp`.
+    """
+    inner = _inner_decoder(model)
+    return bool(getattr(inner, "supports_aux_hidden_states_over_pp", False))
+
+
+def aux_pp_relay_keys(model: nn.Module) -> tuple[str, ...]:
+    """Keys of upstream aux taps this rank passes on toward the last.
+
+    Slots are numbered globally, so upstream taps are exactly
+    ``[0, _aux_slot_base(rank))``. The last rank consumes them instead.
+    """
+    from vllm.distributed.parallel_state import get_pp_group
+
+    pp = get_pp_group()
+    if pp.world_size < 2 or pp.is_first_rank or pp.is_last_rank:
+        return ()
+    inner = _inner_decoder(model)
+    if inner is None or not getattr(inner, "supports_aux_hidden_states_over_pp", False):
+        return ()
+    num_upstream = inner._aux_slot_base(pp.rank_in_group, pp.world_size)
+    key = inner.AUX_HIDDEN_STATE_KEY
+    return tuple(f"{key}{i}" for i in range(num_upstream))
+
+
+def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
+    """Declare the aux slots this stage receives from upstream.
+
+    The runner copies received tensors into a persistent buffer built once from
+    `make_empty_intermediate_tensors`, silently dropping keys that buffer lacks.
+    An undeclared slot therefore costs acceptance without failing.
+    """
+    from vllm.distributed.parallel_state import get_pp_group
+
+    pp = get_pp_group()
+    if pp.world_size < 2 or pp.is_first_rank:
+        return
+    inner = _inner_decoder(model)
+    if inner is None or not getattr(inner, "supports_aux_hidden_states_over_pp", False):
+        return
+
+    # Taps produced by every stage upstream of this one.
+    num_taps = inner._aux_slot_base(pp.rank_in_group, pp.world_size)
+    if num_taps == 0:
+        return
+
+    key = inner.AUX_HIDDEN_STATE_KEY
+    hidden_size = inner.config.hidden_size
+    make_empty = model.make_empty_intermediate_tensors
+
+    def make_empty_with_aux(batch_size, dtype, device):
+        tensors = make_empty(batch_size, dtype, device)
+        for i in range(num_taps):
+            tensors[f"{key}{i}"] = torch.zeros(
+                (batch_size, hidden_size), dtype=dtype, device=device
+            )
+        return tensors
+
+    model.make_empty_intermediate_tensors = make_empty_with_aux
+    logger.info(
+        "Reserved %d aux hidden-state slot(s) in the PP handoff for taps "
+        "produced by stages 0..%d.",
+        num_taps,
+        pp.rank_in_group - 1,
+    )
 
 
 def get_eagle3_aux_layers_from_config(

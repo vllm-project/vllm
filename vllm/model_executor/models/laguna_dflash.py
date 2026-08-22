@@ -249,9 +249,7 @@ class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
             raise ValueError("Laguna DFlash config requires `draft_vocab_size`.")
         self.has_own_embed_tokens = False
         self.has_own_lm_head = False
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.config.target_layer_count = target_layer_num
         target_vocab_size = vllm_config.model_config.get_vocab_size()
         if self.config.draft_vocab_size != target_vocab_size:
