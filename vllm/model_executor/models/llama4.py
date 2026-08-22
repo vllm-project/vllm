@@ -527,9 +527,13 @@ class Llama4Model(LlamaModel):
 
             # Load the weight into the module parameter with corresponding
             # shard id and expert id.
+            # Ensure the CPU tensor is contiguous before the copy to GPU,
+            # otherwise the copy from a non-contiguous CPU tensor is extremely
+            # slow (e.g., 3-4s per weight for ModelOpt Llama-4 checkpoints
+            # which use fused expert weights with transpose/chunk/indexing).
             weight_loader(
                 param,
-                new_loaded_weight,
+                new_loaded_weight.contiguous(),
                 full_param_name,
                 shard_id=shard_id,
                 expert_id=expert_id,
