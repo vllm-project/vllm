@@ -43,11 +43,19 @@ def async_copy_to_gpu(
 
 class UvaBuffer:
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
-        if not is_uva_available():
-            raise RuntimeError("UVA is not available")
-        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-        self.np = self.cpu.numpy()
-        self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+        self._zero_copy = is_uva_available()
+        if self._zero_copy:
+            self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            self.np = self.cpu.numpy()
+            self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+        else:
+            self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=False)
+            self.np = self.cpu.numpy()
+            self.uva = torch.zeros(size, dtype=dtype, device="cuda")
+
+    def sync(self) -> None:
+        if not self._zero_copy:
+            self.uva.copy_(self.cpu, non_blocking=True)
 
 
 class UvaBufferPool:
@@ -76,6 +84,7 @@ class UvaBufferPool:
         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
         n = len(x)
         dst[:n] = x
+        buf.sync()
         return buf.uva[:n]
 
     def copy_to_gpu(
