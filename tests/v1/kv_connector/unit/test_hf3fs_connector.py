@@ -3,17 +3,26 @@
 """
 Tests for HF3FS KV Connector high-level components:
   - TestHf3fsMockClient      : file-backed mock client I/O correctness
+  - TestHF3FSKVConnector     : connector scheduling and metadata behavior
   - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
 """
 
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
+    HF3FSKVConnector,
     HF3FSKVConnectorStats,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
+    HF3FSConnectorMetadata,
+    HF3FSRequestMetadata,
+    SaveBlockInfo,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
     Hf3fsClient as MockHf3fsClient,
@@ -35,6 +44,45 @@ def _make_cuda_event():
     if torch.cuda.is_available():
         return torch.cuda.Event()
     return MagicMock()
+
+
+# ===========================================================================
+# TestHF3FSKVConnector
+# ===========================================================================
+
+
+class TestHF3FSKVConnector:
+    """Tests for HF3FSKVConnector scheduling and metadata behavior."""
+
+    @pytest.mark.cpu_test
+    def test_dcp_hashes_one_key_per_allocated_block(self):
+        extra_config = SimpleNamespace(
+            get_from_extra_config=lambda _key, default: default
+        )
+        config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=16),
+            model_config=SimpleNamespace(use_mla=False),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+            kv_transfer_config=extra_config,
+        )
+        connector = HF3FSKVConnector(config, KVConnectorRole.WORKER, SimpleNamespace())
+        connector._async_manager = MagicMock()
+        metadata = HF3FSConnectorMetadata()
+        metadata.add_request(
+            HF3FSRequestMetadata(
+                request_id="r0",
+                token_ids=list(range(32)),
+                block_ids=[7],
+                save_block_op=SaveBlockInfo(skip_leading_blocks=0),
+            )
+        )
+        connector.bind_connector_metadata(metadata)
+
+        connector.wait_for_save()
+
+        args = connector._async_manager.submit_save_operation.call_args.args
+        assert args[1] == [7]
+        assert len(args[2]) == 1
 
 
 # ===========================================================================
