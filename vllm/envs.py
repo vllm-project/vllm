@@ -133,6 +133,9 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_TRITON_PA_SEQ_PARTITION: bool = True
+    VLLM_TRITON_PA_TARGET_PROGRAMS: int = 0
+    VLLM_TRITON_PA_SCRATCH_BUDGET_MB: int = 128
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -1244,6 +1247,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # Partition the sequence across programs in the Triton paged-decode
+    # fallback. Set to 0 to keep the single-program-per-sequence path.
+    "VLLM_TRITON_PA_SEQ_PARTITION": lambda: (
+        os.getenv("VLLM_TRITON_PA_SEQ_PARTITION", "1") == "1"
+    ),
+    # Number of programs the partitioner aims to launch. 0 means derive it
+    # from the device (4 x multiprocessor count).
+    "VLLM_TRITON_PA_TARGET_PROGRAMS": lambda: (
+        int(os.getenv("VLLM_TRITON_PA_TARGET_PROGRAMS", "0"))
+    ),
+    # Upper bound on the fp32 scratch allocated for per-partition partials,
+    # in MiB. The partition count is chosen to fit inside it.
+    "VLLM_TRITON_PA_SCRATCH_BUDGET_MB": lambda: (
+        int(os.getenv("VLLM_TRITON_PA_SCRATCH_BUDGET_MB", "128"))
     ),
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
     # CudaCommunicator on ROCm.
