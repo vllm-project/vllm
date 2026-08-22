@@ -127,7 +127,7 @@ class Ernie4_5_MoeMoE(nn.Module):
         self.layer_idx = layer_idx
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", None)
+        self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", 0)
         self.ep_group = get_ep_group().device_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.moe_num_experts
@@ -163,6 +163,7 @@ class Ernie4_5_MoeMoE(nn.Module):
             torch.empty(config.moe_num_experts, dtype=torch.float32)
         )
 
+        self.shared_experts: Ernie4_5_MoeMLP | None
         if self.has_shared_experts:
             intermediate_size = (
                 config.moe_intermediate_size * config.moe_num_shared_experts

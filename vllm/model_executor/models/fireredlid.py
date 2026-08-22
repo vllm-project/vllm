@@ -18,14 +18,13 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal
 
-import numpy as np
 import torch
 from torch import nn
 from transformers import BatchFeature
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextConfig
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.logger import init_logger
@@ -431,6 +430,7 @@ class FireRedLIDDummyInputsBuilder(BaseDummyInputsBuilder[FireRedLIDProcessingIn
         audio_len = feature_extractor.chunk_length * sampling_rate
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
@@ -747,13 +747,7 @@ class FireRedLIDForConditionalGeneration(
     @classmethod
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
         """Build the prompt for the FireRedLID encoder-decoder model.
 
@@ -764,7 +758,10 @@ class FireRedLIDForConditionalGeneration(
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {
-                    "audio": (audio, int(stt_config.sample_rate)),
+                    "audio": (
+                        stt_params.audio,
+                        int(stt_params.stt_config.sample_rate),
+                    ),
                 },
             },
             "decoder_prompt": {

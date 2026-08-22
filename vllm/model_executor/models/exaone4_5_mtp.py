@@ -48,17 +48,11 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
 
         model_config = vllm_config.model_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         config = model_config.hf_config
         text_config = config.text_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 
         self.mtp_start_layer_idx = text_config.num_hidden_layers
@@ -67,7 +61,6 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             text_config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
 
         self.fc = ColumnParallelLinear(
