@@ -261,6 +261,13 @@ class ResponsesRequest(OpenAIBaseModel):
             "to 256 bit)."
         ),
     )
+    skip_writing_prefix_cache: bool | None = Field(
+        default=None,
+        description=(
+            "If true, this request may reuse existing prefix-cache entries but "
+            "will not add newly computed blocks to the local prefix cache."
+        ),
+    )
 
     enable_response_messages: bool = Field(
         default=False,
@@ -427,6 +434,8 @@ class ResponsesRequest(OpenAIBaseModel):
             stop = [stop]
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.skip_writing_prefix_cache is not None:
+            extra_args["skip_writing_prefix_cache"] = self.skip_writing_prefix_cache
         if self.kv_transfer_params:
             extra_args["kv_transfer_params"] = self.kv_transfer_params
         if self.ec_transfer_params:
