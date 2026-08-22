@@ -54,12 +54,9 @@ if os.getenv("VLLM_TEST_MODEL"):
         )
     # GDN_ATTN is for Qwen3.5 models (model_type="qwen3_5") and
     # Qwen3-Next/Qwen3.6 hybrid models (dual_chunk_attention_config present)
-    elif (
-        getattr(config, "model_type", "") == "qwen3_5"
-        or (
-            hasattr(config, "dual_chunk_attention_config")
-            and config.dual_chunk_attention_config is not None
-        )
+    elif getattr(config, "model_type", "") == "qwen3_5" or (
+        hasattr(config, "dual_chunk_attention_config")
+        and config.dual_chunk_attention_config is not None
     ):
         DEVICE_BACKENDS["cuda"] = DeviceConfig(
             available=DEVICE_BACKENDS["cuda"].available,
@@ -69,11 +66,7 @@ if os.getenv("VLLM_TEST_MODEL"):
         # Remove GDN_ATTN for models that don't have GDN architecture
         DEVICE_BACKENDS["cuda"] = DeviceConfig(
             available=DEVICE_BACKENDS["cuda"].available,
-            backends=[
-                b
-                for b in DEVICE_BACKENDS["cuda"].backends
-                if b != "GDN_ATTN"
-            ],
+            backends=[b for b in DEVICE_BACKENDS["cuda"].backends if b != "GDN_ATTN"],
         )
 
 # Only include backends for devices that are actually available.

@@ -248,7 +248,9 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         bs1_logprobs_per_prompt = []
         bs1_tokens_per_prompt = []
         for idx, p in enumerate(prompts):
-            print(f"\n[BS=1] Running prompt {idx}/{len(prompts)} - Preview: {p[:80]}...")
+            print(
+                f"\n[BS=1] Running prompt {idx}/{len(prompts)} - Preview: {p[:80]}..."
+            )
             outs = llm.generate([p], sp, use_tqdm=False)
             assert len(outs) == 1
             step_logprobs, token_ids = _extract_step_logprobs(outs[0])
@@ -348,7 +350,9 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
                 if not torch.equal(a, b):
                     max_diff = torch.abs(a - b).max().item()
                     # Print which token failed
-                    print(f"\n[DIVERGENCE] Prompt {i}, Token {t}: max_diff={max_diff:.6e}")
+                    print(
+                        f"\n[DIVERGENCE] Prompt {i}, Token {t}: max_diff={max_diff:.6e}"
+                    )
                     bs1_tok = tokens_bs1[t] if t < len(tokens_bs1) else "N/A"
                     bsN_tok = tokens_bsN[t] if t < len(tokens_bsN) else "N/A"
                     print(f"  Token IDs: bs1={bs1_tok}, bsN={bsN_tok}")
@@ -363,10 +367,12 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
                             "bs1_tokens": tokens_bs1,
                             "bsN_tokens": tokens_bsN,
                             "bs1_all_logprobs": [
-                                logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))
+                                logprobs_bs1[s].tolist()
+                                for s in range(len(logprobs_bs1))
                             ],
                             "bsN_all_logprobs": [
-                                logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))
+                                logprobs_bsN[s].tolist()
+                                for s in range(len(logprobs_bsN))
                             ],
                         }
                     )
@@ -972,4 +978,3 @@ def LLM_with_max_seqs(
         # enable_expert_parallel=True,
         **extra_kwargs,
     )
-
