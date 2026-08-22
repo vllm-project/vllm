@@ -81,6 +81,29 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
+  - label: ":docker: Build Zen CPU image"
+    key: image-build-zen-cpu
+    # Minimal confirmation build: run the zen image build on the generic x86
+    # premerge queue to verify it succeeds. Reuses the shared `-cpu` image as its
+    # base, so it must run after the CPU image build.
+    #
+    # No source_file_dependencies: this step always runs for this validation PR
+    # so the build is exercised regardless of which files changed.
+    depends_on:
+      - image-build-cpu
+    agents:
+      queue: small_cpu_queue_premerge
+    commands:
+    - .buildkite/image_build/image_build_zen_cpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+
   - label: ":docker: Build HPU image"
     soft_fail: true
     depends_on: []
