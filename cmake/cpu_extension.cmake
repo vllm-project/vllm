@@ -515,11 +515,13 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+        "csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp"
         "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
         "csrc/cpu/sgl-kernels/moe_int4.cpp"
         "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        "csrc/cpu/sgl-kernels/moe_fp8_w8a8.cpp"
         "csrc/cpu/sgl-kernels/bmm.cpp"
         "csrc/cpu/sgl-kernels/decode.cpp"
         "csrc/cpu/sgl-kernels/extend.cpp"
@@ -581,6 +583,11 @@ if (ENABLE_X86_ISA)
 
     # For AMX kernels
     target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
+
+    if("$ENV{VLLM_CPU_FP8_BRGEMM}" STREQUAL "1")
+        message(STATUS "Enabling macro: VLLM_CPU_FP8_BRGEMM")
+        target_compile_definitions(_C PRIVATE VLLM_CPU_FP8_BRGEMM)
+    endif()
 
     # AVX512F 
     define_extension_target(
