@@ -19,7 +19,9 @@ use crate::render::RenderState;
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
 };
-use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
+use crate::routes::openai::utils::types::{
+    ListModelsResponse, ModelObject, StreamOptions, StringOrArray,
+};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
@@ -88,6 +90,10 @@ fn lower_render_request(
         token_ids,
         sampling_params: GenerateSamplingParams {
             n: None,
+            stop: text_request.decode_options.stop_strings.map(StringOrArray::Array),
+            include_stop_str_in_output: text_request.decode_options.include_stop_str_in_output,
+            skip_special_tokens: text_request.decode_options.skip_special_tokens,
+            detokenize: true,
             inner: text_request.sampling_params,
         },
         stream,
