@@ -314,7 +314,8 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        boi_token_id = hf_processor.boi_token_id
+        tokenizer = self.info.get_tokenizer()
+        boi_token_id = tokenizer.get_vocab()[hf_processor.boi_token]
 
         def get_replacement_gemma3(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
