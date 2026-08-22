@@ -505,8 +505,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """Issue WRITE transfers to one or more remote TP ranks."""
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
-        plan = self.tp_mappings[engine_id]
-        remote_info = self.transfer_topo.get_engine_info(engine_id)
+        # Push always targets a PP=1 consumer, hence the fixed stage index 0.
+        plan = self.tp_mappings[(engine_id, 0)]
+        remote_info = self.transfer_topo.get_engine_info(engine_id, 0)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
         # Expand D's logical IDs using the ratio learned during the
@@ -529,7 +530,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         replicate_attn = self.use_mla and tp_ratio < 0
         if replicate_attn and not self._has_mamba:
             assert len(plan.all_source_ranks) == 1
-            write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
+            write_ranks = sorted(
+                rank for _, rank in self.dst_xfer_side_handles[engine_id]
+            )
         else:
             write_ranks = list(plan.all_source_ranks)
 
@@ -574,7 +577,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 ]
 
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
+                (0, spec.remote_rank)
             ]
 
             handle = self._xfer_blocks(
