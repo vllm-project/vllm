@@ -132,6 +132,14 @@ class TrtLlmFp8ExpertsBase:
         else:
             self.gemm1_clamp_limit = None
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        for name in ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit"):
+            setattr(
+                self,
+                name,
+                self._register_persistent_buffer(layer, name, getattr(self, name)),
+            )
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard

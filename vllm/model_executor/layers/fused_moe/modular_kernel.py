@@ -517,6 +517,44 @@ class FusedMoEExperts(ABC):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
 
+    def _register_persistent_buffer(
+        self, layer: torch.nn.Module, name: str, tensor: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """Attach kernel-owned constants to the layer's sleep lifecycle.
+
+        Expert implementations are not ``nn.Module`` objects, so a tensor kept
+        only on ``self`` is invisible to level-2 sleep buffer recovery. Reuse
+        existing storage during reload to preserve CUDA-graph pointers.
+        """
+        if tensor is None:
+            return None
+        buffer_name = f"_moe_{name}"
+        sleep_buffers = getattr(self, "_sleep_buffer_names", None)
+        if sleep_buffers is None:
+            sleep_buffers = self._sleep_buffer_names = {}
+        sleep_buffers[name] = buffer_name
+        existing = layer._buffers.get(buffer_name)
+        if existing is None:
+            layer.register_buffer(buffer_name, tensor, persistent=False)
+            return tensor
+        if (
+            existing.shape != tensor.shape
+            or existing.dtype != tensor.dtype
+            or existing.device != tensor.device
+        ):
+            raise RuntimeError(
+                f"Cannot replace sleep-managed MoE buffer {buffer_name}: "
+                f"existing={existing.shape}/{existing.dtype}/{existing.device}, "
+                f"new={tensor.shape}/{tensor.dtype}/{tensor.device}"
+            )
+        existing.copy_(tensor)
+        return existing
+
+    def rebind_sleep_buffers(self, layer: torch.nn.Module) -> None:
+        """Rebind helper aliases after layerwise reload restores old storage."""
+        for name, buffer_name in getattr(self, "_sleep_buffer_names", {}).items():
+            setattr(self, name, layer._buffers[buffer_name])
+
     @staticmethod
     def is_monolithic() -> bool:
         raise NotImplementedError("Implemented by subclasses.")

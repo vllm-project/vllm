@@ -7444,7 +7444,10 @@ class GPUModelRunner(
             yield from attn_groups
 
     def initialize_kv_cache_tensors(
-        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int],
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Initialize the memory buffer for KV cache.
@@ -7458,12 +7461,13 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
 
-        kv_caches = allocate_kv_cache(
-            kv_cache_config,
-            self.device,
-            self.cache_config.get_resolved_kv_cache_layout(),
-            kernel_block_sizes,
-        )
+        with kv_cache_allocation_context or nullcontext():
+            kv_caches = allocate_kv_cache(
+                kv_cache_config,
+                self.device,
+                self.cache_config.get_resolved_kv_cache_layout(),
+                kernel_block_sizes,
+            )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -7513,6 +7517,7 @@ class GPUModelRunner(
         self,
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -7545,7 +7550,9 @@ class GPUModelRunner(
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         kv_caches = self.initialize_kv_cache_tensors(
-            kv_cache_config, kernel_block_sizes
+            kv_cache_config,
+            kernel_block_sizes,
+            kv_cache_allocation_context=kv_cache_allocation_context,
         )
 
         if (
