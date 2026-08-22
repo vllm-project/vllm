@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -63,41 +64,98 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
     return use_fp4
 
 
-@triton.jit
-def _prepare_uniform_decode_kernel(
-    seq_lens_ptr,
-    decode_seq_lens_ptr,
-    block_table_ptr,
-    block_table_stride,
-    expanded_block_table_ptr,
-    expanded_bt_stride,
-    decode_lens_ptr,
-    max_decode_len,
-    BLOCK_SIZE: tl.constexpr,
+class PrepareUniformDecodeKernel(
+    VllmJitKernel["PrepareUniformDecodeKernel.CompileKey"]
 ):
-    idx = tl.program_id(0)
-    req_id = idx // max_decode_len
-    local_idx = idx % max_decode_len
+    def __init__(self) -> None:
+        self.block_size = 1024
+        super().__init__()
 
-    # Compute number of KVs attended to by this token. Padding requests have
-    # seq_len == 0, which would otherwise make the first token of each padded
-    # request negative (e.g. next_n=2 gives 0-2+0+1 = -1). Downstream kernels
-    # read these as uint32, turning -1 into ~4e9.
-    seq_len = tl.load(seq_lens_ptr + req_id)
-    per_token_seq_len = tl.maximum(seq_len - max_decode_len + local_idx + 1, 0)
-    tl.store(decode_seq_lens_ptr + idx, per_token_seq_len)
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
 
-    # Copy block table row.
-    src = block_table_ptr + req_id * block_table_stride
-    dst = expanded_block_table_ptr + idx * expanded_bt_stride
-    for i in tl.range(0, expanded_bt_stride, BLOCK_SIZE):
-        off = i + tl.arange(0, BLOCK_SIZE)
-        mask = off < expanded_bt_stride
-        src_block = tl.load(src + off, mask=mask)
-        tl.store(dst + off, src_block, mask=mask)
+    @staticmethod
+    @triton.jit
+    def kernel(
+        seq_lens_ptr,
+        decode_seq_lens_ptr,
+        block_table_ptr,
+        block_table_stride,
+        expanded_block_table_ptr,
+        expanded_bt_stride,
+        decode_lens_ptr,
+        max_decode_len,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        idx = tl.program_id(0)
+        req_id = idx // max_decode_len
+        local_idx = idx % max_decode_len
 
-    # All reqs now have decode_len = 1.
-    tl.store(decode_lens_ptr + idx, 1)
+        # Compute number of KVs attended to by this token. Padding requests have
+        # seq_len == 0, which would otherwise make the first token of each padded
+        # request negative (e.g. next_n=2 gives 0-2+0+1 = -1). Downstream kernels
+        # read these as uint32, turning -1 into ~4e9.
+        seq_len = tl.load(seq_lens_ptr + req_id)
+        per_token_seq_len = tl.maximum(seq_len - max_decode_len + local_idx + 1, 0)
+        tl.store(decode_seq_lens_ptr + idx, per_token_seq_len)
+
+        # Copy block table row.
+        src = block_table_ptr + req_id * block_table_stride
+        dst = expanded_block_table_ptr + idx * expanded_bt_stride
+        for i in tl.range(0, expanded_bt_stride, BLOCK_SIZE):
+            off = i + tl.arange(0, BLOCK_SIZE)
+            mask = off < expanded_bt_stride
+            src_block = tl.load(src + off, mask=mask)
+            tl.store(dst + off, src_block, mask=mask)
+
+        # All reqs now have decode_len = 1.
+        tl.store(decode_lens_ptr + idx, 1)
+
+    def dispatch(self, *, block_size: int) -> CompileKey:  # type: ignore[override]
+        return self.CompileKey(block_size=block_size)
+
+    def get_warmup_keys(self) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(block_size=self.block_size)
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            1,
+            int32_ptr,
+            1,
+            int32_ptr,
+            1,
+            BLOCK_SIZE=compile_key.block_size,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        seq_lens: torch.Tensor,
+        decode_seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        expanded_block_table: torch.Tensor,
+        decode_lens: torch.Tensor,
+        max_decode_len: int,
+    ) -> None:
+        num_decode_tokens = decode_seq_lens.shape[0]
+        self.kernel[(num_decode_tokens,)](
+            seq_lens,
+            decode_seq_lens,
+            block_table,
+            block_table.stride(0),
+            expanded_block_table,
+            expanded_block_table.stride(0),
+            decode_lens,
+            max_decode_len,
+            BLOCK_SIZE=self.block_size,
+        )
 
 
 def split_indexer_prefill_chunks(
@@ -231,26 +289,22 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
 
-_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS = (
-    TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=True),
-    TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=False),
-)
-
-
 class BuildPrefillChunkMetadataKernel(
     VllmJitKernel["BuildPrefillChunkMetadataKernel.CompileKey"]
 ):
-    BLOCK_SIZE = 1024
+    def __init__(self) -> None:
+        self.block_size = 1024
+        super().__init__()
 
     @dataclass(frozen=True)
     class CompileKey:
         query_slice_start: int
         query_slice_stop: int
-        DCP_RANK: int
-        DCP_WORLD: int
-        DCP_INTERLEAVE: int
-        BLOCK_SIZE: int
-        COMPRESS_RATIO: int
+        dcp_rank: int
+        dcp_world: int
+        dcp_interleave: int
+        block_size: int
+        compress_ratio: int
         input_variant: TritonPointerInputVariant
 
     @staticmethod
@@ -333,23 +387,21 @@ class BuildPrefillChunkMetadataKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
-        query_slice_start: int,
-        query_slice_stop: int,
         DCP_RANK: int,
         DCP_WORLD: int,
         DCP_INTERLEAVE: int,
         BLOCK_SIZE: int,
         COMPRESS_RATIO: int,
         input_variant: TritonPointerInputVariant,
+        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
-            query_slice_start=query_slice_start,
-            query_slice_stop=query_slice_stop,
-            DCP_RANK=DCP_RANK,
-            DCP_WORLD=DCP_WORLD,
-            DCP_INTERLEAVE=DCP_INTERLEAVE,
-            BLOCK_SIZE=BLOCK_SIZE,
-            COMPRESS_RATIO=COMPRESS_RATIO,
+            **compile_key_fields,
+            dcp_rank=DCP_RANK,
+            dcp_world=DCP_WORLD,
+            dcp_interleave=DCP_INTERLEAVE,
+            block_size=BLOCK_SIZE,
+            compress_ratio=COMPRESS_RATIO,
             input_variant=input_variant,
         )
 
@@ -365,14 +417,18 @@ class BuildPrefillChunkMetadataKernel(
             for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
         )
         return self._trace_dispatch(self.dispatch)(
-            query_slice_start=WarmupIntRange(0, 2),
+            # Cover Triton's divisible, exact-one, and generic i32 classes.
+            query_slice_start=(0, 1, 2),
             query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
             DCP_RANK=dcp_rank,
             DCP_WORLD=dcp_world,
             DCP_INTERLEAVE=dcp_interleave,
-            BLOCK_SIZE=self.BLOCK_SIZE,
+            BLOCK_SIZE=self.block_size,
             COMPRESS_RATIO=list(compress_ratios),
-            input_variant=_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS,
+            input_variant=(
+                TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=True),
+                TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=False),
+            ),
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -389,51 +445,25 @@ class BuildPrefillChunkMetadataKernel(
             int32_ptr,
             compile_key.query_slice_start,
             compile_key.query_slice_stop,
-            compile_key.DCP_RANK,
-            compile_key.DCP_WORLD,
-            compile_key.DCP_INTERLEAVE,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
-            COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
+            compile_key.dcp_rank,
+            compile_key.dcp_world,
+            compile_key.dcp_interleave,
+            BLOCK_SIZE=compile_key.block_size,
+            COMPRESS_RATIO=compile_key.compress_ratio,
             grid=(1,),
         )
 
     def __call__(
         self,
-        query_start_loc: torch.Tensor,
-        uncompressed_seq_lens: torch.Tensor,
-        cu_compressed_seq_lens: torch.Tensor,
-        row_start_cu_compressed_seq_lens: torch.Tensor,
-        token_to_seq: torch.Tensor,
-        cu_compressed_seq_len_ks: torch.Tensor,
-        cu_compressed_seq_len_ke: torch.Tensor,
-        query_slice_start: int,
-        query_slice_stop: int,
-        DCP_RANK: int,
-        DCP_WORLD: int,
-        DCP_INTERLEAVE: int,
-        *,
+        *args: Any,
         num_reqs: int,
         COMPRESS_RATIO: int,
     ) -> None:
         self.kernel[(num_reqs,)](
-            query_start_loc,
-            uncompressed_seq_lens,
-            cu_compressed_seq_lens,
-            row_start_cu_compressed_seq_lens,
-            token_to_seq,
-            cu_compressed_seq_len_ks,
-            cu_compressed_seq_len_ke,
-            query_slice_start,
-            query_slice_stop,
-            DCP_RANK,
-            DCP_WORLD,
-            DCP_INTERLEAVE,
-            BLOCK_SIZE=self.BLOCK_SIZE,
+            *args,
+            BLOCK_SIZE=self.block_size,
             COMPRESS_RATIO=COMPRESS_RATIO,
         )
-
-
-_BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()
 
 
 @dataclass
@@ -707,16 +737,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 and num_decodes * max_decode_len == num_decode_tokens
             ):
                 # Uniform decode lengths with no cudagraph token padding.
-                _prepare_uniform_decode_kernel[(num_decode_tokens,)](
+                _PREPARE_UNIFORM_DECODE_KERNEL(
                     seq_lens,
                     self.decode_seq_lens_buffer,
                     block_table,
-                    block_table.stride(0),
                     self.expanded_block_table_buffer,
-                    self.expanded_block_table_buffer.stride(0),
                     self.decode_lens_buffer,
                     max_decode_len,
-                    BLOCK_SIZE=1024,
                 )
                 self.decode_seq_lens_buffer[num_decode_tokens:] = 0
                 seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
@@ -1193,3 +1220,7 @@ def build_prefill_chunk_metadata(
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
     )
+
+
+_PREPARE_UNIFORM_DECODE_KERNEL = PrepareUniformDecodeKernel()
+_BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()

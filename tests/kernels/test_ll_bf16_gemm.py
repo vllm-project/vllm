@@ -57,16 +57,15 @@ def _can_precompile(a, b):
 
 def _gemm(a, b):
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        ll_bf16_gemm,
-        ll_bf16_gemm_kernel,
+        _LL_BF16_GEMM_KERNEL,
     )
 
     if _can_precompile(a, b):
-        compile_key = ll_bf16_gemm_kernel.dispatch(
+        compile_key = _LL_BF16_GEMM_KERNEL.dispatch(
             M=a.shape[0], K=a.shape[1], N=b.shape[0]
         )
-        ll_bf16_gemm_kernel.compile(compile_key)
-    return ll_bf16_gemm(a, b)
+        _LL_BF16_GEMM_KERNEL.compile(compile_key)
+    return _LL_BF16_GEMM_KERNEL(a, b)
 
 
 # ===== Shapes =====
@@ -406,7 +405,7 @@ def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
         fake_ll_bf16_gemm,
     )
     out, bias = gate(x)
@@ -427,7 +426,7 @@ def test_gate_linear_fp32_weight_falls_back(monkeypatch):
         raise AssertionError("ll_bf16_gemm should not run for fp32 weights")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
         fail_ll_bf16_gemm,
     )
     out, _ = gate(x)
@@ -443,7 +442,7 @@ def test_gate_linear_non_bf16_activation_falls_back(monkeypatch):
         raise AssertionError("ll_bf16_gemm should not run for non-bf16 activations")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
         fail_ll_bf16_gemm,
     )
     out, _ = gate(x)
@@ -472,7 +471,7 @@ def test_gate_linear_m_gt_16_falls_back(monkeypatch):
         raise AssertionError("ll_bf16_gemm should not run for M > 16")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
         fail_ll_bf16_gemm,
     )
     out, _ = gate(x)
@@ -541,21 +540,63 @@ def test_invalid_output_dtype():
     a = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(64, 2048, dtype=torch.bfloat16, device="cuda")
     with pytest.raises(ValueError, match="output_dtype=torch.float32"):
-        from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import ll_bf16_gemm
+        from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+            _LL_BF16_GEMM_KERNEL,
+        )
 
-        ll_bf16_gemm(a, b, output_dtype=torch.bfloat16)
+        _LL_BF16_GEMM_KERNEL(a, b, output_dtype=torch.bfloat16)
 
 
-def test_cache_miss_compiles_dotprod():
+def test_cache_miss_compiles_and_caches_dotprod():
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import LLBf16Gemm
 
     torch.manual_seed(42)
     a = torch.randn(3, 64, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(17, 64, dtype=torch.bfloat16, device="cuda")
     kernel = LLBf16Gemm()
-    out = kernel(a, b)
-    assert out.shape == (3, 17)
-    _assert_close(out, _ref(a, b), context="cache miss dotprod")
+    compile_key = kernel.dispatch(M=3, K=64, N=17)
+
+    kernel(a, b)
+
+    assert compile_key in kernel._compiled_cache
+
+
+def test_warmup_keys_cover_router_compile_keys(monkeypatch):
+    from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
+
+    monkeypatch.setattr(
+        ll_bf16,
+        "_arch_tuned_configs",
+        lambda: (
+            {(7168, 384): {2: 256}},
+            {
+                (7168, 384): {5: (4, 4), 6: (5, 4)},
+                (14400, 256): {5: (8, 3)},
+            },
+        ),
+    )
+    kernel = ll_bf16.LLBf16Gemm()
+    expected = [
+        kernel.CompileKey(backend="dotprod", m=1, k=7168, bs=128),
+        kernel.CompileKey(backend="dotprod", m=2, k=7168, bs=256),
+        kernel.CompileKey(backend="dotprod", m=3, k=7168, bs=128),
+        kernel.CompileKey(backend="dotprod", m=4, k=7168, bs=128),
+        kernel.CompileKey(backend="splitk", split_k=4, num_stages=4),
+        kernel.CompileKey(backend="splitk", split_k=5, num_stages=4),
+        kernel.CompileKey(backend="splitk", split_k=6, num_stages=4),
+        kernel.CompileKey(backend="dotprod", m=1, k=14400, bs=128),
+        kernel.CompileKey(backend="dotprod", m=2, k=14400, bs=128),
+        kernel.CompileKey(backend="dotprod", m=3, k=14400, bs=128),
+        kernel.CompileKey(backend="dotprod", m=4, k=14400, bs=128),
+        kernel.CompileKey(backend="splitk", split_k=8, num_stages=3),
+    ]
+    assert (
+        kernel.get_warmup_keys(
+            shapes=((7168, 384), (14400, 256)),
+            m_values=range(1, 17),
+        )
+        == expected
+    )
 
 
 if __name__ == "__main__":

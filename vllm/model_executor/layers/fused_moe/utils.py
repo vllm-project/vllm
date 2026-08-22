@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from collections.abc import Iterable
+from dataclasses import dataclass
 from math import prod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -41,6 +42,14 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
 from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_scalar_specialization_rep,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -129,36 +138,109 @@ def is_model_fused_shared_expert_compatible(
     return enabled_count > 0 and disabled_count == 0
 
 
-@triton.jit
-def _count_expert_num_tokens(
-    topk_ids_ptr,
-    expert_num_tokens_ptr,
-    num_experts,
-    topk_numel,
-    expert_map,
-    HAS_EXPERT_MAP: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+class CountExpertNumTokensKernel(
+    VllmJitKernel["CountExpertNumTokensKernel.CompileKey"]
 ):
-    curr_expert = tl.program_id(0)
+    @dataclass(frozen=True)
+    class CompileKey:
+        num_experts: int
+        topk_numel: int
+        has_expert_map: bool
+        block_size: int
 
-    offsets = tl.arange(0, BLOCK_SIZE)
-    topk_ids_ptrs = topk_ids_ptr + offsets
+    @staticmethod
+    @triton.jit
+    def kernel(
+        topk_ids_ptr,
+        expert_num_tokens_ptr,
+        num_experts,
+        topk_numel,
+        expert_map,
+        HAS_EXPERT_MAP: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        curr_expert = tl.program_id(0)
 
-    acc = tl.zeros((BLOCK_SIZE,), dtype=tl.int32)
-    for x in range(tl.cdiv(topk_numel, BLOCK_SIZE)):
-        mask = offsets < (topk_numel - x * BLOCK_SIZE)
-        expert_ids = tl.load(topk_ids_ptrs, mask=mask, other=-1)
-        if HAS_EXPERT_MAP:
-            expert_map_ptrs = expert_map + expert_ids
-            expert_map_mask = expert_ids >= 0
-            expert_ids = tl.load(expert_map_ptrs, mask=expert_map_mask, other=-1)
+        offsets = tl.arange(0, BLOCK_SIZE)
+        topk_ids_ptrs = topk_ids_ptr + offsets
 
-        has_curr_expert = tl.where(expert_ids == curr_expert, 1, 0)
-        acc = acc + has_curr_expert
-        topk_ids_ptrs += BLOCK_SIZE
+        acc = tl.zeros((BLOCK_SIZE,), dtype=tl.int32)
+        for x in range(tl.cdiv(topk_numel, BLOCK_SIZE)):
+            mask = offsets < (topk_numel - x * BLOCK_SIZE)
+            expert_ids = tl.load(topk_ids_ptrs, mask=mask, other=-1)
+            if HAS_EXPERT_MAP:
+                expert_map_ptrs = expert_map + expert_ids
+                expert_map_mask = expert_ids >= 0
+                expert_ids = tl.load(expert_map_ptrs, mask=expert_map_mask, other=-1)
 
-    if curr_expert < num_experts:
-        tl.store(expert_num_tokens_ptr + curr_expert, tl.sum(acc))
+            has_curr_expert = tl.where(expert_ids == curr_expert, 1, 0)
+            acc = acc + has_curr_expert
+            topk_ids_ptrs += BLOCK_SIZE
+
+        if curr_expert < num_experts:
+            tl.store(expert_num_tokens_ptr + curr_expert, tl.sum(acc))
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_experts: int,
+        topk_numel: int,
+        has_expert_map: bool,
+    ) -> CompileKey:
+        block_size = min(topk_numel, 1024)
+        block_size = triton.next_power_of_2(block_size)
+        return self.CompileKey(
+            num_experts=triton_scalar_specialization_rep(num_experts),
+            topk_numel=triton_scalar_specialization_rep(topk_numel),
+            has_expert_map=has_expert_map,
+            block_size=block_size,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if top_k <= 0 or max_tokens <= 0:
+            return []
+        return self._trace_dispatch(self.dispatch)(
+            num_experts=(1, 2, 16),
+            topk_numel=WarmupIntRange(1, min(max_tokens * top_k, 4096) + 1),
+            has_expert_map=(False, True),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        expert_map = int32_ptr if compile_key.has_expert_map else None
+        warmup(
+            int32_ptr,
+            int32_ptr,
+            compile_key.num_experts,
+            compile_key.topk_numel,
+            expert_map,
+            HAS_EXPERT_MAP=compile_key.has_expert_map,
+            BLOCK_SIZE=compile_key.block_size,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        topk_ids: torch.Tensor,
+        expert_num_tokens: torch.Tensor,
+        num_local_experts: int,
+        expert_map: torch.Tensor | None,
+    ) -> None:
+        block_size = min(topk_ids.numel(), 1024)
+        block_size = triton.next_power_of_2(block_size)
+        self.kernel[(num_local_experts,)](
+            topk_ids,
+            expert_num_tokens,
+            num_local_experts,
+            topk_ids.numel(),
+            expert_map,
+            HAS_EXPERT_MAP=expert_map is not None,
+            BLOCK_SIZE=block_size,
+        )
 
 
 def count_expert_num_tokens(
@@ -184,18 +266,11 @@ def count_expert_num_tokens(
         (num_local_experts), device=topk_ids.device, dtype=torch.int32
     )
 
-    grid = num_local_experts
-    BLOCK_SIZE = min(topk_ids.numel(), 1024)
-    BLOCK_SIZE = triton.next_power_of_2(BLOCK_SIZE)
-
-    _count_expert_num_tokens[(grid,)](
+    _COUNT_EXPERT_NUM_TOKENS_KERNEL(
         topk_ids,
         expert_num_tokens,
         num_local_experts,
-        topk_ids.numel(),
         expert_map,
-        HAS_EXPERT_MAP=expert_map is not None,
-        BLOCK_SIZE=BLOCK_SIZE,
     )
 
     return expert_num_tokens
@@ -457,35 +532,6 @@ def normalize_batched_scales_shape(
     return scales
 
 
-@triton.jit
-def _pack_topk_ids_weights_kernel(
-    topk_ids_ptr,
-    topk_weights_ptr,
-    output_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-    USE_GDC: tl.constexpr,
-    launch_pdl: tl.constexpr,  # triton metadata
-):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
-        tl.extra.cuda.gdc_wait()
-    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    expert_id_shifted = expert_id << 16
-
-    weight = tl.load(topk_weights_ptr + offsets, mask=mask, other=0.0)
-    weight_bf16 = weight.to(tl.bfloat16)
-    weight_int16 = weight_bf16.to(tl.int16, bitcast=True)
-
-    weight_int32 = weight_int16.to(tl.int32) & 0xFFFF
-
-    packed = expert_id_shifted | weight_int32
-    tl.store(output_ptr + offsets, packed, mask=mask)
-
-
 def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
     """Estimate FlashInfer's MoE autotuning maximum token count.
 
@@ -501,6 +547,93 @@ def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
     For a detailed explanation, see: `docs/serving/data_parallel_deployment.md`
     """
     return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
+
+
+class PackTopkIdsWeightsKernel(VllmJitKernel["PackTopkIdsWeightsKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+        use_gdc: bool
+
+    @staticmethod
+    @triton.jit(do_not_specialize=["n_elements"])
+    def kernel(
+        topk_ids_ptr,
+        topk_weights_ptr,
+        output_ptr,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+        USE_GDC: tl.constexpr,
+        launch_pdl: tl.constexpr,  # triton metadata
+    ):
+        pid = tl.program_id(axis=0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        if USE_GDC:
+            tl.extra.cuda.gdc_launch_dependents()
+            tl.extra.cuda.gdc_wait()
+        expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
+        expert_id_shifted = expert_id << 16
+
+        weight = tl.load(topk_weights_ptr + offsets, mask=mask, other=0.0)
+        weight_bf16 = weight.to(tl.bfloat16)
+        weight_int16 = weight_bf16.to(tl.int16, bitcast=True)
+
+        weight_int32 = weight_int16.to(tl.int32) & 0xFFFF
+
+        packed = expert_id_shifted | weight_int32
+        tl.store(output_ptr + offsets, packed, mask=mask)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        block_size: int,
+        use_gdc: bool,
+    ) -> CompileKey:
+        return self.CompileKey(block_size=block_size, use_gdc=use_gdc)
+
+    def get_warmup_keys(self) -> list[CompileKey]:
+        use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(
+            90
+        )
+        return self._trace_dispatch(self.dispatch)(
+            block_size=1024,
+            use_gdc=use_gdc,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        warmup(
+            TritonWarmupTensor(torch.int32),
+            TritonWarmupTensor(torch.float32),
+            TritonWarmupTensor(torch.int32),
+            1,  # do not specialize n_elements
+            BLOCK_SIZE=compile_key.block_size,
+            USE_GDC=compile_key.use_gdc,
+            launch_pdl=compile_key.use_gdc,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        ids_flat: torch.Tensor,
+        weights_flat: torch.Tensor,
+        output: torch.Tensor,
+        *,
+        block_size: int,
+        use_gdc: bool,
+    ) -> None:
+        grid = (triton.cdiv(ids_flat.numel(), block_size),)
+        self.kernel[grid](
+            ids_flat,
+            weights_flat,
+            output,
+            ids_flat.numel(),
+            BLOCK_SIZE=block_size,
+            USE_GDC=use_gdc,
+            launch_pdl=use_gdc,
+        )
 
 
 def trtllm_moe_pack_topk_ids_weights(
@@ -519,15 +652,12 @@ def trtllm_moe_pack_topk_ids_weights(
     output = torch.empty(n_elements, dtype=torch.int32, device=topk_ids.device)
 
     use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(90)
-    grid = (triton.cdiv(n_elements, block_size),)
-    _pack_topk_ids_weights_kernel[grid](
+    _PACK_TOPK_IDS_WEIGHTS_KERNEL(
         ids_flat,
         weights_flat,
         output,
-        n_elements,
-        BLOCK_SIZE=block_size,
-        USE_GDC=use_gdc,
-        launch_pdl=use_gdc,
+        block_size=block_size,
+        use_gdc=use_gdc,
     )
     return output.reshape(original_shape)
 
@@ -549,60 +679,146 @@ def _swiglu_limit_torch(
     output.copy_(F.silu(gate) * up)
 
 
-@triton.jit
-def _swiglu_limit_pad_aware_kernel(
-    input_ptr,  # [num_tokens, 2 * hidden_size]
-    output_ptr,  # [num_tokens, hidden_size]
-    topk_ids_ptr,  # [num_tokens, num_topk]
-    expert_map_ptr,  # global -> local expert id, or -1 if non-local
-    hidden_size,
-    input_row_stride,
-    num_tokens,
-    swiglu_limit,
-    HAS_LIMIT: tl.constexpr,
-    HAS_EXPERT_MAP: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    # Persistent over rows: each CTA owns one column tile and processes a
-    # strided set of token assignments.
-    pid = tl.program_id(0)
-    row_stride = tl.num_programs(0)
-    column_tile = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = column_tile < hidden_size
+class SwigluLimitPadAwareKernel(VllmJitKernel["SwigluLimitPadAwareKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        num_tokens: int
+        has_limit: bool
+        has_expert_map: bool
+        block_size: int
 
-    for row in tl.range(pid, num_tokens, row_stride):
-        expert_id = tl.load(topk_ids_ptr + row)
-        should_compute = expert_id != -1
-        if HAS_EXPERT_MAP:
-            local_expert_id = tl.load(
-                expert_map_ptr + expert_id,
-                mask=expert_id >= 0,
-                other=-1,
-            )
-            should_compute = should_compute & (local_expert_id != -1)
+    @staticmethod
+    @triton.jit(
+        do_not_specialize=[
+            "hidden_size",
+            "input_row_stride",
+            "swiglu_limit",
+        ]
+    )
+    def kernel(
+        input_ptr,  # [num_tokens, 2 * hidden_size]
+        output_ptr,  # [num_tokens, hidden_size]
+        topk_ids_ptr,  # [num_tokens, num_topk]
+        expert_map_ptr,  # global -> local expert id, or -1 if non-local
+        hidden_size,
+        input_row_stride,
+        num_tokens,
+        swiglu_limit,
+        HAS_LIMIT: tl.constexpr,
+        HAS_EXPERT_MAP: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        # Persistent over rows: each CTA owns one column tile and processes a
+        # strided set of token assignments.
+        pid = tl.program_id(0)
+        row_stride = tl.num_programs(0)
+        column_tile = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = column_tile < hidden_size
 
-        if should_compute:
-            gate_offsets = row.to(tl.int64) * input_row_stride + column_tile
-            up_offsets = gate_offsets + hidden_size
+        for row in tl.range(pid, num_tokens, row_stride):
+            expert_id = tl.load(topk_ids_ptr + row)
+            should_compute = expert_id != -1
+            if HAS_EXPERT_MAP:
+                local_expert_id = tl.load(
+                    expert_map_ptr + expert_id,
+                    mask=expert_id >= 0,
+                    other=-1,
+                )
+                should_compute = should_compute & (local_expert_id != -1)
 
-            gate = tl.load(input_ptr + gate_offsets, mask=mask, other=0.0).to(
-                tl.float32
-            )
+            if should_compute:
+                gate_offsets = row.to(tl.int64) * input_row_stride + column_tile
+                up_offsets = gate_offsets + hidden_size
 
-            up = tl.load(input_ptr + up_offsets, mask=mask, other=0.0).to(tl.float32)
+                gate = tl.load(input_ptr + gate_offsets, mask=mask, other=0.0).to(
+                    tl.float32
+                )
 
-            if HAS_LIMIT:
-                gate = tl.minimum(gate, swiglu_limit)
-                up = tl.maximum(up, -swiglu_limit)
-                up = tl.minimum(up, swiglu_limit)
+                up = tl.load(input_ptr + up_offsets, mask=mask, other=0.0).to(
+                    tl.float32
+                )
 
-            silu_gate = gate / (1.0 + tl.exp(-gate))
-            result = silu_gate * up
-            tl.store(
-                output_ptr + row.to(tl.int64) * hidden_size + column_tile,
-                result.to(output_ptr.dtype.element_ty),
-                mask=mask,
-            )
+                if HAS_LIMIT:
+                    gate = tl.minimum(gate, swiglu_limit)
+                    up = tl.maximum(up, -swiglu_limit)
+                    up = tl.minimum(up, swiglu_limit)
+
+                silu_gate = gate / (1.0 + tl.exp(-gate))
+                result = silu_gate * up
+                tl.store(
+                    output_ptr + row.to(tl.int64) * hidden_size + column_tile,
+                    result.to(output_ptr.dtype.element_ty),
+                    mask=mask,
+                )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_tokens: int,
+        block_size: int,
+        **compile_key_fields: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            **compile_key_fields,
+            num_tokens=triton_scalar_specialization_rep(num_tokens),
+            block_size=block_size,
+        )
+
+    def get_warmup_keys(self) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            num_tokens=(1, 2, 16),
+            has_limit=(False, True),
+            has_expert_map=(False, True),
+            block_size=1024,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        data_ptr = TritonWarmupTensor(torch.bfloat16)
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            data_ptr,
+            data_ptr,
+            int32_ptr,
+            int32_ptr,
+            1,  # do not specialize hidden_size
+            1,  # do not specialize input_row_stride
+            compile_key.num_tokens,
+            1.0,  # do not specialize swiglu_limit
+            HAS_LIMIT=compile_key.has_limit,
+            HAS_EXPERT_MAP=compile_key.has_expert_map,
+            BLOCK_SIZE=compile_key.block_size,
+            grid=(1, 1),
+            num_warps=4,
+        )
+
+    def __call__(
+        self,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        topk_ids: torch.Tensor,
+        swiglu_limit: float,
+        expert_map: torch.Tensor | None,
+    ) -> None:
+        num_tokens, gate_up_size = input.shape
+        hidden_size = gate_up_size // 2
+        block_size = 1024
+        grid = (min(num_tokens, 256), triton.cdiv(hidden_size, block_size))
+        self.kernel[grid](
+            input,
+            output,
+            topk_ids,
+            expert_map,
+            hidden_size,
+            gate_up_size,
+            num_tokens,
+            swiglu_limit,
+            HAS_LIMIT=swiglu_limit > 0,
+            HAS_EXPERT_MAP=expert_map is not None,
+            BLOCK_SIZE=block_size,
+            num_warps=4,
+        )
 
 
 def _swiglu_limit_pad_aware(
@@ -612,26 +828,16 @@ def _swiglu_limit_pad_aware(
     swiglu_limit: float,
     expert_map: torch.Tensor | None = None,
 ) -> None:
-    num_tokens, gate_up_size = input.shape
-    hidden_size = gate_up_size // 2
+    num_tokens = input.shape[0]
     if num_tokens == 0:
         return
 
-    BLOCK_SIZE = 1024
-    grid = (min(num_tokens, 256), triton.cdiv(hidden_size, BLOCK_SIZE))
-    _swiglu_limit_pad_aware_kernel[grid](
-        input,
+    _SWIGLU_LIMIT_PAD_AWARE_KERNEL(
         output,
+        input,
         topk_ids,
-        expert_map,
-        hidden_size,
-        gate_up_size,
-        num_tokens,
         swiglu_limit,
-        HAS_LIMIT=swiglu_limit > 0,
-        HAS_EXPERT_MAP=expert_map is not None,
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=4,
+        expert_map,
     )
 
 
@@ -735,3 +941,8 @@ def warn_if_moe_use_td_ineffective(
         reason,
     )
     _warned_moe_use_td_ineffective = True
+
+
+_COUNT_EXPERT_NUM_TOKENS_KERNEL = CountExpertNumTokensKernel()
+_PACK_TOPK_IDS_WEIGHTS_KERNEL = PackTopkIdsWeightsKernel()
+_SWIGLU_LIMIT_PAD_AWARE_KERNEL = SwigluLimitPadAwareKernel()

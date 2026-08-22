@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused batched MoE kernel."""
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -10,8 +13,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    _triton_moe_compute_type,
+    _triton_moe_config,
+    try_get_optimal_moe_config,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
@@ -31,6 +39,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+    zip_inputs,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton, use_tensor_descriptor
 from vllm.triton_utils.allocation import set_triton_allocator
@@ -292,134 +306,400 @@ def expert_triton_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@triton.jit
-def batched_triton_kernel(
-    a_ptr,  # [E, max_num_tokens, K]
-    b_ptr,  # [E, K, N]
-    c_ptr,  # [E, max_num_tokens, N]
-    expert_num_tokens,  # [E]
-    compute_type: tl.constexpr,
-    # Dimensions
-    max_num_tokens,
-    K,
-    N,
-    # Quantization data
-    a_scale_ptr,
-    b_scale_ptr,
-    b_zp_ptr,
-    # The stride variables represent how much to increase the ptr by when
-    # moving by 1 element in a particular dimension. E.g. `stride_am` is
-    # how much to increase `a_ptr` by to get the element one row down
-    # (A has M rows).
-    stride_ae: tl.int64,
-    stride_am: tl.int64,
-    stride_ak: tl.int64,
-    stride_be: tl.int64,
-    stride_bk: tl.int64,
-    stride_bn: tl.int64,
-    stride_ce: tl.int64,
-    stride_cm: tl.int64,
-    stride_cn: tl.int64,
-    stride_ase: tl.int64,
-    stride_asm: tl.int64,
-    stride_ask: tl.int64,
-    stride_bse: tl.int64,
-    stride_bsk: tl.int64,
-    stride_bsn: tl.int64,
-    # Blockwise quantization data
-    group_n: tl.constexpr,
-    group_k: tl.constexpr,
-    # Quantization schemes
-    use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a16: tl.constexpr,
-    per_act_token_quant: tl.constexpr,
-    # Kernel config
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    USE_TD: tl.constexpr = False,
-):
-    expert_id = tl.program_id(axis=0)
-    e_num_tokens = tl.load(expert_num_tokens + expert_id)
-    if e_num_tokens == 0:
-        # Early exit
-        return
+class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        e: int
+        max_num_tokens: int
+        n: int
+        k: int
+        group_n: int
+        group_k: int
+        compute_type: tl.dtype
+        use_fp8_w8a8: bool
+        use_int8_w8a16: bool
+        per_act_token_quant: bool
+        block_m: int
+        block_n: int
+        block_k: int
+        use_td: bool
+        num_warps: int
+        num_stages: int
 
-    # axis 1 is M_blocks * N_blocks
-    pid_mn = tl.program_id(axis=1)
-    # num_pid_m = tl.cdiv(max_num_tokens, BLOCK_M)
-    num_pid_n = tl.cdiv(N, BLOCK_N)
-    pid_m = pid_mn // num_pid_n
-    pid_n = pid_mn % num_pid_n
-
-    cta_m_start = pid_m * BLOCK_M
-    cta_n_start = pid_n * BLOCK_N
-    if cta_m_start >= e_num_tokens:
-        # Early exit
-        return
-
-    cta_m_size = min(BLOCK_M, e_num_tokens - cta_m_start)
-    cta_n_size = min(BLOCK_N, N - cta_n_start)
-
-    a_ptr = a_ptr + expert_id * stride_ae + cta_m_start * stride_am
-    b_ptr = b_ptr + expert_id * stride_be + cta_n_start * stride_bn
-    c_ptr = (
-        c_ptr
-        + expert_id * stride_ce
-        + cta_m_start * stride_cm
-        + cta_n_start * stride_cn
-    )
-
-    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)) % N
-
-    if use_fp8_w8a8:
-        a_scale_ptr = a_scale_ptr + expert_id * stride_ase
-        b_scale_ptr = b_scale_ptr + expert_id * stride_bse
-
-        # block-wise
-        if group_k > 0 and group_n > 0 or per_act_token_quant:
-            a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
-
-    expert_triton_kernel(
-        a_ptr,
-        b_ptr,
-        c_ptr,
-        expert_id,
-        compute_type,
-        cta_m_size,  # M
-        cta_n_size,  # N
-        K,  # K
+    @staticmethod
+    @triton.jit
+    def kernel(
+        a_ptr,  # [E, max_num_tokens, K]
+        b_ptr,  # [E, K, N]
+        c_ptr,  # [E, max_num_tokens, N]
+        expert_num_tokens,  # [E]
+        compute_type: tl.constexpr,
+        # Dimensions
+        max_num_tokens,
+        K,
+        N,
+        # Quantization data
         a_scale_ptr,
         b_scale_ptr,
         b_zp_ptr,
-        # Strides
-        stride_am,
-        stride_ak,
-        stride_bk,
-        stride_bn,
-        stride_cm,
-        stride_cn,
-        stride_ase,
-        stride_asm,
-        stride_ask,
-        stride_bse,
-        stride_bsk,
-        stride_bsn,
-        # offsets
-        offs_bn,
+        # The stride variables represent how much to increase the ptr by when
+        # moving by 1 element in a particular dimension. E.g. `stride_am` is
+        # how much to increase `a_ptr` by to get the element one row down
+        # (A has M rows).
+        stride_ae: tl.int64,
+        stride_am: tl.int64,
+        stride_ak: tl.int64,
+        stride_be: tl.int64,
+        stride_bk: tl.int64,
+        stride_bn: tl.int64,
+        stride_ce: tl.int64,
+        stride_cm: tl.int64,
+        stride_cn: tl.int64,
+        stride_ase: tl.int64,
+        stride_asm: tl.int64,
+        stride_ask: tl.int64,
+        stride_bse: tl.int64,
+        stride_bsk: tl.int64,
+        stride_bsn: tl.int64,
         # Blockwise quantization data
-        group_n,
-        group_k,
+        group_n: tl.constexpr,
+        group_k: tl.constexpr,
         # Quantization schemes
-        use_fp8_w8a8,
-        use_int8_w8a16,
-        per_act_token_quant,
+        use_fp8_w8a8: tl.constexpr,
+        use_int8_w8a16: tl.constexpr,
+        per_act_token_quant: tl.constexpr,
         # Kernel config
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_K,
-        USE_TD,
-    )
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        USE_TD: tl.constexpr = False,
+    ):
+        expert_id = tl.program_id(axis=0)
+        e_num_tokens = tl.load(expert_num_tokens + expert_id)
+        if e_num_tokens == 0:
+            # Early exit
+            return
+
+        # axis 1 is M_blocks * N_blocks
+        pid_mn = tl.program_id(axis=1)
+        # num_pid_m = tl.cdiv(max_num_tokens, BLOCK_M)
+        num_pid_n = tl.cdiv(N, BLOCK_N)
+        pid_m = pid_mn // num_pid_n
+        pid_n = pid_mn % num_pid_n
+
+        cta_m_start = pid_m * BLOCK_M
+        cta_n_start = pid_n * BLOCK_N
+        if cta_m_start >= e_num_tokens:
+            # Early exit
+            return
+
+        cta_m_size = min(BLOCK_M, e_num_tokens - cta_m_start)
+        cta_n_size = min(BLOCK_N, N - cta_n_start)
+
+        a_ptr = a_ptr + expert_id * stride_ae + cta_m_start * stride_am
+        b_ptr = b_ptr + expert_id * stride_be + cta_n_start * stride_bn
+        c_ptr = (
+            c_ptr
+            + expert_id * stride_ce
+            + cta_m_start * stride_cm
+            + cta_n_start * stride_cn
+        )
+
+        offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)) % N
+
+        if use_fp8_w8a8:
+            a_scale_ptr = a_scale_ptr + expert_id * stride_ase
+            b_scale_ptr = b_scale_ptr + expert_id * stride_bse
+
+            # block-wise
+            if group_k > 0 and group_n > 0 or per_act_token_quant:
+                a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
+
+        expert_triton_kernel(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            expert_id,
+            compute_type,
+            cta_m_size,  # M
+            cta_n_size,  # N
+            K,  # K
+            a_scale_ptr,
+            b_scale_ptr,
+            b_zp_ptr,
+            # Strides
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            stride_ase,
+            stride_asm,
+            stride_ask,
+            stride_bse,
+            stride_bsk,
+            stride_bsn,
+            # offsets
+            offs_bn,
+            # Blockwise quantization data
+            group_n,
+            group_k,
+            # Quantization schemes
+            use_fp8_w8a8,
+            use_int8_w8a16,
+            per_act_token_quant,
+            # Kernel config
+            BLOCK_M,
+            BLOCK_N,
+            BLOCK_K,
+            USE_TD,
+        )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        max_num_tokens: int,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size: int,
+        config_top_k: int,
+        launch_n: int,
+        launch_k: int,
+        dtype: torch.dtype,
+        use_fp8_w8a8: bool,
+        use_int8_w8a16: bool,
+        group_n: int,
+        group_k: int,
+        per_act_token_quant: bool,
+        runtime_block_m: int | None = None,
+        runtime_block_n: int | None = None,
+        runtime_block_k: int | None = None,
+        use_td: bool = False,
+        runtime_num_warps: int | None = None,
+        runtime_num_stages: int | None = None,
+    ) -> CompileKey:
+        config_dtype = _get_config_dtype_str(
+            dtype=dtype,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=False,
+        )
+        config = _triton_moe_config(
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            top_k=config_top_k,
+            config_dtype=config_dtype,
+            num_tokens=max_num_tokens,
+            group_n=group_n,
+            group_k=group_k,
+        )
+        block_m = (
+            runtime_block_m if runtime_block_m is not None else config["BLOCK_SIZE_M"]
+        )
+        block_n = (
+            runtime_block_n if runtime_block_n is not None else config["BLOCK_SIZE_N"]
+        )
+        block_k = (
+            runtime_block_k if runtime_block_k is not None else config["BLOCK_SIZE_K"]
+        )
+        num_warps = (
+            runtime_num_warps if runtime_num_warps is not None else config["num_warps"]
+        )
+        num_stages = (
+            runtime_num_stages
+            if runtime_num_stages is not None
+            else config["num_stages"]
+        )
+        return self.CompileKey(
+            dtype=dtype,
+            e=num_experts,
+            max_num_tokens=max_num_tokens,
+            n=launch_n,
+            k=launch_k,
+            group_n=group_n,
+            group_k=group_k,
+            compute_type=_triton_moe_compute_type(dtype),
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            per_act_token_quant=per_act_token_quant,
+            block_m=block_m,
+            block_n=block_n,
+            block_k=block_k,
+            use_td=use_td,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        hidden_size = vllm_config.model_config.hf_config.hidden_size
+        intermediate_size = vllm_config.model_config.hf_config.moe_intermediate_size
+        num_experts = vllm_config.model_config.hf_config.n_routed_experts
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        model_dtype = vllm_config.model_config.dtype
+        if (
+            hidden_size <= 0
+            or intermediate_size <= 0
+            or num_experts <= 0
+            or top_k <= 0
+            or max_tokens <= 0
+        ):
+            return []
+
+        max_tokens = min(max_tokens, 1024)
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(
+                dict(
+                    launch_n=2 * intermediate_size,
+                    launch_k=hidden_size,
+                    dtype=model_dtype,
+                    use_fp8_w8a8=False,
+                    group_n=0,
+                    group_k=0,
+                ),
+                dict(
+                    launch_n=hidden_size,
+                    launch_k=intermediate_size,
+                    dtype=model_dtype,
+                    use_fp8_w8a8=False,
+                    group_n=0,
+                    group_k=0,
+                ),
+                dict(
+                    launch_n=2 * intermediate_size,
+                    launch_k=hidden_size,
+                    dtype=torch.float8_e4m3fn,
+                    use_fp8_w8a8=True,
+                    group_n=128,
+                    group_k=128,
+                ),
+                dict(
+                    launch_n=hidden_size,
+                    launch_k=intermediate_size,
+                    dtype=torch.float8_e4m3fn,
+                    use_fp8_w8a8=True,
+                    group_n=128,
+                    group_k=128,
+                ),
+            ),
+            max_num_tokens=WarmupIntRange(1, max_tokens + 1),
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            config_top_k=top_k,
+            use_int8_w8a16=False,
+            per_act_token_quant=False,
+            use_td=(False, True),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        scale_cols = (
+            triton.cdiv(compile_key.k, compile_key.group_k)
+            if compile_key.group_k > 0
+            else 1
+        )
+        a_ptr = TritonWarmupTensor(
+            compile_key.dtype,
+            shape=(compile_key.e, compile_key.max_num_tokens, compile_key.k),
+        )
+        b_ptr = TritonWarmupTensor(
+            compile_key.dtype,
+            shape=(compile_key.e, compile_key.n, compile_key.k),
+        )
+        c_ptr = TritonWarmupTensor(
+            torch.bfloat16,
+            shape=(compile_key.e, compile_key.max_num_tokens, compile_key.n),
+        )
+        scale_ptr = TritonWarmupTensor(
+            torch.float32,
+            shape=(compile_key.e, compile_key.max_num_tokens, scale_cols),
+        )
+        b_scale_ptr = TritonWarmupTensor(
+            torch.float32,
+            shape=(compile_key.e, compile_key.n, scale_cols),
+        )
+        int32_ptr = TritonWarmupTensor(torch.int32, shape=(compile_key.e,))
+        warmup(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            int32_ptr,
+            compile_key.compute_type,
+            compile_key.max_num_tokens,
+            compile_key.k,
+            compile_key.n,
+            scale_ptr,
+            b_scale_ptr,
+            b_scale_ptr,
+            compile_key.max_num_tokens * compile_key.k,
+            compile_key.k,
+            1,
+            compile_key.n * compile_key.k,
+            1,
+            compile_key.k,
+            compile_key.max_num_tokens * compile_key.n,
+            compile_key.n,
+            1,
+            compile_key.max_num_tokens * scale_cols,
+            scale_cols,
+            1,
+            compile_key.n * scale_cols,
+            1,
+            scale_cols,
+            compile_key.group_n,
+            compile_key.group_k,
+            compile_key.use_fp8_w8a8,
+            compile_key.use_int8_w8a16,
+            compile_key.per_act_token_quant,
+            BLOCK_M=compile_key.block_m,
+            BLOCK_N=compile_key.block_n,
+            BLOCK_K=compile_key.block_k,
+            USE_TD=compile_key.use_td,
+            grid=(1,),
+            num_warps=compile_key.num_warps,
+            num_stages=compile_key.num_stages,
+        )
+
+    def __call__(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        expert_num_tokens: torch.Tensor,
+        compute_type: tl.dtype,
+        max_num_tokens: int,
+        *args: Any,
+        BLOCK_M: int,
+        BLOCK_N: int,
+        BLOCK_K: int,
+        USE_TD: bool,
+        num_warps: int,
+        num_stages: int,
+    ) -> Any:
+        grid = (
+            expert_num_tokens.size(0),
+            triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
+        )
+        return self.kernel[grid](
+            A,
+            B,
+            C,
+            expert_num_tokens,
+            compute_type,
+            max_num_tokens,
+            *args,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            USE_TD=USE_TD,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
 
 
 def invoke_moe_batched_triton_kernel(
@@ -448,11 +728,6 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config["BLOCK_SIZE_M"]
     BLOCK_N = config["BLOCK_SIZE_N"]
     BLOCK_K = config["BLOCK_SIZE_K"]
-
-    grid = (
-        expert_num_tokens.size(0),
-        triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
-    )
 
     A_scale = normalize_batched_scales_shape(A_scale, expert_num_tokens.shape[0])
 
@@ -503,7 +778,7 @@ def invoke_moe_batched_triton_kernel(
     if use_td:
         set_triton_allocator(A.device)
 
-    batched_triton_kernel[grid](
+    _BATCHED_TRITON_KERNEL(
         A,
         B,
         C,
@@ -545,6 +820,8 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         USE_TD=use_td,
+        num_warps=config.get("num_warps", 4),
+        num_stages=config.get("num_stages", 3),
     )
 
 
@@ -1031,3 +1308,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             per_act_token_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
         )
+
+
+_BATCHED_TRITON_KERNEL = BatchedTritonKernel()

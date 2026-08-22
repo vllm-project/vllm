@@ -17,12 +17,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
-from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
-    deepseek_v4_mhc_warmup,
-)
-from vllm.model_executor.warmup.fa4_cutedsl_warmup import (
-    fa4_cutedsl_warmup,
-)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
@@ -35,9 +29,6 @@ from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
-from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
-    sparse_mla_triton_warmup,
-)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -47,53 +38,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
-
-_LL_BF16_WARMUP_M_RANGE = range(1, 17)
-
-
-def _ll_bf16_router_shapes_from_model(
-    model: torch.nn.Module,
-) -> tuple[tuple[int, int], ...]:
-    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-
-    shapes: set[tuple[int, int]] = set()
-    for module in model.modules():
-        if not isinstance(module, GateLinear):
-            continue
-        weight = getattr(module, "weight", None)
-        if not isinstance(weight, torch.Tensor):
-            continue
-        if weight.dim() != 2 or weight.dtype != torch.bfloat16:
-            continue
-        n, k = weight.shape
-        if k % 8 == 0:
-            shapes.add((int(k), int(n)))
-    return tuple(sorted(shapes))
-
-
-def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        is_available as is_ll_bf16_gemm_available,
-    )
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        ll_bf16_gemm_kernel,
-    )
-
-    if not is_ll_bf16_gemm_available():
-        return
-
-    shapes = _ll_bf16_router_shapes_from_model(model)
-    if not shapes:
-        logger.debug_once(
-            "Skipping ll_bf16 router GEMM warmup: no bf16 GateLinear shapes found."
-        )
-        return
-
-    logger.info_once("Warming up ll_bf16 router GEMM kernels for shapes: %s.", shapes)
-    ll_bf16_gemm_kernel.warmup(
-        shapes=shapes,
-        m_values=_LL_BF16_WARMUP_M_RANGE,
-    )
 
 
 def _warmup_kimi_k3_gemm_rs_ar() -> None:
@@ -141,23 +85,9 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     compilation_config = worker.vllm_config.compilation_config
     cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
 
-    # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
-    # layer per token; warm them across token sizes first so the first real
-    # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
-    deepseek_v4_mhc_warmup(
-        worker.get_model(),
-        max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=cudagraph_capture_sizes,
-    )
-
     # Run next so input-prep kernels JIT against pristine runner state.
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
-        fa4_cutedsl_warmup(worker)
-        sparse_mla_triton_warmup(worker)
-
-    if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm(worker.get_model())
 
     _warmup_kimi_k3_gemm_rs_ar()
 
