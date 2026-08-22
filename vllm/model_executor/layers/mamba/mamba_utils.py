@@ -65,9 +65,24 @@ class MambaStateDtypeCalculator:
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
-        return cls._mamba_state_dtype(
+        conv_state_dtype, temporal_state_dtype = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
+        torch_model_dtype = (
+            STR_DTYPE_TO_TORCH_DTYPE.get(model_dtype, model_dtype)
+            if isinstance(model_dtype, str)
+            else model_dtype
+        )
+        if (
+            temporal_state_dtype != torch_model_dtype
+            and temporal_state_dtype != torch.float32
+        ):
+            raise ValueError(
+                f"Mamba-1 selective_scan does not support ssm_state_dtype={temporal_state_dtype} "
+                f"with model_dtype={torch_model_dtype}. Supported ssm_state_dtypes for "
+                f"{torch_model_dtype} are [{torch_model_dtype}, torch.float32]."
+            )
+        return (conv_state_dtype, temporal_state_dtype)
 
     @classmethod
     def mamba2_state_dtype(
