@@ -54,6 +54,39 @@ class Granite20bFCToolParser(ToolParser):
         self.tool_start_token = self.bot_token
         self.tool_call_regex = re.compile(r"<function_call>\s*")
 
+    def _emit_initial_complete_tool_calls(
+        self, tool_call_arr: list[dict]
+    ) -> DeltaMessage | None:
+        delta_tool_calls: list[DeltaToolCall] = []
+        streamed_args_for_tool: list[str] = []
+
+        for index, tool_call in enumerate(tool_call_arr):
+            function_name = tool_call.get("name")
+            if not function_name or "arguments" not in tool_call:
+                return None
+            arguments = json.dumps(tool_call["arguments"], ensure_ascii=False)
+            delta_tool_calls.append(
+                DeltaToolCall(
+                    index=index,
+                    type="function",
+                    id=make_tool_call_id(),
+                    function=DeltaFunctionCall(
+                        name=function_name,
+                        arguments=arguments,
+                    ).model_dump(exclude_none=True),
+                )
+            )
+            streamed_args_for_tool.append(arguments)
+
+        if not delta_tool_calls:
+            return None
+
+        self.current_tool_id = len(tool_call_arr) - 1
+        self.current_tool_name_sent = True
+        self.prev_tool_call_arr = tool_call_arr
+        self.streamed_args_for_tool = streamed_args_for_tool
+        return DeltaMessage(tool_calls=delta_tool_calls)
+
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
@@ -165,6 +198,11 @@ class Granite20bFCToolParser(ToolParser):
             #   only the array brackets, stream nothing
             if len(tool_call_arr) == 0:
                 return None
+
+            if self.current_tool_id < 0 and all(is_complete):
+                initial_delta = self._emit_initial_complete_tool_calls(tool_call_arr)
+                if initial_delta is not None:
+                    return initial_delta
 
             # case: we are starting a new tool in the array
             #   -> array has > 0 length AND length has moved past cursor
