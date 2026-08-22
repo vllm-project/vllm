@@ -204,12 +204,12 @@ class QuantizationConfig(ABC):
         orig_to_new_regex = {
             # Deprecated fused kv_scale -> attn.k_scale
             re.compile(r"\.kv_scale$"): r".attn.k_scale",
-            # ModelOpt: .self_attn.{k,v}_proj.{k,v}_scale -> .self_attn.attn.*
-            re.compile(r"\.self_attn\.[kv]_proj\.([kv])_scale$"): (
+            # ModelOpt: .self_attn.{q,k,v}_proj.{q,k,v}_scale -> .self_attn.attn.*
+            re.compile(r"\.self_attn\.[qkv]_proj\.([qkv])_scale$"): (
                 r".self_attn.attn.\1_scale"
             ),
-            # Fused QKV / qkqkv proj: .self_attn.qk(qk)v_proj.{k,v}_scale -> attn
-            re.compile(r"\.self_attn\.qk(?:qk)?v_proj\.([kv])_scale$"): (
+            # Fused QKV / qkqkv proj: .self_attn.qk(qk)v_proj.{q,k,v}_scale -> attn
+            re.compile(r"\.self_attn\.qk(?:qk)?v_proj\.([qkv])_scale$"): (
                 r".self_attn.attn.\1_scale"
             ),
             # NemotronH: .mixer.{k,v}_proj.{k,v}_scale -> .mixer.attn.*

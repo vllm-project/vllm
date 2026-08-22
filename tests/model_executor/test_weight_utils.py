@@ -85,6 +85,23 @@ class TestMaybeRemapKvScaleName:
         )
         assert result == "model.layers.0.self_attn.attn.v_scale"
 
+    def test_modelopt_q_proj_q_scale(self):
+        """ModelOpt format: q_proj.q_scale -> attn.q_scale.
+
+        Checkpoints that quantize the query as well as the KV cache (e.g. NVFP4
+        W4A4) ship a q_scale next to k_scale/v_scale."""
+        result = maybe_remap_kv_scale_name(
+            "model.layers.0.self_attn.q_proj.q_scale", self.PARAMS_DICT
+        )
+        assert result == "model.layers.0.self_attn.attn.q_scale"
+
+    def test_qkv_proj_q_scale(self):
+        """Fused qkv_proj format: qkv_proj.q_scale -> attn.q_scale"""
+        result = maybe_remap_kv_scale_name(
+            "model.layers.0.self_attn.qkv_proj.q_scale", self.PARAMS_DICT
+        )
+        assert result == "model.layers.0.self_attn.attn.q_scale"
+
     def test_deprecated_kv_scale(self):
         """Old format: kv_scale -> attn.k_scale (deprecated)"""
         result = maybe_remap_kv_scale_name(
@@ -190,6 +207,11 @@ class TestKvCacheScaleMapper:
                 "model.layers.0.self_attn.qkv_proj.v_scale",
                 "model.layers.0.self_attn.attn.v_scale",
             ),
+            # Qwen3-MoE / llm-compressor fused qkv_proj, quantized query
+            (
+                "model.layers.0.self_attn.qkv_proj.q_scale",
+                "model.layers.0.self_attn.attn.q_scale",
+            ),
             # ModelOpt / NVFP4 k_proj/v_proj
             (
                 "model.layers.0.self_attn.k_proj.k_scale",
@@ -198,6 +220,12 @@ class TestKvCacheScaleMapper:
             (
                 "model.layers.0.self_attn.v_proj.v_scale",
                 "model.layers.0.self_attn.attn.v_scale",
+            ),
+            # ModelOpt q_proj: checkpoints that also quantize the query (e.g.
+            # NVFP4 W4A4) ship a q_scale next to k_scale/v_scale.
+            (
+                "model.layers.0.self_attn.q_proj.q_scale",
+                "model.layers.0.self_attn.attn.q_scale",
             ),
             # deprecated fused kv_scale and bare scales
             (
@@ -242,7 +270,9 @@ class TestKvCacheScaleMapper:
         [
             "model.layers.0.self_attn.k_scale",
             "model.layers.0.self_attn.k_proj.k_scale",
+            "model.layers.0.self_attn.q_proj.q_scale",
             "model.layers.0.self_attn.qkv_proj.v_scale",
+            "model.layers.0.self_attn.qkv_proj.q_scale",
             "model.layers.0.mixer.k_proj.k_scale",
         ],
     )
@@ -274,6 +304,10 @@ class TestKvCacheScaleMapper:
         assert (
             combined._map_name("model.layers.0.self_attn.k_proj.k_scale")
             == "model.layers.0.self_attn.attn.k_scale"
+        )
+        assert (
+            combined._map_name("model.layers.0.self_attn.q_proj.q_scale")
+            == "model.layers.0.self_attn.attn.q_scale"
         )
         assert (
             combined._map_name("model.layers.0.self_attn.k_scale")

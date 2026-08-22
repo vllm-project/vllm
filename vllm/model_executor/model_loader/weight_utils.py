@@ -1413,18 +1413,18 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         attn_str = "attn"
     # Define scale name mapping patterns in order of precedence
     scale_mapping_patterns = [
-        # ModelOpt format: .self_attn.{k,v}_proj.{k,v}_scale ->
-        # .self_attn.attn.{k,v}_scale
+        # ModelOpt format: .self_attn.{q,k,v}_proj.{q,k,v}_scale ->
+        # .self_attn.attn.{q,k,v}_scale
         (
-            r"\.self_attn\.([kv])_proj\.([kv])_scale$",
+            r"\.self_attn\.([qkv])_proj\.([qkv])_scale$",
             rf".self_attn.{attn_str}.\2_scale",
         ),
-        # QKV proj format: .self_attn.qkv_proj.{k,v}_scale ->
-        # .self_attn.attn.{k,v}_scale
-        (r"\.self_attn\.qkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
-        # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
-        # .self_attn.attn.{k,v}_scale
-        (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # QKV proj format: .self_attn.qkv_proj.{q,k,v}_scale ->
+        # .self_attn.attn.{q,k,v}_scale
+        (r"\.self_attn\.qkv_proj\.([qkv])_scale$", r".self_attn.attn.\1_scale"),
+        # Qwen3 MoE format: .self_attn.qkqkv_proj.{q,k,v}_scale ->
+        # .self_attn.attn.{q,k,v}_scale
+        (r"\.self_attn\.qkqkv_proj\.([qkv])_scale$", r".self_attn.attn.\1_scale"),
         # NemotronH format: .mixer.{k,v}_proj.{k,v}_scale ->
         # .mixer.attn.{k,v}_scale
         (r"\.mixer\.[kv]_proj\.([kv])_scale$", r".mixer.attn.\1_scale"),
