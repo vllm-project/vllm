@@ -37,3 +37,19 @@ def test_serialize_messages() -> None:
     }
     msg = Message.from_dict(msg_value)
     assert serialize_messages([msg, dict_value]) == [msg_value, dict_value]
+
+
+def test_chat_message_reasoning_content_serialization() -> None:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatMessage
+
+    msg = ChatMessage(role="assistant", content="Answer", reasoning_content="Thinking process")
+    dumped = msg.model_dump()
+    assert dumped["role"] == "assistant"
+    assert dumped["content"] == "Answer"
+    assert dumped["reasoning_content"] == "Thinking process"
+    assert "tool_calls" not in dumped
+
+    msg_none = ChatMessage(role="assistant", content="Answer")
+    dumped_none = msg_none.model_dump()
+    assert "reasoning_content" not in dumped_none
+
