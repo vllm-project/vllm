@@ -306,12 +306,21 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
 class MiniMaxM3VLMultiModalProcessor(
     BaseMultiModalProcessor[MiniMaxM3VLProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         mm_data = dict(mm_data)
         # With ``video_needs_metadata=True`` each video arrives as a
         # ``(frames, metadata)`` tuple. Split the frames back out and forward the
@@ -340,15 +349,17 @@ class MiniMaxM3VLMultiModalProcessor(
 
         # Override the video processor's default do_resize=False (set for a
         # pre-resized pipeline) to True for vLLM's raw-frame inputs.
-        merged = dict(do_resize=True, **mm_kwargs)
-        data = dict(text=prompt, **mm_data)
+        merged = dict(do_resize=True, **hf_processor_mm_kwargs)
+        data = dict(text=prompt_text, **mm_data)
         if video_metadata is not None:
             data["video_metadata"] = video_metadata
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
             data,
             merged,
         )
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_mm_fields_config(
         self,
