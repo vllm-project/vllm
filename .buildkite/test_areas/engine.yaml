@@ -10,7 +10,6 @@ steps:
   - vllm/compilation/
   - vllm/config/
   - vllm/engine/
-  - vllm/entrypoints/logger.py
   - vllm/envs.py
   - vllm/logger.py
   - vllm/logging_utils/
