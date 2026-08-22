@@ -593,6 +593,11 @@ _EMBEDDING_EXAMPLE_MODELS = {
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
     ),
     "BgeM3EmbeddingModel": _HfExamplesInfo("BAAI/bge-m3"),
+    "DeepseekV3BidirectionalModel": _HfExamplesInfo(
+        "ai-sage/Giga-Embeddings-instruct-10B-A1.8B-0826",
+        trust_remote_code=True,
+        hf_overrides={"model_type": "deepseek_v3", "auto_map": None},
+    ),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
@@ -1494,6 +1499,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="z-lab/Qwen3-4B-DFlash-b16",
         use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
+    "DFlash2DraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3.8-27B",
+        speculative_model="z-lab/Qwen3.8-27B-DFlash2",
+        is_available_online=False,
+        use_original_num_layers=True,
+        max_model_len=8192,
         max_num_seqs=32,
     ),
     "DFlashLagunaForCausalLM": _HfExamplesInfo(

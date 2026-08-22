@@ -43,8 +43,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #      clock-sync timestamp
 #   6: Validate EAGLE/MTP speculative configuration compatibility
 #   7: Include NIXL transfer mode (push vs pull) in the compatibility hash
+#   8: Add dcp_size and pcp_size to NixlAgentMetadata
 #
-NIXL_CONNECTOR_VERSION: int = 7
+NIXL_CONNECTOR_VERSION: int = 8
 
 
 @dataclass
@@ -60,6 +61,8 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    dcp_size: int = 1
+    pcp_size: int = 1
 
 
 @dataclass
