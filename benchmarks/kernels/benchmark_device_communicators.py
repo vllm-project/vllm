@@ -29,6 +29,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+    AiterCustomAllreduce,
+)
 from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 from vllm.distributed.device_communicators.flashinfer_all_reduce import (
     FlashInferAllReduce,
@@ -42,6 +46,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import (
 )
 from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -55,6 +60,30 @@ BENCHMARK_DTYPE = torch.bfloat16
 
 # CUDA graph settings
 CUDA_GRAPH_CAPTURE_CYCLES = 10
+
+# All-gather and reduce-scatter are distinct collectives from all-reduce, so
+# results are compared within a collective (each against its own NCCL/RCCL
+# baseline) rather than across collectives.
+COMM_COLLECTIVE = {
+    "ca_1stage": "all-reduce",
+    "ca_2stage": "all-reduce",
+    "pynccl": "all-reduce",
+    "pynccl-symm": "all-reduce",
+    "symm_mem_multimem": "all-reduce",
+    "symm_mem_two_shot": "all-reduce",
+    "flashinfer_trtllm": "all-reduce",
+    "flashinfer_mnnvl": "all-reduce",
+    "aiter_ag": "all-gather",
+    "pynccl_ag": "all-gather",
+    "aiter_rs": "reduce-scatter",
+    "pynccl_rs": "reduce-scatter",
+}
+COLLECTIVE_ORDER = ["all-reduce", "all-gather", "reduce-scatter"]
+COLLECTIVE_BASELINE = {
+    "all-reduce": "pynccl",
+    "all-gather": "pynccl_ag",
+    "reduce-scatter": "pynccl_rs",
+}
 
 
 class CommunicatorBenchmark:
@@ -77,6 +106,11 @@ class CommunicatorBenchmark:
         max_seq_len = max(sequence_lengths)
         max_tensor_elements = max_seq_len * HIDDEN_SIZE
         self.max_size_override = max_tensor_elements * BENCHMARK_DTYPE.itemsize + 1
+        # AITER has effective max size of half the max size, so we double it, and
+        # account for AG output size (which is world_size larger)
+        self.aiter_max_size = (
+            2 * world_size * max_tensor_elements * BENCHMARK_DTYPE.itemsize + 1
+        )
 
         # Initialize communicators
         self.custom_allreduce = None
@@ -85,6 +119,7 @@ class CommunicatorBenchmark:
         self.symm_mem_comm_multimem = None
         self.symm_mem_comm_two_shot = None
         self.fi_ar_comm = None
+        self.aiter_comm = None
 
         self._init_communicators()
 
@@ -180,6 +215,27 @@ class CommunicatorBenchmark:
                 "Rank %s: Failed to initialize FlashInferAllReduce: %s", self.rank, e
             )
             self.fi_ar_comm = None
+
+        if current_platform.is_rocm() and rocm_aiter_ops.is_custom_all_reduce_enabled():
+            try:
+                # Also used for AG/RS for DP
+                self.aiter_comm = AiterCustomAllreduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                    max_size=self.aiter_max_size,
+                )
+                if not self.aiter_comm.disabled:
+                    logger.info("Rank %s: AITER custom AG/RS initialized", self.rank)
+                else:
+                    logger.info("Rank %s: AITER custom AG/RS disabled", self.rank)
+                    self.aiter_comm = None
+            except Exception as e:
+                logger.warning(
+                    "Rank %s: Failed to initialize AITER custom AG/RS: %s",
+                    self.rank,
+                    e,
+                )
+                self.aiter_comm = None
 
     def benchmark_allreduce(
         self, sequence_length: int, num_warmup: int, num_trials: int
@@ -385,29 +441,116 @@ class CommunicatorBenchmark:
                 f"CUDA graph benchmark failed for communicator: {e}"
             ) from e
 
+    def benchmark_ag_rs(
+        self, sequence_length: int, num_warmup: int, num_trials: int
+    ) -> dict[str, float]:
+        """Benchmark all-gather and reduce-scatter: custom (AITER) vs NCCL/RCCL.
 
-def _calculate_speedup_info(comm_results: dict[str, float]) -> str:
-    """Calculate speedup information for a single tensor size."""
+        Each collective is measured for both the AITER custom kernel and the
+        PyNccl baseline so they compare like-for-like (print_results groups
+        columns by collective). All-gather maps ``(seq, hidden)`` ->
+        ``(world_size * seq, hidden)``; reduce-scatter maps ``(seq, hidden)`` ->
+        ``(seq // world_size, hidden)`` and so only runs when ``seq`` divides
+        evenly across ranks. Both reuse ``benchmark_allreduce_single`` timed on a
+        ``(seq, hidden)`` input; baselines write into a pre-allocated buffer.
+        """
+        results: dict[str, float] = {}
+        entries = []
+
+        # ---- all-gather: (seq, hidden) -> (world_size * seq, hidden) ----
+        if self.aiter_comm is not None:
+            c = self.aiter_comm
+            entries.append(
+                (
+                    "aiter_ag",
+                    lambda t, c=c: c.custom_all_gather(t, dim=0),
+                    lambda t, c=c: c.should_custom_ag(t),
+                    c.capture(),
+                )
+            )
+        if self.pynccl_comm is not None:
+            c = self.pynccl_comm
+            ag_out = torch.empty(
+                sequence_length * self.world_size,
+                HIDDEN_SIZE,
+                dtype=BENCHMARK_DTYPE,
+                device=self.device,
+            )
+            entries.append(
+                (
+                    "pynccl_ag",
+                    lambda t, c=c, o=ag_out: c.all_gather(o, t),
+                    lambda t: True,
+                    nullcontext(),
+                )
+            )
+
+        # ---- reduce-scatter: (seq, hidden) -> (seq // world_size, hidden) ----
+        if sequence_length % self.world_size == 0:
+            rs_shape = (sequence_length // self.world_size, HIDDEN_SIZE)
+            if self.aiter_comm is not None:
+                c = self.aiter_comm
+                rs_out = torch.empty(
+                    rs_shape, dtype=BENCHMARK_DTYPE, device=self.device
+                )
+                entries.append(
+                    (
+                        "aiter_rs",
+                        lambda t, c=c, o=rs_out: c.custom_reduce_scatter(t, o, dim=0),
+                        lambda t, c=c: c.should_custom_rs(t, dim=0),
+                        c.capture(),
+                    )
+                )
+            if self.pynccl_comm is not None:
+                c = self.pynccl_comm
+                rs_out = torch.empty(
+                    rs_shape, dtype=BENCHMARK_DTYPE, device=self.device
+                )
+                entries.append(
+                    (
+                        "pynccl_rs",
+                        lambda t, c=c, o=rs_out: c.reduce_scatter(o, t),
+                        lambda t: True,
+                        nullcontext(),
+                    )
+                )
+
+        for name, fn, should_use_fn, context in entries:
+            latency = self.benchmark_allreduce_single(
+                sequence_length, fn, should_use_fn, context, num_warmup, num_trials
+            )
+            if latency is not None:
+                results[name] = latency
+
+        return results
+
+
+def _calculate_speedup_info(comm_results: dict[str, float], baseline: str) -> str:
+    """Fastest comm in a collective group and its speedup vs ``baseline``."""
     if not comm_results:
         return "N/A"
 
-    # Find the fastest communicator
     fastest_comm = min(comm_results.keys(), key=lambda k: comm_results[k])
     fastest_time = comm_results[fastest_comm]
 
-    # Calculate speedup vs PyNccl if available
-    if "pynccl" in comm_results:
-        pynccl_time = comm_results["pynccl"]
-        speedup = pynccl_time / fastest_time
+    if baseline in comm_results and fastest_time > 0:
+        speedup = comm_results[baseline] / fastest_time
         return f"{fastest_comm} ({speedup:.2f}x)"
-    else:
-        return f"{fastest_comm} (N/A)"
+    return f"{fastest_comm} (N/A)"
 
 
 def print_results(
-    results: dict[str, dict[str, float]], sequence_lengths: list[int], world_size: int
+    results: dict[int, dict[str, float]], sequence_lengths: list[int], world_size: int
 ):
-    """Print benchmark results in a formatted table."""
+    """Print benchmark results as one table per collective.
+
+    All-reduce, all-gather and reduce-scatter are different collectives, so each
+    gets its own table and its speedup is computed against that collective's
+    NCCL/RCCL baseline rather than across collectives.
+    """
+    present: set[str] = set()
+    for size_results in results.values():
+        present.update(size_results.keys())
 
     print(f"\n{'=' * 130}")
     print("Device Communicator Benchmark Results")
@@ -415,53 +558,45 @@ def print_results(
         f"World Size: {world_size}, Data Type: {BENCHMARK_DTYPE}, "
         f"Hidden Size: {HIDDEN_SIZE}"
     )
+    print("Tensor Shape is the per-rank input; times are ms per operation.")
     print(f"{'=' * 130}")
 
-    # Get all communicator names
-    all_comms = set()
-    for size_results in results.values():
-        all_comms.update(size_results.keys())
+    for collective in COLLECTIVE_ORDER:
+        comms = sorted(c for c in present if COMM_COLLECTIVE.get(c) == collective)
+        if not comms:
+            continue
+        baseline = COLLECTIVE_BASELINE[collective]
 
-    all_comms = sorted(list(all_comms))
+        print(f"\n{collective} (speedup vs {baseline})")
+        header = f"{'Tensor Shape':<20}{'Tensor Size':<15}"
+        for comm in comms:
+            header += f"{comm:<20}"
+        header += f"{'Best':<30}"
+        print(header)
+        print("-" * len(header))
 
-    # Print header
-    header = f"{'Tensor Shape':<20}{'Tensor Size':<15}"
-    for comm in all_comms:
-        header += f"{comm:<20}"
-    header += f"{'Best (Speedup vs PyNccl)':<30}"
-    print(header)
-    print("-" * len(header))
+        for seq_len in sequence_lengths:
+            if seq_len not in results:
+                continue
+            row_results = {
+                c: results[seq_len][c] for c in comms if c in results[seq_len]
+            }
 
-    # Print results for each sequence length
-    for seq_len in sequence_lengths:
-        if seq_len in results:
-            # Calculate tensor size in elements and bytes
-            tensor_elements = seq_len * HIDDEN_SIZE
-            tensor_bytes = tensor_elements * BENCHMARK_DTYPE.itemsize
-
-            # Format tensor size (MB)
-            tensor_size_mb = tensor_bytes / (1024 * 1024)
-            tensor_size_str = f"{tensor_size_mb:.2f} MB"
-
-            # Format tensor shape
+            tensor_bytes = seq_len * HIDDEN_SIZE * BENCHMARK_DTYPE.itemsize
+            tensor_size_str = f"{tensor_bytes / (1024 * 1024):.2f} MB"
             tensor_shape = f"({seq_len}, {HIDDEN_SIZE})"
 
             row = f"{tensor_shape:<20}{tensor_size_str:<15}"
-            for comm in all_comms:
-                if comm in results[seq_len]:
-                    row += f"{results[seq_len][comm]:<20.3f}"
+            for comm in comms:
+                if comm in row_results:
+                    row += f"{row_results[comm]:<20.3f}"
                 else:
                     row += f"{'N/A':<20}"
-
-            # Calculate speedup information
-            speedup_info = _calculate_speedup_info(results[seq_len])
-            row += f"{speedup_info:<30}"
-
+            row += f"{_calculate_speedup_info(row_results, baseline):<30}"
             print(row)
 
-    print(f"{'=' * 130}")
-    print("All times are in milliseconds (ms) per allreduce operation")
-    print("Speedup column shows: fastest_algorithm (speedup_vs_pynccl)")
+    print(f"\n{'=' * 130}")
+    print("All times are in milliseconds (ms) per operation")
 
 
 def main():
@@ -526,6 +661,13 @@ def main():
             num_warmup=args.num_warmup,
             num_trials=args.num_trials,
         )
+        results.update(
+            benchmark.benchmark_ag_rs(
+                sequence_length=seq_len,
+                num_warmup=args.num_warmup,
+                num_trials=args.num_trials,
+            )
+        )
 
         all_results[seq_len] = results
 
@@ -538,12 +680,23 @@ def main():
 
         # Save to JSON if requested
         if args.output_json:
-            # Add speedup information to results
+            # Add per-collective speedup information to results.
             enhanced_results = {}
             for seq_len, comm_results in all_results.items():
+                speedup_info = {}
+                for collective in COLLECTIVE_ORDER:
+                    group = {
+                        k: v
+                        for k, v in comm_results.items()
+                        if COMM_COLLECTIVE.get(k) == collective
+                    }
+                    if group:
+                        speedup_info[collective] = _calculate_speedup_info(
+                            group, COLLECTIVE_BASELINE[collective]
+                        )
                 enhanced_results[seq_len] = {
                     "timings": comm_results,
-                    "speedup_info": _calculate_speedup_info(comm_results),
+                    "speedup_info": speedup_info,
                 }
 
             output_data = {
