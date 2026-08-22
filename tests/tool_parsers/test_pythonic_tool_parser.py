@@ -7,6 +7,7 @@ import pytest
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
+    run_tool_extraction_nonstreaming,
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
@@ -229,3 +230,108 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_bad_sibling_call_does_not_drop_good_calls(
+    streaming: bool, default_tokenizer: TokenizerLike
+):
+    """One unconvertible call (bytes argument) used to abort the whole
+    conversion, dropping every parseable sibling call in the block."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    model_output = f"[bad(x=b'z'), {SIMPLE_FUNCTION_OUTPUT}]"
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser,
+        model_output,
+        streaming=streaming,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
+def test_non_finite_argument_rejected(default_tokenizer: TokenizerLike):
+    """A 1e999 literal overflows to inf and used to serialize as Infinity —
+    arguments no JSON parser accepts; the call is rejected and every
+    emitted arguments string stays valid JSON."""
+    import json
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    model_output = f"[calc(x=1e999), {SIMPLE_FUNCTION_OUTPUT}]"
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=False
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+    for call in tool_calls:
+        json.loads(call.function.arguments)
+
+
+def test_good_call_survives_unparsable_sibling(default_tokenizer: TokenizerLike):
+    """A broken quote makes the whole block a SyntaxError, so the per-call
+    salvage never gets a call list and the parseable sibling died with the
+    block. Non-streaming only: a partial streaming block is legitimately
+    unparsable and must keep waiting, not be split."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    model_output = f"[{SIMPLE_FUNCTION_OUTPUT}, f(a='x 'y', b='z')]"
+
+    extracted = run_tool_extraction_nonstreaming(tool_parser, model_output)
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
+def test_unrecoverable_block_still_reports_no_tool_call(
+    default_tokenizer: TokenizerLike,
+):
+    """Splitting must not fabricate calls: when no segment parses, the
+    block still falls back to content with tools_called=False."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    model_output = "[f(a='x 'y' 'z), g(b='p 'q' 'r)]"
+
+    extracted = run_tool_extraction_nonstreaming(tool_parser, model_output)
+
+    assert not extracted.tools_called
+    assert extracted.tool_calls == []
+    assert extracted.content == model_output
+
+
+def test_streaming_mismatched_brackets_reported_once(
+    default_tokenizer: TokenizerLike,
+):
+    """Brackets the model got structurally wrong raise at the same offset on
+    every chunk of the block, so the failure was logged with a full traceback
+    once per chunk and none of them named the offending text. It is reported
+    once per request instead."""
+    from vllm.tool_parsers import pythonic_tool_parser as parser_module
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+    model_output = "[foo(x=1])]"
+
+    with (
+        patch.object(parser_module.logger, "exception") as logged_exception,
+        patch.object(parser_module.logger, "warning") as logged_warning,
+    ):
+        _, tool_calls = run_tool_extraction(
+            tool_parser,
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert tool_calls == []
+    assert logged_exception.call_count == 0
+    assert logged_warning.call_count == 1

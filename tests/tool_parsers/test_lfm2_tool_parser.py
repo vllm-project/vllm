@@ -8,6 +8,7 @@ from transformers import AutoTokenizer
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
+    run_tool_extraction_nonstreaming,
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
@@ -431,6 +432,77 @@ def test_empty_tool_call_block(body: str, lfm2_tokenizer: TokenizerLike):
     assert len(reconstructor.tool_calls) == 0
 
 
+@pytest.mark.parametrize("streaming", [True, False])
+def test_bad_sibling_call_does_not_drop_good_calls(
+    streaming: bool, lfm2_tokenizer: TokenizerLike
+):
+    """One unconvertible call (bytes argument) used to abort the whole
+    conversion, dropping every parseable sibling call in the block."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}, bad(x=b'z')]{TOOL_CALL_END}"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=streaming,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_non_finite_argument_call_skipped(
+    streaming: bool, lfm2_tokenizer: TokenizerLike
+):
+    """1e999 overflows to inf and serialized as Infinity -- invalid JSON
+    delivered as a successful tool call. The offending call is skipped and
+    a parseable sibling still comes through."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}, calc(x=1e999)]{TOOL_CALL_END}"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=streaming,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+    import json as _json
+
+    for call in tool_calls:
+        _json.loads(call.function.arguments)
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_positional_argument_call_not_silently_corrupted(
+    streaming: bool, lfm2_tokenizer: TokenizerLike
+):
+    """get_weather('Paris', unit='celsius') used to silently drop 'Paris'
+    and emit a successful call with only {"unit": "celsius"} — a wrong
+    execution instead of a visible failure. The call is rejected; a
+    keyword-only sibling still comes through."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}, "
+        f"get_weather('Paris', unit='celsius')]{TOOL_CALL_END}"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=streaming,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
 def test_whitespace_after_start_token(lfm2_tokenizer: TokenizerLike):
     """Whitespace between <|tool_call_start|> and the opening bracket must
     not break parsing. The streaming path used to feed the indented text to
@@ -664,3 +736,218 @@ def test_regex_timeout_handling(streaming: bool, lfm2_tokenizer: TokenizerLike):
         assert content == fake_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+def test_streaming_mismatched_brackets_reported_once(lfm2_tokenizer: TokenizerLike):
+    """Brackets the model got structurally wrong raise at the same offset on
+    every chunk, so the block was reported with a full traceback once per
+    chunk — twenty-five of them for a call whose arguments continue past the
+    bad bracket. It is reported once, when the block is complete."""
+    from vllm.tool_parsers import lfm2_tool_parser
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[foo(x=1])]{TOOL_CALL_END}"
+
+    with (
+        patch.object(lfm2_tool_parser.logger, "exception") as logged_exception,
+        patch.object(lfm2_tool_parser.logger, "warning") as logged_warning,
+    ):
+        _, tool_calls = run_tool_extraction(
+            cls(lfm2_tokenizer),
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert tool_calls == []
+    assert logged_exception.call_count == 0
+    assert logged_warning.call_count == 1
+
+
+def test_streaming_bad_bracket_after_a_streamed_prefix_reported_once(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """When the bad bracket arrives after a prefix that already completed to
+    a valid call, that call has been streamed and cannot be retracted, and
+    every later chunk fails at the bracket — six tracebacks here, twenty-five
+    for a longer argument list. The block is reported once instead."""
+    from vllm.tool_parsers import lfm2_tool_parser
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[bash(cmd='ls -la'], timeout=30)]{TOOL_CALL_END}"
+
+    with (
+        patch.object(lfm2_tool_parser.logger, "exception") as logged_exception,
+        patch.object(lfm2_tool_parser.logger, "warning") as logged_warning,
+    ):
+        _, tool_calls = run_tool_extraction(
+            cls(lfm2_tokenizer),
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert len(tool_calls) == 1
+    assert logged_exception.call_count == 0
+    assert logged_warning.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    ["f'{q}'", "[i for i in y]"],
+    ids=["fstring_placeholder", "comprehension"],
+)
+def test_streaming_unconvertible_value_never_streams_partial_args(
+    bad_value: str, lfm2_tokenizer: TokenizerLike
+):
+    """A value whose early prefix completes to a fabricated literal (f' to
+    f'', [ to []) converted, so the call's argument prefix was streamed; once
+    the real value arrived it stopped converting and the call was dropped,
+    leaving the client a tool call whose arguments are half a JSON object.
+    The fabricated shapes now wait, so an unconvertible call streams nothing
+    and only the parseable sibling comes through."""
+    import json
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}, f(x={bad_value})]{TOOL_CALL_END}"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=True,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert [call.function for call in tool_calls] == [SIMPLE_FUNCTION_CALL]
+    for call in tool_calls:
+        json.loads(call.function.arguments)
+
+
+def test_streaming_multibyte_string_argument(lfm2_tokenizer: TokenizerLike):
+    """A token boundary that falls inside a multi-byte character must not
+    corrupt the streamed argument: the harness decoded growing token prefixes
+    independently, so the partial bytes of a 3-byte char reached the parser as
+    a replacement char and the streamed value ended as café \ufffd."""
+    import json
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[f(s='café ☕')]{TOOL_CALL_END}"
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=True,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function.name == "f"
+    assert json.loads(tool_calls[0].function.arguments) == {"s": "café ☕"}
+
+
+def test_streaming_implicit_string_concatenation(lfm2_tokenizer: TokenizerLike):
+    """Adjacent string literals ('ab' 'cd') are valid Python that concatenates
+    to one value. The broken-string guard misread the second opening quote as
+    an unclosable string and withheld every later delta — including the final,
+    fully parseable text — so the client was left with a truncated argument."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[f(s='ab' 'cd')]{TOOL_CALL_END}"
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer),
+        model_output,
+        streaming=True,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == FunctionCall(name="f", arguments='{"s": "abcd"}')
+
+
+def test_streaming_positional_call_logged_once_not_per_chunk(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """A call written with a positional argument is unconvertible at every
+    point in the stream, so treating that as a failure logged an exception
+    with a traceback on each of its chunks — thirteen for this call, and over
+    a thousand in one production run, without a tool call being lost."""
+    from vllm.tool_parsers import lfm2_tool_parser
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[read('/etc/hosts')]{TOOL_CALL_END}"
+
+    with patch.object(lfm2_tool_parser.logger, "exception") as logged_exception:
+        run_tool_extraction(
+            cls(lfm2_tokenizer),
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert logged_exception.call_count == 0
+
+
+def test_streaming_waits_for_a_half_streamed_parameter_name(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """A parameter name still arriving is recognized by counting ``=`` against
+    ``,``, so an earlier string value holding an ``=`` defeats the count and
+    the half-typed name completes to a bare name — a positional argument. That
+    state is transient: waiting must be silent, and both calls must still be
+    emitted once the ``=`` arrives."""
+    from vllm.tool_parsers import lfm2_tool_parser
+
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[fetch(url='http://x/?a=1'), bash(cmd='ls')]{TOOL_CALL_END}"
+    )
+
+    with patch.object(lfm2_tool_parser.logger, "exception") as logged_exception:
+        _, tool_calls = run_tool_extraction(
+            cls(lfm2_tokenizer),
+            model_output,
+            streaming=True,
+            assert_one_tool_per_delta=False,
+        )
+
+    assert logged_exception.call_count == 0
+    assert [call.function for call in tool_calls] == [
+        FunctionCall(name="fetch", arguments='{"url": "http://x/?a=1"}'),
+        FunctionCall(name="bash", arguments='{"cmd": "ls"}'),
+    ]
+
+
+def test_good_call_survives_unparsable_sibling(lfm2_tokenizer: TokenizerLike):
+    """A genuinely ambiguous nested quote makes the whole block a
+    SyntaxError, so the per-call salvage never gets a call list and the
+    parseable sibling died with the block — leaving an agent loop with no
+    tool result at all. Non-streaming only: a partial streaming block is
+    legitimately unparsable and must keep waiting, not be split."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}, "
+        f"f(a='x 'y', b='z')]{TOOL_CALL_END}"
+    )
+
+    extracted = run_tool_extraction_nonstreaming(cls(lfm2_tokenizer), model_output)
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
+def test_unrecoverable_block_still_reports_no_tool_call(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """Splitting must not fabricate calls: when no segment parses, the
+    block still falls back to content with tools_called=False."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[f(a='x 'y' 'z), g(b='p 'q' 'r)]{TOOL_CALL_END}"
+
+    extracted = run_tool_extraction_nonstreaming(cls(lfm2_tokenizer), model_output)
+
+    assert not extracted.tools_called
+    assert extracted.tool_calls == []
+    assert extracted.content == model_output

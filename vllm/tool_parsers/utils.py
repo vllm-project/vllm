@@ -6,6 +6,7 @@ import json
 import keyword as _python_keyword
 import math
 import warnings
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
@@ -558,16 +559,167 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
         )
         raise UnexpectedAstError("Invalid tool call name")
     function_name = _ast_callable_dotted_name(call.func)
+    if call.args:
+        # Only keyword arguments carry parameter names; positional values
+        # used to be dropped silently, emitting a successful-looking call
+        # whose arguments were missing. Reject instead.
+        logger.warning(
+            "Tool call has positional arguments: %s",
+            ast.dump(call),
+        )
+        raise UnexpectedAstError("Tool call arguments must be keyword arguments")
     arguments = {}
     for keyword in call.keywords:
+        if keyword.arg is None:
+            # **-unpacking is ast.keyword(arg=None); ``arguments[None]``
+            # used to serialize as a literal "null" key. Merge dict
+            # literals with Python's later-binding-wins semantics and
+            # reject anything else.
+            unpacked = get_parameter_value(keyword.value)
+            if not isinstance(unpacked, dict):
+                logger.warning(
+                    "**-unpacked tool call argument is not a dict: %s",
+                    ast.dump(keyword.value),
+                )
+                raise UnexpectedAstError(
+                    "**-unpacked tool call arguments must be dict literals"
+                )
+            arguments.update(unpacked)
+            continue
         arguments[keyword.arg] = get_parameter_value(keyword.value)
+    try:
+        # allow_nan=False: a non-finite float (e.g. the literal 1e999
+        # overflowing to inf at parse time) would otherwise serialize as
+        # Infinity, which is not valid JSON for downstream clients.
+        arguments_json = json.dumps(arguments, ensure_ascii=False, allow_nan=False)
+    except (ValueError, TypeError) as e:
+        logger.warning("Tool call arguments are not valid JSON: %s", e)
+        raise UnexpectedAstError(
+            "Tool call arguments must serialize to valid JSON"
+        ) from e
     return ToolCall(
         type="function",
         function=FunctionCall(
             name=function_name,
-            arguments=json.dumps(arguments, ensure_ascii=False),
+            arguments=arguments_json,
         ),
     )
+
+
+def salvage_tool_calls(call_nodes: Sequence[ast.expr]) -> list[ToolCall]:
+    """Convert call nodes individually, skipping ones that fail.
+
+    A single unconvertible call (unsupported argument shape) used to abort
+    the whole list comprehension in every pythonic-family parser, dropping
+    each parseable sibling call in the block. Skipping is deterministic on
+    the text, so streaming chunks stay index-consistent.
+
+    Returns an empty list when nothing is convertible; callers decide what
+    that means. It is a hard failure while parsing a complete block, but a
+    normal wait state mid-stream, where a partially arrived call routinely
+    completes to a shape that cannot be converted yet.
+    """
+    tool_calls = []
+    for node in call_nodes:
+        try:
+            tool_calls.append(handle_single_tool(node))  # type: ignore
+        except UnexpectedAstError as e:
+            logger.warning("Skipping unconvertible tool call: %s", e)
+    return tool_calls
+
+
+def split_top_level_calls(text: str, *, respect_strings: bool = True) -> list[str]:
+    """Split a pythonic call block into top-level call segments.
+
+    ``[a(x=1), b(y=2)]`` becomes ``["a(x=1)", "b(y=2)"]``: one enclosing
+    bracket pair is stripped and only commas at bracket depth 0 separate
+    segments.
+
+    With ``respect_strings=True`` commas inside string literals are never
+    separators — correct for well-formed strings, but a broken quote
+    desynchronizes the scan and hides every later separator behind a
+    phantom string. With ``respect_strings=False`` only brackets are
+    counted: string arguments always sit at depth >= 1 inside their call's
+    parentheses, so their commas still never split, and no quote can
+    desynchronize the scan.
+    """
+    text = text.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    segments: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if respect_strings and quote is not None:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if respect_strings and char in {"'", '"'}:
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            segments.append(text[start:index])
+            start = index + 1
+        index += 1
+    segments.append(text[start:])
+    return [segment.strip() for segment in segments if segment.strip()]
+
+
+def salvage_calls_from_unparsable_block(
+    text: str,
+    rewrite: Callable[[str], list[str]] | None = None,
+) -> list[ast.Call]:
+    """Recover individual calls from a block ``ast.parse`` cannot handle.
+
+    When the block as a whole is a SyntaxError no rewrite recovers (e.g. a
+    genuinely ambiguous nested quote), the per-call salvage never runs and
+    one bad call drops every parseable sibling — leaving an agent loop with
+    no tool result at all. Split the block into top-level segments with both
+    scanning strategies and parse each segment on its own (through the
+    *rewrite* candidates when given). A wrongly split segment simply fails
+    to parse and is discarded, so this can only under-recover, never
+    attribute arguments to the wrong call. The strategy recovering more
+    calls wins; source order is preserved.
+    """
+    best: list[ast.Call] = []
+    for respect_strings in (True, False):
+        segments = split_top_level_calls(text, respect_strings=respect_strings)
+        if len(segments) < 2:
+            continue
+        calls: list[ast.Call] = []
+        for segment in segments:
+            candidates = [segment] if rewrite is None else rewrite(segment)
+            for candidate in candidates:
+                try:
+                    parsed = ast.parse(candidate, mode="eval").body
+                except (SyntaxError, ValueError):
+                    continue
+                if isinstance(parsed, ast.Call):
+                    calls.append(parsed)
+                break
+        if len(calls) > len(best):
+            best = calls
+    return best
+
+
+def _top_level_call_count(module: ast.Module) -> int:
+    """Number of calls in a parsed ``[a(...), b(...)]`` block."""
+    if not module.body:
+        return 0
+    value = getattr(module.body[0], "value", None)
+    if isinstance(value, ast.List):
+        return sum(1 for element in value.elts if isinstance(element, ast.Call))
+    return 1 if isinstance(value, ast.Call) else 0
 
 
 def escape_ctrl_chars_in_strings(text: str) -> str:
@@ -825,6 +977,12 @@ def escape_nested_quotes_in_strings(text: str) -> tuple[str, bool]:
             prefix.append(text[index : quotes[0] + 1])
             index = quotes[0] + 1
             continue
+        # A late-closing reading can swallow a whole sibling call into the
+        # string value (``f(a='x 'y'), g(...)`` parsing as one call with
+        # ``g(...)`` inside ``a``) — worse than dropping it, since the tool
+        # then runs with corrupted arguments. Counting brackets is immune to
+        # the broken quote, so the block's call count is the invariant.
+        expected_calls = len(split_top_level_calls(text, respect_strings=False))
         winners = []
         for close in (j for j in quotes if is_closer(j)):
             interior: list[str] = []
@@ -838,9 +996,11 @@ def escape_nested_quotes_in_strings(text: str) -> tuple[str, bool]:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", SyntaxWarning)
                 try:
-                    ast.parse(escape_ctrl_chars_in_strings(candidate))
+                    module = ast.parse(escape_ctrl_chars_in_strings(candidate))
                 except (SyntaxError, ValueError):
                     continue
+            if expected_calls > 1 and _top_level_call_count(module) < expected_calls:
+                continue
             winners.append(candidate)
         if len(winners) == 1:
             return winners[0], True
@@ -923,6 +1083,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
             are detected.
     """
     bracket_stack: list[str] = []
+    last_quote_open = -1
     for index, char in enumerate(text):
         # Inside a string literal only an unescaped matching quote is
         # significant; brackets are literal text. Without this guard a bracket
@@ -945,6 +1106,19 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
                 raise UnexpectedAstError("Mismatched curly braces")
         elif char in {"'", '"'}:
             bracket_stack.append(char)
+            last_quote_open = index
+
+    if bracket_stack and bracket_stack[-1] in {"'", '"'}:
+        # Closing an f-string ourselves fabricates a placeholder-free literal
+        # out of text that may still grow a placeholder — a value that
+        # converts now and stops converting once the '{' arrives, after its
+        # prefix has already been streamed and cannot be retracted.
+        j = last_quote_open
+        while j > 0 and text[j - 1].isalpha() and last_quote_open - j < 2:
+            j -= 1
+        at_boundary = j == 0 or not (text[j - 1].isalnum() or text[j - 1] == "_")
+        if at_boundary and "f" in text[j:last_quote_open].lower():
+            return None
 
     text = text.rstrip()
     if text.endswith("=") or text.endswith(":"):
@@ -963,12 +1137,11 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
             return None
     if text.endswith(","):
         text = text[:-1]
-    if (
-        bracket_stack
-        and bracket_stack[-1] == "["
-        and not text.endswith("[")
-        and not text.endswith(")")
-    ):
+    # A list only completes right after a closed call: anywhere else the
+    # closing "]" fabricates a value (a just-opened "[" becomes an empty
+    # list) that converts now and stops converting once real elements
+    # arrive, after its prefix has already been streamed.
+    if bracket_stack and bracket_stack[-1] == "[" and not text.endswith(")"):
         return None
 
     _CLOSING = {"[": "]", "(": ")", "{": "}", "'": "'", '"': '"'}
