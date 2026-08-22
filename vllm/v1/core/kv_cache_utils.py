@@ -1763,13 +1763,49 @@ def _get_kv_cache_groups_uniform_groups(
     return [full_mla_group, *swa_mla_groups]
 
 
-def _annotate_eagle_groups_deepseek_v4(
+def _annotate_eagle_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
     kv_cache_groups: list[KVCacheGroupSpec],
+    use_deepseek_v4_fallback: bool = False,
 ) -> None:
+    """Flag the KV cache groups that hold drafter attention layers.
+
+    Two detection rules, in order of preference:
+
+    1. Spec-driven. ``non_causal_multi_token_decode`` is declared on
+       MLAAttentionSpec and set by drafter attention layers that run a
+       non-causal multi-token decode (today only Kimi-K3 DSpark). It survives
+       MLAAttentionSpec.merge, so it still identifies a group after per-group
+       spec merging, wherever grouping happens to land. It is sufficient but
+       not necessary: a drafter whose spec is indistinguishable from the
+       target's cannot be found this way.
+    2. Model-scoped positional fallback for DeepseekV4, whose MTP block reuses
+       the target's own decoder layer and so carries no spec marker. Its draft
+       attention layer is always the last registered layer, so flag whichever
+       group holds it. This rule is only valid where the groups partition
+       exactly the layers of ``kv_cache_spec``, which is true on the
+       group_and_unify path and not in general; other callers must leave
+       ``use_deepseek_v4_fallback`` False.
+       FIXME(yifan): avoid/generalize this hacky check.
+
+    Args:
+        vllm_config: Config supplying the speculative method, if any.
+        kv_cache_spec: The kv cache spec of each attention layer, in layer
+            registration order. Only read by rule 2.
+        kv_cache_groups: Groups to annotate in place.
+        use_deepseek_v4_fallback: Enable rule 2. Only the group_and_unify path
+            may set this.
+    """
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle():
+        return
+
+    for group in kv_cache_groups:
+        if getattr(group.kv_cache_spec, "non_causal_multi_token_decode", False):
+            group.is_eagle_group = True
+
+    if not use_deepseek_v4_fallback:
         return
     # Detection uses the merged MLA spec's model_version.
     if not any(
@@ -1777,14 +1813,50 @@ def _annotate_eagle_groups_deepseek_v4(
         for spec in kv_cache_spec.values()
     ):
         return
-    # DeepseekV4's MTP attention layer is always the last layer, and we flag whichever
-    # group contains it.
-    # FIXME(yifan): avoid/generalize this hacky check.
     last_layer = next(reversed(kv_cache_spec))
     for group in kv_cache_groups:
         if last_layer in group.layer_names:
             group.is_eagle_group = True
             break
+
+
+def _warn_if_unannotated_eagle_mamba(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> None:
+    """Warn when the flag-all eagle fallback will silently disable reuse.
+
+    With no group annotated, consumers flag every group as a draft group. That
+    widens a Mamba group's required lookup window to two consecutive chunks,
+    which align-mode checkpointing never produces, so reuse drops to zero with
+    no error and no metric to show it.
+
+    Args:
+        vllm_config: Config supplying the speculative method, if any.
+        kv_cache_groups: Groups as they will be handed to consumers.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_eagle():
+        return
+    if any(group.is_eagle_group for group in kv_cache_groups):
+        return
+    mamba_groups = [
+        idx
+        for idx, group in enumerate(kv_cache_groups)
+        if isinstance(group.kv_cache_spec, MambaSpec)
+    ]
+    if not mamba_groups:
+        return
+    logger.warning(
+        "Speculative decoding (method=%s) is enabled but no KV cache group "
+        "could be identified as the draft model's, so every group -- "
+        "including Mamba groups %s -- will be treated as a draft group. A "
+        "Mamba group cannot satisfy the widened lookup window that implies, "
+        "so prefix-cache reuse across requests will be disabled and any "
+        "external KV offload tier will store without ever serving a hit.",
+        spec_config.method,
+        mamba_groups,
+    )
 
 
 def _largest_divisor_at_most(value: int, limit: int) -> int:
@@ -1831,7 +1903,12 @@ def get_kv_cache_groups(
         # attention in different sizes. Need to group layers into multiple
         # UniformTypeKVCacheSpecs.
         kv_cache_groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
-        _annotate_eagle_groups_deepseek_v4(vllm_config, kv_cache_spec, kv_cache_groups)
+        _annotate_eagle_groups(
+            vllm_config,
+            kv_cache_spec,
+            kv_cache_groups,
+            use_deepseek_v4_fallback=True,
+        )
         return kv_cache_groups
 
     # Pull HiddenStateCacheSpec layers out before the general multi-group
@@ -1876,6 +1953,8 @@ def get_kv_cache_groups(
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
+    _annotate_eagle_groups(vllm_config, kv_cache_spec, groups)
+    _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
 
