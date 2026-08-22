@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import 
     FlashInferExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+    TrtLlmFp8ExpertsModular,
     TrtLlmFp8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
@@ -42,6 +44,19 @@ except ImportError:
         pytest.skip(
             "flashinfer not supported for vLLM on ROCm", allow_module_level=True
         )
+
+try:
+    from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+except ImportError:
+    has_flashinfer_trtllm_fused_moe = lambda: False
+
+requires_trtllm_fp8_moe = pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.has_device_capability(100)
+    or not has_flashinfer_trtllm_fused_moe(),
+    reason="trtllm fp8 moe experts require CUDA, sm100 (Blackwell), and a "
+    "flashinfer build with the trtllm fused moe kernels",
+)
 
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     90
@@ -422,3 +437,112 @@ def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
 
     assert w13_converted.shape[0] == num_experts
     assert w2_converted.shape[0] == num_experts
+
+
+@requires_trtllm_fp8_moe
+@pytest.mark.parametrize("block_shape,is_mxfp8", [([1, 32], True), ([128, 128], False)])
+def test_trtllm_fp8_moe_gemm1_swiglu_params_only_forwarded_for_mxfp8(
+    block_shape, is_mxfp8, monkeypatch
+):
+    """gemm1_alpha/beta/clamp_limit must reach flashinfer only on the MXFP8 path.
+
+    These are MXFP8 + SwiGLU per-expert parameters. flashinfer 0.6.15+ rejects
+    them on the DeepSeekFp8 path (``Fp8QuantizationType != MxFp8``) via
+    ``_validate_fp8_block_scale_gemm1_activation_params``. A SwiGLU-OAI model
+    sets them (``layer.swiglu_alpha`` -> ``gemm1_alpha`` in fp8.py) even while
+    running the DeepSeekFp8 block-scale path, so vLLM must drop them there.
+
+    This is a forwarding-invariant check: the flashinfer entry points are
+    replaced with a capture stub, so no kernel runs and the result is stable
+    across flashinfer versions. gemm1_alpha/beta/clamp_limit are kept non-None
+    on *both* paths -- the DeepSeekFp8 case only exercises the fix when they
+    are present, since flashinfer short-circuits when all three are None.
+    """
+    import flashinfer
+
+    e, m, k, intermediate, topk = 4, 8, 128, 16, 2
+    swiglu_keys = ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
+    expected = list(swiglu_keys) if is_mxfp8 else []
+
+    def make_quant_config():
+        # Non-None on both paths: the DeepSeekFp8 case is the real trigger.
+        return SimpleNamespace(
+            block_shape=block_shape,
+            is_per_tensor=False,
+            w1_scale=torch.ones(e, device="cuda"),
+            w2_scale=torch.ones(e, device="cuda"),
+            gemm1_alpha=1.0,
+            gemm1_beta=1.0,
+            gemm1_clamp_limit=10.0,
+        )
+
+    def make_moe_config():
+        return SimpleNamespace(
+            routing_method=None,
+            experts_per_token=topk,
+            intermediate_size_per_partition=intermediate,
+            hidden_dim=k,
+            num_local_experts=e,
+            max_num_tokens=128,
+            dp_size=1,
+            is_act_and_mul=True,
+            moe_parallel_config=SimpleNamespace(ep_rank=0),
+        )
+
+    captured: dict = {}
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        return torch.zeros(1)
+
+    a1q_scale = torch.ones(k // 128, m, device="cuda")
+    w1 = torch.zeros(e, 2 * intermediate, k, dtype=torch.float8_e4m3fn, device="cuda")
+    w2 = torch.zeros(e, k, intermediate, dtype=torch.float8_e4m3fn, device="cuda")
+
+    # Modular (pre-routed) path.
+    captured.clear()
+    monkeypatch.setattr(
+        flashinfer.fused_moe, "trtllm_fp8_block_scale_routed_moe", capture
+    )
+    TrtLlmFp8ExpertsModular(make_moe_config(), make_quant_config()).apply(
+        output=torch.zeros(m, k, device="cuda"),
+        hidden_states=torch.randn(m, k, device="cuda"),
+        w1=w1,
+        w2=w2,
+        topk_weights=torch.zeros(m, topk, device="cuda"),
+        topk_ids=torch.zeros(m, topk, dtype=torch.int32, device="cuda"),
+        activation=MoEActivation.SILU,
+        global_num_experts=e,
+        expert_map=None,
+        a1q_scale=a1q_scale,
+        a2_scale=None,
+        workspace13=None,
+        workspace2=None,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    forwarded = [key for key in swiglu_keys if key in captured]
+    assert forwarded == expected, (
+        f"modular path: expected {expected} gemm1 kwargs, got {forwarded}"
+    )
+
+    # Monolithic block-scale path.
+    captured.clear()
+    monkeypatch.setattr(flashinfer.fused_moe, "trtllm_fp8_block_scale_moe", capture)
+    TrtLlmFp8ExpertsMonolithic(
+        make_moe_config(), make_quant_config()
+    )._apply_block_scale(
+        hidden_states=torch.randn(m, k, device="cuda"),
+        w1=w1,
+        w2=w2,
+        router_logits=torch.randn(m, e, device="cuda"),
+        activation=MoEActivation.SILU,
+        global_num_experts=e,
+        expert_map=None,
+        a1q_scale=a1q_scale,
+        apply_router_weight_on_input=False,
+    )
+    forwarded = [key for key in swiglu_keys if key in captured]
+    assert forwarded == expected, (
+        f"monolithic path: expected {expected} gemm1 kwargs, got {forwarded}"
+    )
