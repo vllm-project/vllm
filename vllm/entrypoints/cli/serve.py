@@ -9,6 +9,7 @@ import uvloop
 
 import vllm
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
@@ -142,7 +143,11 @@ class ServeSubcommand(CLISubcommand):
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
             run_headless(args)
-        elif args.api_server_count > 1 or rust_frontend_path:
+        elif (
+            args.api_server_count > 1
+            or rust_frontend_path
+            or args.enable_engine_snapshot
+        ):
             run_multi_api_server(args)
         else:
             # Single API server (this process).
@@ -256,6 +261,28 @@ def run_headless(args: argparse.Namespace):
         logger.info("Shutting down.")
 
 
+def _validate_engine_snapshot_execution(
+    vllm_config: VllmConfig, executor_class: type[Executor]
+) -> None:
+    parallel_config = vllm_config.parallel_config
+    if (
+        parallel_config.data_parallel_size != 1
+        or parallel_config.tensor_parallel_size != 1
+        or parallel_config.pipeline_parallel_size != 1
+        or parallel_config.prefill_context_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+        or parallel_config.nnodes != 1
+    ):
+        raise ValueError(
+            "Engine snapshots currently require all parallel sizes to be 1"
+        )
+
+    from vllm.v1.executor.uniproc_executor import UniProcExecutor
+
+    if not issubclass(executor_class, UniProcExecutor):
+        raise ValueError("Engine snapshots currently require UniProcExecutor")
+
+
 def run_multi_api_server(args: argparse.Namespace):
     assert not args.headless
     rust_frontend_path = (
@@ -263,6 +290,16 @@ def run_multi_api_server(args: argparse.Namespace):
     )
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
+    snapshot_provider = None
+
+    if args.enable_engine_snapshot:
+        if rust_frontend_path:
+            raise ValueError("Engine snapshots require the Python frontend")
+        if num_api_servers != 1:
+            raise ValueError("Engine snapshots currently require one API server")
+        from vllm.snapshot.providers import make_snapshot_provider
+
+        snapshot_provider = make_snapshot_provider(args.engine_snapshot_provider)
 
     if rust_frontend_path and num_api_servers > 1:
         raise ValueError(
@@ -294,12 +331,31 @@ def run_multi_api_server(args: argparse.Namespace):
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
+    if args.enable_engine_snapshot:
+        from vllm.snapshot.resources import parse_snapshot_resource_policy
+
+        resource_policy = parse_snapshot_resource_policy(
+            args.engine_snapshot_resource_policy
+        )
+        if (
+            resource_policy.requires_allocator
+            and not vllm_config.model_config.enable_sleep_mode
+            and not vllm_config.model_config.enable_cumem_allocator
+        ):
+            raise ValueError(
+                "Engine snapshot resource policies that offload or discard "
+                "allocations require "
+                "--enable-sleep-mode or --enable-cumem-allocator"
+            )
+
     if num_api_servers > 1 and envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         raise ValueError(
             "VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used with api_server_count > 1"
         )
 
     executor_class = Executor.get_class(vllm_config)
+    if args.enable_engine_snapshot:
+        _validate_engine_snapshot_execution(vllm_config, executor_class)
     log_stats = not engine_args.disable_log_stats
 
     parallel_config = vllm_config.parallel_config
@@ -309,6 +365,7 @@ def run_multi_api_server(args: argparse.Namespace):
     api_server_manager: APIServerProcessManager | RustFrontendProcessManager | None = (
         None
     )
+    snapshot_manager = None
 
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
@@ -325,7 +382,11 @@ def run_multi_api_server(args: argparse.Namespace):
     )
 
     with launch_core_engines(
-        vllm_config, executor_class, log_stats, addresses
+        vllm_config,
+        executor_class,
+        log_stats,
+        addresses,
+        enable_engine_snapshot=args.enable_engine_snapshot,
     ) as engine_launch:
         local_engine_manager = engine_launch.engine_manager
         coordinator = engine_launch.coordinator
@@ -364,6 +425,11 @@ def run_multi_api_server(args: argparse.Namespace):
                 output_addresses=addresses.outputs,
                 stats_update_address=stats_update_address,
                 tensor_queue=engine_launch.tensor_queue,
+                snapshot_control_path=(
+                    args.engine_snapshot_control_socket
+                    if args.enable_engine_snapshot
+                    else None
+                ),
             )
 
             if not is_ray_dp:
@@ -380,6 +446,66 @@ def run_multi_api_server(args: argparse.Namespace):
         # If any of these processes exit before the engines are up, the engine startup
         # will be aborted with an error.
         engine_launch.watched_frontend_processes = api_server_manager.processes
+
+    if args.enable_engine_snapshot:
+        try:
+            if not isinstance(local_engine_manager, CoreEngineProcManager):
+                raise RuntimeError(
+                    "Engine snapshots require CoreEngineProcManager"
+                )
+            if len(local_engine_manager.processes) != 1:
+                raise RuntimeError(
+                    "Engine snapshots require exactly one EngineCore process"
+                )
+            root_pid = local_engine_manager.processes[0].pid
+            if root_pid is None:
+                raise RuntimeError("EngineCore process PID is unavailable")
+            from vllm.snapshot.manager import EngineSnapshotManager, config_digest
+
+            if snapshot_provider is None:
+                raise RuntimeError("engine snapshot provider was not initialized")
+
+            snapshot_config = {
+                "model": args.model,
+                "tokenizer": args.tokenizer or args.model,
+                "revision": args.revision,
+                "tokenizer_revision": args.tokenizer_revision,
+                "dtype": args.dtype,
+                "max_model_len": args.max_model_len,
+                "served_model_name": args.served_model_name,
+                "load_format": args.load_format,
+                "tensor_parallel_size": args.tensor_parallel_size,
+                "pipeline_parallel_size": args.pipeline_parallel_size,
+                "data_parallel_size": args.data_parallel_size,
+                "enforce_eager": args.enforce_eager,
+                "integrity": args.engine_snapshot_integrity,
+                "vllm_config_hash": vllm_config.compute_hash(),
+            }
+
+            snapshot_manager = EngineSnapshotManager(
+                args.engine_snapshot_control_socket,
+                args.engine_snapshot_dir,
+                root_pid,
+                provider=snapshot_provider,
+                config_hash=config_digest(snapshot_config),
+                snapshot_config=snapshot_config,
+                resource_policy=args.engine_snapshot_resource_policy,
+                persistence=args.engine_snapshot_persistence,
+                integrity=args.engine_snapshot_integrity,
+                process_manager=local_engine_manager,
+            )
+            snapshot_manager.start()
+        except BaseException:
+            if snapshot_manager is not None:
+                snapshot_manager.close()
+            if api_server_manager is not None:
+                api_server_manager.shutdown()
+            if local_engine_manager:
+                local_engine_manager.shutdown()
+            if coordinator:
+                coordinator.shutdown()
+            sock.close()
+            raise
 
     # Wait for API servers.
     try:
@@ -401,6 +527,8 @@ def run_multi_api_server(args: argparse.Namespace):
             )
 
         api_server_manager.shutdown(timeout=timeout)
+        if snapshot_manager is not None:
+            snapshot_manager.close()
         if local_engine_manager:
             local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
         if coordinator:

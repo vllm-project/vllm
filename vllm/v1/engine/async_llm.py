@@ -982,14 +982,57 @@ class AsyncLLM(EngineClient):
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
 
-    async def checkpoint_prepare(self) -> None:
-        await self.collective_rpc("checkpoint_prepare")
+    async def checkpoint_prepare(
+        self, resource_policy: dict[str, str]
+    ) -> list[dict[str, float]]:
+        return await self.collective_rpc("checkpoint_prepare", args=(resource_policy,))
 
-    async def checkpoint_restore(self) -> None:
-        await self.collective_rpc("checkpoint_restore")
+    async def checkpoint_restore(
+        self, resource_policy: dict[str, str]
+    ) -> list[dict[str, float]]:
+        return await self.collective_rpc("checkpoint_restore", args=(resource_policy,))
+
+    async def checkpoint_abort(self) -> list[dict[str, float]]:
+        return await self.collective_rpc("checkpoint_abort")
+
+    async def snapshot_detach_io(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        marker_path: str,
+        persistence: str,
+    ) -> None:
+        await self.engine_core.snapshot_detach_io_async(
+            nonce,
+            generation,
+            snapshot_id,
+            config_hash,
+            marker_path,
+            persistence,
+        )
+
+    async def snapshot_wait_for_attach(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        root_pid: int,
+    ) -> None:
+        await self.engine_core.snapshot_wait_for_attach_async(
+            nonce, generation, snapshot_id, config_hash, root_pid
+        )
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
+
+    async def is_idle(self) -> bool:
+        return (
+            not self.output_processor.has_unfinished_requests()
+            and not self.engine_core.dp_engines_running()
+        )
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
