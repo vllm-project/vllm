@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
+import contextlib
 import json
 import multiprocessing
 import os
 import sys
 from shutil import which
+
+with contextlib.suppress(ImportError):
+    import readline  # noqa: F401
 
 try:
     # Try to get CUDA_HOME from PyTorch installation, which is the
