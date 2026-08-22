@@ -13,7 +13,19 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 
-@triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
+@triton.jit(
+    do_not_specialize_on_alignment=[
+        "cache_indices_ptr",
+        "has_initial_states_ptr",
+        "query_start_loc_ptr",
+        "batch_ptr",
+        "token_chunk_offset_ptr",
+        "block_idx_first_scheduled_token",
+        "block_idx_last_scheduled_token",
+        "initial_state_idx",
+        "num_computed_tokens",
+    ]
+)
 def _causal_conv1d_fwd_kernel(  # continuous batching
     # Pointers to matrices
     x_ptr,  # (dim, cu_seqlen) holding `batch` of actual sequences + padded sequences
@@ -759,7 +771,15 @@ def causal_conv1d_fn(
     return out.to(original_x_dtype)
 
 
-@triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
+@triton.jit(
+    do_not_specialize_on_alignment=[
+        "conv_state_indices_ptr",
+        "num_accepted_tokens_ptr",
+        "query_start_loc_ptr",
+        "block_idx_last_scheduled_token",
+        "initial_state_idx",
+    ]
+)
 def _causal_conv1d_update_kernel(
     # Pointers to matrices
     x_ptr,  # (batch, dim, seqlen)
