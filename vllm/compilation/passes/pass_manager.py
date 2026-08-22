@@ -50,6 +50,8 @@ if current_platform.is_cuda_alike():
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
+
+if current_platform.is_cuda() or current_platform.is_xpu():
     from .fusion.collective_fusion import AsyncTPPass
 
 if current_platform.is_xpu():

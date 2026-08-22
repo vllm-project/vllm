@@ -98,6 +98,82 @@ def test_async_tp_pass_correctness(
 
 
 @create_new_process_for_each_test()
+@pytest.mark.parametrize("model_id", ["RedHatAI/Qwen3-32B-FP8-block"])
+@pytest.mark.parametrize("tp_size", [2])
+@pytest.mark.parametrize("async_tp_enabled", [True])
+@pytest.mark.parametrize("distributed_backend", ["mp"])
+@pytest.mark.skipif(
+    not current_platform.is_xpu(),
+    reason="XPU block FP8 AsyncTP correctness only runs on XPU",
+)
+def test_async_tp_pass_xpu_block_fp8_correctness(
+    model_id: str,
+    tp_size: int,
+    async_tp_enabled: bool,
+    distributed_backend: str,
+    num_gpus_available: int,
+    monkeypatch,
+):
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_available_online(on_fail="skip")
+
+    pp_size = 1
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
+
+    common_args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "8",
+    ]
+
+    compilation_config = {
+        "mode": CompilationMode.VLLM_COMPILE,
+        "compile_sizes": [2, 4, 8],
+        "splitting_ops": [],
+        "pass_config": {
+            "enable_sp": True,
+            "fuse_gemm_comms": async_tp_enabled,
+            # Qwen3-32B's hidden_size clears the SP heuristic's minimum, but
+            # actual test prompts are far shorter than the resulting token
+            # threshold. Force sp_min_token_num=1 so the block FP8 AsyncTP
+            # all-gather pattern actually fires for these small requests.
+            "sp_min_token_num": 1,
+        },
+    }
+
+    async_tp_args = [
+        *common_args,
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--distributed-executor-backend",
+        distributed_backend,
+        "--compilation_config",
+        json.dumps(compilation_config),
+    ]
+
+    tp_args = [
+        *common_args,
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--distributed-executor-backend",
+        "mp",
+    ]
+
+    compare_two_settings(
+        model_id,
+        async_tp_args,
+        tp_args,
+        method="generate",
+        force_v1_runner=True,
+    )
+
+
+@create_new_process_for_each_test()
 def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
     if (
         not current_platform.is_cuda()
