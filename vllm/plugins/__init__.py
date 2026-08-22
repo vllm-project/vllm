@@ -74,6 +74,13 @@ def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
     return plugins
 
 
+def _run_general_plugins():
+    plugins = load_plugins_by_group(group=DEFAULT_PLUGINS_GROUP)
+    # general plugins, we only need to execute the loaded functions
+    for func in plugins.values():
+        func()
+
+
 def load_general_plugins():
     """WARNING: plugins can be loaded for multiple times in different
     processes. They should be designed in a way that they can be loaded
@@ -84,10 +91,17 @@ def load_general_plugins():
         return
     plugins_loaded = True
 
-    plugins = load_plugins_by_group(group=DEFAULT_PLUGINS_GROUP)
-    # general plugins, we only need to execute the loaded functions
-    for func in plugins.values():
-        func()
+    if envs.VLLM_USE_HW_AGNOSTIC:
+        # Wrap the plugin loading to resolve in-tree layer names
+        # to the hw-agnostic classes.
+        from vllm.model_executor.hw_agnostic.layers._layer_names import (
+            hw_agnostic_layer_names,
+        )
+
+        with hw_agnostic_layer_names():
+            _run_general_plugins()
+    else:
+        _run_general_plugins()
 
 
 def load_endpoint_plugins(
