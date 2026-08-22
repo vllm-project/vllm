@@ -125,6 +125,7 @@ flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
 flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
     "flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"
 )
+flashinfer_mm_bf16 = _lazy_import_wrapper("flashinfer.gemm", "mm_bf16")
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
 flashinfer_mxfp4_quantize = _lazy_import_wrapper("flashinfer", "mxfp4_quantize")
 nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
@@ -171,6 +172,15 @@ autotune = _lazy_import_wrapper(
     "autotune",
     fallback_fn=lambda *args, **kwargs: contextlib.nullcontext(),
 )
+
+
+@functools.cache
+def has_flashinfer_mm_bf16() -> bool:
+    """Return `True` if FlashInfer exposes the BF16 dense GEMM entrypoint."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.gemm")
+    return mod is not None and hasattr(mod, "mm_bf16")
 
 
 @functools.cache
@@ -1083,6 +1093,7 @@ __all__ = [
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
     "flashinfer_fp4_quantize",
+    "flashinfer_mm_bf16",
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
@@ -1094,6 +1105,7 @@ __all__ = [
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "flashinfer_xqa_batch_decode_with_kv_cache",
     "autotune",
+    "has_flashinfer_mm_bf16",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
     "has_flashinfer_nvlink_two_sided",
