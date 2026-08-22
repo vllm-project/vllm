@@ -1,4 +1,4 @@
-name: pre-commit
+[![pre-commit](https://github.com/vllm-project/vllm/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/vllm-project/vllm/actions/workflows/pre-commit.yml)name: pre-commit
 
 on:
   pull_request:
