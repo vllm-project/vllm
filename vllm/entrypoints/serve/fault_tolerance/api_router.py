@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-import uuid
 from http import HTTPStatus
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Request
@@ -17,10 +16,10 @@ logger = init_logger(__name__)
 
 router = APIRouter()
 
-_ALLOWED_INSTRUCTIONS = {"retry"}
+_ALLOWED_INSTRUCTIONS = {"retry", "scale_down"}
 
 
-def _validate_payload(body: dict) -> tuple[str, dict]:
+def _validate_payload(body: dict) -> tuple[str, dict, str]:
     if not isinstance(body, dict):
         raise HTTPException(400, "Request body must be a JSON object.")
     instruction = body.get("instruction")
@@ -31,7 +30,11 @@ def _validate_payload(body: dict) -> tuple[str, dict]:
     params = body.get("params", {})
     if not isinstance(params, dict):
         raise HTTPException(400, "'params' must be an object.")
-    return instruction, params
+
+    request_id = body.get("request_id", "")
+    if not isinstance(request_id, str):
+        raise HTTPException(400, "'request_id' must be a string.")
+    return instruction, params, request_id
 
 
 @router.post(
@@ -50,11 +53,13 @@ async def process_fault_tolerance_instruction(
     except json.JSONDecodeError as e:
         raise HTTPException(400, "Invalid JSON format") from e
 
-    instruction, params = _validate_payload(body)
+    instruction, params, request_id = _validate_payload(body)
+    # One recovery round shares one request_id, which namespaces that round's
+    # coordination keys; empty falls back to the engine's local epoch.
     ft_request = FaultToleranceRequest(
         instruction=instruction,
         params=params,
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
     )
 
     client: EngineClient = raw_request.app.state.engine_client

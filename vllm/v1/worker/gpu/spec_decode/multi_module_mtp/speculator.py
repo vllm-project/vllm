@@ -199,6 +199,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            parallel_config=self.vllm_config.parallel_config,
         )
 
         # Rebuild the slot mappings and attention metadata.
