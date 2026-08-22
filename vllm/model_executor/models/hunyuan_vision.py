@@ -731,28 +731,6 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
 
 
 class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        # HunYuanVLProcessor requires image placeholders wrapped with start/end tokens.
-        if mm_data.get("images") is not None and prompt:
-            img_tok = hf_processor.image_token
-            wrapped = (
-                f"{hf_processor.image_start_token}{img_tok}"
-                f"{hf_processor.image_end_token}"
-            )
-            if img_tok in prompt and wrapped not in prompt:
-                prompt = prompt.replace(img_tok, wrapped)
-        return self.info.ctx.call_hf_processor(
-            hf_processor,
-            dict(text=prompt, **mm_data),
-            mm_kwargs,
-        )
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
