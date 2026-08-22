@@ -113,16 +113,12 @@ class LatentMoERunner(MoERunner):
             )
 
             experts_cls = getattr(self._quant_method, "experts_cls", None)
-            moe_kernel = self._quant_method.moe_kernel
+            # The kernel instance is built after weight loading, while the tail
+            # must register its CuTeDSL warmup units during runner construction.
             self.moe_config.defer_moe_finalize = (
-                (
-                    experts_cls is TrtLlmMxfp4ExpertsMonolithic
-                    or experts_cls is TrtLlmNvFp4ExpertsMonolithic
-                )
-                and self.moe_config.hidden_dim == self.moe_config.hidden_dim_unpadded
-                and moe_kernel is not None
-                and moe_kernel.supports_deferred_moe_finalize()
-            )
+                experts_cls is TrtLlmMxfp4ExpertsMonolithic
+                or experts_cls is TrtLlmNvFp4ExpertsMonolithic
+            ) and self.moe_config.hidden_dim == self.moe_config.hidden_dim_unpadded
             from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import (
                 KimiK3LatentMoETailOp,
             )
@@ -145,6 +141,12 @@ class LatentMoERunner(MoERunner):
                 if self.moe_config.use_deferred_moe_finalize
                 else -1
             )
+            if self.moe_config.use_deferred_moe_finalize:
+                logger.info_once(
+                    "K3 latent-MoE tail fusion with deferred top-k finalization "
+                    "is enabled for up to %d tokens.",
+                    op.contract.max_num_tokens,
+                )
         else:
             self.moe_config.defer_moe_finalize = False
             self.moe_config.defer_moe_finalize_max_num_tokens = -1
