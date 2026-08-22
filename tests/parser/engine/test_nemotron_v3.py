@@ -63,6 +63,24 @@ class TestNemotronSwap:
         assert content == "The answer is 42."
         assert reasoning is None
 
+    def test_thinking_alias_false_swaps(self, parser):
+        """``thinking=False`` is accepted as an alias for enable_thinking."""
+        text = "The answer is 42."
+        request = _make_request(thinking=False)
+        reasoning, content = parser.extract_reasoning(text, request)
+        assert content == "The answer is 42."
+        assert reasoning is None
+
+    def test_thinking_alias_sets_initial_content_state(self):
+        from vllm.parser.engine.parser_engine_config import ParserState
+
+        parser = NemotronV3Parser(
+            make_mock_tokenizer(_VOCAB),
+            chat_template_kwargs={"thinking": False},
+        )
+        assert parser.thinking_enabled is False
+        assert parser.parser_engine_config.initial_state == ParserState.CONTENT
+
     def test_force_nonempty_content_swaps(self, parser):
         """force_nonempty_content=True triggers swap when content empty."""
         text = "The answer is 42."
