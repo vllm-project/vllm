@@ -12,6 +12,7 @@ test_sharded_rdt_plan.py; the producer server's protocol in
 test_sharded_rdt_producer.py.
 """
 
+import itertools
 from dataclasses import asdict
 
 import pytest
@@ -568,9 +569,15 @@ def _serve_ring_server(src_name, src):
         torch.empty(1 << 16, dtype=torch.uint8, device="cuda") for _ in range(2)
     ]
 
+    # The slot is ``seq % nring``, so stepping seq by nring keeps every pull in
+    # slot 0 while still making each one its own generation -- reusing a seq
+    # would rendezvous with the finished pack and return it unchanged.
+    seqs = itertools.count(0, srv._nring)
+
     def serve(chain):
-        srv._serve_idx[0] = 0
-        return srv.rdt_produce_weights_batched([(src_name, chain)], consumer_id=0)[0]
+        return srv.rdt_produce_weights_batched(
+            [(src_name, chain)], consumer_id=0, seq=next(seqs)
+        )[0]
 
     return srv, serve
 

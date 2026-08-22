@@ -155,9 +155,11 @@ steps:
   # sharded RDT: 2 FSDP2 trainer ranks -> 2 vLLM DP ranks with EP. Its data
   # plane is NIXL, which ships only in the kv-connector set, and the script
   # also drops the nixl-cu wheel variant that does not match this image. Kept
-  # last so the commands above run in an unmodified environment.
+  # last so the commands above run in an unmodified environment. RDT_MODEL
+  # replaces the script's default MoE with a tiny one: the default needs 27 GiB
+  # in the shared HF cache, which no other command here shares the cost of.
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - python3 examples/rl/rlhf_sharded_rdt_small_ep.py
+  - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
 
 - label: ":nvidia: (L4) Distributed DP Extended"
   key: distributed-dp-tests-4-gpus
