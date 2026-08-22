@@ -1748,6 +1748,35 @@ def _largest_divisor_at_most(value: int, limit: int) -> int:
     return 1
 
 
+def _ensure_min_page_size(
+    groups: list[KVCacheGroupSpec],
+    common_page: int,
+    hidden_specs: dict[str, HiddenStateCacheSpec],
+) -> tuple[list[KVCacheGroupSpec], int]:
+    """Scale up group block sizes so the common page is at least as large as
+    the biggest hidden-state per-token cost.
+
+    Returns the (possibly scaled) groups and updated common page size.
+    """
+    max_per_token = max(
+        spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+        for spec in hidden_specs.values()
+    )
+    if max_per_token <= common_page:
+        return groups, common_page
+
+    scale = cdiv(max_per_token, common_page)
+    common_page *= scale
+    scaled: list[KVCacheGroupSpec] = []
+    for g in groups:
+        s = g.kv_cache_spec
+        kw: dict[str, int] = {"block_size": s.block_size * scale}
+        if isinstance(s, (AttentionSpec, MambaSpec)) and s.page_size_padded is not None:
+            kw["page_size_padded"] = s.page_size_padded * scale
+        scaled.append(KVCacheGroupSpec(g.layer_names, replace(s, **kw)))
+    return scaled, common_page
+
+
 def get_kv_cache_groups(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec]:
@@ -1813,6 +1842,8 @@ def get_kv_cache_groups(
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
         common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
+        # TP may shrink the common page below hidden-state per-token cost.
+        groups, common_page = _ensure_min_page_size(groups, common_page, hidden_specs)
         group_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in groups))
         for name, spec in hidden_specs.items():
             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
