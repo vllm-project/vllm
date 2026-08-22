@@ -60,7 +60,12 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, StopParam
+from vllm.entrypoints.openai.engine.protocol import (
+    JsonSchemaResponseFormat,
+    OpenAIBaseModel,
+    ResponseFormat,
+    StopParam,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -116,6 +121,25 @@ def serialize_messages(msgs):
     Serializes multiple messages
     """
     return [serialize_message(msg) for msg in msgs] if msgs else None
+
+
+def text_config_to_response_format(
+    text: ResponseTextConfig | None,
+) -> ResponseFormat | None:
+    if text is None or text.format is None:
+        return None
+    fmt = text.format
+    if fmt.type == "json_schema":
+        return ResponseFormat(
+            type="json_schema",
+            json_schema=JsonSchemaResponseFormat(
+                name=fmt.name,
+                description=fmt.description,
+                schema=fmt.schema_,
+                strict=fmt.strict,
+            ),
+        )
+    return ResponseFormat(type=fmt.type)
 
 
 class ResponseRawMessageAndToken(OpenAIBaseModel):
@@ -347,6 +371,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
             tool_choice=self.tool_choice if self.tools else None,
+            response_format=text_config_to_response_format(self.text),
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -381,6 +406,7 @@ class ResponsesRequest(OpenAIBaseModel):
         if (
             response_format.type == "json_schema"
             and response_format.schema_ is not None
+            and response_format.strict is not False
         ):
             return StructuredOutputsParams(
                 json=response_format.schema_  # type: ignore[call-arg]
