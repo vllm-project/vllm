@@ -121,6 +121,11 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.v1.attention.backends.rocm_aiter_unified_attn."
         "RocmAiterUnifiedAttentionBackend"
     )
+    # FlyDSL gfx950 (CDNA4) paged flash attention. Shares the unified-attention
+    # KV cache ABI, so it is a drop-in alternative to ROCM_AITER_UNIFIED_ATTN.
+    ROCM_FLYDSL_DUALWAVE_ATTN = (
+        "vllm.v1.attention.backends.rocm_flydsl_attn.RocmFlyDSLAttentionBackend"
+    )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
     CPU_MLA = "vllm.v1.attention.backends.mla.cpu_mla.CPUMLABackend"
     AMX_MLA = "vllm.v1.attention.backends.mla.amx_mla.AMXMLABackend"
