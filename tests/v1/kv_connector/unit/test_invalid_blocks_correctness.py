@@ -478,3 +478,29 @@ def test_async_recompute_blocks_not_cached_when_invalid(
 
     # request should be in the running queue
     assert request in recompute_scheduler.running
+
+
+# TODO: Remove or update this fallback test once hybrid KV supports precise,
+# group-aware invalid block recovery.
+def test_hybrid_invalid_blocks_fallback_recomputes_from_beginning(
+    recompute_scheduler: Scheduler,
+):
+    """Hybrid KV recovery should not assume a single KV cache group."""
+    request = create_request(num_tokens=4 * recompute_scheduler.block_size)
+    request.num_computed_tokens = request.num_tokens
+    request.num_output_placeholders = 1
+    recompute_scheduler.kv_cache_manager.get_block_ids = Mock(
+        return_value=([1, 2], [3, 4])
+    )
+
+    affected_req_ids, total_affected_tokens, blocks_to_evict = (
+        recompute_scheduler._update_requests_with_invalid_blocks(
+            [request], {3}, {}, evict_blocks=True
+        )
+    )
+
+    assert affected_req_ids == {request.request_id}
+    assert request.num_computed_tokens == 0
+    assert request.num_output_placeholders == 0
+    assert total_affected_tokens == request.num_tokens
+    assert blocks_to_evict == {1, 2, 3, 4}
