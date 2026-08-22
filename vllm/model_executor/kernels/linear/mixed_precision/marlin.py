@@ -51,6 +51,13 @@ class MarlinLinearKernel(MPLinearKernel):
                 f"  Marlin, supported types are: {quant_types}",
             )
 
+        if (
+            c.act_type == torch.int8
+            and c.weight_type == scalar_types.uint4b8
+            and c.has_g_idx
+        ):
+            return False, "Marlin W4A8-INT8 does not support act-order"
+
         if c.group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
             return (
                 False,
@@ -136,6 +143,9 @@ class MarlinLinearKernel(MPLinearKernel):
                 size_n=padded_n,
                 num_bits=c.weight_type.size_bits,
                 is_a_8bit=is_a_8bit,
+                is_w4a8_int8=(
+                    c.act_type == torch.int8 and c.weight_type == scalar_types.uint4b8
+                ),
             )
             return x
 

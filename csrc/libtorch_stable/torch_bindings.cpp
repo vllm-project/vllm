@@ -94,7 +94,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // gptq_marlin repack from GPTQ.
   ops.def(
       "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
-      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit, "
+      "bool is_w4a8_int8) -> Tensor");
+  ops.def("marlin_uses_ldmatrix_s4(Tensor tensor) -> bool");
   // conditionally compiled so impl registrations are in source file
 
   // awq_marlin repack from AWQ.

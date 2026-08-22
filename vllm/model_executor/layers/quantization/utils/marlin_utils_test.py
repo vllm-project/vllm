@@ -51,7 +51,15 @@ def marlin_permute_weights(
     return q_w
 
 
-def marlin_weights(q_w, size_k, size_n, num_bits, perm, is_a_8bit=False):
+def marlin_weights(
+    q_w,
+    size_k,
+    size_n,
+    num_bits,
+    perm,
+    is_a_8bit=False,
+    use_ldmatrix_s4=False,
+):
     # Permute
     q_w = marlin_permute_weights(q_w, size_k, size_n, perm, is_a_8bit=is_a_8bit)
 
@@ -60,6 +68,9 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm, is_a_8bit=False):
     orig_device = q_w.device
 
     q_w = q_w.cpu().numpy().astype(np.uint32)
+    if use_ldmatrix_s4:
+        assert is_a_8bit and num_bits == 4
+        q_w ^= 0x8
 
     q_packed = np.zeros((q_w.shape[0], q_w.shape[1] // pack_factor), dtype=np.uint32)
     for i in range(pack_factor):
@@ -70,7 +81,21 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm, is_a_8bit=False):
     return q_packed
 
 
-def get_weight_perm(num_bits: int, is_a_8bit: bool = False):
+def get_weight_perm(
+    num_bits: int, is_a_8bit: bool = False, use_ldmatrix_s4: bool = False
+):
+    if use_ldmatrix_s4:
+        assert num_bits == 4 and is_a_8bit
+        perm = []
+        for k_block in range(2):
+            for n_block in range(4):
+                for n_row in range(8):
+                    for k_column in range(16):
+                        k = k_block * 16 + k_column
+                        n = n_block * 8 + n_row
+                        perm.append((n // 16) * 512 + k * 16 + n % 16)
+        return torch.tensor(perm)
+
     perm_list: list[int] = []
     if is_a_8bit:
         for i in range(32):
@@ -134,6 +159,11 @@ def marlin_quantize(
     input_dtype: torch.dtype | None = None,
 ):
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
+    use_ldmatrix_s4 = (
+        input_dtype == torch.int8
+        and quant_type == scalar_types.uint4b8
+        and ops.marlin_uses_ldmatrix_s4(w)
+    )
 
     size_k, size_n = w.shape
     num_bits = quant_type.size_bits
@@ -155,9 +185,15 @@ def marlin_quantize(
         q_w, g_idx, sort_indices = sort_weights(q_w, g_idx)
 
     # Reformat to marlin
-    weight_perm = get_weight_perm(num_bits, is_a_8bit)
+    weight_perm = get_weight_perm(num_bits, is_a_8bit, use_ldmatrix_s4)
     marlin_q_w = marlin_weights(
-        q_w, size_k, size_n, num_bits, weight_perm, is_a_8bit=is_a_8bit
+        q_w,
+        size_k,
+        size_n,
+        num_bits,
+        weight_perm,
+        is_a_8bit=is_a_8bit,
+        use_ldmatrix_s4=use_ldmatrix_s4,
     )
     marlin_s = marlin_permute_scales(s, size_k, size_n, group_size, is_a_8bit=is_a_8bit)
 
