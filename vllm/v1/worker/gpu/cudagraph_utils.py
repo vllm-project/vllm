@@ -40,6 +40,23 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+def _rocm_version_lt(major: int, minor: int) -> bool:
+    """Return True if the ROCm/HIP runtime version is older than major.minor.
+
+    torch.version.hip is e.g. "7.2.53211" on ROCm 7.2. Returns False on
+    non-ROCm platforms (torch.version.hip is None).
+    """
+    hip = torch.version.hip
+    if hip is None:
+        return False
+    try:
+        from packaging.version import Version
+
+        return Version(hip) < Version(f"{major}.{minor}")
+    except Exception:
+        return False
+
+
 class AttentionState(NamedTuple):
     attn_metadata: dict[str, Any] | None
     slot_mappings: dict[str, torch.Tensor]
@@ -129,6 +146,12 @@ class CudaGraphManager:
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
+        # ROCm < 7.14 has a graph-pool bug that silently corrupts values
+        # during replay. Use a private pool per graph as a workaround.
+        self._use_per_graph_pools = current_platform.is_rocm() and _rocm_version_lt(
+            7, 14
+        )
+        self._per_graph_pools: dict[BatchExecutionDescriptor, Any] = {}
 
         self._graphs_captured = False
 
@@ -358,11 +381,13 @@ class CudaGraphManager:
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
-                        if self.pool is not None:
-                            set_graph_pool_id(self.pool)
+                        if self._use_per_graph_pools:
+                            capture_pool = current_platform.graph_pool_handle()
+                            self._per_graph_pools[desc] = capture_pool
                         else:
-                            set_graph_pool_id(current_platform.graph_pool_handle())
-                        with torch.cuda.graph(graph, self.pool):
+                            capture_pool = self.pool
+                        set_graph_pool_id(capture_pool)
+                        with torch.cuda.graph(graph, capture_pool):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch
