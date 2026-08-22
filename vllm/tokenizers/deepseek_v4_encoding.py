@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Union, Optional
 import copy
 import json
 
+from vllm.tokenizers.deepseek_encoding_utils import load_tool_call_arguments
+
 # ============================================================
 # Special Tokens
 # ============================================================
@@ -148,10 +150,7 @@ def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
     p_dsml_template = '<{dsml_token}parameter name="{key}" string="{is_str}">{value}</{dsml_token}parameter>'
     P_dsml_strs = []
 
-    if isinstance(tool_call["arguments"], str):
-        arguments = json.loads(tool_call["arguments"])
-    else:
-        arguments = tool_call["arguments"]
+    arguments = load_tool_call_arguments(tool_call)
 
     for k, v in arguments.items():
         p_dsml_str = p_dsml_template.format(
