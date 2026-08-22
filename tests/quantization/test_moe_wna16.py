@@ -313,3 +313,110 @@ def test_compressed_tensors_wna16_moe_converts_and_sets_up_humming_kernel():
     assert not hasattr(layer, "w2_weight_packed")
     assert layer.w13_weight.dtype is torch.int32
     assert layer.w2_weight.dtype is torch.int32
+
+
+def _channelwise_int4_args() -> QuantizationArgs:
+    """A per-channel int4 checkpoint, which leaves ``group_size`` unset."""
+    args = QuantizationArgs(
+        num_bits=4,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.CHANNEL,
+        symmetric=True,
+        dynamic=False,
+    )
+    assert args.group_size is None, "premise: CHANNEL leaves group_size unset"
+    return args
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="check_moe_marlin_supports_config rejects every config on ROCm",
+)
+@pytest.mark.parametrize("backend", [WNA16MoEBackend.MARLIN, WNA16MoEBackend.TRITON])
+def test_wna16_oracle_accepts_unset_group_size(backend):
+    """Both backends must *accept* a per-channel config, not just survive it.
+
+    -1 is a supported Marlin group size and the shapes below pass the Marlin
+    tiling checks, while Triton never reads group_size for QuantizationArgs.
+    A reason string from either backend would mean the unset group_size cost
+    the layer its preferred kernel instead of raising TypeError.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    # hidden_dim % 128 and intermediate % 64 must hold, or the Marlin shape
+    # check rejects the config before group_size is ever read.
+    reason = _backend_incompatibility_reason(
+        backend=backend,
+        moe_config=make_dummy_moe_config(
+            num_experts=2, hidden_dim=256, intermediate_size=512
+        ),
+        quant_config=_channelwise_int4_args(),
+        may_have_zp=False,
+        may_have_bias=False,
+        allow_tile_padding=True,
+    )
+
+    assert reason is None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Marlin is only a candidate WNA16 MoE backend on CUDA; elsewhere "
+    "__init__ takes the non-Marlin branch, which rejects channelwise",
+)
+def test_compressed_tensors_wna16_moe_marlin_prep_with_unset_group_size():
+    """Load a per-channel checkpoint through the Marlin path end to end.
+
+    ``__init__`` and Marlin weight prep read ``group_size`` independently, so
+    both have to normalise the unset value. The post-repack shapes prove prep
+    ran with the Marlin K/N rather than merely returning something.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+        CompressedTensorsWNA16MoEMethod,
+    )
+
+    num_experts, hidden_size, intermediate_size = 2, 256, 512
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+    )
+    moe_config.moe_backend = "marlin"
+
+    method = CompressedTensorsWNA16MoEMethod(_channelwise_int4_args(), None, moe_config)
+    assert method.wna16_backend == WNA16MoEBackend.MARLIN
+    assert method.group_size == -1
+
+    layer = torch.nn.Module()
+    layer.intermediate_size_per_partition = intermediate_size
+    layer._expert_routing_tables = lambda: (None, None, None)
+    method.create_weights(
+        layer,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size_per_partition=intermediate_size,
+        intermediate_size_full=intermediate_size,
+        params_dtype=torch.bfloat16,
+    )
+    layer.cuda()
+    for parameter in layer.parameters():
+        parameter.data.zero_()
+
+    method.process_weights_after_loading(layer)
+
+    # gptq_marlin_moe_repack packs to (size_k // 16, size_n * 2) for int4; w13
+    # is repacked with size_k=hidden_size, size_n=2*intermediate_size, and w2
+    # the other way round. Channelwise keeps one scale group per channel.
+    assert layer.w13_weight_packed.shape == (
+        num_experts,
+        hidden_size // 16,
+        4 * intermediate_size,
+    )
+    assert layer.w2_weight_packed.shape == (
+        num_experts,
+        intermediate_size // 16,
+        2 * hidden_size,
+    )
+    assert layer.w13_weight_scale.shape == (num_experts, 1, 2 * intermediate_size)
+    assert layer.w2_weight_scale.shape == (num_experts, 1, hidden_size)
