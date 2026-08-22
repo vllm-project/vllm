@@ -5,6 +5,7 @@
 
 from pathlib import Path
 
+import jinja2.ext
 import jinja2.sandbox
 import pytest
 
@@ -19,7 +20,9 @@ TEMPLATE_PATH = (
 def gemma4_template():
     """Load and compile the Gemma4 chat template."""
     template_str = TEMPLATE_PATH.read_text()
-    env = jinja2.sandbox.ImmutableSandboxedEnvironment()
+    env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+        extensions=[jinja2.ext.loopcontrols]
+    )
     return env.from_string(template_str)
 
 
@@ -28,6 +31,38 @@ def _render(template, messages, **kwargs):
     kwargs.setdefault("bos_token", "<bos>")
     kwargs.setdefault("add_generation_prompt", False)
     return template.render(messages=messages, **kwargs)
+
+
+class _CountingRange:
+    def __init__(self) -> None:
+        self.yields = 0
+
+    def __call__(self, *args):
+        for value in range(*args):
+            self.yields += 1
+            yield value
+
+
+def _alternating_tool_messages(pair_count: int) -> list[dict]:
+    messages: list[dict[str, object]] = [{"role": "user", "content": "start"}]
+    for index in range(pair_count):
+        call_id = f"call_{index}"
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "function": {"name": "lookup", "arguments": {}},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": call_id, "content": "ok"},
+            ]
+        )
+    return messages
 
 
 class TestGemma4ChatTemplate:
@@ -412,3 +447,11 @@ class TestGemma4ChatTemplate:
         assert "<|image|>" in result
         assert "<|audio|>" in result
         assert "<|video|>" in result
+
+    def test_tool_chain_suffix_scans_are_linear(self, gemma4_template):
+        messages = _alternating_tool_messages(128)
+        counting_range = _CountingRange()
+
+        _render(gemma4_template, messages, range=counting_range)
+
+        assert counting_range.yields <= 3 * len(messages)

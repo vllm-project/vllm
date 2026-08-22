@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from collections import deque
 from contextlib import AsyncExitStack
 from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
 from openai.types.responses import (
+    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseTextConfig,
     ResponseTextDeltaEvent,
+    response_text_delta_event,
 )
 from openai.types.responses.response_format_text_json_schema_config import (
     ResponseFormatTextJSONSchemaConfig,
@@ -53,6 +57,19 @@ from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser.harmony import Segment
 from vllm.sampling_params import SamplingParams
+
+
+class _CountingFunctionCallList(list[ResponseFunctionToolCall]):
+    def __init__(self, calls: list[ResponseFunctionToolCall]):
+        super().__init__(calls)
+        self.reverse_calls = 0
+
+    def __copy__(self):
+        return self
+
+    def __reversed__(self):
+        self.reverse_calls += 1
+        return super().__reversed__()
 
 
 class MockConversationContext(ConversationContext):
@@ -155,6 +172,89 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
     }
 
 
+def test_harmony_function_call_outputs_do_not_reverse_scan_per_item() -> None:
+    previous_outputs = _CountingFunctionCallList([])
+    prev_response = MagicMock()
+    prev_response.id = "resp_prev"
+    prev_response.output = previous_outputs
+    serving = MagicMock(spec=OpenAIServingResponses)
+    serving.msg_store = {"resp_prev": []}
+    request = ResponsesRequest(
+        model="test-model",
+        input=[
+            {
+                "type": "function_call",
+                "id": f"fc_{index}",
+                "call_id": f"call_{index}",
+                "name": f"function_{index}",
+                "arguments": "{}",
+            }
+            for index in range(32)
+        ]
+        + [
+            {
+                "type": "function_call_output",
+                "call_id": "call_0",
+                "output": "ok",
+            }
+            for _ in range(32)
+        ],
+    )
+
+    messages = OpenAIServingResponses._construct_input_messages_with_harmony(
+        serving, request, prev_response
+    )
+
+    assert len(messages) == 64
+    assert messages[-1].author.name == "functions.function_0"
+    assert previous_outputs.reverse_calls <= 1
+
+
+def test_harmony_function_call_index_keeps_latest_prior_call() -> None:
+    earlier = ResponseFunctionToolCall(
+        id="fc_old",
+        call_id="call_test",
+        name="old_function",
+        arguments="{}",
+        type="function_call",
+    )
+    later = ResponseFunctionToolCall(
+        id="fc_new",
+        call_id="call_test",
+        name="new_function",
+        arguments="{}",
+        type="function_call",
+    )
+    reasoning = ResponseReasoningItem(
+        id="rs_test",
+        type="reasoning",
+        content=[],
+        summary=[],
+        status=None,
+    )
+    prev_response = MagicMock()
+    prev_response.id = "resp_prev"
+    prev_response.output = [earlier, reasoning, later]
+    serving = MagicMock(spec=OpenAIServingResponses)
+    serving.msg_store = {"resp_prev": []}
+    request = ResponsesRequest(
+        model="test-model",
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": "call_test",
+                "output": "ok",
+            }
+        ],
+    )
+
+    messages = OpenAIServingResponses._construct_input_messages_with_harmony(
+        serving, request, prev_response
+    )
+
+    assert messages[-1].author.name == "functions.new_function"
+
+
 @pytest.mark.skip_global_cleanup
 def test_response_created_event_uses_public_json_schema_alias() -> None:
     schema = {
@@ -203,6 +303,43 @@ def test_response_created_event_uses_public_json_schema_alias() -> None:
     assert event.response.text is not None
     assert event.response.text.format is not None
     assert event.response.text.format.model_dump(by_alias=True)["schema"] == schema
+
+
+@pytest.mark.asyncio
+async def test_background_stream_terminal_cursor_closes() -> None:
+    terminal_event = MagicMock()
+    terminal_event.type = "response.completed"
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    serving.event_store = {
+        "resp_test": (deque([terminal_event]), asyncio.Event()),
+    }
+
+    stream = serving.responses_background_stream_generator(
+        "resp_test",
+        starting_after=0,
+    )
+
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(stream), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_background_stream_cursor_before_terminal_yields_terminal() -> None:
+    terminal_event = MagicMock()
+    terminal_event.type = "response.completed"
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    serving.event_store = {
+        "resp_test": (deque([terminal_event]), asyncio.Event()),
+    }
+
+    stream = serving.responses_background_stream_generator(
+        "resp_test",
+        starting_after=-1,
+    )
+
+    assert await asyncio.wait_for(anext(stream), timeout=0.1) is terminal_event
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(stream), timeout=0.1)
 
 
 class TestInitializeToolSessions:
@@ -768,6 +905,91 @@ def _mock_parser_with_reasoning(serving, delta_sequence: list[DeltaMessage]):
     mock_parser_instance.is_reasoning_end = MagicMock(return_value=False)
     serving.parser = MagicMock(return_value=mock_parser_instance)
     return mock_parser_instance
+
+
+class TestSimpleStreamingLogprobsInclude:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("include", "expect_logprobs"),
+        [
+            (["reasoning.encrypted_content"] * 3, False),
+            (
+                ["reasoning.encrypted_content"] * 3 + ["message.output_text.logprobs"],
+                True,
+            ),
+        ],
+    )
+    async def test_include_output_logprobs_evaluated_once_per_request(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        include: list[str],
+        expect_logprobs: bool,
+    ) -> None:
+        serving = _make_serving_instance_with_reasoning()
+        contexts = [
+            _make_simple_context_with_output("hello", [10]),
+            _make_simple_context_with_output(" world", [20]),
+            _make_simple_context_with_output("!", [30]),
+        ]
+        stream_logprobs = [
+            response_text_delta_event.Logprob(
+                token="token", logprob=-0.1, top_logprobs=[]
+            )
+        ]
+        create_stream_response_logprobs = MagicMock(return_value=stream_logprobs)
+        monkeypatch.setattr(
+            serving,
+            "_create_stream_response_logprobs",
+            create_stream_response_logprobs,
+        )
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(
+            input="hi",
+            tools=[],
+            stream=True,
+            include=include,
+        )
+        include_output_logprobs_calls = 0
+        original_is_include_output_logprobs = (
+            ResponsesRequest.is_include_output_logprobs
+        )
+
+        def count_is_include_output_logprobs(request: ResponsesRequest) -> bool:
+            nonlocal include_output_logprobs_calls
+            include_output_logprobs_calls += 1
+            return original_is_include_output_logprobs(request)
+
+        monkeypatch.setattr(
+            ResponsesRequest,
+            "is_include_output_logprobs",
+            count_is_include_output_logprobs,
+        )
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=64),
+            result_generator=result_generator(),
+            context=SimpleContext(response_parser=None),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
+        assert [e.delta for e in text_deltas] == ["hello", " world", "!"]
+        expected_logprobs = stream_logprobs if expect_logprobs else []
+        assert [e.logprobs for e in text_deltas] == [expected_logprobs] * len(contexts)
+        expected_create_calls = len(contexts) if expect_logprobs else 0
+        assert create_stream_response_logprobs.call_count == expected_create_calls
+        assert include_output_logprobs_calls == 1
 
 
 class TestStreamingReasoningToContentTransition:
