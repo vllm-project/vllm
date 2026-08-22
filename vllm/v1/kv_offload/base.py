@@ -103,6 +103,9 @@ class ReqContext:
     def get_state(self, cls: type[_T]) -> _T | None:
         return self._state.get(cls)
 
+    def pop_state(self, cls: type[_T]) -> _T | None:
+        return self._state.pop(cls, None)
+
 
 class LookupResult(Enum):
     """Result of OffloadingManager.lookup()."""
@@ -157,6 +160,9 @@ class OffloadingEvent:
     # True if blocks are removed, False if stored
     removed: bool
     locality: Locality | None = None
+    # The request that produced a stored event, when known locally. Removal
+    # events are storage-owned and do not carry request context.
+    req_context: ReqContext | None = field(default=None, repr=False, compare=False)
 
 
 """

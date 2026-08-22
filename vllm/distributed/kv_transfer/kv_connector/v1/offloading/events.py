@@ -4,19 +4,21 @@
 
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size.
-:class:`OffloadingEventsTracker` snapshots each chunk's full ``BlockStored``
-payload while the ``Request`` is alive and publishes stores as block-granular
-payloads: a chunk event may carry multiple constituent per-block hashes, and
-evictions fan out to the same hashes. Chunks overlapping a non-chunk-aligned
-shared prefix re-announce the shared hashes once per chunk; consumers are
-expected to deduplicate (reference-count) repeated store/remove announcements
-of the same hash. Opt-in via
-``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
-KV cache events are enabled. See the PR description for the full design.
+:class:`OffloadingEventsTracker` keeps a request-scoped key locator on
+``ReqContext`` and builds the ``BlockStored`` payload only when a store event
+arrives. Store jobs keep that context through completion; only a minimal
+detached hash record survives for the legacy removal contract. A chunk event
+may carry multiple constituent per-block hashes, and evictions fan out to the
+same hashes. Chunks overlapping a non-chunk-aligned shared prefix re-announce
+the shared hashes once per chunk; consumers are expected to deduplicate
+(reference-count) repeated store/remove announcements of the same hash.
+Opt-in via ``kv_connector_extra_config["self_describing_kv_events"]``;
+inert unless KV cache events are enabled. See the PR description for the
+full design.
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from vllm.distributed.kv_events import (
@@ -29,6 +31,7 @@ from vllm.distributed.kv_events import (
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    generate_block_hash_extra_keys,
     maybe_convert_block_hash,
     resolve_block_hashes,
 )
@@ -42,8 +45,10 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
+    ReqContext,
     get_offload_block_hash,
     get_offload_group_idx,
+    make_offload_key,
 )
 from vllm.v1.request import Request
 
@@ -75,11 +80,9 @@ def get_offloading_event_group_spec(
     )
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class _OffloadEventMetadata:
-    """BlockStored payload snapshot for one OffloadKey, captured while the
-    Request is available and kept until the matching eviction event. ``medium``
-    is forwarded from the OffloadingEvent."""
+    """Immutable ``BlockStored`` payload snapshot for one offload key."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -88,21 +91,32 @@ class _OffloadEventMetadata:
     block_size: int
     lora_id: int | None
     lora_name: str | None
-    # Deferred: needs the same incremental curr_mm_idx handling as GPU events.
     extra_keys: tuple[tuple[Any, ...] | None, ...] | None
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
 
 
-class OffloadingEventsTracker:
-    """Tracks offloaded chunks' KV event payloads from store to eviction.
+@dataclass(slots=True)
+class _RequestEventContext:
+    """Lazy event locators owned by one request."""
 
-    The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
-    :meth:`record_lookup` for ready primary-tier hits while the ``Request`` is
-    available. Deferred and missing lookups add no state. Under the connector's
-    supported success-only transfer model, entries follow primary allocations
-    until CPU removal translation or :meth:`reset`.
-    """
+    request: Request
+    group_configs: dict[int, "GroupOffloadConfig"]
+    supports_partial_tail: bool
+    indexed_hash_count: int = 0
+    locators: dict[OffloadKey, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _RemovalMetadata:
+    """Minimal detached record retained for the legacy removal contract."""
+
+    block_hashes: tuple[BlockHash, ...]
+    group_idx: int
+
+
+class OffloadingEventsTracker:
+    """Translates offload events using request-scoped key locators."""
 
     def __init__(self, config: OffloadingKVEventsConfig):
         self.config = config
@@ -110,89 +124,173 @@ class OffloadingEventsTracker:
             config.enable_kv_cache_events and config.self_describing_kv_events
         )
 
-        # OffloadKey -> payload snapshot, kept until CPU removal or reset.
-        self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+        # PR 1 preserves the existing self-describing removal behavior. Keep
+        # only the hashes needed for that compatibility path, detached from
+        # the request-scoped stored-event payload.
+        self._removal_metadata: dict[tuple[Medium, OffloadKey], _RemovalMetadata] = {}
 
-    def record_store(
+    def on_new_request(
         self,
-        req: Request,
-        group_config: "GroupOffloadConfig",
-        chunk_idx: int,
-        offload_key: OffloadKey,
+        req_context: ReqContext,
+        request: Request,
+        group_configs: tuple["GroupOffloadConfig", ...],
+        supports_partial_tail: bool = False,
     ) -> None:
-        """Snapshot the KV cache event payload for one offloaded chunk.
-
-        No-op when self-describing event capture is disabled or for
-        sliding-window / SSM groups, which keep the legacy placeholder payload.
-        """
+        """Attach a lazy event context to one request."""
         if not self.self_describing_enabled:
             return
-        if group_config.sliding_window_size_in_chunks is not None:
-            return
-        meta = self._build_event_metadata(req, group_config, chunk_idx)
-        self._pending_event_metadata[offload_key] = meta
-
-    def record_lookup(
-        self,
-        req: Request,
-        group_config: "GroupOffloadConfig",
-        chunk_idx: int,
-        offload_key: OffloadKey,
-    ) -> None:
-        """Snapshot metadata for a ready primary-tier lookup hit."""
-        if not self.self_describing_enabled:
-            return
-        if group_config.sliding_window_size_in_chunks is not None:
-            return
-        if offload_key not in self._pending_event_metadata:
-            self._pending_event_metadata[offload_key] = self._build_event_metadata(
-                req, group_config, chunk_idx
+        req_context.set_state(
+            _RequestEventContext(
+                request=request,
+                group_configs={config.group_idx: config for config in group_configs},
+                supports_partial_tail=supports_partial_tail,
             )
+        )
 
-    def record_partial_store(
+    @staticmethod
+    def _request_event_context(
+        req_context: ReqContext | None,
+    ) -> _RequestEventContext | None:
+        if req_context is None:
+            return None
+        return req_context.get_state(_RequestEventContext)
+
+    @staticmethod
+    def _extend_locators(state: _RequestEventContext) -> None:
+        request = state.request
+        if len(request.block_hashes) < state.indexed_hash_count:
+            state.indexed_hash_count = 0
+            state.locators.clear()
+        for hash_idx in range(state.indexed_hash_count, len(request.block_hashes)):
+            block_hash = request.block_hashes[hash_idx]
+            for group_config in state.group_configs.values():
+                if group_config.sliding_window_size_in_chunks is not None:
+                    continue
+                hash_boundary = hash_idx + 1
+                if (
+                    hash_boundary % group_config.hashes_per_chunk != 0
+                    and not state.supports_partial_tail
+                ):
+                    continue
+                tokens_per_hash = group_config.tokens_per_chunk // (
+                    group_config.hashes_per_chunk
+                )
+                key = make_offload_key(block_hash, group_config.group_idx)
+                state.locators.setdefault(key, hash_boundary * tokens_per_hash)
+        state.indexed_hash_count = len(request.block_hashes)
+
+    def _locator_for(
         self,
-        req: Request,
-        group_config: "GroupOffloadConfig",
-        boundary_tokens: int,
+        state: _RequestEventContext,
         offload_key: OffloadKey,
-    ) -> None:
-        """Snapshot metadata for a newly stored partial recurrent tail."""
-        if group_config.sliding_window_size_in_chunks is not None:
+    ) -> tuple["GroupOffloadConfig", int] | None:
+        self._extend_locators(state)
+        boundary_tokens = state.locators.get(offload_key)
+        group_config = state.group_configs.get(get_offload_group_idx(offload_key))
+        if boundary_tokens is None or group_config is None:
+            return None
+        return group_config, boundary_tokens
+
+    def _metadata_for(
+        self,
+        state: _RequestEventContext,
+        offload_key: OffloadKey,
+    ) -> _OffloadEventMetadata | None:
+        if not self._request_is_event_safe(state.request):
+            return None
+        locator = self._locator_for(state, offload_key)
+        if locator is None:
+            return None
+        group_config, boundary_tokens = locator
+
+        if boundary_tokens % group_config.tokens_per_chunk == 0:
+            chunk_idx = boundary_tokens // group_config.tokens_per_chunk - 1
+            return self._build_event_metadata(state.request, group_config, chunk_idx)
+        return self._build_partial_event_metadata(
+            state.request, group_config, boundary_tokens
+        )
+
+    @staticmethod
+    def _request_is_event_safe(request: Request) -> bool:
+        # Resumable sessions can replace a sampled token after its block hash
+        # was appended. NIXL/Mooncake Mamba prefill can similarly truncate a
+        # request when combined with this connector. Until those paths roll
+        # back the hashes and offload keys, do not pair stale hashes with the
+        # mutated token list in a self-describing event.
+        if getattr(request, "resumable", False) is True:
+            return False
+        params = request.kv_transfer_params
+        return not (isinstance(params, dict) and params.get("_p_side_truncated"))
+
+    def record_hit(self, req_context: ReqContext, offload_key: OffloadKey) -> None:
+        """Backfill the detached removal record for a primary-tier hit."""
+        if not self.self_describing_enabled:
             return
-        self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
-
-    def record_partial_lookup(
-        self,
-        req: Request,
-        group_config: "GroupOffloadConfig",
-        boundary_tokens: int,
-        offload_key: OffloadKey,
-    ) -> None:
-        """Backfill metadata for a partial recurrent tail lookup hit."""
-        if group_config.sliding_window_size_in_chunks is not None:
+        removal_key = (Medium.CPU, offload_key)
+        if removal_key in self._removal_metadata:
             return
-        if offload_key not in self._pending_event_metadata:
-            self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
+        state = self._request_event_context(req_context)
+        if state is not None and not self._request_is_event_safe(state.request):
+            return
+        locator = self._locator_for(state, offload_key) if state is not None else None
+        if state is None or locator is None:
+            return
+        group_config, boundary_tokens = locator
+        block_hashes = self._block_hashes_for(
+            state.request,
+            group_config,
+            boundary_tokens,
+        )
+        self._removal_metadata[removal_key] = _RemovalMetadata(
+            block_hashes=block_hashes,
+            group_idx=group_config.group_idx,
+        )
 
-    def _record_partial_tail(
+    @staticmethod
+    def _block_hashes_for(
+        req: Request,
+        group_config: "GroupOffloadConfig",
+        boundary_tokens: int,
+    ) -> tuple[BlockHash, ...]:
+        tokens_per_hash = group_config.tokens_per_chunk // (
+            group_config.hashes_per_chunk
+        )
+        last_hash_idx = boundary_tokens // tokens_per_hash
+        if boundary_tokens % group_config.tokens_per_chunk == 0:
+            first_hash_idx = last_hash_idx - group_config.hashes_per_chunk
+            block_hashes = resolve_block_hashes(
+                req.block_hashes[first_hash_idx:last_hash_idx],
+                tokens_per_hash,
+                group_config.tokens_per_block,
+            )
+        else:
+            chunk_start = (
+                (boundary_tokens - 1) // group_config.tokens_per_chunk
+            ) * group_config.tokens_per_chunk
+            first_hash_idx = chunk_start // tokens_per_hash
+            block_hashes = req.block_hashes[first_hash_idx:last_hash_idx]
+        assert first_hash_idx >= 0
+        assert last_hash_idx <= len(req.block_hashes)
+        resolved_hashes = tuple(
+            block_hash for block_hash in block_hashes if block_hash is not None
+        )
+        assert resolved_hashes and len(resolved_hashes) == len(block_hashes)
+        return resolved_hashes
+
+    def _build_partial_event_metadata(
         self,
         req: Request,
         group_config: "GroupOffloadConfig",
         boundary_tokens: int,
-        offload_key: OffloadKey,
-    ) -> None:
+    ) -> _OffloadEventMetadata:
         """Build metadata for the valid prefix of one physical cache block.
 
         A partial recurrent tail ends on a hash boundary but before its
         physical cache block is full. The event describes only the valid
         hashes and tokens, not the unused remainder of that physical block.
         """
-        if not self.self_describing_enabled:
-            return
-
         tokens_per_hash = group_config.tokens_per_chunk // group_config.hashes_per_chunk
         # Subtract one so the boundary token itself cannot select the next
-        # physical block when the boundary lies exactly on a block edge.
         chunk_start = (
             (boundary_tokens - 1) // group_config.tokens_per_chunk
         ) * group_config.tokens_per_chunk
@@ -216,14 +314,20 @@ class OffloadingEventsTracker:
 
         lora_id = req.lora_request.adapter_id if req.lora_request is not None else None
         lora_name = req.lora_request.name if req.lora_request is not None else None
-        self._pending_event_metadata[offload_key] = _OffloadEventMetadata(
+        extra_keys = self._build_extra_keys(
+            req,
+            chunk_start,
+            boundary_tokens,
+            tokens_per_hash,
+        )
+        return _OffloadEventMetadata(
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
             token_ids=tuple(req.all_token_ids[chunk_start:boundary_tokens]),
             block_size=tokens_per_hash,
             lora_id=lora_id,
             lora_name=lora_name,
-            extra_keys=None,
+            extra_keys=extra_keys,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
         )
@@ -246,9 +350,30 @@ class OffloadingEventsTracker:
                 yield from self._take_stored_event(event)
 
     def reset(self) -> None:
-        """Drop all tracked state; pending payloads are stale after a
-        manager cache reset."""
-        self._pending_event_metadata.clear()
+        """Drop detached CPU removal records after a cache reset."""
+        self._removal_metadata.clear()
+
+    @staticmethod
+    def _build_extra_keys(
+        req: Request,
+        start_token_idx: int,
+        end_token_idx: int,
+        block_size: int,
+    ) -> tuple[tuple[Any, ...] | None, ...]:
+        """Match GPU event extra-key generation at event block granularity."""
+        assert start_token_idx % block_size == 0
+        assert end_token_idx % block_size == 0
+        curr_mm_idx = 0
+        extra_keys: list[tuple[Any, ...] | None] = []
+        for block_start in range(start_token_idx, end_token_idx, block_size):
+            block_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                req,
+                block_start,
+                block_start + block_size,
+                curr_mm_idx,
+            )
+            extra_keys.append(block_extra_keys)
+        return tuple(extra_keys)
 
     def _build_event_metadata(
         self,
@@ -263,7 +388,8 @@ class OffloadingEventsTracker:
         assert hashes_per_chunk > 0
         assert chunk_idx >= 0
         tokens_per_hash = group_config.tokens_per_chunk // hashes_per_chunk
-        # Each chunk's final raw hash is its OffloadKey.
+        # Each chunk's final raw hash is its OffloadKey. Resolve the raw hash
+        # chain to the owning KV group's block granularity, matching GPU events.
         first_hash_idx = chunk_idx * hashes_per_chunk
         last_hash_idx = first_hash_idx + hashes_per_chunk
         assert first_hash_idx >= 0
@@ -295,6 +421,12 @@ class OffloadingEventsTracker:
         tok_end = tok_start + group_config.tokens_per_chunk
         assert tok_end <= len(req.all_token_ids)
         token_ids = tuple(req.all_token_ids[tok_start:tok_end])
+        extra_keys = self._build_extra_keys(
+            req,
+            tok_start,
+            tok_end,
+            group_config.tokens_per_block,
+        )
 
         lora_id: int | None = None
         lora_name: str | None = None
@@ -309,7 +441,7 @@ class OffloadingEventsTracker:
             block_size=group_config.tokens_per_block,
             lora_id=lora_id,
             lora_name=lora_name,
-            extra_keys=None,
+            extra_keys=extra_keys,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
         )
@@ -335,24 +467,27 @@ class OffloadingEventsTracker:
         )
 
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
-        # Metadata is read, NOT popped: the entry must survive until the
-        # eviction event so BlockRemoved can fan out to the same hashes.
-        # Events are self-contained (own parent), so key order is free.
         locality = event.locality.value if event.locality is not None else None
+        state = (
+            self._request_event_context(event.req_context)
+            if self.self_describing_enabled
+            else None
+        )
         for key in event.keys:
-            meta = self._pending_event_metadata.get(key)
+            meta = self._metadata_for(state, key) if state is not None else None
             if meta is None:
                 if self.self_describing_enabled:
-                    # Expected for unsupported shapes; warn once only.
                     logger.warning_once(
                         "OffloadingEventsTracker: no event metadata for "
                         "offload key during BlockStored emission; emitting a "
-                        "placeholder payload. Expected for non-full-attention "
-                        "groups and promotions not observed as a primary-tier "
-                        "hit before translation."
+                        "placeholder payload. Expected for external jobs and "
+                        "unsupported cache shapes."
                     )
                 yield self._placeholder_stored(key, event.medium, locality)
                 continue
+
+            if event.medium is Medium.CPU:
+                self._record_removal_metadata(event.medium, key, meta)
 
             yield BlockStored(
                 block_hashes=list(
@@ -384,7 +519,7 @@ class OffloadingEventsTracker:
         locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
         for key in event.keys:
-            meta = self._pending_event_metadata.pop(key, None)
+            meta = self._removal_metadata.pop((event.medium, key), None)
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
@@ -411,3 +546,17 @@ class OffloadingEventsTracker:
                 group_idx=group_idx,
                 locality=locality,
             )
+
+    def _record_removal_metadata(
+        self,
+        medium: Medium,
+        key: OffloadKey,
+        metadata: _OffloadEventMetadata,
+    ) -> None:
+        self._removal_metadata.setdefault(
+            (medium, key),
+            _RemovalMetadata(
+                block_hashes=metadata.block_hashes,
+                group_idx=metadata.group_idx,
+            ),
+        )

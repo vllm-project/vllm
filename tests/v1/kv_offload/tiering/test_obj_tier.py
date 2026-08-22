@@ -215,13 +215,17 @@ class MockNixlAgent:
 # ---------------------------------------------------------------------------
 
 
-def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
+def _make_events_spec(
+    enable_kv_cache_events: bool,
+    *,
+    self_describing_kv_events: bool = False,
+) -> SimpleNamespace:
     """Offloading spec stub with an explicit global KV events flag."""
     return SimpleNamespace(
         config=_make_offloading_config(enable_kv_cache_events),
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=enable_kv_cache_events,
-            self_describing_kv_events=False,
+            self_describing_kv_events=self_describing_kv_events,
         ),
     )
 
@@ -457,6 +461,15 @@ class TestMockObjTierFailures:
         assert results[0].job_id == 2
         assert not results[0].success
 
+    def test_submit_load_exception_clears_job_keys(self):
+        tier, _ = _make_tier(num_blocks=4)
+        tier._submit_transfer = MagicMock(side_effect=RuntimeError("submit failed"))
+
+        with pytest.raises(RuntimeError, match="submit failed"):
+            tier.submit_load(make_job(2, [key(1)], [0]))
+
+        assert tier._load_job_keys == {}
+
     def test_submit_store_make_prepped_xfer_failure_reported_in_get_finished(self):
         tier, agent = _make_tier(num_blocks=4)
         agent.make_prepped_xfer = lambda *a, **k: None
@@ -607,7 +620,10 @@ class TestMockObjTierShutdown:
 class TestObjTierKVEvents:
     def setup_method(self):
         self.tier, self.agent = _make_tier(
-            offloading_spec=_make_events_spec(enable_kv_cache_events=True),
+            offloading_spec=_make_events_spec(
+                enable_kv_cache_events=True,
+                self_describing_kv_events=True,
+            ),
             enable_kv_events=True,
             locality="REMOTE",
         )
@@ -618,12 +634,16 @@ class TestObjTierKVEvents:
         self.tier.submit_store(make_job(1, keys, [0, 1]))
         assert all(r.success for r in drain(self.tier))
 
-        events = list(self.tier.take_events())
-        assert len(events) == 1
-        assert events[0].keys == keys
-        assert events[0].medium == Medium.STORAGE
-        assert events[0].locality is Locality.REMOTE
-        assert not events[0].removed
+        event_iter = iter(self.tier.take_events())
+        event = next(event_iter)
+        assert self.tier.events == []
+        assert event.keys == keys
+        assert event.medium == Medium.STORAGE
+        assert event.locality is Locality.REMOTE
+        assert not event.removed
+        assert event.req_context is _CTX
+        assert self.tier._store_job_contexts == {}
+        event_iter.close()
         # take_events drains the buffer.
         assert list(self.tier.take_events()) == []
 
@@ -645,6 +665,7 @@ class TestObjTierKVEvents:
             events = list(tier.take_events())
             assert len(events) == 1
             assert events[0].locality is expected
+            assert events[0].req_context is None
         finally:
             tier.shutdown()
 
@@ -686,6 +707,7 @@ class TestObjTierKVEvents:
         assert not results[0].success
         assert list(self.tier.take_events()) == []
         assert self.tier._store_job_keys == {}
+        assert self.tier._store_job_contexts == {}
 
     def test_submission_failure_emits_no_event(self):
         self.agent.make_prepped_xfer = lambda *a, **k: None
@@ -694,6 +716,7 @@ class TestObjTierKVEvents:
         assert not results[0].success
         assert list(self.tier.take_events()) == []
         assert self.tier._store_job_keys == {}
+        assert self.tier._store_job_contexts == {}
 
     def test_events_disabled_by_default(self):
         tier, _ = _make_tier()
