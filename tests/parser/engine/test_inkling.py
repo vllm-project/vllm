@@ -10,6 +10,7 @@ cases mirror the Rust unified parser's tests
 """
 
 import json
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -28,6 +29,7 @@ from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.inkling import InklingParser, _inkling_arg_converter, inkling_config
 from vllm.parser.parser_manager import ParserManager
+from vllm.renderers.online_renderer import prompt_declares_tools
 
 MSG_MODEL = "<|message_model|>"
 TEXT_START = "<|content_text|>"
@@ -869,3 +871,165 @@ def test_content_tool_start_emits_reasoning_end_in_reasoning_pass():
         EventType.TEXT_CHUNK,
     ]
     assert events[1].value == TOOL_JSON
+
+
+class TestPlainTextStreaming:
+    """No-tools plain-text responses must stream incrementally.
+
+    With ``reasoning_effort`` of ``none`` or ``minimal`` and no tools, Inkling
+    emits bare text with no ``<|content_text|>`` marker. Parsing that from the
+    message-header state buffers the whole answer, because text there may still
+    turn out to be a function name; the answer is only released when a closer
+    finally proves otherwise. The final content is correct either way, so these
+    cases assert *when* the deltas arrive, not just what they concatenate to.
+    """
+
+    GEN_PROMPT = [_TML_VOCAB[MSG_MODEL]]
+    ANSWER = "the answer is 42"
+
+    @staticmethod
+    def _parser(mock_tokenizer, effort, tools=None, prompt_has_tools=False):
+        """``prompt_has_tools`` is what the serving layer reports; pass ``None``
+        to report nothing, as a caller that has not been taught to."""
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="inkling",
+            reasoning_parser_name="inkling",
+            enable_auto_tools=True,
+        )
+        chat_template_kwargs = {"reasoning_effort": effort}
+        if prompt_has_tools is not None:
+            chat_template_kwargs["_vllm_prompt_has_tools"] = prompt_has_tools
+        return parser_cls(
+            mock_tokenizer,
+            tools or [],
+            chat_template_kwargs=chat_template_kwargs,
+        )
+
+    @classmethod
+    def _content_deltas(cls, parser, request, text):
+        """Feed one token per ``parse_delta`` call; return what each delta
+        carried in ``content``."""
+        tokens = _tokenize(text)
+        out = []
+        for i, (token_id, token) in enumerate(tokens):
+            delta = parser.parse_delta(
+                token,
+                [token_id],
+                request,
+                prompt_token_ids=cls.GEN_PROMPT if i == 0 else None,
+                finished=(i == len(tokens) - 1),
+            )
+            out.append(delta.content if delta and delta.content else "")
+        return out
+
+    @pytest.mark.parametrize("effort", ["none", "minimal"])
+    @pytest.mark.parametrize("closer", [END_MESSAGE, ""], ids=["end_message", "eos"])
+    def test_bare_text_streams_incrementally(
+        self, mock_tokenizer, mock_request, effort, closer
+    ):
+        mock_request.tools = []
+        deltas = self._content_deltas(
+            self._parser(mock_tokenizer, effort),
+            mock_request,
+            f"{self.ANSWER}{closer}",
+        )
+        assert "".join(deltas) == self.ANSWER
+        # The point of this test: one delta per token, not one final blob.
+        assert [d for d in deltas if d] == list(self.ANSWER), (
+            f"content did not stream incrementally: {deltas}"
+        )
+
+    @pytest.mark.parametrize("effort", ["none", "minimal"])
+    def test_tools_keep_message_header_parsing(
+        self, mock_tokenizer, mock_request, effort
+    ):
+        """With tools declared, the optional function name after
+        ``<|message_model|>`` is metadata and must stay hidden -- so a
+        tools-enabled request keeps message-header parsing even at these
+        efforts."""
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        deltas = self._content_deltas(
+            self._parser(mock_tokenizer, effort, tools, prompt_has_tools=True),
+            mock_request,
+            f"get_weather{TEXT_START}{self.ANSWER}{END_MESSAGE}",
+        )
+        content = "".join(deltas)
+        assert content == self.ANSWER
+        assert "get_weather" not in content
+
+    @pytest.mark.parametrize("effort", ["none", "minimal"])
+    def test_developer_message_tools_keep_message_header_parsing(
+        self, mock_tokenizer, mock_request, effort
+    ):
+        """Tools declared on a developer message are rendered into the prompt
+        but never reach ``request.tools``. Keying plain-text mode off the tool
+        list alone would enable it for a tool-enabled prompt and surface the
+        function-name header as visible content."""
+        mock_request.tools = []
+        deltas = self._content_deltas(
+            self._parser(mock_tokenizer, effort, tools=[], prompt_has_tools=True),
+            mock_request,
+            f"get_weather{TEXT_START}{self.ANSWER}{END_MESSAGE}",
+        )
+        content = "".join(deltas)
+        assert content == self.ANSWER
+        assert "get_weather" not in content
+
+    @pytest.mark.parametrize("effort", ["none", "minimal"])
+    def test_unreported_prompt_tools_keep_message_header_parsing(
+        self, mock_tokenizer, mock_request, effort
+    ):
+        """A caller that reports nothing gets today's behaviour.
+
+        Plain-text mode asserts no function name can appear, so it stays off
+        unless someone that has seen every tool source says so. Buffered but
+        correct beats streamed but leaking."""
+        mock_request.tools = []
+        deltas = self._content_deltas(
+            self._parser(mock_tokenizer, effort, prompt_has_tools=None),
+            mock_request,
+            f"get_weather{TEXT_START}{self.ANSWER}{END_MESSAGE}",
+        )
+        content = "".join(deltas)
+        assert content == self.ANSWER
+        assert "get_weather" not in content
+
+
+class TestPromptDeclaresTools:
+    """``prompt_declares_tools`` has to see every source that reaches the
+    prompt, since plain-text mode turns on only when it reports none."""
+
+    @staticmethod
+    def _request(tools=None, messages=None):
+        request = MagicMock()
+        request.tools = tools or []
+        request.messages = messages or [{"role": "user", "content": "hi"}]
+        return request
+
+    def test_no_tools_anywhere(self):
+        assert prompt_declares_tools(self._request(), {}) is False
+
+    def test_request_tools(self):
+        request = self._request(tools=[_function_tool()])
+        assert prompt_declares_tools(request, {}) is True
+
+    def test_chat_template_kwargs_tools(self):
+        """Server defaults and request overrides both land here, and it is what
+        the Inkling renderer actually reads."""
+        kwargs = {"tools": [{"name": "get_weather"}]}
+        assert prompt_declares_tools(self._request(), kwargs) is True
+
+    def test_chat_template_kwargs_tools_auto_is_unset(self):
+        assert prompt_declares_tools(self._request(), {"tools": "auto"}) is False
+
+    def test_developer_message_tools(self):
+        messages = [
+            {"role": "developer", "content": "x", "tools": [{"name": "get_weather"}]},
+            {"role": "user", "content": "hi"},
+        ]
+        assert prompt_declares_tools(self._request(messages=messages), {}) is True
+
+    def test_developer_message_without_tools(self):
+        messages = [{"role": "developer", "content": "x"}, {"role": "user", "c": "hi"}]
+        assert prompt_declares_tools(self._request(messages=messages), {}) is False
