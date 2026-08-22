@@ -80,6 +80,31 @@ def test_extract_reasoning_with_generation_prefix_consumed():
     assert content == "answer"
 
 
+def test_extract_reasoning_truncated_before_close_marker():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content = parser.extract_reasoning_content(
+        "unfinished reasoning",
+        request,
+    )
+
+    assert reasoning == "unfinished reasoning"
+    assert content is None
+
+
+def test_extract_markerless_output_with_thinking_disabled():
+    parser = KimiK3ReasoningParser(
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
+    )
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content = parser.extract_reasoning_content("answer", request)
+
+    assert reasoning is None
+    assert content == "answer"
+
+
 def test_delegating_parser_strips_response_wrapper_without_tool_parser():
     parser = ReasoningOnlyParser(DummyTokenizer())
     request = ChatCompletionRequest(model="test-model", messages=[])
@@ -179,6 +204,23 @@ def test_streaming_split_close_marker_hands_content_downstream():
     assert closed.reasoning is None
     assert closed.content == f"{RESPONSE_OPEN}answer"
     assert parser.extract_content_ids([2, 3, 10]) == [10]
+
+
+def test_streaming_truncated_before_close_marker():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    delta = parser.extract_reasoning_content_streaming(
+        previous_text="",
+        current_text="unfinished reasoning",
+        delta_text="unfinished reasoning",
+        previous_token_ids=[],
+        current_token_ids=[9],
+        delta_token_ids=[9],
+    )
+
+    assert isinstance(delta, DeltaMessage)
+    assert delta.reasoning == "unfinished reasoning"
+    assert delta.content is None
 
 
 def test_thinking_disabled_streams_content():
