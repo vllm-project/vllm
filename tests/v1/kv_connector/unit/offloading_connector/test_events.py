@@ -141,12 +141,14 @@ def _stored_event(
     keys: list[OffloadKey],
     medium: Medium = _CPU_MEDIUM,
     locality: Locality | None = None,
+    ownership: str | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
         medium=medium,
         removed=False,
         locality=locality,
+        ownership=ownership,
     )
 
 
@@ -154,12 +156,14 @@ def _removed_event(
     keys: list[OffloadKey],
     medium: Medium = _CPU_MEDIUM,
     locality: Locality | None = None,
+    ownership: str | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
         medium=medium,
         removed=True,
         locality=locality,
+        ownership=ownership,
     )
 
 
@@ -530,13 +534,21 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     ]
 
 
-def test_secondary_stored_event_does_not_mutate_cpu_metadata():
+def test_secondary_event_lifecycle_preserves_cpu_metadata():
     tracker, _, _, key = _lookup_chunk()
-    expected_metadata = dict(tracker._pending_event_metadata)
+    metadata = tracker._pending_event_metadata[key]
+    events = list(
+        tracker.take_events(
+            [
+                _stored_event([key], Medium.STORAGE, ownership="custom"),
+                _removed_event([key], Medium.STORAGE, ownership="custom"),
+            ]
+        )
+    )
 
-    stored = list(tracker.take_events([_stored_event([key], Medium.STORAGE)]))
-    assert stored[0].token_ids == [1, 2, 3, 4]
-    assert tracker._pending_event_metadata == expected_metadata
+    assert events[0].token_ids == [1, 2, 3, 4]
+    assert [event.ownership for event in events] == ["custom", "custom"]
+    assert tracker._pending_event_metadata[key] is metadata
 
 
 def test_take_events_groups_removed_hashes_by_kv_group():
