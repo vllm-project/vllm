@@ -498,10 +498,7 @@ class StreamingParserEngine:
             # Tool names are expected to be compact. Avoid delaying an entire
             # response if ordinary prose happens to quote an unterminated
             # invoke marker.
-            if (
-                len(self._recovery_hold_name) > 256
-                or "\n" in self._recovery_hold_name
-            ):
+            if len(self._recovery_hold_name) > 256 or "\n" in self._recovery_hold_name:
                 return self._abort_recovery_hold()
 
         self._recovery_hold_events.extend(self._emit_for_state_now(text, token_count))
@@ -563,13 +560,13 @@ class StreamingParserEngine:
             return []
 
         if self.state == ParserState.TOOL_ARGS:
+            if not transition.commit_provisional_tool_call:
+                return self._abort_recovery_hold()
             transition_events = self._run_transition(transition, value, token_count)
             self._recovery_hold_events.extend(transition_events)
-            if EventType.TOOL_CALL_END in transition.events:
-                events = self._recovery_hold_events
-                self._clear_recovery_hold()
-                return events
-            return []
+            events = self._recovery_hold_events
+            self._clear_recovery_hold()
+            return events
 
         return self._abort_recovery_hold()
 

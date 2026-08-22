@@ -44,6 +44,10 @@ class Transition:
     # engine buffers its semantic events, validates the completed tool name
     # through a parser-supplied callback, and commits only after the call ends.
     provisional_tool_call: bool = False
+    # Commit a buffered provisional call at this transition. Recovery paths
+    # that leave tool arguments through any other transition are restored as
+    # ordinary text.
+    commit_provisional_tool_call: bool = False
 
 
 @dataclass(frozen=True)
