@@ -178,6 +178,12 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
             * but without the fix, block 2 would be evicted as the LRU
               candidate to make room for [3, 4, 5]
         - After complete_store([2, 3, 4, 5]), block 2 must still be present.
+
+    Not parametrized for sae: SAE's admission gate makes prepare_store
+    return None here (a new session for [3,4,5] loses to the incumbent
+    session holding [1,2]), so the same "still present after store"
+    assertion doesn't apply. SAE's protected-key handling is covered in
+    tests/v1/kv_offload/cpu/policies/test_sae_policy.py.
     """
     manager = make_cpu_manager(
         num_blocks=4,
