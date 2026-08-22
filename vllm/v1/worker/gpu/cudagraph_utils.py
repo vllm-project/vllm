@@ -108,6 +108,7 @@ class CudaGraphManager:
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        input_batch_cls: type[InputBatch] | None = None,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -117,6 +118,7 @@ class CudaGraphManager:
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
         self.varlen_decode = varlen_decode
+        self.input_batch_cls = input_batch_cls or InputBatch
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -449,6 +451,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        input_batch_cls: type[InputBatch] | None = None,
     ):
         super().__init__(
             vllm_config,
@@ -457,6 +460,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
+            input_batch_cls=input_batch_cls,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -521,6 +525,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len,
+                input_batch_cls=self.input_batch_cls,
             )
 
             # Capture with dummy rows marked as padding.
@@ -613,8 +618,10 @@ def prepare_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
     full_cudagraph: bool,
     max_query_len: int | None = None,
+    input_batch_cls: type[InputBatch] | None = None,
 ) -> AttentionState:
-    input_batch = InputBatch.make_dummy(
+    input_batch_cls = input_batch_cls or InputBatch
+    input_batch = input_batch_cls.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)

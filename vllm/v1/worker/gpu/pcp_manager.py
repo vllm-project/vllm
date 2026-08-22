@@ -45,23 +45,24 @@ class PCPManager:
 
     def __init__(
         self,
-        pcp_world_size: int,
-        pcp_rank: int,
+        vllm_config: VllmConfig,
         device: torch.device,
+        supports_mm_inputs: bool,
         req_states: RequestState | None = None,
-        max_num_reqs: int | None = None,
-        max_num_tokens: int | None = None,
         block_tables: BlockTables | None = None,
-        dcp_world_size: int = 1,
-        dcp_rank: int = 0,
-        cp_interleave: int = 1,
     ) -> None:
-        self.pcp_world_size = pcp_world_size
-        self.pcp_rank = pcp_rank
+        parallel_config = vllm_config.parallel_config
+        self.validate_config(vllm_config, supports_mm_inputs)
+
+        self.pcp_world_size = parallel_config.prefill_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group
         self.device = device
-        self.dcp_world_size = dcp_world_size
-        self.dcp_rank = dcp_rank
-        self.cp_interleave = cp_interleave
+        self.dcp_world_size = parallel_config.decode_context_parallel_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
+        self.cp_interleave = parallel_config.cp_kv_cache_interleave_size
+
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
         self._global_batch: InputBatch | None = None
         self._req_states = req_states
@@ -113,7 +114,7 @@ class PCPManager:
         self._gathered_kv_slot_mappings = (
             torch.empty(
                 num_kv_cache_groups,
-                max_num_tokens * pcp_world_size,
+                max_num_tokens * self.pcp_world_size,
                 dtype=torch.int64,
                 device=device,
             )
@@ -647,36 +648,3 @@ def maybe_restore_pcp_for_sampling(
     if manager is None:
         return hidden_states, input_batch
     return manager.restore_for_sampling(hidden_states)
-
-
-def maybe_build_pcp_manager(
-    vllm_config: VllmConfig,
-    device: torch.device,
-    supports_mm_inputs: bool,
-    req_states: RequestState,
-    block_tables: BlockTables,
-    cls: type[PCPManager] = PCPManager,
-) -> PCPManager | None:
-    parallel_config = vllm_config.parallel_config
-    pcp_size = parallel_config.prefill_context_parallel_size
-    if pcp_size <= 1:
-        return None
-
-    cls.validate_config(vllm_config, supports_mm_inputs)
-
-    pcp_rank = get_pcp_group().rank_in_group
-    dcp_size = parallel_config.decode_context_parallel_size
-    dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
-
-    return cls(
-        pcp_world_size=pcp_size,
-        pcp_rank=pcp_rank,
-        device=device,
-        req_states=req_states,
-        max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
-        max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-        block_tables=block_tables,
-        dcp_world_size=dcp_size,
-        dcp_rank=dcp_rank,
-        cp_interleave=parallel_config.cp_kv_cache_interleave_size,
-    )
