@@ -30,6 +30,10 @@ def rocm_per_tensor_float_w8a8_scaled_mm_impl(
         and B.shape[1] % 16 == 0  # K
         and ((bias is None) or (bias.dtype == out_dtype))
     ):
+        # wvSplitKQ needs a densely packed activation; the caller's view of A can
+        # be strided. .contiguous() is a no-op on a single row, so test the stride.
+        if A.stride() != (A.size(1), 1):
+            A = A.clone(memory_format=torch.contiguous_format)
         output = ops.wvSplitKQ(
             B.t(),
             A,
