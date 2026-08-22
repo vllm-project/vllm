@@ -25,7 +25,12 @@ class AsyncScheduler(Scheduler):
         ] * scheduler_output.num_spec_tokens_to_schedule
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
-            if request.is_prefill_chunk:
+            # Reserve placeholders only for steps whose sampled tokens the
+            # model runner returns: it discards sampled tokens while the
+            # input has not yet covered the full sequence, but the final
+            # prefill chunk of a streaming segment (tokens appended
+            # mid-generation) still produces one and must be reserved.
+            if request.num_computed_tokens < request.num_tokens:
                 continue
 
             scheduler_output.pending_structured_output_tokens |= (
