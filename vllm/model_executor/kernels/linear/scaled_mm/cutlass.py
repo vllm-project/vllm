@@ -166,6 +166,20 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "requires CUDA."
+
+        if compute_capability is None:
+            capability = current_platform.get_device_capability()
+            compute_capability = capability.to_int() if capability is not None else None
+
+        if compute_capability is not None and not ops.cutlass_scaled_mm_supports_fp8(
+            compute_capability
+        ):
+            return (
+                False,
+                "CutlassFP8ScaledMMLinearKernel is not supported on compute "
+                f"capability {compute_capability}.",
+            )
+
         return True, None
 
     @classmethod
@@ -285,13 +299,15 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         )
 
     @classmethod
-    def is_supported(cls, compute_capability=None):
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if not CUTLASS_BLOCK_FP8_SUPPORTED:
             return (
                 False,
-                "The device compute capability of"
-                f"{compute_capability} is not supported.",
+                "CUTLASS block FP8 is not supported.",
             )
+
         return True, None
 
     @classmethod
