@@ -6,6 +6,7 @@ from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.ernie45_reasoning_parser import Ernie45ReasoningParser
 
 parser_name = "ernie45"
 
@@ -122,3 +123,54 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+def _streaming_parser() -> Ernie45ReasoningParser:
+    # Exercise the pure streaming logic with explicit token ids, without a
+    # tokenizer: the run_reasoning_extraction harness feeds one token per
+    # delta, so it cannot build a delta that spans </think>, <response> and
+    # </response> at once (which happens under speculative decoding).
+    parser = object.__new__(Ernie45ReasoningParser)
+    parser.start_token_id = 1
+    parser.end_token_id = 2
+    parser.response_start_token_id = 3
+    parser.response_end_token_id = 4
+    parser.newline_token_id = 5
+    parser.parser_token_ids = [2, 4]
+    return parser
+
+
+def test_streaming_multi_token_delta_with_response_block():
+    # </think> + a full <response>...</response> block in a single delta: the
+    # <response> prefix and </response> suffix must both be stripped cleanly.
+    parser = _streaming_parser()
+    delta = "</think>\n<response>\nHello\n</response>\n"
+    msg = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=delta,
+        delta_text=delta,
+        previous_token_ids=[],
+        current_token_ids=[2, 3, 4],
+        delta_token_ids=[2, 3, 4],
+    )
+    assert msg is not None
+    assert msg.reasoning == ""
+    assert msg.content == "\nHello\n"
+
+
+def test_streaming_multi_token_delta_without_response_block():
+    # </think> followed by plain content (no <response> wrapper) in one delta
+    # must keep the content intact.
+    parser = _streaming_parser()
+    delta = "</think>def"
+    msg = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=delta,
+        delta_text=delta,
+        previous_token_ids=[],
+        current_token_ids=[2, 9],
+        delta_token_ids=[2, 9],
+    )
+    assert msg is not None
+    assert msg.reasoning == ""
+    assert msg.content == "def"
