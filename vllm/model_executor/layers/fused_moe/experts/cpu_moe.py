@@ -36,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
     kInt4Static,
+    kInt4Static32,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
     kMxfp4Static,
@@ -963,6 +964,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
     ) -> bool:
         SUPPORTED_W_A = [
             (kInt4Static, None),
+            (kInt4Static32, None),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -974,6 +976,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
     ) -> bool:
         return routing_method in [
             RoutingMethodType.Default,
+            RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
         ]
@@ -1011,6 +1014,8 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
                 "apply_router_weight_on_input=True. "
             )
 
+        is_deepseek_v3 = self.moe_config.routing_method == RoutingMethodType.DeepSeekV3
+
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -1018,12 +1023,13 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             top_k=self.moe_config.experts_per_token,
             renormalize=self.moe_config.routing_method
             in (
+                RoutingMethodType.DeepSeekV3,
                 RoutingMethodType.Renormalize,
                 RoutingMethodType.RenormalizeNaive,
             ),
             topk_group=topk_group,
             num_expert_group=num_expert_group,
-            scoring_func="softmax",
+            scoring_func="sigmoid" if is_deepseek_v3 else "softmax",
             routed_scaling_factor=(
                 routed_scaling_factor if routed_scaling_factor is not None else 1.0
             ),
