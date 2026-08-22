@@ -80,6 +80,16 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
+    /// Return the maximum number of top log probabilities accepted.
+    pub fn max_logprobs(&self) -> i32 {
+        self.max_logprobs
+    }
+
+    /// Return the backend model id.
+    pub fn model_id(&self) -> &str {
+        self.backend.model_id()
+    }
+
     fn tokenize_prompt(
         tokenizer: &DynTokenizer,
         prompt: Prompt,

@@ -4,6 +4,7 @@
 mod abort_requests;
 mod cache;
 mod collective_rpc;
+mod derender;
 mod health;
 mod inference;
 mod load;
@@ -83,6 +84,14 @@ fn build_router_with_options(
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/chat/completions", post(openai::chat_completions))
+        .route(
+            "/v1/chat/completions/derender",
+            post(derender::derender_chat_completions),
+        )
+        .route(
+            "/v1/completions/derender",
+            post(derender::derender_completions),
+        )
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize))

@@ -44,6 +44,18 @@ impl ChatEventStream {
         }
     }
 
+    /// Wrap an arbitrary stream of chat events.
+    ///
+    /// Used by callers that synthesize the structured event stream themselves
+    /// (e.g. the derender endpoints replaying already-generated tokens through
+    /// an output processor) rather than receiving it from the engine pipeline.
+    pub fn from_stream(request_id: String, inner: impl ChatEventStreamTrait) -> Self {
+        Self {
+            request_id,
+            inner: Box::pin(inner),
+        }
+    }
+
     /// Return the request ID associated with this stream.
     pub fn request_id(&self) -> &str {
         &self.request_id
