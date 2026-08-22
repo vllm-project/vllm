@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 from dataclasses import dataclass, fields
 
 import pytest
@@ -371,3 +372,59 @@ def test_unit_shuffle():
     )
 
     assert_close(ref=out_ref, tri=out)
+
+
+@pytest.mark.parametrize("n_tokens", [1, 33, 512])
+@pytest.mark.parametrize("n_experts,topk", [(32, 4), (128, 4)])
+def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
+    """routing_data_from_sparse_topk must produce routing structures
+    identical to make_routing_data for the same topk result."""
+    from vllm.model_executor.layers.fused_moe.experts import (
+        gpt_oss_triton_kernels_moe as gptoss_moe,
+    )
+
+    make_routing_data = gptoss_moe.make_routing_data
+    routing_data_from_sparse_topk = gptoss_moe.routing_data_from_sparse_topk
+    use_legacy_triton_kernels = gptoss_moe.use_legacy_triton_kernels
+
+    if use_legacy_triton_kernels:
+        pytest.skip("SparseMatrix path requires triton_kernels v3.6.0+")
+
+    from triton_kernels.topk import topk as topk_fn
+
+    torch.manual_seed(0)
+    logits = torch.randn(n_tokens, n_experts, dtype=torch.bfloat16, device="cuda")
+    sparse_topk = topk_fn(logits, topk, apply_softmax=True)
+    assert not isinstance(sparse_topk, tuple)
+
+    rd_new, gather_new, scatter_new = routing_data_from_sparse_topk(
+        sparse_topk, n_experts
+    )
+    rd_ref, gather_ref, scatter_ref = make_routing_data(
+        sparse_topk.indx.to(torch.long), sparse_topk.vals, n_experts
+    )
+
+    def assert_equivalent(new, ref, path="RoutingData"):
+        """Recursively compare tensor-valued leaves of routing structures."""
+        if isinstance(ref, torch.Tensor):
+            torch.testing.assert_close(new, ref, msg=lambda m: f"{path}: {m}")
+        elif isinstance(ref, (int, float, bool, str)) or ref is None:
+            assert new == ref, f"{path}: {new!r} != {ref!r}"
+        elif dataclasses.is_dataclass(ref):
+            for f in dataclasses.fields(ref):
+                assert_equivalent(
+                    getattr(new, f.name), getattr(ref, f.name), f"{path}.{f.name}"
+                )
+        elif callable(ref):
+            assert callable(new), f"{path}: callable vs {type(new)}"
+        elif hasattr(ref, "__dict__"):
+            for k, v in vars(ref).items():
+                assert_equivalent(getattr(new, k), v, f"{path}.{k}")
+        else:
+            assert type(new) is type(ref), f"{path}: {type(new)} vs {type(ref)}"
+
+    assert_equivalent(rd_new, rd_ref)
+    torch.testing.assert_close(gather_new.src_indx, gather_ref.src_indx)
+    torch.testing.assert_close(gather_new.dst_indx, gather_ref.dst_indx)
+    torch.testing.assert_close(scatter_new.src_indx, scatter_ref.src_indx)
+    torch.testing.assert_close(scatter_new.dst_indx, scatter_ref.dst_indx)
