@@ -227,6 +227,29 @@ def test_snapshot_environment_contract(
     inspected_environment = dict(inspected["environment"])
     assert inspected_environment == environment
 
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "current_identity", lambda _uuid: _runtime_identity())
+    manifest = tools.make_manifest(
+        argparse.Namespace(
+            hf_token=secret,
+            model_tag="Qwen/Qwen3-0.6B",
+            revision=_MODEL_REVISION,
+            served_model_name=None,
+            tokenizer_revision=None,
+        ),
+        ("Qwen/Qwen3-0.6B", "--hf-token", secret, f"--hf-token={secret}"),
+        ProcessInventory(100, (100, 101), (101,), "GPU-abc"),
+        _oracle(),
+        tmp_path,
+    )
+
+    assert manifest.engine_argv == (
+        "Qwen/Qwen3-0.6B",
+        "--hf-token",
+        "***",
+        "--hf-token=***",
+    )
+
 
 def parse_snapshot(*argv: str):
     parser = FlexibleArgumentParser()
