@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -45,8 +45,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   7: Include NIXL transfer mode (push vs pull) in the compatibility hash
 #   8: Add dcp_size and pcp_size to NixlAgentMetadata
 #   9: Add block_strides
+#   10: Add pipeline-parallel producer metadata and per-request pp_size
 #
-NIXL_CONNECTOR_VERSION: int = 9
+NIXL_CONNECTOR_VERSION: int = 10
 
 
 @dataclass
@@ -65,6 +66,13 @@ class NixlAgentMetadata:
     physical_blocks_per_logical_kv_block: int
     dcp_size: int = 1
     pcp_size: int = 1
+    # Pipeline-parallel producer shard identity. Defaults keep a PP=1 peer
+    # that omits these fields decodable.
+    pp_rank: int = 0
+    pp_size: int = 1
+    # Layer names backing each registered region, in registration order. Lets
+    # a consumer map a PP producer's layer slice onto its own regions.
+    registered_layer_names: list[str] = field(default_factory=list)
 
 
 @dataclass

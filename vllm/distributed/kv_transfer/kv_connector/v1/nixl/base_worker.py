@@ -63,6 +63,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
     get_pcp_group,
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -103,6 +104,18 @@ class NixlBaseConnectorWorker:
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
+
+    # Whether this transfer mode can read from a PP-sharded producer, i.e. it
+    # keys remote state per (pp_rank, tp_rank) and issues one transfer per
+    # producer stage. Push writes into a remote's regions by layer offset and
+    # cannot, so it keeps rejecting a PP consumer.
+    _supports_consumer_pp: bool = False
+
+    # Whether this transfer mode can describe a PP producer's *pooled* regions,
+    # where HMA shares one backing tensor across kv cache groups. Requires
+    # per-(region x member group) descriptor emission; push slices regions per
+    # layer assuming a uniform count, so it cannot.
+    _supports_pp_hma: bool = False
 
     def _compute_desc_ids(
         self,
@@ -259,6 +272,94 @@ class NixlBaseConnectorWorker:
         """
         return region_idx < len(self._region_is_mla) and self._region_is_mla[region_idx]
 
+    def _local_region_indices_for_layer_names(
+        self, registered_layer_names: list[str]
+    ) -> list[int]:
+        """Map a producer shard's registered layers onto local region indices.
+
+        Args:
+            registered_layer_names: Layer name backing each of the producer's
+                regions, in its registration order.
+
+        Returns:
+            Local region index for each producer region, same order.
+
+        Raises:
+            RuntimeError: A producer layer has no matching local region.
+        """
+        local_names = self.local_seen_layer_names
+        positions_by_name: dict[str, list[int]] = defaultdict(list)
+        for local_idx, layer_name in enumerate(local_names):
+            positions_by_name[layer_name].append(local_idx)
+
+        occurrences_by_name: dict[str, int] = defaultdict(int)
+        local_indices: list[int] = []
+        for layer_name in registered_layer_names:
+            occurrence = occurrences_by_name[layer_name]
+            occurrences_by_name[layer_name] += 1
+            matches = positions_by_name.get(layer_name, [])
+            if occurrence >= len(matches):
+                raise RuntimeError(
+                    "NIXL handshake failed: producer registered layer "
+                    f"{layer_name!r} occurrence {occurrence} has no matching "
+                    f"local region. Local registered layers: {local_names}"
+                )
+            local_indices.append(matches[occurrence])
+        return local_indices
+
+    def _region_group_ids_for_layer_names(
+        self, registered_layer_names: list[str]
+    ) -> tuple[int, ...]:
+        """KV group id backing each region of a producer shard."""
+        return tuple(
+            self._layer_name_to_kv_group_index[name] for name in registered_layer_names
+        )
+
+    def _get_block_descs_ids_for_shard(
+        self,
+        engine_id: EngineId,
+        remote_pp_rank: int,
+        num_blocks: int,
+        block_ids: BlockIds,
+    ) -> np.ndarray:
+        """Descriptor IDs relative to one producer stage's prepared dlist.
+
+        A PP producer stage registers only its own layer slice, so descriptor
+        ids run over that shard's regions rather than over all local regions.
+
+        Args:
+            engine_id: Remote producer engine id.
+            remote_pp_rank: Producer pipeline-parallel rank of the shard.
+            num_blocks: Number of blocks per region in the shard's dlist.
+            block_ids: Physical block ids per local KV group.
+
+        Returns:
+            Flat descriptor ids into the shard's prepared dlist.
+        """
+        region_group_ids = self._shard_region_group_ids[(engine_id, remote_pp_rank)]
+        desc_ids: list[np.ndarray] = []
+        for region_id, group_id in enumerate(region_group_ids):
+            group_arr = np.asarray(block_ids[group_id], dtype=np.int64)
+            if group_arr.size == 0:
+                continue
+            desc_ids.append(region_id * num_blocks + group_arr)
+        if not desc_ids:
+            return np.empty(0, dtype=np.int64)
+        return np.concatenate(desc_ids)
+
+    def _handshake_complete(self, engine_id: EngineId, pp_size: int) -> bool:
+        """Whether every producer shard of ``engine_id`` is registered.
+
+        ``_remote_agents[engine_id]`` is only assigned once every shard of the
+        handshake succeeded, so its presence alone covers PP=1. The recorded
+        pp_size additionally forces a re-handshake if a peer first seen as a
+        single stage later announces itself as pipelined.
+        """
+        return (
+            engine_id in self._remote_agents
+            and self._remote_pp_size.get(engine_id, 1) == pp_size
+        )
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -307,6 +408,11 @@ class NixlBaseConnectorWorker:
         self._layer_specs = {
             layer: group.kv_cache_spec
             for group in kv_cache_config.kv_cache_groups
+            for layer in group.layer_names
+        }
+        self._layer_name_to_kv_group_index = {
+            layer: group_index
+            for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
             for layer in group.layer_names
         }
 
@@ -439,9 +545,17 @@ class NixlBaseConnectorWorker:
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         self.device_id: int = 0
-        # Current rank may pull from multiple remote TP workers.
-        # EngineId, dict[int, list[int]] -> engine_id, tp_rank, base_addr_for_layer
-        self.kv_caches_base_addr = defaultdict[EngineId, dict[int, list[int]]](dict)
+        # Current rank may pull from multiple remote workers. A PP producer is
+        # sharded over (pp_rank, tp_rank); a PP=1 remote uses (0, tp_rank).
+        # EngineId, dict[shard, list[int]] -> engine_id, shard, base_addr_for_layer
+        self.kv_caches_base_addr = defaultdict[
+            EngineId, dict[tuple[int, int], list[int]]
+        ](dict)
+        # Base address of each locally registered region, in registration order.
+        self.local_kv_caches_base_addr: list[int] = []
+        # Layer name backing each local region, 1:1 with the list above. Lets a
+        # PP producer's layer slice be mapped onto local regions by name.
+        self.local_seen_layer_names: list[str] = []
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -451,17 +565,24 @@ class NixlBaseConnectorWorker:
         # transfers into the matching sub-range of a PP=1 remote's regions.
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self._remote_region_offset = 0
-        # PP push slices regions per layer (uniform count); HMA breaks that.
-        if self.pp_size > 1 and self._is_hma_required:
+        # HMA pools several kv cache groups into one backing tensor, so a
+        # region holds more than one layer. A mode that slices regions per
+        # layer assuming a uniform count cannot describe that under PP.
+        if self.pp_size > 1 and self._is_hma_required and not self._supports_pp_hma:
             raise NotImplementedError(
-                "NixlPushConnector does not support pipeline_parallel_size > 1 "
-                "with hybrid KV cache layouts (HMA) yet."
+                f"NIXL {self._TRANSFER_MODE} mode does not support "
+                "pipeline_parallel_size > 1 with hybrid KV cache layouts (HMA)."
             )
-        # Decode-side PP is unsupported (completions counted per consumer rank).
-        if vllm_config.kv_transfer_config.kv_role == "kv_consumer" and self.pp_size > 1:
+        # Reading from a PP-sharded producer needs remote state keyed per
+        # (pp_rank, tp_rank) and one transfer per stage.
+        if (
+            vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+            and self.pp_size > 1
+            and not self._supports_consumer_pp
+        ):
             raise NotImplementedError(
-                "NixlPushConnector consumer (decode) does not support "
-                "pipeline_parallel_size > 1."
+                f"NIXL {self._TRANSFER_MODE} mode consumer (decode) does not "
+                "support pipeline_parallel_size > 1."
             )
         # Keep heartbeat handshakes to a PP-sharded producer notif-only.
         self._hb_handshake_notif_only = False
@@ -474,8 +595,25 @@ class NixlBaseConnectorWorker:
         # Populated dynamically during handshake based on remote configuration.
         # Per-source split handles, keyed by (tp_ratio, remote_block_size).
         self.src_xfer_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
-        # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
-        self.dst_xfer_side_handles = defaultdict[EngineId, dict[int, int]](dict)
+        # Local handles covering only a PP producer shard's layer slice, keyed
+        # by (engine_id, remote_pp_rank, remote_block_size). PP=1 remotes keep
+        # using the whole-region handles above.
+        self.src_xfer_handles_by_remote: dict[tuple[EngineId, int, int], int] = {}
+        self.src_blocks_data_by_remote: dict[tuple[EngineId, int, int], np.ndarray] = {}
+        # Per-shard split handles, keyed by (engine_id, remote_pp_rank, tp_ratio).
+        self.src_xfer_handles_by_shard_tp_ratio: dict[
+            tuple[EngineId, int, int], list[int]
+        ] = {}
+        # KV group id backing each region of a PP producer shard, keyed by
+        # (engine_id, remote_pp_rank).
+        self._shard_region_group_ids: dict[tuple[EngineId, int], tuple[int, ...]] = {}
+        # Map of engine_id -> {(pp_rank, tp_rank): nixl_prepped_dlist_handle}.
+        self.dst_xfer_side_handles = defaultdict[EngineId, dict[tuple[int, int], int]](
+            dict
+        )
+        # Map of engine_id -> remote pipeline-parallel size, set once the
+        # handshake with every producer shard has completed.
+        self._remote_pp_size: dict[EngineId, int] = {}
 
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
@@ -571,8 +709,9 @@ class NixlBaseConnectorWorker:
         # within a block (BLHNC/BHLNC), where stride > block_len.
         self.block_stride_per_layer = list[int]()
 
-        # Per-engine TP mappings. Generated during handshake.
-        self.tp_mappings: dict[EngineId, TPMapping] = {}
+        # TP mappings per producer shard, keyed by (engine_id, remote_pp_rank).
+        # Generated during handshake; a PP=1 remote uses pp_rank 0.
+        self.tp_mappings: dict[tuple[EngineId, int], TPMapping] = {}
 
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
@@ -751,7 +890,11 @@ class NixlBaseConnectorWorker:
                     )
                 else:
                     remote_agent_name = self.add_remote_agent(
-                        metadata, remote_rank, remote_tp_size
+                        metadata,
+                        remote_rank,
+                        remote_tp_size,
+                        remote_pp_rank=remote_pp_rank,
+                        remote_pp_size=remote_pp_size,
                     )
                 setup_agent_time = time.perf_counter()
                 logger.debug(
@@ -912,7 +1055,7 @@ class NixlBaseConnectorWorker:
         """
         self._evict_stale_engines()
         with self._handshake_lock:
-            if engine_id in self._remote_agents:
+            if self._handshake_complete(engine_id, pp_size):
                 return None
             fut = self._handshake_futures.get(engine_id)
             if fut is not None:
@@ -931,6 +1074,7 @@ class NixlBaseConnectorWorker:
             def done_callback(
                 f: Future[tuple[dict[tuple[int, int], str], float]],
                 eid=engine_id,
+                pp=pp_size,
             ):
                 with self._handshake_lock:
                     del self._handshake_futures[eid]
@@ -939,6 +1083,9 @@ class NixlBaseConnectorWorker:
                         self._remote_agents[eid] = remote_agents
                         self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
+                        # Mark complete only after every PP stage's TP shards
+                        # are registered, so reads never race a missing handle.
+                        self._remote_pp_size[eid] = pp
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -960,6 +1107,7 @@ class NixlBaseConnectorWorker:
             meta.remote.host,
             meta.remote.port,
             meta.tp_size,
+            meta.pp_size,
         )
         if fut is None:
             # Already handshaked — only happens if caller does not pre-check.
@@ -1004,6 +1152,15 @@ class NixlBaseConnectorWorker:
             self.backend_name,
             transfer_mode=self._TRANSFER_MODE,
         )
+        if self.pp_size > 1 and self._has_mamba:
+            # Per-shard descriptor layouts for hybrid (Mamba/SSM) producers
+            # need mamba region tracking the consumer descriptor builder
+            # does not implement yet.
+            raise RuntimeError(
+                "Hybrid (Mamba/SSM) models are not yet supported with "
+                "pipeline_parallel_size > 1 over NIXL PD disaggregation."
+            )
+        pp_rank = get_pp_group().rank_in_group
 
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
@@ -1030,6 +1187,9 @@ class NixlBaseConnectorWorker:
         caches_data = []
         seen_storage_addresses: set[int] = set()
         seen_base_addresses: list[int] = []
+        # Layer backing each region, so a consumer can map a PP producer's
+        # layer slice onto its own regions by name.
+        seen_layer_names: list[str] = []
 
         packed_storage = _share_storage_and_block_stride(list(xfer_buffers.values()))
 
@@ -1149,6 +1309,7 @@ class NixlBaseConnectorWorker:
                         self._region_is_mla[idx] = True
                     continue
                 seen_base_addresses.append(base_addr)
+                seen_layer_names.append(layer_name)
                 self.block_len_per_layer.append(block_len)
                 self.block_stride_per_layer.append(block_stride)
                 self._region_is_mla.append(is_mla_region)
@@ -1180,9 +1341,14 @@ class NixlBaseConnectorWorker:
             == len(seen_base_addresses)
             == len(self._region_is_mla)
             == len(self.block_stride_per_layer)
+            == len(seen_layer_names)
         )
 
-        self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
+        self.kv_caches_base_addr[self.engine_id][(pp_rank, self.tp_rank)] = (
+            seen_base_addresses
+        )
+        self.local_kv_caches_base_addr = seen_base_addresses
+        self.local_seen_layer_names = seen_layer_names
         self.num_regions = len(seen_base_addresses)
 
         if self.pp_size > 1:
@@ -1193,6 +1359,14 @@ class NixlBaseConnectorWorker:
             assert num_local_layers > 0 and self.num_regions % num_local_layers == 0
             regions_per_layer = self.num_regions // num_local_layers
             self._remote_region_offset = regions_per_layer * start_layer
+            logger.info(
+                "Registering KV_Caches. pp_rank=%d/%d, layers=[%d, %d), num_regions=%d",
+                pp_rank,
+                self.pp_size,
+                start_layer,
+                end_layer,
+                self.num_regions,
+            )
 
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = self.num_regions * self.num_blocks
@@ -1230,7 +1404,7 @@ class NixlBaseConnectorWorker:
             engine_id=self.engine_id,
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             device_id=self.device_id,
-            kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id][self.tp_rank],
+            kv_caches_base_addr=self.local_kv_caches_base_addr,
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
             block_strides=self.block_stride_per_layer,
@@ -1245,6 +1419,9 @@ class NixlBaseConnectorWorker:
             ),
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
+            pp_rank=pp_rank,
+            pp_size=self.pp_size,
+            registered_layer_names=seen_layer_names,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1363,15 +1540,30 @@ class NixlBaseConnectorWorker:
         self,
         base_addresses: list[int],
         block_size_ratio: int,
+        local_region_indices: list[int] | None = None,
     ) -> np.ndarray:
-        """Build local FA descriptors for all layers as an Nx3 uint64 array."""
+        """Build local FA descriptors for all layers as an Nx3 uint64 array.
+
+        Args:
+            base_addresses: Base address of each region to describe.
+            block_size_ratio: Local block size divided by remote block size.
+            local_region_indices: Local region index of each entry in
+                ``base_addresses``, used to look up per-region block lengths
+                when describing a producer shard's layer slice. Defaults to
+                the identity mapping over all local regions.
+
+        Returns:
+            Nx3 uint64 array of (address, length, device_id) descriptors.
+        """
         assert self.transfer_topo is not None
         assert base_addresses, "Local KV cache base addresses must not be empty."
+        if local_region_indices is None:
+            local_region_indices = list(range(len(base_addresses)))
         num_blocks = self.num_blocks * block_size_ratio
         device_id = self.device_id
         block_arange = np.arange(num_blocks, dtype=np.uint64)
         parts: list[np.ndarray] = []
-        for i, base_addr in enumerate(base_addresses):
+        for i, base_addr in zip(local_region_indices, base_addresses):
             block_len = self.block_len_per_layer[i] // block_size_ratio
             block_stride = self.block_stride_per_layer[i] // block_size_ratio
             addrs = base_addr + block_arange * block_stride
@@ -1383,12 +1575,28 @@ class NixlBaseConnectorWorker:
         plan: TPMapping,
         nixl_agent_meta: NixlAgentMetadata,
         block_size_ratio: int,
+        local_region_indices: list[int] | None = None,
     ) -> np.ndarray:
-        """Build remote FA descriptors for all layers as an Nx3 uint64 array."""
+        """Build remote FA descriptors for all layers as an Nx3 uint64 array.
+
+        Args:
+            plan: TP mapping against the producer shard being described.
+            nixl_agent_meta: Handshake metadata of that producer shard.
+            block_size_ratio: Local block size divided by remote block size.
+            local_region_indices: Local region index of each remote region,
+                used to look up per-region block lengths when the producer is
+                a PP stage holding only part of the layers. Defaults to the
+                identity mapping.
+
+        Returns:
+            Nx3 uint64 array of (address, length, device_id) descriptors.
+        """
         assert self.transfer_topo is not None
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
         )
+        if local_region_indices is None:
+            local_region_indices = list(range(len(nixl_agent_meta.kv_caches_base_addr)))
         fa_group_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
@@ -1400,9 +1608,10 @@ class NixlBaseConnectorWorker:
         block_arange = np.arange(num_blocks, dtype=np.uint64)
         parts: list[np.ndarray] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            replicated = self._is_region_replicated(i)
+            local_region_idx = local_region_indices[i]
+            replicated = self._is_region_replicated(local_region_idx)
             # Read our whole local region size from remote..
-            local_block_len = self.block_len_per_layer[i]
+            local_block_len = self.block_len_per_layer[local_region_idx]
             remote_kv_block_len = local_block_len // block_size_ratio
             if block_size_ratio > 1:
                 # ..using remote kv_block_len as transfer unit
@@ -1424,6 +1633,8 @@ class NixlBaseConnectorWorker:
     def register_local_xfer_handler(
         self,
         block_size: int,
+        *,
+        registered_layer_names: list[str] | None = None,
     ) -> tuple[int, np.ndarray]:
         """
         Function used for register local xfer handler with local block_size or
@@ -1435,12 +1646,34 @@ class NixlBaseConnectorWorker:
         When remote block size is less than local block size, we need to use
         register another local_xfer_handler using remote block len to ensure
         data copy correctness.
+
+        Args:
+            block_size: Block size the handler describes blocks with.
+            registered_layer_names: Layers a pipeline-parallel producer shard
+                registered, in its own registration order. When given, only the
+                matching local regions are described, so the handler lines up
+                1:1 with that shard's remote descriptors. ``None`` describes
+                every local region.
+
+        Returns:
+            The prepared local dlist handle and its descriptor array.
         """
         assert self.transfer_topo is not None
         block_size_ratio = self.block_size // block_size
-        local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
+        if registered_layer_names is None:
+            local_base_addresses = self.local_kv_caches_base_addr
+            local_region_indices = list(range(len(local_base_addresses)))
+        else:
+            local_region_indices = self._local_region_indices_for_layer_names(
+                registered_layer_names
+            )
+            local_base_addresses = [
+                self.local_kv_caches_base_addr[i] for i in local_region_indices
+            ]
 
-        blocks_data = self._build_fa_local(local_base_addresses, block_size_ratio)
+        blocks_data = self._build_fa_local(
+            local_base_addresses, block_size_ratio, local_region_indices
+        )
         logger.debug(
             "Created %s blocks for src engine %s and rank %s on device id %s",
             len(blocks_data),
@@ -1469,6 +1702,9 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         remote_tp_rank: int = 0,
         remote_tp_size: int = 1,
+        *,
+        remote_pp_rank: int = 0,
+        remote_pp_size: int = 1,
     ) -> str:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
@@ -1512,17 +1748,32 @@ class NixlBaseConnectorWorker:
 
         For Mamba hetero-TP, both tp_ratio > 0 (D_TP > P_TP) and
         tp_ratio < 0 (P_TP > D_TP) are supported by the 3-read transfer.
+
+        A pipeline-parallel producer registers one shard per (pp_rank, tp_rank);
+        each shard holds only its own layer slice, so descriptors are built and
+        cached per shard.
         """  # noqa: E501
         engine_id = nixl_agent_meta.engine_id
+        shard_key = (remote_pp_rank, remote_tp_rank)
         # TODO re-evaluate refreshing for scaling/recovery
-        if (0, remote_tp_rank) in self._remote_agents.get(engine_id, {}):
+        if shard_key in self._remote_agents.get(engine_id, {}):
             logger.debug(
-                "Remote agent with engine_id %s and rank"
-                "%s already exchanged metadata, skip handshake.",
+                "Remote agent with engine_id %s, pp rank %s, tp rank %s "
+                "already exchanged metadata, skip handshake.",
                 engine_id,
+                remote_pp_rank,
                 remote_tp_rank,
             )
-            return self._remote_agents[engine_id][(0, remote_tp_rank)]
+            return self._remote_agents[engine_id][shard_key]
+
+        if remote_pp_size > 1:
+            return self._add_pp_remote_agent(
+                nixl_agent_meta,
+                remote_tp_rank,
+                remote_tp_size,
+                remote_pp_rank,
+                remote_pp_size,
+            )
 
         # Number of physical regions registered locally (one per layer/tensor).
         num_local_regions = len(self.block_len_per_layer)
@@ -1557,7 +1808,7 @@ class NixlBaseConnectorWorker:
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
 
-        self.tp_mappings[engine_id] = compute_tp_mapping(
+        self.tp_mappings[(engine_id, 0)] = compute_tp_mapping(
             transfer_topology=transfer_topo,
             remote_tp_size=remote_tp_size,
             group_spec_types=self._group_spec_types,
@@ -1580,7 +1831,7 @@ class NixlBaseConnectorWorker:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
 
         # Keep track of remote agent kv caches base addresses.
-        self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
+        self.kv_caches_base_addr[engine_id][shard_key] = (
             nixl_agent_meta.kv_caches_base_addr
         )
         self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size)
@@ -1596,7 +1847,7 @@ class NixlBaseConnectorWorker:
             tp_ratio,
         )
 
-        plan = self.tp_mappings[engine_id]
+        plan = self.tp_mappings[(engine_id, 0)]
 
         ### (Optional) Register a local handler at the remote engine's block
         ### granularity (remote/prefill blocks smaller than local).
@@ -1667,11 +1918,271 @@ class NixlBaseConnectorWorker:
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
-        self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
+        self.dst_xfer_side_handles[engine_id][shard_key] = (
             self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
         )
 
         return remote_agent_name
+
+    def _add_pp_remote_agent(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        remote_tp_rank: int,
+        remote_tp_size: int,
+        remote_pp_rank: int,
+        remote_pp_size: int,
+    ) -> str:
+        """Register one shard of a pipeline-parallel producer.
+
+        Each producer stage registers only the layers it owns, so descriptors,
+        TP mappings and local handles are all cached per (engine, pp_rank)
+        rather than per engine.
+
+        Args:
+            nixl_agent_meta: Handshake metadata of the producer shard.
+            remote_tp_rank: TP rank of the shard within its stage.
+            remote_tp_size: TP size of the producer.
+            remote_pp_rank: PP rank (stage index) of the shard.
+            remote_pp_size: PP size of the producer.
+
+        Returns:
+            The NIXL agent name of the registered shard.
+        """
+        engine_id = nixl_agent_meta.engine_id
+        shard_key = (remote_pp_rank, remote_tp_rank)
+        assert self.transfer_topo is not None
+        transfer_topo = self.transfer_topo
+
+        if nixl_agent_meta.pp_size != remote_pp_size:
+            raise RuntimeError(
+                "NIXL handshake failed: producer advertised "
+                f"pp_size={nixl_agent_meta.pp_size} but was queried as a "
+                f"pp_size={remote_pp_size} engine."
+            )
+        if nixl_agent_meta.pp_rank != remote_pp_rank:
+            raise RuntimeError(
+                "NIXL handshake failed: producer advertised "
+                f"pp_rank={nixl_agent_meta.pp_rank} but was queried for "
+                f"pp_rank={remote_pp_rank}."
+            )
+        if not nixl_agent_meta.registered_layer_names:
+            raise RuntimeError(
+                "NIXL handshake failed: a pipeline-parallel producer must "
+                "advertise registered_layer_names so its layer slice can be "
+                "mapped onto local regions."
+            )
+
+        transfer_info = EngineTransferInfo(
+            remote_tp_size=remote_tp_size,
+            remote_block_size=nixl_agent_meta.block_size,
+            remote_block_len=nixl_agent_meta.block_lens[0],
+            remote_physical_blocks_per_logical=(
+                nixl_agent_meta.physical_blocks_per_logical_kv_block
+            ),
+            remote_pp_rank=remote_pp_rank,
+        )
+        transfer_topo.register_remote_engine(engine_id, transfer_info)
+        logger.info(
+            "Transfer plan: %s", transfer_topo.describe(engine_id, remote_pp_rank)
+        )
+
+        plan_key = (engine_id, remote_pp_rank)
+        self.tp_mappings[plan_key] = compute_tp_mapping(
+            transfer_topology=transfer_topo,
+            remote_tp_size=remote_tp_size,
+            group_spec_types=self._group_spec_types,
+        )
+
+        remote_agent_name = self.nixl_wrapper.add_remote_agent(
+            nixl_agent_meta.agent_metadata
+        )
+
+        block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
+        if engine_id not in self.dst_num_blocks:
+            self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
+
+        self.kv_caches_base_addr[engine_id][shard_key] = (
+            nixl_agent_meta.kv_caches_base_addr
+        )
+        local_region_indices = self._validate_pp_remote_agent_handshake(
+            nixl_agent_meta,
+            remote_pp_rank,
+            remote_tp_size,
+            block_size_ratio,
+        )
+
+        tp_ratio = transfer_topo.tp_ratio(remote_tp_size)
+        logger.debug(
+            "Registering remote agent (%s, pp rank %s, tp rank %s) memory "
+            "regions with tp_ratio %s",
+            engine_id,
+            remote_pp_rank,
+            remote_tp_rank,
+            tp_ratio,
+        )
+        plan = self.tp_mappings[plan_key]
+
+        # One local handler per (engine, stage, remote block size): sibling TP
+        # ranks of the same stage register the same layer slice.
+        local_handle_key = (engine_id, remote_pp_rank, nixl_agent_meta.block_size)
+        if local_handle_key not in self.src_xfer_handles_by_remote:
+            handle, local_blocks_data = self.register_local_xfer_handler(
+                nixl_agent_meta.block_size,
+                registered_layer_names=nixl_agent_meta.registered_layer_names,
+            )
+            self.src_xfer_handles_by_remote[local_handle_key] = handle
+            self.src_blocks_data_by_remote[local_handle_key] = local_blocks_data
+            self._shard_region_group_ids[plan_key] = (
+                self._region_group_ids_for_layer_names(
+                    nixl_agent_meta.registered_layer_names
+                )
+            )
+        src_blocks_data = self.src_blocks_data_by_remote[local_handle_key]
+        region_group_ids = self._shard_region_group_ids[plan_key]
+
+        ### (Optional) Register local agent memory regions. MLA is not split.
+        split_handle_key = (engine_id, remote_pp_rank, tp_ratio)
+        if (
+            tp_ratio < 0
+            and (not self.use_mla or len(plan.all_source_ranks) > 1)
+            and split_handle_key not in self.src_xfer_handles_by_shard_tp_ratio
+        ):
+            self.src_xfer_handles_by_shard_tp_ratio[split_handle_key] = []
+            num_shard_descs = len(region_group_ids) * self.num_blocks * block_size_ratio
+            for handle_data in self._build_local_splits_from_plan(
+                plan,
+                src_blocks_data,
+                num_shard_descs,
+                block_size_ratio,
+            ):
+                descs = self.nixl_wrapper.get_xfer_descs(
+                    handle_data, self.nixl_memory_type
+                )
+                handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
+                self.src_xfer_handles_by_shard_tp_ratio[split_handle_key].append(handle)
+
+        blocks_data = self._build_fa_remote(
+            plan,
+            nixl_agent_meta,
+            block_size_ratio,
+            local_region_indices,
+        )
+        logger.debug(
+            "Created %s blocks for dst engine %s with remote pp rank %s, "
+            "remote tp rank %s and local rank %s",
+            len(blocks_data),
+            engine_id,
+            remote_pp_rank,
+            remote_tp_rank,
+            self.tp_rank,
+        )
+
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
+        self.dst_xfer_side_handles[engine_id][shard_key] = (
+            self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
+        )
+        # _nixl_handshake only publishes _remote_agents once every shard is
+        # registered; record it now so a partially-registered engine can still
+        # resolve the agents it does have (e.g. for notifs).
+        self._remote_agents[engine_id][shard_key] = remote_agent_name
+
+        return remote_agent_name
+
+    def _validate_pp_remote_agent_handshake(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        remote_pp_rank: int,
+        remote_tp_size: int,
+        block_size_ratio: int,
+    ) -> list[int]:
+        """Validate one pipeline-parallel producer shard's handshake metadata.
+
+        Mirrors ``_validate_remote_agent_handshake`` but compares per-region
+        block lengths against the local regions the shard's layers map to,
+        instead of assuming the producer registered every layer.
+
+        Args:
+            nixl_agent_meta: Handshake metadata of the producer shard.
+            remote_pp_rank: PP rank (stage index) of the shard.
+            remote_tp_size: TP size of the producer.
+            block_size_ratio: Local block size divided by remote block size.
+
+        Returns:
+            Local region index for each of the shard's regions, in the shard's
+            registration order.
+
+        Raises:
+            RuntimeError: A producer layer has no matching local region, or the
+                producer's layout cannot serve a heterogeneous-TP read.
+        """
+        remote_engine_id = nixl_agent_meta.engine_id
+        assert self.transfer_topo is not None
+        assert (
+            len(nixl_agent_meta.kv_caches_base_addr)
+            == len(nixl_agent_meta.block_lens)
+            == len(nixl_agent_meta.registered_layer_names)
+        )
+        local_region_indices = self._local_region_indices_for_layer_names(
+            nixl_agent_meta.registered_layer_names
+        )
+
+        remote_info = self.transfer_topo.get_engine_info(
+            remote_engine_id, remote_pp_rank
+        )
+        assert remote_info.remote_tp_size == remote_tp_size
+
+        tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
+        assert tp_ratio != 0, "Local and remote TP size must be divisible."
+        if self.use_mla:
+            assert tp_ratio > 0, "MLA only supports remote TP size >= local TP size."
+        assert not (
+            tp_ratio < 0
+            and self.transfer_topo.is_kv_replicated(remote_engine_id, remote_pp_rank)
+        )
+
+        remote_physical_per_logical = remote_info.remote_physical_blocks_per_logical
+        assert remote_physical_per_logical >= 1
+
+        kv_cache_layout = nixl_agent_meta.kv_cache_layout
+        if (
+            abs(tp_ratio) != 1
+            and not self.use_mla
+            and not self.transfer_topo.is_kv_replicated(
+                remote_engine_id, remote_pp_rank
+            )
+            and not KVCacheLayout[kv_cache_layout].is_block_contiguous
+            and not self.enable_permute_local_kv
+        ):
+            raise RuntimeError(
+                "Heterogeneous TP head-dimension splitting requires contiguous "
+                f"heads, but remote kv_cache_layout is {kv_cache_layout}. Use a "
+                "block-contiguous layout (e.g. LBHNC) on the prefill side."
+            )
+
+        remote_replicates_kv = self.transfer_topo.is_kv_replicated(
+            remote_engine_id, remote_pp_rank
+        )
+        for j, remote_block_len in enumerate(nixl_agent_meta.block_lens):
+            local_block_len = self.block_len_per_layer[local_region_indices[j]]
+            if self.use_mla or remote_replicates_kv:
+                # With a replicated KV cache, only the number of blocks differs.
+                expected = local_block_len // block_size_ratio
+            elif tp_ratio > 0:
+                expected = (local_block_len * tp_ratio) // block_size_ratio
+            else:
+                assert block_size_ratio == 1, (
+                    "Different local/remote block sizes are not supported"
+                    " when P TP > D TP."
+                )
+                expected = local_block_len // (-tp_ratio)
+            assert remote_block_len == expected, (
+                "Remote P worker KV layer cache shape is incompatible with the "
+                "local decode worker."
+            )
+
+        # TP workers that handshake with same remote have same #blocks.
+        assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
+        return local_region_indices
 
     def _validate_remote_agent_handshake(
         self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int
@@ -2079,8 +2590,9 @@ class NixlBaseConnectorWorker:
             # granularity (block_size_ratio > 1) or at kernel-block
             # granularity, when equal kernel pages meet differing logical
             # block sizes and _apply_prefix_caching front-trims to the
-            # minimum count (hybrid heterogeneous TP).
-            remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+            # minimum count (hybrid heterogeneous TP). Block size is uniform
+            # across a producer's PP stages, so stage 0 is representative.
+            remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id, 0)
             block_size_ratio = self.transfer_topo.block_size_ratio(
                 remote_info.remote_block_size
             )
@@ -2542,9 +3054,25 @@ class NixlBaseConnectorWorker:
         for agent_name in self._remote_agents.pop(engine_id).values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
+        # Per-producer-shard local handles (PP producers only).
+        for key in [k for k in self.src_xfer_handles_by_remote if k[0] == engine_id]:
+            self.nixl_wrapper.release_dlist_handle(
+                self.src_xfer_handles_by_remote.pop(key)
+            )
+            self.src_blocks_data_by_remote.pop(key, None)
+        for key in [
+            k for k in self.src_xfer_handles_by_shard_tp_ratio if k[0] == engine_id
+        ]:
+            for handle in self.src_xfer_handles_by_shard_tp_ratio.pop(key):
+                self.nixl_wrapper.release_dlist_handle(handle)
+        for key in [k for k in self._shard_region_group_ids if k[0] == engine_id]:
+            del self._shard_region_group_ids[key]
+
         self.kv_caches_base_addr.pop(engine_id, None)
         self.dst_num_blocks.pop(engine_id, None)
-        self.tp_mappings.pop(engine_id, None)
+        self._remote_pp_size.pop(engine_id, None)
+        for key in [k for k in self.tp_mappings if k[0] == engine_id]:
+            del self.tp_mappings[key]
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)
 
@@ -2582,6 +3110,16 @@ class NixlBaseConnectorWorker:
         self.src_xfer_handles_by_tp_ratio.clear()
         for engine_id in list(self._remote_agents):
             self._cleanup_remote_engine(engine_id, log_eviction=False)
+        # Shards of an engine whose handshake failed before it was published.
+        for handle in self.src_xfer_handles_by_remote.values():
+            self.nixl_wrapper.release_dlist_handle(handle)
+        self.src_xfer_handles_by_remote.clear()
+        self.src_blocks_data_by_remote.clear()
+        for handles in self.src_xfer_handles_by_shard_tp_ratio.values():
+            for handle in handles:
+                self.nixl_wrapper.release_dlist_handle(handle)
+        self.src_xfer_handles_by_shard_tp_ratio.clear()
+        self._shard_region_group_ids.clear()
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()

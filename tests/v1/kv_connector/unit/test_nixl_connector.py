@@ -651,7 +651,7 @@ class TestNixlHandshake:
         worker = connector.connector_worker
         # simulate handshake
         worker.dst_xfer_side_handles = {
-            FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
+            FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {(0, 0): 1}
         }
         worker.kv_cache_layout = "LBHNC"
         num_xfers = 4
@@ -823,9 +823,9 @@ class TestNixlHandshake:
             assert split_key in worker.src_xfer_handles_by_tp_ratio
             assert len(worker.src_xfer_handles_by_tp_ratio[split_key]) == tp_ratio
             assert remote_engine_id in worker.dst_xfer_side_handles
-            assert set(worker.dst_xfer_side_handles[remote_engine_id].keys()) == set(
-                range(tp_ratio)
-            )
+            assert set(worker.dst_xfer_side_handles[remote_engine_id].keys()) == {
+                (0, r) for r in range(tp_ratio)
+            }
 
         remote_agents, _ = worker._nixl_handshake(
             host="localhost",
@@ -2215,12 +2215,12 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         worker.src_xfer_handles_by_block_size = {worker.block_size: 455}
         # P TP = 2 * D TP case, we should register 2 local handles
         worker.src_xfer_handles_by_tp_ratio = {(-2, 16): [456, 457]}
-        worker.dst_xfer_side_handles = {"engine1": {0: 789}}
+        worker.dst_xfer_side_handles = {"engine1": {(0, 0): 789}}
         worker._remote_agents = {"engine1": {(0, 0): "agent1"}}
         # _cleanup_remote_engine (called by shutdown) also clears these:
-        worker.kv_caches_base_addr["engine1"] = {0: [0xABC]}
+        worker.kv_caches_base_addr["engine1"] = {(0, 0): [0xABC]}
         worker.dst_num_blocks["engine1"] = 50
-        worker.tp_mappings["engine1"] = MagicMock()
+        worker.tp_mappings[("engine1", 0)] = MagicMock()
         worker._engine_last_active["engine1"] = time.perf_counter()
         worker._registered_descs = ["desc1", "desc2"]
 
@@ -2270,10 +2270,10 @@ def _setup_worker_with_remote_engine(
 
     engine_id = "remote-engine-1"
     worker._remote_agents[engine_id] = {(0, 0): "agent_0", (0, 1): "agent_1"}
-    worker.dst_xfer_side_handles[engine_id] = {0: 100, 1: 200}
-    worker.kv_caches_base_addr[engine_id] = {0: [0xABC]}
+    worker.dst_xfer_side_handles[engine_id] = {(0, 0): 100, (0, 1): 200}
+    worker.kv_caches_base_addr[engine_id] = {(0, 0): [0xABC]}
     worker.dst_num_blocks[engine_id] = 50
-    worker.tp_mappings[engine_id] = MagicMock()
+    worker.tp_mappings[(engine_id, 0)] = MagicMock()
     worker._engine_last_active[engine_id] = time.perf_counter()
 
     worker.transfer_topo = MagicMock()
@@ -2303,7 +2303,7 @@ def test_engine_ttl_eviction(default_vllm_config, dist_init):
         assert engine_id not in worker.dst_xfer_side_handles
         assert engine_id not in worker.kv_caches_base_addr
         assert engine_id not in worker.dst_num_blocks
-        assert engine_id not in worker.tp_mappings
+        assert (engine_id, 0) not in worker.tp_mappings
         assert engine_id not in worker._engine_last_active
         worker.transfer_topo.unregister_remote_engine.assert_called_with(engine_id)
 
@@ -3315,7 +3315,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
             (0, rank): f"agent_p{rank}" for rank in range(prefill_tp_size)
         }
         worker.dst_xfer_side_handles = {
-            remote_engine_id: {rank: 100 + rank for rank in range(prefill_tp_size)}
+            remote_engine_id: {(0, rank): 100 + rank for rank in range(prefill_tp_size)}
         }
         # Sanity: D TP=1, P TP=4 => tp_ratio = -4 (P > D).
         assert worker.transfer_topo.tp_ratio(prefill_tp_size) == -prefill_tp_size
