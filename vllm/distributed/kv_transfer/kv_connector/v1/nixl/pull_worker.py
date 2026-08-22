@@ -325,7 +325,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 # Same-host destination is host memory: read into device staging
                 # and copy down, instead of letting UCX use TCP loopback.
                 # Notify the remote only once every chunk has landed, which the
-                # stager reports through _advance_host_staging.
+                # stager reports through _get_finished_host_staging.
                 self._pending_recv_notifs.setdefault(request_id, []).append(
                     (self._remote_agents[dst_engine_id][(0, remote_rank)], notif_id)
                 )
