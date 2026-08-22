@@ -123,7 +123,7 @@ elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    # starting from CUDA 12.9 and Blackwell (10.0), we use family-specific targets (10.0f, 12.0f, etc)
    # to support the whole generation without specifying all sub-architectures
    # see: https://developer.nvidia.com/blog/nvidia-blackwell-and-nvidia-cuda-12-9-introduce-family-specific-architecture-features/
-  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0")
+  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0;12.1")
 elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
   set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;10.3;12.0;12.1")
@@ -826,12 +826,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
 
   # The cutlass_scaled_mm kernels for Blackwell SM12x (c3x, i.e. CUTLASS 3.x) require
-  # CUDA 12.8 or later
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
-  endif()
+  # CUDA 12.8 or later. Always use the explicit "12.0a;12.1a" arch-specific
+  # candidates (not a "12.0f" family target): these kernels use arch-conditional
+  # MMA instructions that only exist in the 'a'-qualified (architecture-specific)
+  # codegen. A family target compiles a portable baseline-capability cubin
+  # without those instructions, which builds fine but aborts at launch on real
+  # hardware with "Arch conditional MMA instruction used without targeting
+  # appropriate compute capability" (confirmed on DGX Spark / GB10, sm_121).
+  # Verified with cuobjdump that pinning to "12.1a" here produces a working
+  # sm_121a cubin for CutlassFp8BlockScaledMMKernel that runs without the
+  # launch failure above.
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
     set(SCALED_MM_SM120_SRCS
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c3x_sm120.cu"
@@ -1002,7 +1007,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # per-source flags, so shared files accumulate both SM12x and SM10x/11x
   # gencodes when both families are requested.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.0f" "${CUDA_ARCHS}")
+    # Pin to plain "12.0" instead of the "12.0f" family target: ptxas in
+    # CUDA 13.0 cannot emit the e2m1x2 conversion these NVFP4 kernels use
+    # when asked to target sm_121 natively ("Instruction 'cvt with .e2m1x2'
+    # not supported on .target 'sm_121'"), so the family-fallback in
+    # cuda_archs_loose_intersection (which would otherwise pick up 12.1)
+    # must not be allowed to select it here. Building sm_120 and relying on
+    # same-major forward compatibility matches today's published behavior.
+    cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.0" "${CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
