@@ -1,0 +1,64 @@
+# Standalone image for the Rust frontend renderer. This builds only `vllm-rs`
+# and ships no Python, PyTorch, CUDA, model weights, or vLLM kernel artifacts.
+
+ARG RUST_VERSION=1.95
+ARG DEBIAN_VERSION=bookworm
+
+FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS rust-renderer-build
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
+
+WORKDIR /workspace
+
+COPY rust rust
+COPY rust-toolchain.toml rust-toolchain.toml
+
+ENV CARGO_BUILD_JOBS=4
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo build --manifest-path rust/Cargo.toml \
+        --package vllm-cmd \
+        --bin vllm-rs \
+        --release \
+        --features native-tls-vendored \
+    && strip rust/target/release/vllm-rs
+
+FROM debian:${DEBIAN_VERSION}-slim AS vllm-rust-renderer
+
+ARG VLLM_BUILD_COMMIT
+ARG VLLM_BUILD_PIPELINE
+ARG VLLM_BUILD_URL
+ARG VLLM_IMAGE_TAG
+
+ENV VLLM_USAGE_SOURCE=production-docker-image \
+    VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \
+    VLLM_BUILD_PIPELINE=${VLLM_BUILD_PIPELINE:-local} \
+    VLLM_BUILD_URL=${VLLM_BUILD_URL:-} \
+    VLLM_IMAGE_TAG=${VLLM_IMAGE_TAG:-local/vllm-rust-renderer:dev} \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
+      org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \
+      org.opencontainers.image.version="${VLLM_IMAGE_TAG}" \
+      org.opencontainers.image.url="${VLLM_BUILD_URL}" \
+      ai.vllm.build.commit="${VLLM_BUILD_COMMIT}" \
+      ai.vllm.build.pipeline="${VLLM_BUILD_PIPELINE}" \
+      ai.vllm.build.url="${VLLM_BUILD_URL}" \
+      ai.vllm.image.tag="${VLLM_IMAGE_TAG}"
+
+COPY --from=rust-renderer-build /workspace/rust/target/release/vllm-rs \
+    /usr/local/bin/vllm-rs
+COPY --from=rust-renderer-build /etc/ssl/certs/ca-certificates.crt \
+    /etc/ssl/certs/ca-certificates.crt
+
+EXPOSE 8000
+ENTRYPOINT ["vllm-rs"]
+CMD ["render", "--help"]

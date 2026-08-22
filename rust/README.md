@@ -90,6 +90,17 @@ It exposes `/v1/chat/completions/render` and `/v1/completions/render`. Only
 tokenizer and model configuration files are loaded; model weights, PyTorch,
 and vLLM kernels are not required.
 
+To build and run the standalone Docker image:
+
+```bash
+docker buildx bake -f docker/docker-bake.hcl rust-renderer
+
+docker run --rm -p 8000:8000 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  vllm:rust-renderer \
+  render Qwen/Qwen3-32B --host 0.0.0.0 --max-model-len 32768
+```
+
 The render endpoints return the public token-in `GenerateRequest` consumed by
 the Rust `/inference/v1/generate` endpoint. A chat render response, or one item
 from a completion render response, can be submitted to that endpoint without
