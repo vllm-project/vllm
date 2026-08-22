@@ -1447,20 +1447,23 @@ TINY_QWEN = "Qwen/Qwen3-0.6B"
 # the checkpoint->module mapping, which differs structurally between them: GQA
 # fuses Q/K/V of unequal head counts into one param, MLA replaces them with the
 # compressed kv_a/kv_b pair, and MoE turns per-expert checkpoint entries into
-# stacked expert params. All are chosen for size -- the largest is 4.4B, and no
-# weights are downloaded (see `_bake_probe`).
+# stacked expert params.
+#
+# Keep them small: `load_format="dummy"` skips the download but not the
+# allocation, so every parameter is still built on the device at full size.
 BAKE_MODELS = [
     pytest.param(TINY_QWEN, id="gqa-dense"),
     pytest.param("TitanML/tiny-mixtral", id="moe"),
-    # MLA (kv_lora_rank set, so `ModelConfig.use_mla`) plus routed experts. The
-    # smallest OFFICIAL DeepSeek, and it has to be official: the MLA prefill
-    # backends accept only (qk_nope=128, qk_rope=64, v=128), so the tiny random
-    # DeepSeek builds fail engine init outright. bf16 rather than one of the fp8
-    # checkpoints, because `process_weights_after_loading` swaps the vLLM
-    # parameter subclasses out on those and the plain second `load_weights` this
-    # test compares against then cannot run. It is 15.7B, but `load_format=
-    # "dummy"` and the header-only metadata mean nothing is downloaded.
-    pytest.param("deepseek-ai/DeepSeek-V2-Lite", id="mla-moe"),
+    # MLA (kv_lora_rank set, so `ModelConfig.use_mla`) plus routed experts. Only
+    # the STRUCTURE is under test -- `_bake_probe` synthesizes the checkpoint
+    # from the safetensors headers and never reads a weight value -- so a random
+    # 0.06B model does the job, as long as it has the MLA head shape the prefill
+    # backends accept: (qk_nope=128, qk_rope=64, v=128).
+    #
+    # Not an fp8 checkpoint: `process_weights_after_loading` swaps the vLLM
+    # parameter subclasses out on those, and the plain second `load_weights`
+    # this test compares against then cannot run.
+    pytest.param("hmellor/tiny-random-DeepseekV2ForCausalLM", id="mla-moe"),
 ]
 
 
