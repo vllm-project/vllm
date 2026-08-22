@@ -434,6 +434,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
+    tokenizer: TestTokenizer,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -458,13 +459,14 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
+            tokenizer: fake_chat_tokenizer(),
         }
     }
 
     fn with_model_id(model_id: impl Into<String>) -> Self {
         Self {
             model_id: model_id.into(),
-            multimodal_model_info: None,
+            ..Self::new()
         }
     }
 
@@ -472,9 +474,14 @@ impl FakeChatBackend {
         multimodal_model_info: vllm_chat::multimodal::MultimodalModelInfo,
     ) -> Self {
         Self {
-            model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
+            ..Self::new()
         }
+    }
+
+    fn with_tokenizer(mut self, tokenizer: TestTokenizer) -> Self {
+        self.tokenizer = tokenizer;
+        self
     }
 }
 
@@ -488,7 +495,7 @@ impl fmt::Debug for FakeChatBackend {
 
 impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(fake_chat_tokenizer())
+        Arc::new(self.tokenizer.clone())
     }
 
     fn model_id(&self) -> &str {
@@ -691,6 +698,30 @@ fn test_render_app_with_parser_selections(
     reasoning_parser: ParserSelection,
 ) -> axum::Router {
     let backend = Arc::new(FakeChatBackend::new());
+    build_render_router(Arc::new(RenderState {
+        model: "backend-model".to_string(),
+        served_model_names: vec!["render-model".to_string()],
+        text: TextRequestProcessor::new(backend.clone(), 128),
+        chat: ChatRequestProcessor::render_only(backend)
+            .with_parser_selections(tool_call_parser, reasoning_parser),
+    }))
+}
+
+/// Derender tests need byte-id token pieces that round-trip through
+/// `id_to_token`/`token_to_id`, so the fake tokenizer uses the byte-level
+/// piece mapping here (unlike the render fixtures above).
+fn test_derender_app() -> axum::Router {
+    test_derender_app_with_parser_selections(ParserSelection::Auto, ParserSelection::Auto)
+}
+
+fn test_derender_app_with_parser_selections(
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> axum::Router {
+    let backend = Arc::new(
+        FakeChatBackend::new()
+            .with_tokenizer(fake_chat_tokenizer().with_byte_level_piece_mapping()),
+    );
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: vec!["render-model".to_string()],
@@ -6757,4 +6788,763 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+// ---------------------------------------------------------------------------
+// /v1/{chat/completions,completions}/derender tests
+//
+// Port of tests/entrypoints/scale_out/derender/test_derender.py against the
+// render-only router fixture. Reasoning/tool parsing (phase 2) and streaming
+// (test_derender_stream.py, phase 3) tests land in later phases.
+// ---------------------------------------------------------------------------
+
+/// Build a chat `GenerateResponse` body mirroring `_make_generate_response`.
+fn derender_generate_response(token_ids: serde_json::Value) -> serde_json::Value {
+    json!({
+        "request_id": "chatcmpl-derender-test",
+        "choices": [{
+            "index": 0,
+            "token_ids": token_ids,
+            "finish_reason": "stop",
+            "logprobs": null,
+        }],
+        "prompt_logprobs": null,
+        "kv_transfer_params": null,
+    })
+}
+
+/// Byte-level token ids for ordinary text through the fake chat tokenizer.
+fn derender_token_ids(text: &str) -> Vec<u32> {
+    use vllm_text::tokenizer::Tokenizer as _;
+    fake_chat_tokenizer()
+        .with_byte_level_piece_mapping()
+        .encode(text, false)
+        .expect("encode text")
+}
+
+async fn derender_chat(
+    app: &mut axum::Router,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    post_json(app, "/v1/chat/completions/derender", body).await
+}
+
+async fn derender_completion(
+    app: &mut axum::Router,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    post_json(app, "/v1/completions/derender", body).await
+}
+
+#[tokio::test]
+async fn derender_chat_roundtrip() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("hello");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "stream": false,
+            "generate_response": derender_generate_response(json!(token_ids)),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["object"], "chat.completion");
+    // The response id echoes the generate response request id verbatim.
+    assert_eq!(json["id"], "chatcmpl-derender-test");
+    assert_eq!(json["choices"][0]["index"], 0);
+    assert_eq!(json["choices"][0]["message"]["role"], "assistant");
+    assert_eq!(json["choices"][0]["message"]["content"], "hello");
+    // finish_reason passes through verbatim from the wire.
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(json["prompt_logprobs"], serde_json::Value::Null);
+    assert_eq!(json["kv_transfer_params"], serde_json::Value::Null);
+    assert_eq!(json["ec_transfer_params"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn derender_chat_usage() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("abc");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!(token_ids)),
+            "prompt_tokens": 10,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["usage"]["prompt_tokens"], 10);
+    assert_eq!(json["usage"]["completion_tokens"], 3);
+    assert_eq!(json["usage"]["total_tokens"], 13);
+}
+
+#[tokio::test]
+async fn derender_chat_usage_default() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("abc");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!(token_ids)),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["usage"]["prompt_tokens"], 0);
+}
+
+#[tokio::test]
+async fn derender_chat_prompt_logprobs_passthrough() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("abc");
+    let mut response = derender_generate_response(json!(token_ids));
+    response["prompt_logprobs"] = json!([null, null]);
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({ "model": "render-model", "generate_response": response }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["prompt_logprobs"], json!([null, null]));
+}
+
+#[tokio::test]
+async fn derender_chat_kv_transfer_params_passthrough() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("abc");
+    let mut response = derender_generate_response(json!(token_ids));
+    response["kv_transfer_params"] = json!({"key": "value"});
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({ "model": "render-model", "generate_response": response }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["kv_transfer_params"], json!({"key": "value"}));
+}
+
+#[tokio::test]
+async fn derender_chat_logprobs_placeholder_resolution() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("hi");
+    let mut response = derender_generate_response(json!(token_ids));
+    response["choices"][0]["logprobs"] = json!({
+        "content": [{
+            "token": "token_id:104",
+            "logprob": -1.0,
+            "bytes": null,
+            "top_logprobs": [{"token": "token_id:105", "logprob": -2.0, "bytes": null}],
+        }],
+    });
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({ "model": "render-model", "generate_response": response }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let content = &json["choices"][0]["logprobs"]["content"];
+    // token_id:N placeholders resolve to the decoded token and UTF-8 bytes.
+    assert_eq!(content[0]["token"], "h");
+    assert_eq!(content[0]["bytes"], json!([104]));
+    assert_eq!(content[0]["top_logprobs"][0]["token"], "i");
+    assert_eq!(content[0]["top_logprobs"][0]["bytes"], json!([105]));
+}
+
+#[tokio::test]
+async fn derender_chat_empty_token_ids_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!([])),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("empty or null token_ids"));
+}
+
+#[tokio::test]
+async fn derender_chat_null_token_ids_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, _) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(serde_json::Value::Null),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn derender_chat_unknown_model_rejected() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("abc");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "does-not-exist",
+            "generate_response": derender_generate_response(json!(token_ids)),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(json["error"]["code"], "model_not_found");
+}
+
+#[tokio::test]
+async fn derender_chat_model_omitted_resolves_served_name() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("abc");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({ "generate_response": derender_generate_response(json!(token_ids)) }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["model"], "render-model");
+}
+
+#[tokio::test]
+async fn derender_chat_oversized_token_ids_rejected() {
+    let mut app = test_derender_app();
+    // The fixture serves max_model_len=128.
+    let oversized_ids = vec![42_u32; 129];
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!(oversized_ids)),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("max_model_len"));
+}
+
+#[tokio::test]
+async fn derender_chat_too_many_choices_rejected() {
+    let mut app = test_derender_app();
+    let choices: Vec<serde_json::Value> = (0..16_385)
+        .map(|index| json!({"index": index, "token_ids": [42], "finish_reason": "stop"}))
+        .collect();
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": {
+                "request_id": "test-choices-bound",
+                "choices": choices,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("choices count"));
+}
+
+#[tokio::test]
+async fn derender_chat_negative_token_ids_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, _) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!([-1, 42, 100])),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn derender_chat_oversized_logprobs_rejected() {
+    let mut app = test_derender_app();
+    let content: Vec<serde_json::Value> = (0..129)
+        .map(|_| json!({"token": "x", "logprob": -1.0, "bytes": null, "top_logprobs": []}))
+        .collect();
+    let mut response = derender_generate_response(json!([42]));
+    response["choices"][0]["logprobs"] = json!({ "content": content });
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({ "model": "render-model", "generate_response": response }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("logprobs.content length"));
+}
+
+#[tokio::test]
+async fn derender_chat_oversized_top_logprobs_rejected() {
+    let mut app = test_derender_app();
+    // The fixture defaults to max_logprobs=20.
+    let top_logprobs: Vec<serde_json::Value> = (0..25)
+        .map(|i| json!({"token": format!("t{i}"), "logprob": -(i as f32), "bytes": null}))
+        .collect();
+    let mut response = derender_generate_response(json!([42]));
+    response["choices"][0]["logprobs"] = json!({
+        "content": [{
+            "token": "x",
+            "logprob": -1.0,
+            "bytes": null,
+            "top_logprobs": top_logprobs,
+        }],
+    });
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({ "model": "render-model", "generate_response": response }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(message.contains("top_logprobs count"), "{message}");
+    assert!(message.contains("max_logprobs"), "{message}");
+}
+
+#[tokio::test]
+async fn derender_chat_no_chat_request_falls_back_to_plain_detok() {
+    // Parser configured, but without chat_request the endpoint must plain
+    // detokenize; the fake think markers are regular tokens, so they survive
+    // skip_special_tokens=true decoding.
+    let mut app = test_derender_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("deepseek_r1".to_string()),
+    );
+    let token_ids = derender_token_ids("<think>raw</think>text");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!(token_ids)),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let message = &json["choices"][0]["message"];
+    assert_eq!(message["content"], "<think>raw</think>text");
+    assert_eq!(message["reasoning"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn derender_completion_roundtrip() {
+    let mut app = test_derender_app();
+    let ids1 = derender_token_ids("ab");
+    let ids2 = derender_token_ids("cd");
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [
+                derender_generate_response(json!(ids1)),
+                {
+                    "request_id": "cmpl-second",
+                    "choices": [{
+                        "index": 0,
+                        "token_ids": ids2,
+                        "finish_reason": "length",
+                    }],
+                },
+            ],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["object"], "text_completion");
+    // The response id comes from the first generate response.
+    assert_eq!(json["id"], "chatcmpl-derender-test");
+    // Choices are flattened across responses and re-indexed from 0.
+    assert_eq!(json["choices"][0]["index"], 0);
+    assert_eq!(json["choices"][0]["text"], "ab");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(json["choices"][1]["index"], 1);
+    assert_eq!(json["choices"][1]["text"], "cd");
+    assert_eq!(json["choices"][1]["finish_reason"], "length");
+}
+
+#[tokio::test]
+async fn derender_completion_usage_aggregation() {
+    let mut app = test_derender_app();
+    let ids1 = derender_token_ids("abc");
+    let ids2 = derender_token_ids("defg");
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [
+                derender_generate_response(json!(ids1)),
+                derender_generate_response(json!(ids2)),
+            ],
+            "prompt_tokens": [5, 10],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["usage"]["prompt_tokens"], 15);
+    assert_eq!(json["usage"]["completion_tokens"], 7);
+    assert_eq!(json["usage"]["total_tokens"], 22);
+}
+
+#[tokio::test]
+async fn derender_completion_prompt_tokens_length_mismatch_rejected() {
+    let mut app = test_derender_app();
+    let ids = derender_token_ids("abc");
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [derender_generate_response(json!(ids))],
+            "prompt_tokens": [5, 10],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("prompt_tokens length (2) must equal generate_responses length (1)")
+    );
+}
+
+#[tokio::test]
+async fn derender_completion_empty_generate_responses_rejected() {
+    let mut app = test_derender_app();
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({ "model": "render-model", "generate_responses": [] }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("generate_responses must not be empty")
+    );
+}
+
+#[tokio::test]
+async fn derender_completion_too_many_generate_responses_rejected() {
+    let mut app = test_derender_app();
+    let responses: Vec<serde_json::Value> = (0..16_385)
+        .map(|i| {
+            json!({
+                "request_id": format!("gen-{i}"),
+                "choices": [{"index": 0, "token_ids": [42], "finish_reason": "stop"}],
+            })
+        })
+        .collect();
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({ "model": "render-model", "generate_responses": responses }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("generate_responses count"));
+}
+
+#[tokio::test]
+async fn derender_completion_logprobs() {
+    let mut app = test_derender_app();
+    let mut response = derender_generate_response(json!(derender_token_ids("h")));
+    response["choices"][0]["logprobs"] = json!({
+        "content": [{
+            "token": "token_id:104",
+            "logprob": -1.0,
+            "bytes": null,
+            "top_logprobs": [{"token": "token_id:105", "logprob": -2.0, "bytes": null}],
+        }],
+    });
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({ "model": "render-model", "generate_responses": [response] }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let logprobs = &json["choices"][0]["logprobs"];
+    // Chat-shaped logprobs flatten into the completions parallel lists.
+    assert_eq!(logprobs["tokens"], json!(["h"]));
+    assert_eq!(logprobs["token_logprobs"], json!([-1.0]));
+    assert_eq!(logprobs["top_logprobs"], json!([{"i": -2.0}]));
+    assert_eq!(logprobs["text_offset"], json!([0]));
+}
+
+#[tokio::test]
+async fn derender_completion_kv_transfer_params_passthrough() {
+    let mut app = test_derender_app();
+    let mut response = derender_generate_response(json!(derender_token_ids("abc")));
+    response["kv_transfer_params"] = json!({"node": "abc"});
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({ "model": "render-model", "generate_responses": [response] }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["kv_transfer_params"], json!({"node": "abc"}));
+}
+
+#[tokio::test]
+async fn derender_completion_kv_transfer_params_disagreement_nulled() {
+    let mut app = test_derender_app();
+    let mut first = derender_generate_response(json!(derender_token_ids("ab")));
+    first["kv_transfer_params"] = json!({"node": "a"});
+    let mut second = derender_generate_response(json!(derender_token_ids("cd")));
+    second["kv_transfer_params"] = json!({"node": "b"});
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({ "model": "render-model", "generate_responses": [first, second] }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["kv_transfer_params"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn derender_completion_oversized_token_ids_rejected() {
+    let mut app = test_derender_app();
+    let oversized_ids = vec![42_u32; 129];
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [{
+                "request_id": "gen-0",
+                "choices": [{
+                    "index": 0,
+                    "token_ids": oversized_ids,
+                    "finish_reason": "stop",
+                }],
+            }],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("max_model_len"));
+}
+
+#[tokio::test]
+async fn derender_stream_invalid_body_rejected() {
+    let mut app = test_derender_app();
+
+    // stream=true is not supported until phase 3: the non-streaming request
+    // body's `stream` deserializer rejects it outright.
+    let (status, _) =
+        derender_completion(&mut app, json!({ "stream": true, "model": "render-model" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A non-object JSON body.
+    let (status, _) = derender_completion(&mut app, json!([1, 2, 3])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn derender_chat_usage_overflow_rejected() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("abc");
+
+    let (status, json) = derender_chat(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_response": derender_generate_response(json!(token_ids)),
+            "prompt_tokens": u64::MAX,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("overflows the token counter"),
+        "{json}"
+    );
+}
+
+#[tokio::test]
+async fn derender_completion_echo_prepends_prompt() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("there");
+
+    for prompt in [json!("hi "), json!(derender_token_ids("hi "))] {
+        let (status, json) = derender_completion(
+            &mut app,
+            json!({
+                "model": "render-model",
+                "generate_responses": [derender_generate_response(json!(token_ids))],
+                "completion_request": {
+                    "model": "render-model",
+                    "prompt": prompt,
+                    "echo": true,
+                    "max_tokens": 5,
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["choices"][0]["text"], "hi there");
+    }
+}
+
+#[tokio::test]
+async fn derender_completion_prompt_only_echo_hides_internal_token() {
+    let mut app = test_derender_app();
+    // echo + max_tokens=0 generates one internal token to drive the engine to
+    // a finished event; the derendered choice must expose just the prompt.
+    let token_ids = derender_token_ids("x");
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [derender_generate_response(json!(token_ids))],
+            "completion_request": {
+                "model": "render-model",
+                "prompt": "hi ",
+                "echo": true,
+                "max_tokens": 0,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["choices"][0]["text"], "hi ");
+}
+
+#[tokio::test]
+async fn derender_completion_prompt_only_echo_returns_prompt_logprobs() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("x");
+    let mut response = derender_generate_response(json!(token_ids));
+    // add_special_tokens defaults to true, so the prompt tokenizes to
+    // [BOS, 104, 105]; the first position carries no logprobs, matching the
+    // engine's prompt-logprobs convention.
+    response["prompt_logprobs"] = json!([
+        null,
+        {"104": {"logprob": -0.5, "rank": 1, "decoded_token": "token_id:104"}},
+        {"105": {"logprob": -0.25, "rank": 1, "decoded_token": "token_id:105"}},
+    ]);
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [response],
+            "completion_request": {
+                "model": "render-model",
+                "prompt": "hi",
+                "echo": true,
+                "max_tokens": 0,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let logprobs = &json["choices"][0]["logprobs"];
+    assert_eq!(logprobs["tokens"], json!(["<bos>", "h", "i"]), "{json}");
+    assert_eq!(
+        logprobs["token_logprobs"],
+        json!([null, -0.5, -0.25]),
+        "{json}"
+    );
+    // "<bos>" is 5 characters wide.
+    assert_eq!(logprobs["text_offset"], json!([0, 5, 6]), "{json}");
+}
+
+#[tokio::test]
+async fn derender_completion_echo_shifts_logprob_offsets() {
+    let mut app = test_derender_app();
+    let token_ids = derender_token_ids("hi");
+    let mut response = derender_generate_response(json!(token_ids));
+    response["choices"][0]["logprobs"] = json!({
+        "content": [
+            {"token": "token_id:104", "logprob": -1.0, "top_logprobs": []},
+            {"token": "token_id:105", "logprob": -2.0, "top_logprobs": []},
+        ],
+    });
+
+    let (status, json) = derender_completion(
+        &mut app,
+        json!({
+            "model": "render-model",
+            "generate_responses": [response],
+            "completion_request": {
+                "model": "render-model",
+                "prompt": "say ",
+                "echo": true,
+                "max_tokens": 5,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["choices"][0]["text"], "say hi");
+    let logprobs = &json["choices"][0]["logprobs"];
+    // Without prompt logprobs in the response, the generated-token offsets are
+    // shifted past the echoed prompt ("say " is 4 characters).
+    assert_eq!(logprobs["text_offset"], json!([4, 5]), "{json}");
+    assert_eq!(logprobs["tokens"], json!(["h", "i"]), "{json}");
 }
