@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import DeviceConfig, VllmConfig, get_current_vllm_config
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.v1.worker.gpu_model_runner import _get_parameter_for_reload
 from vllm.v1.worker.gpu_worker import Worker
@@ -20,8 +20,13 @@ from vllm.v1.worker.gpu_worker import Worker
 class _RecordingEngine:
     """Minimal stand-in for a weight transfer engine."""
 
-    def __init__(self, raise_on_update: bool = False):
+    def __init__(
+        self,
+        raise_on_update: bool = False,
+        raise_on_finish: bool = False,
+    ):
         self.raise_on_update = raise_on_update
+        self.raise_on_finish = raise_on_finish
         self.started = False
         self.finished = False
         self.reset_count = 0
@@ -45,6 +50,8 @@ class _RecordingEngine:
     def finish_weight_update(self) -> None:
         self._record_config()
         self.finished = True
+        if self.raise_on_finish:
+            raise ValueError("finish boom")
 
     def reset_weight_update_target(self) -> None:
         self.reset_count += 1
@@ -64,7 +71,7 @@ class _RecordingModelRunner:
 
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker = object.__new__(Worker)
-    worker.vllm_config = VllmConfig()
+    worker.vllm_config = VllmConfig(device_config=DeviceConfig(device="cpu"))
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
     worker._weight_update_is_draft = False
@@ -116,6 +123,7 @@ def test_start_update_finish_delegates_to_engine():
     assert worker._weight_update_active is False
     assert engine.seen_configs == [worker.vllm_config] * 3
     assert worker.model_runner.reset_lora_calls == 1
+    assert worker._weight_update_is_draft is False
 
 
 def test_finish_draft_session_keeps_lora_state():
@@ -128,6 +136,7 @@ def test_finish_draft_session_keeps_lora_state():
     Worker.finish_weight_update(worker)
 
     assert worker.model_runner.reset_lora_calls == 0
+    assert worker._weight_update_is_draft is False
 
 
 def test_double_start_raises():
@@ -160,6 +169,32 @@ def test_update_resets_active_on_error():
     # A failed update ends the session so the next start is clean.
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_finish_error_resets_target_and_allows_next_session(is_draft):
+    engine = _RecordingEngine(raise_on_finish=True)
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    worker._set_draft_weight_update_target = lambda: None
+
+    if is_draft:
+        Worker.start_draft_weight_update(worker)
+    else:
+        Worker.start_weight_update(worker)
+    with pytest.raises(ValueError, match="finish boom"):
+        Worker.finish_weight_update(worker)
+
+    assert engine.reset_count == 1
+    assert worker._weight_update_active is False
+    assert worker._weight_update_is_draft is False
+    assert worker.model_runner.reset_lora_calls == 0
+
+    engine.raise_on_finish = False
+    Worker.start_weight_update(worker)
+    Worker.finish_weight_update(worker)
+    assert worker.model_runner.reset_lora_calls == 1
 
 
 def test_missing_engine_raises():
