@@ -591,6 +591,40 @@ def test_no_mm_input_chunking():
         )
 
 
+def test_no_mm_input_chunking_at_item_boundary():
+    """A chunk starting exactly at a multimodal item must not split it.
+
+    Regression test for issue #52306: the rollback guard only fired while
+    ``num_computed_tokens < start_pos``, so a chunk beginning exactly at the
+    item skipped the check and could cover only part of it - silently breaking
+    models with bidirectional attention over the item.
+    """
+    mm_positions = [[PlaceholderRange(offset=400, length=800)]]
+
+    def ask(num_computed_tokens: int, num_new_tokens: int) -> int:
+        # A fresh scheduler per call: the encoder cache is stateful.
+        scheduler = create_scheduler(
+            model="llava-hf/llava-1.5-7b-hf",
+            max_num_batched_tokens=1024,
+            disable_chunked_mm_input=True,
+            max_model_len=2048,
+        )
+        request = create_requests(
+            num_requests=1, num_tokens=1200, mm_positions=mm_positions
+        )[0]
+        return scheduler._try_schedule_encoder_inputs(
+            request, num_computed_tokens, num_new_tokens, encoder_compute_budget=100_000
+        )[1]
+
+    # Starts before the item and cannot reach past it: stop just before it.
+    assert ask(0, 500) == 400
+    # Starts exactly at the item and cannot cover it: schedule nothing rather
+    # than half an item.
+    assert ask(400, 500) == 0
+    # Starts exactly at the item and covers it: schedule it.
+    assert ask(400, 800) == 800
+
+
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
 def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     """Test scheduling behavior with concurrent partial requests.
