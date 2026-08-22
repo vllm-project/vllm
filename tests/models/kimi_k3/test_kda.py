@@ -434,6 +434,29 @@ def test_packed_kda_decode_correctness(
     assert_close("ht", dense_state, packed_state, 1e-3, err_atol=1e-3)
 
 
+@pytest.mark.parametrize("impl", PACKED_DECODE_IMPLS.keys())
+@torch.inference_mode()
+def test_packed_kda_decode_supports_large_batch_head_grid(impl: str):
+    H, D = 96, 128
+    num_seqs = 65535 // H + 1
+
+    def empty(*shape: int, dtype: torch.dtype = torch.bfloat16):
+        return torch.empty(*shape, dtype=dtype, device=DEVICE)
+
+    packed_out, _ = PACKED_DECODE_IMPLS[impl](
+        mixed_qkv=empty(num_seqs, 3 * H * D),
+        raw_g=empty(1, num_seqs, H, D),
+        raw_beta=empty(1, num_seqs, H),
+        A_log=empty(H, dtype=torch.float32),
+        dt_bias=empty(H, D, dtype=torch.float32),
+        lower_bound=-5.0,
+        initial_state=empty(1, H, D, D, dtype=torch.float32),
+        state_indices=torch.zeros(num_seqs, dtype=torch.int32, device=DEVICE),
+    )
+
+    assert packed_out.count_nonzero().item() == 0
+
+
 @pytest.mark.parametrize(
     ("H", "fuse_gate"),
     [(12, True), (12, False), (12, None), (96, None)],
