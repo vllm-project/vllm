@@ -48,6 +48,8 @@ DSML_INVOKE_PREFIX = f'<{_DSML}invoke name="'
 DSML_INVOKE_NAME_END = '">'
 DSML_INVOKE_END = f"</{_DSML}invoke>"
 DSML_PARAM_CLOSE = f"</{_DSML}parameter>"
+DSML_FOREIGN_TOOL_START = f"<{_DSML}function_calls>"
+DSML_FOREIGN_TOOL_END = f"</{_DSML}function_calls>"
 
 _ESCAPED_DSML = re.escape(_DSML)
 _PARAM_RE = re.compile(
@@ -135,6 +137,8 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
             "INVOKE_NAME_END": DSML_INVOKE_NAME_END,
             "INVOKE_END": DSML_INVOKE_END,
             "PARAM_CLOSE": DSML_PARAM_CLOSE,
+            "FOREIGN_START": DSML_FOREIGN_TOOL_START,
+            "FOREIGN_END": DSML_FOREIGN_TOOL_END,
         },
         token_id_terminals={
             "THINK_START": DSML_THINK_START,
@@ -169,6 +173,38 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
                 (),
+            ),
+            # Keep V3.2 wrappers verbatim so their inner invokes cannot enter
+            # the V4 orphan-recovery path.
+            (ParserState.CONTENT, "FOREIGN_START"): Transition(
+                ParserState.FOREIGN_BLOCK,
+                (EventType.TEXT_CHUNK,),
+            ),
+            (ParserState.FOREIGN_BLOCK, "FOREIGN_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TEXT_CHUNK,),
+            ),
+            (ParserState.FOREIGN_BLOCK, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (),
+            ),
+            (ParserState.REASONING, "FOREIGN_START"): Transition(
+                ParserState.FOREIGN_REASONING_BLOCK,
+                (EventType.REASONING_CHUNK,),
+            ),
+            (
+                ParserState.FOREIGN_REASONING_BLOCK,
+                "FOREIGN_END",
+            ): Transition(
+                ParserState.REASONING,
+                (EventType.REASONING_CHUNK,),
+            ),
+            (
+                ParserState.FOREIGN_REASONING_BLOCK,
+                "TOOL_START",
+            ): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (EventType.REASONING_END,),
             ),
             # DeepSeek V4 can intermittently omit or corrupt the outer
             # <｜DSML｜tool_calls> wrapper while still emitting a complete
@@ -214,6 +250,8 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
         content_events={
             ParserState.CONTENT: EventType.TEXT_CHUNK,
             ParserState.REASONING: EventType.REASONING_CHUNK,
+            ParserState.FOREIGN_BLOCK: EventType.TEXT_CHUNK,
+            ParserState.FOREIGN_REASONING_BLOCK: EventType.REASONING_CHUNK,
             ParserState.TOOL_NAME: EventType.TOOL_NAME,
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
         },

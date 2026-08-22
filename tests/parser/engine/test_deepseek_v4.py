@@ -23,6 +23,8 @@ from tests.parser.engine.streaming_helpers import (
 )
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.deepseek_v4 import (
+    DSML_FOREIGN_TOOL_END,
+    DSML_FOREIGN_TOOL_START,
     DSML_INVOKE_END,
     DSML_INVOKE_NAME_END,
     DSML_INVOKE_PREFIX,
@@ -554,6 +556,10 @@ def _tool_calls(*invokes):
     return DSML_TOOL_START + "\n".join(invokes) + DSML_TOOL_END
 
 
+def _foreign_tool_calls(*invokes):
+    return DSML_FOREIGN_TOOL_START + "\n".join(invokes) + DSML_FOREIGN_TOOL_END
+
+
 def _recovery_tool():
     return _make_tool("get_weather", {"city": {"type": "string"}})
 
@@ -571,6 +577,20 @@ def _content_recovery_parser(mock_tokenizer, *tools):
 
 
 class TestMalformedWrapperRecovery:
+    def test_foreign_wrapper_does_not_recover_inner_invoke(
+        self, mock_tokenizer, mock_request
+    ):
+        tool = _recovery_tool()
+        mock_request.tools = [tool]
+        parser = _content_recovery_parser(mock_tokenizer, tool)
+        text = _foreign_tool_calls(_recovery_invoke())
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content == text
+
     def test_missing_start_wrapper_recovers_declared_tool(
         self, mock_tokenizer, mock_request
     ):
@@ -751,9 +771,7 @@ class TestMalformedWrapperRecovery:
         mock_request.tools = tools
         parser = _content_recovery_parser(mock_tokenizer, *tools)
         text = (
-            _recovery_invoke()
-            + _recovery_invoke(name="get_forecast")
-            + DSML_TOOL_END
+            _recovery_invoke() + _recovery_invoke(name="get_forecast") + DSML_TOOL_END
         )
 
         result = parser.extract_tool_calls(text, mock_request)
@@ -1273,6 +1291,81 @@ class TestDelegatingParserLargeDelta:
 
 
 class TestDelegatingMalformedWrapperRecovery:
+    def test_foreign_wrapper_in_reasoning_cannot_execute_inner_invoke(
+        self, mock_tokenizer, mock_request
+    ):
+        tool = _recovery_tool()
+        mock_request.tools = [tool]
+        mock_request.tool_choice = "auto"
+        parser = _DeepSeekV4Delegating(
+            mock_tokenizer,
+            tools=[tool],
+            chat_template_kwargs={"thinking": True},
+        )
+        text = "Still thinking.\n" + _foreign_tool_calls(_recovery_invoke())
+        delta = parser.parse_delta(
+            text,
+            [],
+            mock_request,
+            prompt_token_ids=[],
+            finished=True,
+        )
+        output = collect_output([delta])
+
+        assert output.reasoning == text
+        assert output.content == ""
+        assert output.tool_calls == []
+
+    def test_unclosed_foreign_wrapper_finishes_as_reasoning(
+        self, mock_tokenizer, mock_request
+    ):
+        tool = _recovery_tool()
+        mock_request.tools = [tool]
+        mock_request.tool_choice = "auto"
+        parser = _DeepSeekV4Delegating(
+            mock_tokenizer,
+            tools=[tool],
+            chat_template_kwargs={"thinking": True},
+        )
+        text = "Still thinking.\n" + DSML_FOREIGN_TOOL_START + "quoted output"
+        delta = parser.parse_delta(
+            text,
+            [],
+            mock_request,
+            prompt_token_ids=[],
+            finished=True,
+        )
+        output = collect_output([delta])
+
+        assert output.reasoning == text
+        assert output.content == ""
+        assert output.tool_calls == []
+
+    def test_native_wrapper_escapes_unclosed_foreign_reasoning_block(
+        self, mock_tokenizer, mock_request
+    ):
+        tool = _recovery_tool()
+        mock_request.tools = [tool]
+        mock_request.tool_choice = "auto"
+        parser = _DeepSeekV4Delegating(
+            mock_tokenizer,
+            tools=[tool],
+            chat_template_kwargs={"thinking": True},
+        )
+        text = DSML_FOREIGN_TOOL_START + _tool_calls(_recovery_invoke())
+        delta = parser.parse_delta(
+            text,
+            [],
+            mock_request,
+            prompt_token_ids=[],
+            finished=True,
+        )
+        output = collect_output([delta])
+
+        assert output.reasoning == DSML_FOREIGN_TOOL_START
+        assert output.content == ""
+        assert [call["name"] for call in output.tool_calls] == ["get_weather"]
+
     def test_complete_declared_invoke_commits_before_think_end(
         self, mock_tokenizer, mock_request
     ):
@@ -1293,7 +1386,7 @@ class TestDelegatingMalformedWrapperRecovery:
         )
         output = collect_output([delta])
 
-        assert output.reasoning == "Still thinking.\n"
+        assert output.reasoning == "Still thinking."
         assert output.content == ""
         assert [call["name"] for call in output.tool_calls] == ["get_weather"]
 

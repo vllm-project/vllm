@@ -324,10 +324,15 @@ class StreamingParserEngine:
                     )
                 )
             self.state = ParserState.CONTENT
-        elif self.state == ParserState.REASONING:
+        elif self.state in (
+            ParserState.REASONING,
+            ParserState.FOREIGN_REASONING_BLOCK,
+        ):
             events.append(
                 SemanticEvent(EventType.REASONING_END, tool_index=self.tool_index)
             )
+            self.state = ParserState.CONTENT
+        elif self.state == ParserState.FOREIGN_BLOCK:
             self.state = ParserState.CONTENT
         elif self.state == ParserState.MESSAGE_HEADER:
             if self._message_header_buffer:
