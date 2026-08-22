@@ -7,7 +7,7 @@ Abstract interfaces and data types for the secondary tiering layer.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import numpy as np
 
@@ -81,6 +81,13 @@ class JobResult:
     transfer_time: float | None = None
 
 
+class JobMetadata(NamedTuple):
+    """A TransferJob together with the secondary tier index it belongs to."""
+
+    transfer_job: TransferJob
+    tier_idx: int
+
+
 class ParentManager(ABC):
     """Interface for secondary tiers to call back into the tiering manager.
 
@@ -112,7 +119,7 @@ class ParentManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> TransferJob: ...
+    ) -> TransferJob | None: ...
 
     @abstractmethod
     def on_request_finished(self, req_context: ReqContext) -> None: ...

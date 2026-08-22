@@ -39,7 +39,9 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.tiering.admission.base import TieringAdmissionPolicy
 from vllm.v1.kv_offload.tiering.base import (
+    JobMetadata,
     JobResult,
     SecondaryTierManager,
     TieringOffloadingMetrics,
@@ -1211,6 +1213,210 @@ class TestTieringOffloadingManager:
         ctx = ReqContext(req_id="r2", load_tier_filter=load_tier_filter)
         assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT_PENDING
         self.secondary_tier1.lookup.assert_called()
+
+
+class _SpyAdmissionPolicy(TieringAdmissionPolicy):
+    """Admits or rejects everything per a fixed flag; records every call
+    so tests can assert on what the manager actually passed through."""
+
+    def __init__(self, admit: bool = True):
+        self.admit = admit
+        self.admitted: list[JobMetadata] = []
+        self.completed: list[tuple[JobMetadata, JobResult]] = []
+        self.reset_calls = 0
+
+    def should_admit(self, job: JobMetadata) -> bool:
+        return self.admit
+
+    def on_admitted(self, job: JobMetadata) -> None:
+        self.admitted.append(job)
+
+    def on_completed(self, job: JobMetadata, result: JobResult) -> None:
+        self.completed.append((job, result))
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+
+
+class TestAdmissionPolicyWiring:
+    """TieringOffloadingManager consults the admission policy at every
+    job-submission and lifecycle point it's supposed to."""
+
+    @pytest.fixture
+    def manager_setup(self):
+        mock_region = _mock_mmap_region(2)
+        self.primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=2, mmap_region=mock_region
+        )
+        self.secondary_tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="example",
+        )
+        self.policy = _SpyAdmissionPolicy(admit=True)
+        self.manager = TieringOffloadingManager(
+            primary_tier=self.primary_tier,
+            secondary_tiers=[self.secondary_tier],
+            admission_policy=self.policy,
+        )
+
+    def _simulate_on_schedule_end(self):
+        ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        self.manager.on_schedule_end(ctx)
+        list(self.manager.take_events())
+
+    def test_cascade_admitted_calls_on_admitted_and_pins_block(self, manager_setup):
+        block = to_keys([0])[0]
+        self.manager.on_new_request(_CTX)
+        self.manager.prepare_store([block], _CTX)
+        self.manager.complete_store([block], _CTX, success=True)
+
+        assert len(self.policy.admitted) == 1
+        admitted_job = self.policy.admitted[0]
+        assert admitted_job.tier_idx == 0
+        assert list(admitted_job.transfer_job.keys) == [block]
+        # prepare_read() pinned the block for the async cascade transfer.
+        assert self.primary_tier._policy.get(block).ref_cnt == 1
+
+    def test_cascade_rejected_returns_none_without_pinning(self, manager_setup):
+        self.policy.admit = False
+        block = to_keys([0])[0]
+        self.manager.on_new_request(_CTX)
+        self.manager.prepare_store([block], _CTX)
+        self.manager.complete_store([block], _CTX, success=True)
+
+        assert self.policy.admitted == []
+        # complete_store() alone sets ref_cnt to 0 (ready); a rejected
+        # cascade never calls prepare_read(), so it stays at 0, not pinned.
+        assert self.primary_tier._policy.get(block).ref_cnt == 0
+
+    def test_cascade_rejected_skips_tier_submission(self, manager_setup):
+        """complete_store()'s cascade loop must not blow up or call
+        submit_store when the admission policy rejects the job."""
+        self.policy.admit = False
+        block = to_keys([0])[0]
+        self.manager.on_new_request(_CTX)
+        self.manager.prepare_store([block], _CTX)
+
+        self.manager.complete_store([block], _CTX, success=True)
+
+        assert self.secondary_tier.get_num_blocks() == 0
+
+    def test_promotion_rejected_returns_false_without_allocating(self, manager_setup):
+        self.policy.admit = False
+        block = to_keys([0])[0]
+        self.secondary_tier.blocks[block] = True
+
+        result = self.manager.lookup(block, _CTX)
+
+        assert result is LookupResult.MISS
+        assert self.policy.admitted == []
+        # No primary slot was reserved for the rejected promotion.
+        assert self.primary_tier._policy.get(block) is None
+
+    def test_promotion_admitted_calls_on_admitted(self, manager_setup):
+        block = to_keys([0])[0]
+        self.secondary_tier.blocks[block] = True
+
+        result = self.manager.lookup(block, _CTX)
+
+        assert result is LookupResult.HIT_PENDING
+        assert len(self.policy.admitted) == 1
+        admitted_job = self.policy.admitted[0]
+        assert admitted_job.tier_idx == 0
+        assert admitted_job.transfer_job.is_promotion is True
+        assert list(admitted_job.transfer_job.keys) == [block]
+
+    def test_on_completed_called_for_cascade_and_promotion(self, manager_setup):
+        cascade_block, promotion_block = to_keys([0, 1])
+        self.secondary_tier.blocks[promotion_block] = True
+
+        # Cascade: store cascade_block through to the secondary tier.
+        self.manager.on_new_request(_CTX)
+        self.manager.prepare_store([cascade_block], _CTX)
+        self.manager.complete_store([cascade_block], _CTX, success=True)
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        # Promotion: pull promotion_block up from the secondary tier.
+        assert self.manager.lookup(promotion_block, _CTX) is LookupResult.HIT_PENDING
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        completed_is_promotion = {
+            job.transfer_job.is_promotion for job, _result in self.policy.completed
+        }
+        assert completed_is_promotion == {True, False}
+
+    def test_reset_cache_calls_policy_reset(self, manager_setup):
+        self.manager.reset_cache()
+
+        assert self.policy.reset_calls == 1
+
+    def test_cascade_tier_idx_matches_actual_tier(self, manager_setup):
+        """A per-tier policy must see each tier's real index. A bug that
+        hardcodes tier_idx (e.g. always 0) would slip past every other
+        test in this class, since they all use a single-tier fixture."""
+        mock_region = _mock_mmap_region(2)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=2, mmap_region=mock_region
+        )
+        tier0 = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="example",
+        )
+        tier1 = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="example",
+        )
+        policy = _SpyAdmissionPolicy(admit=True)
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[tier0, tier1],
+            admission_policy=policy,
+        )
+        block = to_keys([0])[0]
+        manager.on_new_request(_CTX)
+        manager.prepare_store([block], _CTX)
+        manager.complete_store([block], _CTX, success=True)
+
+        seen_tier_idxs = {job.tier_idx for job in policy.admitted}
+        assert seen_tier_idxs == {0, 1}
+
+    def test_promotion_tier_idx_matches_actual_tier(self, manager_setup):
+        """Same hardening as the cascade version, for the promotion path:
+        the block only exists in the second tier, so a hardcoded tier_idx
+        would report the wrong tier even though promotion still succeeds."""
+        mock_region = _mock_mmap_region(2)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=2, mmap_region=mock_region
+        )
+        tier0 = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="example",
+        )
+        tier1 = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="example",
+        )
+        policy = _SpyAdmissionPolicy(admit=True)
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[tier0, tier1],
+            admission_policy=policy,
+        )
+        block = to_keys([0])[0]
+        tier1.blocks[block] = True
+
+        result = manager.lookup(block, _CTX)
+
+        assert result is LookupResult.HIT_PENDING
+        assert len(policy.admitted) == 1
+        assert policy.admitted[0].tier_idx == 1
 
 
 class TestTieringOffloadingWithoutSecondaryTiers:

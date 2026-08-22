@@ -23,7 +23,6 @@ Key Design Principles:
 import time
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import NamedTuple
 
 import numpy as np
 from typing_extensions import override
@@ -47,8 +46,11 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.tiering.admission.always import AlwaysAdmitPolicy
+from vllm.v1.kv_offload.tiering.admission.base import TieringAdmissionPolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
+    JobMetadata,
     JobResult,
     ParentManager,
     SecondaryTierManager,
@@ -74,11 +76,6 @@ class RequestState:
     pending_primary_stores: int = 0
     is_finished: bool = False
     request_level_tiers: set[int] | None = None
-
-
-class JobMetadata(NamedTuple):
-    transfer_job: TransferJob
-    tier_idx: int
 
 
 class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
@@ -154,7 +151,7 @@ class _SecondaryTierFacingParent(ParentManager):
 
     def create_store_job(
         self, keys: Collection[OffloadKey], req_context: ReqContext
-    ) -> TransferJob:
+    ) -> TransferJob | None:
         return self._m.create_store_job(keys, req_context, self._origin_idx)
 
     def on_request_finished(self, req_context: ReqContext) -> None:
@@ -183,6 +180,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
+        admission_policy: TieringAdmissionPolicy | None = None,
     ):
         """
         Initialize the TieringOffloadingManager.
@@ -191,9 +189,12 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
+            admission_policy: Gates cascade/promotion job submission before
+                            it happens. Defaults to admitting everything.
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
+        self._admission_policy = admission_policy or AlwaysAdmitPolicy()
 
         self._job_id_counter: int = 0
         # Job tracking: maps job_id to metadata for all in-flight transfers.
@@ -320,6 +321,7 @@ class TieringOffloadingManager(OffloadingManager):
                 )
                 transfer_job = job_metadata.transfer_job
                 self._metrics.on_job_finished(job_metadata, completed_job)
+                self._admission_policy.on_completed(job_metadata, completed_job)
 
                 if transfer_job.is_promotion:
                     # secondary→primary transfer (promotion) completed.
@@ -439,6 +441,18 @@ class TieringOffloadingManager(OffloadingManager):
         Returns:
             True if promotion was initiated, False if primary tier is full.
         """
+        # Admission check first (cheap, side-effect free): don't allocate
+        # primary space for a promotion the policy will reject anyway.
+        probe = TransferJob(
+            job_id=self._next_job_id(),
+            keys=[key],
+            block_ids=np.array([], dtype=np.int64),
+            is_promotion=True,
+            req_context=req_context,
+        )
+        if not self._admission_policy.should_admit(JobMetadata(probe, tier_idx)):
+            return False
+
         # Allocate space in primary tier for promoted block.
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
@@ -450,6 +464,8 @@ class TieringOffloadingManager(OffloadingManager):
             # rather than retrying indefinitely.
             self._metrics.on_promotion_allocation_failure()
             return False
+
+        self._admission_policy.on_admitted(JobMetadata(probe, tier_idx))
 
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
@@ -622,6 +638,8 @@ class TieringOffloadingManager(OffloadingManager):
 
         for tier_idx in request_level_tiers:
             job_metadata = self.create_store_job(ready_keys, req_context, tier_idx)
+            if job_metadata is None:
+                continue
             tier = self.secondary_tiers[tier_idx]
             tier.submit_store(job_metadata)
 
@@ -661,6 +679,8 @@ class TieringOffloadingManager(OffloadingManager):
             # secondary tier.
             for tier_idx, tier in enumerate(self.secondary_tiers):
                 job_metadata = self.create_store_job(keys, req_context, tier_idx)
+                if job_metadata is None:
+                    continue
                 tier.submit_store(job_metadata)
 
         # Note: The async transfers are now in flight. Their completion is
@@ -676,28 +696,34 @@ class TieringOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         tier_idx: int = 0,
-    ) -> TransferJob:
+    ) -> TransferJob | None:
         """Pin blocks in the primary tier and create a tracked store job.
 
         Calls prepare_read() to increment ref_cnt (protecting blocks
         from eviction during the async transfer), allocates a job ID,
         and registers the job in _jobs.
 
-        The caller is responsible for the actual data transfer and
+        Returns None if the admission policy rejects the job; the caller
+        must not treat this as an error, just as "not submitted this round."
+        Otherwise the caller is responsible for the actual data transfer and
         reporting completion via get_finished_jobs().
         """
-        primary_blocks_spec = self.primary_tier.prepare_read(keys, req_context)
-        assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
-        job_id = self._next_job_id()
-        job_metadata = TransferJob(
-            job_id=job_id,
+        transfer_job = TransferJob(
+            job_id=self._next_job_id(),
             keys=keys,
-            block_ids=primary_blocks_spec.block_ids,
+            block_ids=np.array([], dtype=np.int64),
             is_promotion=False,
             req_context=req_context,
         )
-        self._register_job(job_metadata, tier_idx)
-        return job_metadata
+        if not self._admission_policy.should_admit(JobMetadata(transfer_job, tier_idx)):
+            return None
+
+        primary_blocks_spec = self.primary_tier.prepare_read(keys, req_context)
+        assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
+        transfer_job.block_ids = primary_blocks_spec.block_ids
+        self._register_job(transfer_job, tier_idx)
+        self._admission_policy.on_admitted(JobMetadata(transfer_job, tier_idx))
+        return transfer_job
 
     @override
     def on_new_request(
@@ -843,6 +869,7 @@ class TieringOffloadingManager(OffloadingManager):
         # reset below invalidates; their submit_load() has not yet been
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
+        self._admission_policy.reset()
         self._metrics.assert_idle()
 
         finished_req_ids = []
