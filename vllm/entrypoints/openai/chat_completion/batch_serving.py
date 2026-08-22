@@ -11,6 +11,7 @@ from fastapi import Request
 from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
+    ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
     ChatMessage,
@@ -119,16 +120,20 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             for messages in request.messages
         ]
 
-        parser: Parser | None = None
+        # One parser per conversation: parser state and request-derived
+        # configuration are per-conversation, not per-batch.
+        parsers: list[Parser | None] = [None] * len(single_requests)
         if self.parser_cls is not None:
-            chat_template_kwargs = self._effective_chat_template_kwargs(
-                single_requests[0]
-            )
-            parser = self.parser_cls(
-                tokenizer,
-                None,  # tools
-                chat_template_kwargs=chat_template_kwargs,
-            )
+            parsers = [
+                self.parser_cls(
+                    tokenizer,
+                    None,  # tools
+                    chat_template_kwargs=self._effective_chat_template_kwargs(
+                        single_request
+                    ),
+                )
+                for single_request in single_requests
+            ]
 
         render_result = await self.render_batch_chat_request(request)
         if isinstance(render_result, ErrorResponse):
@@ -191,25 +196,27 @@ class OpenAIServingChatBatch(OpenAIServingChat):
 
         return await self.chat_completion_full_generator_batch(
             request,  # type: ignore[arg-type]
+            single_requests,
             generators,
             request_id,
             model_name,
             all_conversations,
             tokenizer,
             request_metadata,
-            parser,
+            parsers,
         )
 
     async def chat_completion_full_generator_batch(
         self,
         request: BatchChatCompletionRequest,  # type: ignore[override]
+        single_requests: list[ChatCompletionRequest],
         generators: list[AsyncGenerator[RequestOutput, None]],
         request_id: str,
         model_name: str,
         all_conversations: list[list[ConversationMessage]],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        parser: Parser | None = None,
+        parsers: list[Parser | None],
     ) -> ErrorResponse | ChatCompletionResponse:
         """Handle batched (non-streaming) chat completions.
 
@@ -268,10 +275,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 else:
                     logprobs = None
 
+                parser = parsers[prompt_idx]
                 if parser is not None:
                     reasoning, content, _ = parser.parse(
                         output.text,
-                        request=request,  # type: ignore[arg-type]
+                        request=single_requests[prompt_idx],
                         model_output_token_ids=output.token_ids,
                     )
                     if not request.include_reasoning:
