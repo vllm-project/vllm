@@ -99,6 +99,8 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
+        # Set from the draft attention layers in set_attn.
+        self.dcp_kv_head_replicated: bool = False
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -176,6 +178,18 @@ class DFlashSpeculator(DraftModelSpeculator):
             block_tables,
             target_input_buffers,
             target_attn_groups,
+        )
+
+        # A dense draft under DCP caches the whole group's KV heads (see
+        # dcp_kv_head_replicas in qwen3_dflash.py). Such a cache holds heads
+        # this rank has not projected yet at input-prep time, so the query
+        # block's K/V must not be slotted into it.
+        layers = self.vllm_config.compilation_config.static_forward_context
+        self.dcp_kv_head_replicated = any(
+            getattr(layers[name], "cache_num_kv_heads", 0)
+            > getattr(layers[name], "num_kv_heads", 0)
+            for name in self.draft_attn_layer_names
+            if name in layers
         )
 
         self.draft_kv_cache_group_ids = [
@@ -416,6 +430,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_num_tokens,
                 self.max_model_len,
                 self.sample_from_anchor,
+                self.dcp_kv_head_replicated,
             )
 
         # Pre-insert context K/V into the cache. Runs eagerly outside the captured graph
@@ -528,6 +543,7 @@ def _prepare_dflash_inputs_kernel(
     PAD_SLOT_ID: tl.constexpr,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
+    PAD_QUERY_SLOTS_UNDER_CP: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -602,9 +618,16 @@ def _prepare_dflash_inputs_kernel(
         mask=is_query,
         other=0,
     ).to(tl.int64)
-    # A null block is never a writable cache slot. This can occur when a
-    # sliding-window block table contains evicted/global padding entries.
-    q_resident = is_query & (q_block_id != 0)
+    if PAD_QUERY_SLOTS_UNDER_CP and CP_SIZE > 1:
+        # A DCP KV-head-replicated draft cache attends the query block against
+        # the freshly computed K/V, never the cache, and this rank holds only
+        # its local heads at this point. Writing them would corrupt the
+        # replicated head layout, so no query position gets a slot.
+        q_resident = tl.zeros_like(is_query)
+    else:
+        # A null block is never a writable cache slot. This can occur when a
+        # sliding-window block table contains evicted/global padding entries.
+        q_resident = is_query & (q_block_id != 0)
     local_q_slot = cp_local_slot(
         query_pos,
         q_block_id,
@@ -722,6 +745,7 @@ def prepare_dflash_inputs(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
+    dcp_kv_head_replicated: bool = False,
 ) -> None:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
@@ -767,5 +791,6 @@ def prepare_dflash_inputs(
         PAD_SLOT_ID=PAD_SLOT_ID,
         CP_SIZE=cp_size,
         CP_INTERLEAVE=cp_interleave,
+        PAD_QUERY_SLOTS_UNDER_CP=dcp_kv_head_replicated,
         BLOCK_SIZE=BLOCK_SIZE,
     )
