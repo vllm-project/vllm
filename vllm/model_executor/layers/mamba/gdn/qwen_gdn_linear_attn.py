@@ -447,10 +447,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.dt_bias = nn.Parameter(
             torch.ones(self.num_v_heads // self.tp_size),
         )
+
+        a_log_dtype = torch.float32
+        # be consistent with huggingface qwen 3.6 series checkpoint. See
+        # https://huggingface.co/Qwen/Qwen3.6-397B-A17B/tree/main?show_file_info=model.safetensors.index.json
+        if self._is_real_model_type_qwen3_6(config):
+            a_log_dtype = torch.bfloat16
         self.A_log = nn.Parameter(
             torch.empty(
                 divide(self.num_v_heads, self.tp_size),
-                dtype=torch.float32,
+                dtype=a_log_dtype,
             )
         )
 
@@ -464,6 +470,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             f"unsupported {output_gate_type=}"
         )
 
+        norm_dtype = torch.get_default_dtype()
+        # be consistent with huggingface qwen 3.5 series checkpoint. See
+        # https://huggingface.co/Qwen/Qwen3.5-397B-A17B/tree/main?show_file_info=model.safetensors.index.json
+        if self._is_real_model_type_qwen3_5(config):
+            norm_dtype = torch.float32
+
         self.norm = RMSNormGated(
             self.head_v_dim,
             eps=self.layer_norm_epsilon,
@@ -471,6 +483,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             norm_before_gate=True,
             activation=output_gate_type,
             device=current_platform.current_device(),
+            dtype=norm_dtype,
         )
 
         self.out_proj = RowParallelLinear(
@@ -532,6 +545,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
         return None
+
+    def _is_real_model_type_qwen3_5(self, config: Qwen3NextConfig) -> bool:
+        return (
+            hasattr(config, "real_model_type") and config.real_model_type == "qwen3_5"
+        )
+
+    def _is_real_model_type_qwen3_6(self, config: Qwen3NextConfig) -> bool:
+        return (
+            hasattr(config, "real_model_type") and config.real_model_type == "qwen3_6"
+        )
 
     def create_qkvz_proj(
         self,
