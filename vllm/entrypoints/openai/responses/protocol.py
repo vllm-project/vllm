@@ -15,6 +15,7 @@ from openai.types.responses import (
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
     ResponseFunctionToolCall,
+    ResponseInputAudioParam,
     ResponseInputItemParam,
     ResponseMcpCallArgumentsDeltaEvent,
     ResponseMcpCallArgumentsDoneEvent,
@@ -42,6 +43,11 @@ from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
+from openai.types.responses.response_input_message_content_list_param import (
+    ResponseInputFileParam,
+    ResponseInputImageParam,
+    ResponseInputTextParam,
+)
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
@@ -54,6 +60,8 @@ from pydantic import (
     field_serializer,
     model_validator,
 )
+from typing_extensions import Required as _Required
+from typing_extensions import TypedDict as _TypedDict
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
@@ -130,7 +138,37 @@ class ResponseRawMessageAndToken(OpenAIBaseModel):
 ResponseInputOutputMessage: TypeAlias = (
     list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
 )
-ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
+
+
+class _EasyInputMessageWithAudioParam(_TypedDict, total=False):
+    """Extension of EasyInputMessageParam that additionally accepts
+    ``input_audio`` content parts.
+
+    The openai SDK's ``ResponseInputMessageContentListParam`` only permits
+    text, image, and file content parts; ``ResponseInputAudioParam`` is
+    intentionally absent.  As a result, audio messages that are accepted by
+    ``/v1/chat/completions`` fail Pydantic validation on ``/v1/responses``
+    with an opaque 422 error.  This TypedDict mirrors EasyInputMessageParam
+    while extending the content union to include ``ResponseInputAudioParam``,
+    so both endpoints accept the same audio-bearing user messages (#47659).
+    """
+
+    content: _Required[
+        str
+        | list[
+            ResponseInputTextParam
+            | ResponseInputImageParam
+            | ResponseInputFileParam
+            | ResponseInputAudioParam
+        ]
+    ]
+    role: _Required[Literal["user", "assistant", "system", "developer"]]
+    type: Literal["message"]
+
+
+ResponseInputOutputItem: TypeAlias = (
+    _EasyInputMessageWithAudioParam | ResponseInputItemParam | ResponseOutputItem
+)
 
 
 class ResponsesRequest(OpenAIBaseModel):
