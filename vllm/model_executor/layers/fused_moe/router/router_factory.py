@@ -37,7 +37,7 @@ from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
 )
 
 
-def create_fused_moe_router(
+def create_non_simulated_fused_moe_router(
     # common parameters
     top_k: int,
     global_num_experts: int,
@@ -66,14 +66,13 @@ def create_fused_moe_router(
     the provided parameters.
 
     The selection logic follows this priority order:
-    1. RoutingSimulatorRouter - if VLLM_MOE_ROUTING_SIMULATION_STRATEGY env var is set
-    2. ZeroExpertRouter - if zero_expert_type is not None
-    3. GroupedTopKRouter - if use_grouped_topk is True and the grouping is not
+    1. ZeroExpertRouter - if zero_expert_type is not None
+    2. GroupedTopKRouter - if use_grouped_topk is True and the grouping is not
        degenerate (at most one group, with topk_group <= 1)
-    4. CustomRoutingRouter - if custom_routing_function is not None
-    5. FusedTopKBiasRouter - if e_score_correction_bias is not None
-    6. AiterSharedRoutedFusedMoERouter - if num_fused_shared_experts > 0
-    7. FusedTopKRouter - default fallback
+    3. CustomRoutingRouter - if custom_routing_function is not None
+    4. FusedTopKBiasRouter - if e_score_correction_bias is not None
+    5. AiterSharedRoutedFusedMoERouter - if num_fused_shared_experts > 0
+    6. FusedTopKRouter - default fallback
 
     Common arguments:
         top_k: Number of experts to select per token
@@ -110,14 +109,6 @@ def create_fused_moe_router(
     Returns:
         An instance of the appropriate FusedMoERouter subclass
     """
-
-    routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
-    if routing_strategy != "":
-        return RoutingSimulatorRouter(
-            top_k=top_k,
-            global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
-        )
 
     if zero_expert_type is not None:
         assert num_logical_experts is not None, (
@@ -233,4 +224,57 @@ def create_fused_moe_router(
         eplb_state=eplb_state,
         renormalize=renormalize,
         scoring_func=scoring_func,
+    )
+
+
+def create_fused_moe_router(
+    # common parameters
+    top_k: int,
+    global_num_experts: int,
+    renormalize: bool = True,
+    # grouped topk parameters
+    use_grouped_topk: bool = False,
+    num_expert_group: int | None = None,
+    topk_group: int | None = None,
+    scoring_func: str = "softmax",
+    num_fused_shared_experts: int = 0,
+    shared_expert_weight: float = 1.0,
+    # grouped topk + fused topk bias parameters
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: torch.Tensor | None = None,
+    # custom routing parameters
+    custom_routing_function: Callable | None = None,
+    # eplb parameters
+    eplb_state: EplbLayerState | None = None,
+    # zero expert parameters
+    zero_expert_type: str | None = None,
+    num_logical_experts: int | None = None,
+    hash_indices_table: torch.Tensor | None = None,
+) -> FusedMoERouter:
+    """Create the configured router, overriding it when simulation is enabled."""
+    router = create_non_simulated_fused_moe_router(
+        top_k=top_k,
+        global_num_experts=global_num_experts,
+        renormalize=renormalize,
+        use_grouped_topk=use_grouped_topk,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        scoring_func=scoring_func,
+        num_fused_shared_experts=num_fused_shared_experts,
+        shared_expert_weight=shared_expert_weight,
+        routed_scaling_factor=routed_scaling_factor,
+        e_score_correction_bias=e_score_correction_bias,
+        custom_routing_function=custom_routing_function,
+        eplb_state=eplb_state,
+        zero_expert_type=zero_expert_type,
+        num_logical_experts=num_logical_experts,
+        hash_indices_table=hash_indices_table,
+    )
+    if envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY == "":
+        return router
+    return RoutingSimulatorRouter(
+        top_k=top_k,
+        global_num_experts=global_num_experts,
+        original_routing_method_type=router.routing_method_type,
+        eplb_state=eplb_state,
     )

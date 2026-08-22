@@ -75,6 +75,123 @@ def test_basic_functionality(
         )
 
 
+def test_uniform_strategy_generates_monolithic_logits(device):
+    router_logits = torch.full(
+        (16, 32),
+        7.0,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    original_logits = router_logits.clone()
+
+    simulated_logits = RoutingSimulator.simulate_monolithic_logits(
+        router_logits=router_logits,
+        strategy_name="uniform_random",
+    )
+
+    assert simulated_logits.shape == router_logits.shape
+    assert simulated_logits.device == router_logits.device
+    assert simulated_logits.dtype == router_logits.dtype
+    assert torch.all((simulated_logits >= 0) & (simulated_logits < 1))
+    assert torch.equal(router_logits, original_logits)
+
+
+def test_normal_strategy_does_not_generate_monolithic_logits(device):
+    router_logits = torch.zeros((16, 32), device=device)
+
+    with pytest.raises(NotImplementedError):
+        RoutingSimulator.simulate_monolithic_logits(
+            router_logits=router_logits,
+            strategy_name="normal_routing",
+        )
+
+
+@pytest.mark.parametrize(
+    "strategy,expected",
+    [("uniform_random", True), ("normal_routing", False)],
+)
+def test_nvfp4_monolithic_supports_uniform_simulation_only(
+    monkeypatch,
+    strategy: str,
+    expected: bool,
+):
+    import vllm.envs as envs
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsMonolithic,
+    )
+
+    env_name = "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
+    monkeypatch.setitem(
+        envs.environment_variables,
+        env_name,
+        lambda: strategy,
+    )
+
+    assert (
+        TrtLlmNvFp4ExpertsMonolithic._supports_routing_method(
+            RoutingMethodType.Simulated,
+            weight_key=None,
+            activation_key=None,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "router_kwargs,expected_method",
+    [
+        ({}, "RenormalizeNaive"),
+        ({"renormalize": False}, "Default"),
+        (
+            {
+                "use_grouped_topk": True,
+                "num_expert_group": 4,
+                "topk_group": 2,
+                "scoring_func": "sigmoid",
+                "e_score_correction_bias": torch.zeros(16),
+            },
+            "DeepSeekV3",
+        ),
+    ],
+)
+def test_simulator_preserves_original_routing_method(
+    monkeypatch,
+    router_kwargs,
+    expected_method: str,
+):
+    import vllm.envs as envs
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.router.router_factory import (
+        create_fused_moe_router,
+        create_non_simulated_fused_moe_router,
+    )
+
+    env_name = "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
+    monkeypatch.setitem(
+        envs.environment_variables,
+        env_name,
+        lambda: "uniform_random",
+    )
+
+    non_simulated_router = create_non_simulated_fused_moe_router(
+        top_k=2,
+        global_num_experts=16,
+        **router_kwargs,
+    )
+    router = create_fused_moe_router(
+        top_k=2,
+        global_num_experts=16,
+        **router_kwargs,
+    )
+
+    assert non_simulated_router.routing_method_type == RoutingMethodType[
+        expected_method
+    ]
+    assert router.routing_method_type == RoutingMethodType.Simulated
+    assert router.original_routing_method_type == RoutingMethodType[expected_method]
+
+
 def test_routing_strategy_integration(monkeypatch, device):
     """Test that the routing strategy environment variable works with
     FusedMoEFactory."""
