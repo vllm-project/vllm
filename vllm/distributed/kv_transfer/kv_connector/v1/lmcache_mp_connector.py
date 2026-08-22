@@ -869,6 +869,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
                         start=0,
                         end=free_end,
                         request_id=request.request_id,
+                        cache_salt=tracker.cache_salt,
                     )
                     logger.debug(
                         "Free locks of tokens %d-%d since it is cached by vLLM.",
