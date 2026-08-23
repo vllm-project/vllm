@@ -23,10 +23,11 @@ the name `pcp_o_proj_tp`.
 - Only DeepSeek V2/V3/V3.2 and GLM-4 MoE Lite MLA are supported. GLM-4 MoE Lite
   attention inherits the DeepSeekV2 MLA path, so it reuses the same explicit
   prefetch and dynamic O-Proj implementation.
-- O-Proj itself must use the unquantized linear method. Quantized checkpoints
-  remain usable when their quantization configuration excludes O-Proj, as the
-  PCP-validated GLM-5.2-NVFP4 checkpoint excludes all self-attention modules.
-  A quantized O-Proj fails during post-load processing.
+- O-Proj may use the unquantized linear method or ModelOpt W4A4 NVFP4 with a
+  CUTLASS-compatible post-load layout. The NVFP4 adapter covers native CUTLASS
+  and FlashInfer backends that use the same packed-weight and swizzled-scale
+  representation. Other quantized O-Proj methods and NVFP4 backend layouts fail
+  during post-load processing.
 - `bias=False` is required.
 - Only eager execution is supported. CUDA Graph, `torch.compile`, and DBO are
   not supported yet.
@@ -60,16 +61,33 @@ is reduced to `1/P` of the standard TP layout.
 
 ## Weight-switch scope
 
-The implementation follows the vllm-ascend `TPWeightSwitchMixin` mechanism but
-opts in only `UnquantizedLinearMethod`. The method declares its `weight` tensor
-and post-load input-shard dimension; the mixin owns the reusable buffers,
-asynchronous collective handle, and local/full tensor aliases.
+The implementation follows the vllm-ascend `TPWeightSwitchMixin` mechanism.
+Each compatible linear method declares every post-load tensor consumed by its
+kernel and the corresponding input-shard dimension. The mixin owns the reusable
+buffers, asynchronous collective handles, and local/full tensor aliases.
+
+`UnquantizedLinearMethod` declares only `weight`. The ModelOpt W4A4 NVFP4
+adapter is the quantized example: it declares the packed `weight` and per-block
+`weight_scale`. Packed weights concatenate directly on dimension 1. CUTLASS
+block scales do not: every local scale is already stored in a 128x4 swizzled
+layout. The adapter exposes a logical unswizzled view to the collective and,
+after the asynchronous gather completes, assembles the full swizzled scale in a
+shared buffer before switching both layer attributes. Scale payloads use
+`uint8` views so the collective preserves FP8 bits without requiring an FP8
+reduction datatype. Replicated global scales
+(`input_global_scale_inv`, `weight_global_scale`, and `alpha`) remain unchanged.
+
+The adapter validates the concrete kernel layout before allocating state.
+Marlin repacking, TensorRT-LLM shuffling, Humming renaming, FBGEMM flattening,
+and local input-axis padding are not treated as concatenative and fail closed.
+This keeps the mixin extension representation-specific rather than claiming
+support for every backend selected by the `modelopt_fp4` configuration name.
 
 This boundary matches the quantized model coverage already present for PCP.
 The upstream PCP GSM8K matrix contains GLM-5.2-NVFP4, whose ModelOpt
 configuration excludes every `self_attn` module from NVFP4 quantization. Its
-O-Proj therefore uses the same unquantized method as a BF16 checkpoint. The
-supported method set is intentionally limited to `UnquantizedLinearMethod`.
+O-Proj therefore uses the same unquantized method as a BF16 checkpoint; it does
+not exercise the quantized O-Proj adapter.
 
 ## Runtime paths
 
@@ -174,9 +192,11 @@ vllm serve <model> \
 ## MVP validation results
 
 The following end-to-end results cover the unquantized O-Proj path. The unit
-tests cover asynchronous gather, wait-before-use, full/local alias switching,
-restoration after a failed linear call, logical-versus-local prefill decisions,
-and rejection of a quantized O-Proj method.
+tests additionally cover ModelOpt NVFP4 packed-weight gathering, logical scale
+gathering and full CUTLASS-layout reassembly, preservation of replicated global
+scales, and rejection of non-CUTLASS NVFP4 post-load layouts. A quantized
+end-to-end model result is still required before promoting the NVFP4 adapter
+beyond example status.
 
 Online accuracy was evaluated on August 23, 2026, using four NVIDIA H20 GPUs,
 GLM-4.7-Flash BF16, and the 1,319-question GSM8K test set. TP4, PCP4TP1, and

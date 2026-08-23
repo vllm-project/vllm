@@ -11,6 +11,11 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
+    CutlassNvFp4LinearKernel,
+    FlashInferB12xNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
+    FlashInferCuteDslNvFp4LinearKernel,
+    FlashInferCutlassNvFp4LinearKernel,
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
@@ -55,6 +60,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.tp_weight_switch import (
+    TPWeightGatherPart,
+    TPWeightGatherSpec,
+    TPWeightSwitchMixin,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_channel_strategy,
@@ -90,6 +100,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1106,7 +1117,16 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         )
 
 
-class ModelOptNvFp4LinearMethod(LinearMethodBase):
+_PCP_TP_NVFP4_CUTLASS_LAYOUT_KERNELS = (
+    CutlassNvFp4LinearKernel,
+    FlashInferB12xNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
+    FlashInferCuteDslNvFp4LinearKernel,
+    FlashInferCutlassNvFp4LinearKernel,
+)
+
+
+class ModelOptNvFp4LinearMethod(TPWeightSwitchMixin, LinearMethodBase):
     """Linear method for Model Optimizer NVFP4.
     Supports loading NVFP4 checkpoints with the following structure:
 
@@ -1117,10 +1137,161 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     Args: quant_config: The ModelOpt quantization config.
     """
 
+    supports_tp_weight_switch = True
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1, make_full_contiguous=True),
+        TPWeightGatherSpec("weight_scale", gather_dim=1),
+    )
+
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
         self.marlin_input_dtype = None
         self.kernel = init_nvfp4_linear_kernel()
+
+    def get_tp_weight_switch_specs(
+        self, layer: torch.nn.Module
+    ) -> tuple[TPWeightGatherSpec, ...]:
+        """Validate the NVFP4 post-load layout used by PCP O-Proj TP.
+
+        CUTLASS-compatible kernels keep packed weights concatenative on the
+        input axis, but store per-block scales in a 128x4 swizzled layout. The
+        custom gather part below gathers logical scales and reassembles the
+        full swizzled layout. Global input/weight scales are replicated and do
+        not participate in the collective.
+        """
+        if not isinstance(self.kernel, _PCP_TP_NVFP4_CUTLASS_LAYOUT_KERNELS):
+            raise RuntimeError(
+                "ModelOpt NVFP4 PCP O-Proj TP currently supports only "
+                "CUTLASS-compatible post-load layouts; got "
+                f"{type(self.kernel).__name__}."
+            )
+        if getattr(layer, "weights_padding_cols", 0) != 0:
+            raise RuntimeError(
+                "ModelOpt NVFP4 PCP O-Proj TP requires each local packed "
+                "weight shard to need no input-axis padding."
+            )
+        return self.tp_weight_gather_specs
+
+    def _create_tp_weight_gather_part(
+        self,
+        layer: torch.nn.Module,
+        spec: TPWeightGatherSpec,
+        tp_size: int,
+        *,
+        pool: Any | None,
+        pool_key_prefix: Any | None,
+    ) -> TPWeightGatherPart:
+        if spec.attr_name != "weight_scale":
+            return super()._create_tp_weight_gather_part(
+                layer,
+                spec,
+                tp_size,
+                pool=pool,
+                pool_key_prefix=pool_key_prefix,
+            )
+
+        scale = layer.weight_scale.detach()
+        output_size = layer.output_size_per_partition
+        local_scale_cols = (
+            layer.input_size_per_partition // self.quant_config.group_size
+        )
+        padded_output_size = round_up(output_size, 128)
+        padded_local_scale_cols = round_up(local_scale_cols, 4)
+        expected_shape = (padded_output_size, padded_local_scale_cols)
+        if scale.dtype != torch.float8_e4m3fn or tuple(scale.shape) != expected_shape:
+            raise RuntimeError(
+                "Unexpected CUTLASS-compatible ModelOpt NVFP4 block-scale "
+                f"layout: expected dtype=torch.float8_e4m3fn and shape "
+                f"{expected_shape}, got dtype={scale.dtype} and "
+                f"shape={tuple(scale.shape)}."
+            )
+
+        full_scale_cols = local_scale_cols * tp_size
+        padded_full_scale_cols = round_up(full_scale_cols, 4)
+        pool_key = (
+            pool_key_prefix,
+            spec.attr_name,
+            scale.device.type,
+            scale.device.index,
+            scale.dtype,
+            output_size,
+            local_scale_cols,
+            full_scale_cols,
+            "nvfp4_cutlass_layout",
+        )
+        gather_input = self._get_or_create_tp_weight_buffer(
+            pool,
+            (*pool_key, "gather_input"),
+            (local_scale_cols, output_size),
+            dtype=torch.uint8,
+            device=scale.device,
+        )
+        gather_output = self._get_or_create_tp_weight_buffer(
+            pool,
+            (*pool_key, "gather_output"),
+            (full_scale_cols, output_size),
+            dtype=torch.uint8,
+            device=scale.device,
+        )
+        local_padded = self._get_or_create_tp_weight_buffer(
+            pool,
+            (*pool_key, "local_padded"),
+            (1, padded_output_size, padded_local_scale_cols),
+            dtype=scale.dtype,
+            device=scale.device,
+        )
+        full_padded = self._get_or_create_tp_weight_buffer(
+            pool,
+            (*pool_key, "full_padded"),
+            (1, padded_output_size, padded_full_scale_cols),
+            dtype=scale.dtype,
+            device=scale.device,
+        )
+        full_tensor = self._get_or_create_tp_weight_buffer(
+            pool,
+            (*pool_key, "full"),
+            (padded_output_size, padded_full_scale_cols),
+            dtype=scale.dtype,
+            device=scale.device,
+        )
+
+        local_m_tiles = padded_output_size // 128
+        local_k_tiles = padded_local_scale_cols // 4
+        full_k_tiles = padded_full_scale_cols // 4
+
+        def prepare() -> None:
+            local_padded_view = local_padded.view(
+                1, local_m_tiles, 4, 32, local_k_tiles, 4
+            )
+            local_swizzled_view = scale.view(1, local_m_tiles, local_k_tiles, 32, 4, 4)
+            local_padded_view.copy_(local_swizzled_view.permute(0, 1, 4, 3, 2, 5))
+            gather_input.copy_(
+                local_padded[0, :output_size, :local_scale_cols].view(torch.uint8).T
+            )
+
+        def finalize() -> None:
+            full_padded.zero_()
+            full_padded[0, :output_size, :full_scale_cols].view(torch.uint8).copy_(
+                gather_output.T
+            )
+            full_swizzled_view = full_tensor.view(
+                1, local_m_tiles, full_k_tiles, 32, 4, 4
+            )
+            full_padded_view = full_padded.view(
+                1, local_m_tiles, 4, 32, full_k_tiles, 4
+            )
+            full_swizzled_view.copy_(full_padded_view.permute(0, 1, 4, 3, 2, 5))
+
+        return TPWeightGatherPart(
+            spec=spec,
+            tp_tensor=scale,
+            gather_source=scale,
+            gather_input=gather_input,
+            gather_output=gather_output,
+            full_tensor=full_tensor,
+            prepare=prepare,
+            finalize=finalize,
+        )
 
     def create_weights(
         self,

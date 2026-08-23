@@ -1823,9 +1823,9 @@ class PCPOProjRowParallelLinear(RowParallelLinear):
         ):
             return quant_method
         raise RuntimeError(
-            "PCP O-Proj TP currently supports only an unquantized O-Proj; "
-            f"got {type(quant_method).__name__}. Quantized checkpoints must "
-            "exclude O-Proj from weight quantization."
+            "PCP O-Proj TP does not support the selected O-Proj linear method "
+            f"or post-load layout: {type(quant_method).__name__}. Quantized "
+            "checkpoints may exclude O-Proj from weight quantization."
         )
 
     def _enable_pcp_weight_switch(self) -> None:
@@ -1902,7 +1902,8 @@ class PCPOProjRowParallelLinear(RowParallelLinear):
             )
         if input_.shape[-1] != self._tp_input_size:
             if self._use_full_weight and self._tp_weight_state is not None:
-                TPWeightSwitchMixin.wait_tp_weight_all_gather(self._tp_weight_state)
+                assert self._tp_weight_method is not None
+                self._tp_weight_method.wait_tp_weight_all_gather(self._tp_weight_state)
             self._use_full_weight = None
             raise ValueError(
                 "PCP O-Proj expected a TP-sharded input with last dimension "
