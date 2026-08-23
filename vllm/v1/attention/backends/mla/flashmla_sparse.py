@@ -244,13 +244,6 @@ def get_prefill_workspace_size(max_model_len: int):
     return max_model_len * 5
 
 
-def fp8_mixed_batch_chunk_slices(num_tokens: int) -> list[slice]:
-    return [
-        slice(start, min(start + MAX_SCRATCH_CHUNK_TOKENS, num_tokens))
-        for start in range(0, num_tokens, MAX_SCRATCH_CHUNK_TOKENS)
-    ]
-
-
 class FlashMLASparseMetadataBuilder(
     SparseMLACommonMetadataBuilder[FlashMLASparseMetadata]
 ):
@@ -374,6 +367,49 @@ class FlashMLASparseMetadataBuilder(
                     f"{gathered_padded_heads})"
                 )
 
+    def _build_fp8_kernel_metadata(
+        self,
+        chunk_num_tokens: int,
+        padded_heads: int,
+        full_chunk_fp8_metadata: "FlashMLASparseMetadata.FP8KernelMetadata",
+    ) -> tuple[
+        "FlashMLASparseMetadata.FP8KernelMetadata",
+        "FlashMLASparseMetadata.FP8KernelMetadata",
+    ]:
+        is_full_chunk = chunk_num_tokens == MAX_SCRATCH_CHUNK_TOKENS
+        if full_chunk_fp8_metadata is not None and is_full_chunk:
+            return full_chunk_fp8_metadata, full_chunk_fp8_metadata
+
+        scheduler_metadata, _ = get_mla_metadata(
+            cache_seqlens=self.topk_tokens_tensor[:1],  # Single batch
+            num_q_tokens_per_head_k=chunk_num_tokens * padded_heads,
+            topk=self.topk_tokens,
+            num_heads_q=padded_heads,
+            num_heads_k=1,
+            is_fp8_kvcache=True,
+        )
+        metadata = FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=scheduler_metadata,
+            cache_lens=self.max_model_len_tensor[:1],
+            dummy_block_table=self.dummy_block_table[:1],
+        )
+        if is_full_chunk:
+            full_chunk_fp8_metadata = metadata
+        return metadata, full_chunk_fp8_metadata
+
+    def _build_fp8_mixed_batch_chunks(
+        self, num_tokens: int, padded_heads: int
+    ) -> list[tuple[slice, "FlashMLASparseMetadata.FP8KernelMetadata"]]:
+        chunks = []
+        full_chunk_fp8_metadata = None
+        for start in range(0, num_tokens, MAX_SCRATCH_CHUNK_TOKENS):
+            stop = min(start + MAX_SCRATCH_CHUNK_TOKENS, num_tokens)
+            fp8_metadata, full_chunk_fp8_metadata = self._build_fp8_kernel_metadata(
+                stop - start, padded_heads, full_chunk_fp8_metadata
+            )
+            chunks.append((slice(start, stop), fp8_metadata))
+        return chunks
+
     def _build_fp8_mixed_decode_prefill(
         self,
         common_attn_metadata: CommonAttentionMetadata,
@@ -395,29 +431,9 @@ class FlashMLASparseMetadataBuilder(
         )
 
         # Use padded head count since that's what the kernel will see
-        padded_heads = self.fp8_decode_padded_heads
-
-        # Build metadata for all tokens as a single batch
-        chunks = []
-        for token_slice in fp8_mixed_batch_chunk_slices(num_tokens):
-            chunk_num_tokens = token_slice.stop - token_slice.start
-            scheduler_metadata, _ = get_mla_metadata(
-                cache_seqlens=self.topk_tokens_tensor[:1],  # Single batch
-                num_q_tokens_per_head_k=chunk_num_tokens * padded_heads,
-                topk=self.topk_tokens,
-                num_heads_q=padded_heads,
-                num_heads_k=1,
-                is_fp8_kvcache=True,
-            )
-
-            fp8_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
-                scheduler_metadata=scheduler_metadata,
-                cache_lens=self.max_model_len_tensor[:1],
-                dummy_block_table=self.dummy_block_table[:1],
-            )
-            chunks.append((token_slice, fp8_metadata))
-
-        return chunks
+        return self._build_fp8_mixed_batch_chunks(
+            num_tokens, self.fp8_decode_padded_heads
+        )
 
     def _build_fp8_separate_prefill_decode(
         self,
