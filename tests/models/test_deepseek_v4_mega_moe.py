@@ -281,6 +281,7 @@ def test_kimi_k3_mega_moe_finalizes_bf16_shared_expert_weights(monkeypatch):
     experts._transformed_bf16_shared_l2_weight = None
     experts._bf16_shared_hidden_size = 0
     experts._bf16_shared_intermediate_size = 0
+    experts._bf16_shared_finalization_attempted = False
 
     shared_experts = SimpleNamespace(
         shard_sequence_parallel=False,
@@ -314,6 +315,98 @@ def test_kimi_k3_mega_moe_finalizes_bf16_shared_expert_weights(monkeypatch):
     )
     assert experts._bf16_shared_hidden_size == 128
     assert experts._bf16_shared_intermediate_size == 128
+
+
+def test_kimi_k3_mega_moe_attempts_unsupported_shared_fusion_once(monkeypatch):
+    from vllm.models.kimi_k3.nvidia.model import KimiK3MegaMoEExperts
+
+    experts = KimiK3MegaMoEExperts.__new__(KimiK3MegaMoEExperts)
+    torch.nn.Module.__init__(experts)
+    experts._transformed_l1_weights = (torch.empty(1), torch.empty(1))
+    experts._bf16_shared_finalization_attempted = False
+
+    imports = 0
+
+    def import_deep_gemm():
+        nonlocal imports
+        imports += 1
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm._import_deep_gemm",
+        import_deep_gemm,
+    )
+
+    shared_experts = SimpleNamespace()
+    experts.finalize_weights(shared_experts)
+    experts.finalize_weights(shared_experts)
+
+    assert imports == 1
+
+
+def test_kimi_k3_fused_shared_partial_is_reduced_before_up_projection(monkeypatch):
+    from vllm.models.kimi_k3.nvidia.model import KimiMoE
+
+    class FakeExperts(torch.nn.Module):
+        has_fused_bf16_shared_experts = True
+
+        def finalize_weights(self, shared_experts):
+            assert shared_experts is not None
+
+        def forward(self, hidden_states, *args, shared_hidden_states, **kwargs):
+            routed = torch.ones_like(hidden_states)
+            shared = torch.full_like(shared_hidden_states, 2)
+            return routed, shared
+
+    class FakeOutputTransform(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = SimpleNamespace(
+                weight=torch.ones(128),
+                variance_epsilon=1e-6,
+            )
+
+        def forward(
+            self,
+            hidden_states,
+            residual=None,
+            *,
+            hidden_states_are_normalized=False,
+        ):
+            assert hidden_states_are_normalized
+            assert residual is not None
+            return hidden_states + residual
+
+    moe = KimiMoE.__new__(KimiMoE)
+    torch.nn.Module.__init__(moe)
+    moe.use_mega_moe = True
+    moe.fuse_shared_mega_moe = True
+    moe.fused_shared_output_needs_tp_reduce = True
+    moe.shared_experts = torch.nn.Identity()
+    moe.experts = FakeExperts()
+    moe.routed_output_transform = FakeOutputTransform()
+    moe._maybe_overlap_router_and_down_proj = lambda hidden_states: (
+        hidden_states,
+        torch.ones(hidden_states.shape[0], 1),
+        torch.zeros(hidden_states.shape[0], 1, dtype=torch.int32),
+    )
+
+    calls = 0
+
+    def fake_all_reduce(shared_output):
+        nonlocal calls
+        calls += 1
+        return shared_output * 8
+
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.nvidia.model.tensor_model_parallel_all_reduce",
+        fake_all_reduce,
+    )
+
+    output = moe(torch.zeros(2, 128))
+
+    assert calls == 1
+    assert torch.all(output == 17)
 
 
 @pytest.mark.parametrize("fused", [False, True])

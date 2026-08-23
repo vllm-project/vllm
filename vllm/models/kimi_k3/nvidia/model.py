@@ -15,6 +15,7 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -373,6 +374,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self._transformed_bf16_shared_l2_weight: torch.Tensor | None = None
         self._bf16_shared_hidden_size = 0
         self._bf16_shared_intermediate_size = 0
+        self._bf16_shared_finalization_attempted = False
 
     def synchronize_first_launch(self) -> None:
         ep_group = get_ep_group()
@@ -385,6 +387,13 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self._synchronized_ep_groups.add(key)
 
     def finalize_weights(self, shared_experts: KimiMLP | None = None) -> None:
+        routed_weights_finalized = self._transformed_l1_weights is not None
+        shared_weights_finalized = (
+            shared_experts is None or self._bf16_shared_finalization_attempted
+        )
+        if routed_weights_finalized and shared_weights_finalized:
+            return
+
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
@@ -416,11 +425,10 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             self.w2_weight = None
             self.w2_weight_scale = None
 
-        if (
-            shared_experts is None
-            or self._transformed_bf16_shared_l1_weight is not None
-        ):
+        if shared_weights_finalized:
             return
+        assert shared_experts is not None
+        self._bf16_shared_finalization_attempted = True
         if not hasattr(deep_gemm, "fp8_fp4_mega_moe_bf16_shared"):
             logger.warning_once(
                 "Kimi K3 BF16 shared-expert MegaMoE fusion is disabled because "
@@ -753,7 +761,13 @@ class KimiMoE(nn.Module):
                 intermediate_size=shared_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                # MegaMoE bypasses LatentMoERunner and consumes the shared
+                # branch directly.  Without sequence parallelism (notably
+                # PP+TP), the shared MLP is TP-sharded, so its row-parallel
+                # output must be reduced here before it is added to the
+                # replicated routed up-projection.  The regular FusedMoE path
+                # keeps a partial output for LatentMoERunner to reduce.
+                reduce_results=self.use_mega_moe and not use_sequence_parallel,
                 use_sequence_parallel=use_sequence_parallel,
                 # Only the MegaMoE path calls the shared experts directly; the
                 # FusedMoE path below hands them to the runner, which fuses
@@ -766,14 +780,16 @@ class KimiMoE(nn.Module):
             )
         else:
             self.shared_experts = None
-        # Native fusion computes one complete shared MLP per local token shard.
-        # Under PP+TP the shared MLP is tensor-sharded instead, so fusing a
-        # rank-local partial would make the replicated residual stream diverge.
         self.fuse_shared_mega_moe = bool(
             self.use_mega_moe
             and self.shared_experts is not None
             and not envs.VLLM_DISABLE_KIMI_K3_MEGAMOE_SHARED_EXPERT_FUSION
-            and (use_sequence_parallel or self.tp_size == 1)
+        )
+        # PP disables K3 sequence parallelism. In that layout the BF16 shared
+        # weights are TP-sharded, so the fused kernel returns a rank-local
+        # partial that must be reduced before the replicated up-projection.
+        self.fused_shared_output_needs_tp_reduce = bool(
+            self.fuse_shared_mega_moe and self.tp_size > 1 and not use_sequence_parallel
         )
 
         self.routed_expert_down_proj: ReplicatedLinear | None
@@ -979,9 +995,12 @@ class KimiMoE(nn.Module):
                     rms_weight=norm.weight,
                     rms_epsilon=norm.variance_epsilon,
                 )
+                if self.fused_shared_output_needs_tp_reduce:
+                    shared_output = tensor_model_parallel_all_reduce(shared_output)
                 # Kernel 1 returned an already-normalized routed latent plus
-                # the BF16 shared output. addmm_ is kernel 2 and folds the
-                # shared add into the up-projection's beta epilogue.
+                # the BF16 shared output (reduced above when it was TP-sharded).
+                # addmm_ is kernel 2 and folds the shared add into the
+                # up-projection's beta epilogue.
                 final_hidden_states = self.routed_output_transform(
                     final_hidden_states,
                     residual=shared_output,
