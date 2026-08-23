@@ -419,7 +419,7 @@ vllm-bench \
 | --------- | ------------- | ------------- |
 | `openai-embeddings` | `/v1/embeddings` | Text embedding (accepts text or token IDs) |
 | `openai-embeddings-chat` | `/v1/embeddings` | Chat-format embedding (supports multimodal content) |
-| `vllm-pooling` | `/v1/pooling` | vLLM native pooling endpoint |
+| `vllm-pooling` | `/pooling` | vLLM native pooling endpoint |
 | `vllm-rerank` | `/v1/rerank` | vLLM reranking (query from prompt, documents via `--extra-body`) |
 
 Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Use `--dataset-name sharegpt`, `sonnet`, or `hf` for text-based embedding/rerank benchmarks, or `random` for token-ID-based embedding benchmarks.

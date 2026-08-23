@@ -262,9 +262,6 @@ class InputProcessingContext:
         hf_processor: Callable[..., BatchFeature] | ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
-        *,
-        num_tries: int = 1,
-        max_tries: int = 5,
     ) -> BatchFeature:
         """
         Call `hf_processor` on the prompt `data`
@@ -273,6 +270,12 @@ class InputProcessingContext:
         assert callable(hf_processor)
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
+
+        # vLLM needs the full untruncated sequence to keep multi-modal
+        # placeholder tokens aligned; note that the text inputs in
+        # call_hf_processor are just dummy text, not the original prompt.
+        # The original prompt is already tokenized by the renderer.
+        merged_kwargs.setdefault("truncation", False)
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,

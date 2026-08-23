@@ -334,6 +334,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
+        w.pcp_rank = 0
         w.world_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
@@ -513,6 +514,24 @@ class TestPushWriterStartLoadKv:
         assert w._finished_blocks_inbox.qsize() == 1
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
+
+    def test_noncanonical_pcp_rank_skips_producer_work(self):
+        w = _StubWriterWorker.fresh()
+        w.pcp_rank = 1
+        w._send_heartbeats = MagicMock()
+
+        meta = NixlConnectorMetadata()
+        meta.push_finished_blocks["req"] = ([1, 2],)
+        meta.reqs_in_batch.add("req")
+        meta.reqs_to_send["req"] = time.perf_counter() + 10
+
+        w.start_load_kv(meta)
+
+        assert w._finished_blocks_inbox.empty()
+        assert "req" not in w._reqs_to_process
+        assert "req" not in w._reqs_to_send
+        assert not w._push_writer_wake.is_set()
+        w._send_heartbeats.assert_not_called()
 
 
 # The P→D handshake must run on the base worker's background executor, never
@@ -1062,6 +1081,8 @@ class TestPushPipelineParallel:
             device_id=0,
             num_blocks=4,
             block_lens=[block_len] * 4,
+            # Non-interleaved: consecutive blocks abut, so stride == block length.
+            block_strides=[block_len] * 4,
             kv_cache_layout="HND",
             block_size=16,
             ssm_sizes=(0, 0),
