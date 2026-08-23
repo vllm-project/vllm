@@ -414,6 +414,10 @@ class NemotronHMTP(nn.Module, SupportsPP):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            # MTP weights are nested in "language_model."
+            # in Multimodal Nemotron-H checkpoints.
+            name = name.removeprefix("language_model.")
+
             # Only process MTP weights - skip all non-MTP weights
             if not name.startswith("mtp.") and "embeddings" not in name:
                 continue
