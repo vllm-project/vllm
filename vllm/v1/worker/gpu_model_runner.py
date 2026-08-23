@@ -200,6 +200,7 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
+from vllm.v1.spec_decode.orthrus import OrthrusProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import (
@@ -641,6 +642,7 @@ class GPUModelRunner(
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
                 | Step3p5MTPProposer
+                | OrthrusProposer
             )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]
@@ -680,6 +682,14 @@ class GPUModelRunner(
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
+            elif self.speculative_config.method == "orthrus":
+                # EXPERIMENTAL / unvalidated: see
+                # vllm/v1/spec_decode/orthrus.py for status. load_model's
+                # KV-sharing wiring is implemented; propose() is an explicit
+                # stub pending the one-shot block-proposal attention
+                # metadata construction (not safe to guess blind -- see
+                # that module's docstring).
+                self.drafter = OrthrusProposer(self.vllm_config, self.device, self)
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():

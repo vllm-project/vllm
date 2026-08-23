@@ -10,6 +10,7 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -88,6 +89,62 @@ class OrthrusAttention(Qwen3Attention):
         )
         self.q_norm_diff = type(self.q_norm)(self.head_dim, eps=rms_norm_eps)
         self.k_norm_diff = type(self.k_norm)(self.head_dim, eps=rms_norm_eps)
+
+        # EXPERIMENTAL (milestone 3, unvalidated against vLLM's real
+        # scheduler/CI): a second paged Attention layer for the diffusion
+        # path, used only when this module is loaded as a speculative-decode
+        # *draft* model (see OrthrusProposer / OrthrusForCausalLM.is_orthrus_
+        # diffusion_draft). It gets its own small ephemeral KV-cache group
+        # allocated by vLLM's normal machinery; the corresponding *target*
+        # model instance's same-index self.attn layer is wired in as its
+        # kv_sharing_target_layer_name by OrthrusProposer.load_model, so a
+        # diffusion-block forward reads the target's real, already-populated
+        # cache. Simplification vs. the reference implementation: this uses
+        # plain causal masking within the proposed block instead of the
+        # reference's non-causal "attend everywhere in the block" scheme --
+        # spec-decode verification still makes generation exactly lossless
+        # regardless of how good the draft's proposals are, so this is a
+        # valid (if weaker) proposer, not a correctness shortcut.
+        self.attn_diff = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn_diff",
+        )
+
+    def forward_diffusion_paged(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Diffusion-path forward through vLLM's real paged attention.
+
+        EXPERIMENTAL / milestone 3: unlike ``forward_diffusion`` (which takes
+        explicit offline KV tensors, used for milestone-1/2 validation),
+        this goes through ``self.attn_diff`` -- a normal vLLM Attention
+        layer -- so it participates in the live scheduler's KV cache and
+        forward context like any other decode step. It is only meaningful
+        when ``self.attn_diff.kv_sharing_target_layer_name`` has been wired
+        (by ``OrthrusProposer.load_model``) to the corresponding *target*
+        model layer's ``self.attn``, so this reads the target's real cache.
+        """
+        qkv, _ = self.qkv_proj_diff(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+        q_by_head = self.q_norm_diff(q_by_head)
+        q = q_by_head.view(q.shape)
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+        k_by_head = self.k_norm_diff(k_by_head)
+        k = k_by_head.view(k.shape)
+
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn_diff(q, k, v)
+        output, _ = self.o_proj_diff(attn_output)
+        return output
 
     def forward_diffusion(
         self,
@@ -338,6 +395,26 @@ class OrthrusDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual, new_key, new_value
 
+    def forward_diffusion_paged(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """EXPERIMENTAL (milestone 3): paged-attention diffusion forward."""
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states = self.self_attn.forward_diffusion_paged(
+            positions=positions,
+            hidden_states=hidden_states,
+        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
+
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -392,6 +469,32 @@ class OrthrusModel(Qwen2Model):
                 residual=residual,
                 cached_key=cached_key,
                 cached_value=cached_value,
+            )
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+    def forward_diffusion_paged(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """EXPERIMENTAL (milestone 3): paged-attention diffusion forward.
+
+        Used when this ``OrthrusModel`` is loaded as a speculative-decode
+        *draft* (see ``OrthrusProposer``): each layer's diffusion attention
+        reads the corresponding *target* model layer's live paged KV cache
+        via ``kv_sharing_target_layer_name`` (wired by
+        ``OrthrusProposer.load_model``), instead of the offline tensors
+        ``forward_diffusion`` takes for milestone-1/2 validation.
+        """
+        hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
+        residual = None
+        for layer in self.layers:
+            hidden_states, residual = layer.forward_diffusion_paged(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
@@ -526,6 +629,17 @@ class OrthrusForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
+        # EXPERIMENTAL (milestone 3, unvalidated): true when this instance
+        # is being constructed as a speculative-decode *draft* model (see
+        # OrthrusProposer), i.e. get_model() was called with
+        # model_config=speculative_config.draft_model_config. In that case
+        # forward() routes through the diffusion path instead of the normal
+        # AR path.
+        self.is_orthrus_diffusion_draft = (
+            vllm_config.speculative_config is not None
+            and vllm_config.model_config is vllm_config.speculative_config.draft_model_config
+        )
+
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
@@ -554,6 +668,8 @@ class OrthrusForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        if self.is_orthrus_diffusion_draft:
+            return self.model.forward_diffusion_paged(input_ids, positions, inputs_embeds)
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def compute_logits(
@@ -696,10 +812,10 @@ class OrthrusForCausalLM(
         return output_ids[:max_length].unsqueeze(0)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        # AutoWeightsLoader's constructor no longer accepts skip_prefixes;
+        # tied lm_head/embed_tokens weights are deduplicated internally by
+        # qualname-aliasing (see AutoWeightsLoader's weight-tying handling).
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
 

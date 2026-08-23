@@ -73,6 +73,7 @@ SpeculativeMethod = Literal[
     "draft_model",
     "suffix",
     "custom_class",
+    "orthrus",
     EagleModelTypes,
     NgramGPUTypes,
     DSparkModelTypes,
@@ -944,7 +945,7 @@ class SpeculativeConfig:
                         draft_hf.truncated_vocab_size = target_vocab
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
+                if self.method in ("eagle", "eagle3", "dflash", "dspark", "orthrus"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -1068,7 +1069,7 @@ class SpeculativeConfig:
                     ):
                         hf.n_predict = hf.block_size
 
-                if self.method in ("dflash", "dspark"):
+                if self.method in ("dflash", "dspark", "orthrus"):
                     self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
