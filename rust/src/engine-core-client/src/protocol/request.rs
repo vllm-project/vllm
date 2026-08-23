@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
+use crate::protocol::kv_hints::KvHintsEnvelope;
 use crate::protocol::multimodal::MmFeatures;
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::{OpaqueValue, lora};
@@ -127,6 +128,8 @@ pub struct EngineCoreRequest {
     /// Stable session identity shared by related requests.
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub kv_hints: Option<KvHintsEnvelope>,
 }
 
 impl EngineCoreRequest {
@@ -158,6 +161,7 @@ mod tests {
     use rmpv::Value;
 
     use super::*;
+    use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
     use crate::protocol::multimodal::{
         MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
     };
@@ -179,6 +183,16 @@ mod tests {
             arrival_time: 1234.5,
             client_index: 7,
             session_id: Some("session-1".to_string()),
+            kv_hints: Some(KvHintsEnvelope {
+                protocol_version: "0.1".to_string(),
+                message_id: "msg-1".to_string(),
+                actions: vec![KvHintAction {
+                    action_id: "action-1".to_string(),
+                    action_type: "example.action".to_string(),
+                    action_version: "1.0".to_string(),
+                    payload: BTreeMap::from([("key".to_string(), serde_json::json!("value"))]),
+                }],
+            }),
             ..EngineCoreRequest::default()
         };
 
@@ -189,13 +203,14 @@ mod tests {
             other => panic!("expected array, got {other:?}"),
         };
 
-        assert_eq!(array.len(), 21);
+        assert_eq!(array.len(), 22);
         assert_eq!(array[0], Value::from("req-1"));
         assert_eq!(array[2], Value::Nil);
         assert_eq!(array[4], Value::Nil);
         assert_eq!(array[10], Value::Nil);
         assert_eq!(array[11], Value::from(7));
         assert_eq!(array[20], Value::from("session-1"));
+        assert!(matches!(&array[21], Value::Map(_)));
     }
 
     #[test]

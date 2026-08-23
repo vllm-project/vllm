@@ -21,6 +21,7 @@ from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.kv_hints import KvHintsEnvelope
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
@@ -79,6 +80,7 @@ class EngineClient(ABC):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
