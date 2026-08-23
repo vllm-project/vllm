@@ -7,7 +7,7 @@
 # Copyright (c) 2024 NVIDIA
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from vllm.multimodal.processing import PromptUpdateDetails
+from vllm.multimodal.processing import PromptUpdateDetails, cached_encode
 from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import InternVLImageProcessor, InternVLProcessor
@@ -37,7 +37,7 @@ class NVLMProcessor(InternVLProcessor):
         self,
         num_patches: int | None,
         num_features: int | None = None,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         if num_patches is None:
             raise NotImplementedError("Embedding inputs are not supported")
 
@@ -58,4 +58,6 @@ class NVLMProcessor(InternVLProcessor):
         # when trying to find "<tile" as a subsequence of "<Image><tile"
         repl = self.start_image_token + features + self.end_image_token
 
-        return PromptUpdateDetails.select_text(repl, self.ctx_image_token)
+        full_ids = cached_encode(self.tokenizer, repl, add_special_tokens=False)
+
+        return PromptUpdateDetails.select_token_id(full_ids, self.ctx_image_token_id)
