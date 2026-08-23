@@ -219,7 +219,7 @@ class PagedShmTensorIPC:
             item = ShmWriteRequest(
                 uuid=random_uuid(),
                 size=elem.data.nbytes,
-                use_cache=True,          # Cacheable, can be evicted LRU.
+                use_cache=True,  # Cacheable, can be evicted LRU.
                 generate_read_token=True,  # Create a one‑time read token.
             )
             items.append(item)
@@ -255,7 +255,7 @@ class PagedShmTensorIPC:
                 dtype=str(elem.data.dtype).removeprefix("torch."),
                 shape=tuple(elem.data.shape),
             )
-            elem.data = None   # Free the original tensor reference.
+            elem.data = None  # Free the original tensor reference.
 
         end = time.perf_counter()
         elapsed_time = end - start
