@@ -39,8 +39,8 @@ use crate::test_utils::{
     setup_mock_engine_with_init, spawn_mock_engine_task,
 };
 use crate::{
-    CoordinatorMode, ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
-    Error, TransportMode,
+    CoordinatorMode, ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig,
+    EngineCoreOutputStream, EngineId, Error, TransportMode,
 };
 
 static TRACING: Once = Once::new();
@@ -225,6 +225,189 @@ fn request_output(
         new_token_ids,
         finish_reason,
         ..Default::default()
+    }
+}
+
+const RESUMABLE_SESSION_ID: &str = "rt-abc";
+/// Nonzero client index for continuation stamping tests.
+const RESUMABLE_TEST_CLIENT_INDEX: u32 = 7;
+
+fn resumable_segment_add(resumable: bool, prompt_token_ids: Vec<u32>) -> EngineCoreRequest {
+    EngineCoreRequest {
+        request_id: RESUMABLE_SESSION_ID.to_string(),
+        prompt_token_ids: Some(prompt_token_ids),
+        sampling_params: Some(EngineCoreSamplingParams::for_test()),
+        arrival_time: 0.0,
+        resumable,
+        external_req_id: Some(RESUMABLE_SESSION_ID.to_string()),
+        ..EngineCoreRequest::default()
+    }
+}
+
+async fn decode_add(dealer: &mut DealerSocket) -> EngineCoreRequest {
+    let message = recv_engine_message(dealer).await;
+    assert_eq!(message[0].as_ref(), &[0x00], "expected an ADD frame");
+    rmp_serde::from_slice(&message[1]).expect("decode ADD")
+}
+
+async fn drain_resumable_stream(mut stream: EngineCoreOutputStream) -> Vec<u32> {
+    let mut tokens = Vec::new();
+    while let Some(item) =
+        timeout(Duration::from_secs(10), stream.next()).await.expect("stream timeout")
+    {
+        tokens.extend(item.expect("stream output").new_token_ids.iter().copied());
+    }
+    tokens
+}
+
+async fn connect_resumable_test_client<F>(
+    run: F,
+) -> (
+    EngineCoreClient,
+    IpcNamespace,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+)
+where
+    F: for<'a> FnOnce(
+            &'a mut DealerSocket,
+            &'a mut PushSocket,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+        + Send
+        + 'static,
+{
+    let ipc = IpcNamespace::new().expect("ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let (shutdown_tx, engine_task) =
+        spawn_mock_engine_task(handshake_address.clone(), b"engine-resumable".to_vec(), run);
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            RESUMABLE_TEST_CLIENT_INDEX,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    (client, ipc, shutdown_tx, engine_task)
+}
+
+/// One step of a scripted mock engine, run in order. The script reports segment
+/// stops only and never sets `finished_requests`.
+enum EngineStep {
+    ExpectAdd {
+        resumable: bool,
+    },
+    Emit {
+        tokens: Vec<u32>,
+        finish_reason: Option<EngineCoreFinishReason>,
+    },
+}
+
+fn expect_add(resumable: bool) -> EngineStep {
+    EngineStep::ExpectAdd { resumable }
+}
+
+/// Emit a segment stop, which ends one segment but not necessarily the session.
+fn emit_stop(tokens: Vec<u32>) -> EngineStep {
+    EngineStep::Emit {
+        tokens,
+        finish_reason: Some(EngineCoreFinishReason::Stop),
+    }
+}
+
+/// Emit tokens mid-segment.
+fn emit_tokens(tokens: Vec<u32>) -> EngineStep {
+    EngineStep::Emit {
+        tokens,
+        finish_reason: None,
+    }
+}
+
+struct ResumableFixture {
+    client: EngineCoreClient,
+    adds: mpsc::UnboundedReceiver<EngineCoreRequest>,
+    ipc: IpcNamespace,
+    shutdown_tx: oneshot::Sender<()>,
+    engine_task: tokio::task::JoinHandle<()>,
+}
+
+impl ResumableFixture {
+    /// Await the first `expected` ADDs the engine decoded, in wire order.
+    ///
+    /// The stream can complete before the engine has read the sentinel off its
+    /// socket, so the ADDs have to be awaited rather than polled.
+    async fn observed_adds(&mut self, expected: usize) -> Vec<EngineCoreRequest> {
+        let mut observed = Vec::with_capacity(expected);
+        while observed.len() < expected {
+            let add = timeout(Duration::from_secs(10), self.adds.recv())
+                .await
+                .expect("timed out waiting for the engine to decode an ADD")
+                .expect("the engine dropped the ADD channel");
+            observed.push(add);
+        }
+        observed
+    }
+
+    async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(());
+        self.engine_task.await.unwrap();
+        self.client.shutdown().await.unwrap();
+        drop(self.ipc);
+    }
+}
+
+/// Drive a resumable session against a mock engine that replays `script`.
+async fn resumable_session_fixture(script: Vec<EngineStep>) -> ResumableFixture {
+    let (adds_tx, adds) = mpsc::unbounded_channel();
+    let (client, ipc, shutdown_tx, engine_task) =
+        connect_resumable_test_client(move |dealer, push| {
+            Box::pin(async move {
+                for step in script {
+                    match step {
+                        EngineStep::ExpectAdd { resumable } => {
+                            let add = decode_add(dealer).await;
+                            assert_eq!(
+                                add.resumable, resumable,
+                                "unexpected resumable flag on ADD: {add:?}"
+                            );
+                            adds_tx.send(add).unwrap();
+                        }
+                        EngineStep::Emit {
+                            tokens,
+                            finish_reason,
+                        } => {
+                            send_outputs(
+                                push,
+                                RequestBatchOutputs {
+                                    outputs: vec![request_output(
+                                        RESUMABLE_SESSION_ID,
+                                        tokens,
+                                        finish_reason,
+                                    )],
+                                    ..Default::default()
+                                }
+                                .into(),
+                            )
+                            .await;
+                        }
+                    }
+                }
+            })
+        })
+        .await;
+
+    ResumableFixture {
+        client,
+        adds,
+        ipc,
+        shutdown_tx,
+        engine_task,
     }
 }
 
@@ -3129,4 +3312,153 @@ async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
     assert!(final_output.is_some());
 
     client.shutdown().await.unwrap();
+}
+
+/// Wire sequence: open → continue → close (`resumable: true, true, false`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumable_session_wire_example() {
+    init_tracing();
+    let mut fixture = resumable_session_fixture(vec![
+        expect_add(true),
+        emit_stop(vec![1, 2]),
+        expect_add(true),
+        emit_stop(vec![3]),
+        expect_add(false),
+    ])
+    .await;
+
+    let stream = fixture
+        .client
+        .call(resumable_segment_add(true, vec![11, 22]))
+        .await
+        .expect("open session");
+    fixture
+        .client
+        .call_continuation(resumable_segment_add(true, vec![33]))
+        .await
+        .expect("continue session");
+    fixture
+        .client
+        .call_continuation(resumable_segment_add(false, vec![0]))
+        .await
+        .expect("close session");
+
+    assert_eq!(drain_resumable_stream(stream).await, vec![1, 2, 3]);
+
+    let observed = fixture.observed_adds(3).await;
+    assert_eq!(
+        observed.iter().map(|add| add.resumable).collect::<Vec<_>>(),
+        vec![true, true, false],
+        "one ADD per segment plus the sentinel"
+    );
+    assert!(observed.iter().all(|add| add.request_id == RESUMABLE_SESSION_ID));
+    assert_eq!(
+        observed.iter().map(|add| add.prompt_token_ids.clone()).collect::<Vec<_>>(),
+        vec![Some(vec![11, 22]), Some(vec![33]), Some(vec![0])]
+    );
+    assert!(
+        observed.iter().all(|add| add.client_index == RESUMABLE_TEST_CLIENT_INDEX),
+        "every segment, including continuations, must stamp the client index: {observed:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// The engine ran ahead: every submitted segment had already stopped when the
+/// sentinel went out, so the sentinel itself has to end the stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumable_session_closes_when_the_sentinel_follows_the_last_stop() {
+    init_tracing();
+    let fixture = resumable_session_fixture(vec![
+        expect_add(true),
+        emit_stop(vec![1, 2]),
+        expect_add(false),
+    ])
+    .await;
+
+    let mut stream = fixture
+        .client
+        .call(resumable_segment_add(true, vec![11]))
+        .await
+        .expect("open session");
+    let segment = timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("stream timeout")
+        .expect("segment output")
+        .expect("segment output is not an error");
+    assert_eq!(segment.finish_reason, Some(EngineCoreFinishReason::Stop));
+
+    fixture
+        .client
+        .call_continuation(resumable_segment_add(false, vec![0]))
+        .await
+        .expect("close session");
+    assert!(
+        timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("stream timeout")
+            .is_none()
+    );
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumable_session_closes_on_the_last_stop_after_the_sentinel() {
+    init_tracing();
+    // The single segment only stops once the sentinel has arrived.
+    let fixture = resumable_session_fixture(vec![
+        expect_add(true),
+        expect_add(false),
+        emit_stop(vec![9]),
+    ])
+    .await;
+
+    let stream = fixture
+        .client
+        .call(resumable_segment_add(true, vec![11]))
+        .await
+        .expect("open session");
+    fixture
+        .client
+        .call_continuation(resumable_segment_add(false, vec![0]))
+        .await
+        .expect("close session");
+
+    assert_eq!(drain_resumable_stream(stream).await, vec![9]);
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumable_session_abort_ends_open_session() {
+    init_tracing();
+    let fixture = resumable_session_fixture(vec![expect_add(true), emit_tokens(vec![1, 2])]).await;
+
+    let mut stream = fixture
+        .client
+        .call(resumable_segment_add(true, vec![11]))
+        .await
+        .expect("open session");
+    fixture.client.abort(&[RESUMABLE_SESSION_ID.to_string()]).await.expect("abort");
+
+    let last = timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("stream timeout")
+        .expect("abort output")
+        .expect("abort output is not an error");
+    assert_eq!(last.finish_reason, Some(EngineCoreFinishReason::Abort));
+
+    // An aborted session is no longer continuable.
+    let error = fixture
+        .client
+        .call_continuation(resumable_segment_add(true, vec![22]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::UnknownResumableRequestId { .. }),
+        "{error:?}"
+    );
+
+    fixture.shutdown().await;
 }

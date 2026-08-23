@@ -42,16 +42,15 @@ impl Deref for EngineCoreStreamOutput {
 
 /// Stream of raw engine-core outputs for one request.
 ///
-/// The stream yields only [`EngineCoreStreamOutput`] values whose embedded
-/// output `request_id` matches the originating `add_request()` call. Normal
-/// request completion is expected to include a final output object whose
-/// `finish_reason` is non-`None`.
+/// One-shot streams end on a terminal `finish_reason`. Resumable streams also
+/// end on an explicit `Ok(None)` from the registry.
 pub struct EngineCoreOutputStream {
     request_id: String,
     engine_index: u32,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
     state: State,
     rx: OutputReceiver,
+    resumable: bool,
 }
 
 impl EngineCoreOutputStream {
@@ -60,6 +59,7 @@ impl EngineCoreOutputStream {
         engine_index: u32,
         abort_tx: mpsc::UnboundedSender<AbortRequest>,
         rx: OutputReceiver,
+        resumable: bool,
     ) -> Self {
         Self {
             request_id,
@@ -67,6 +67,7 @@ impl EngineCoreOutputStream {
             abort_tx,
             state: State::Running,
             rx,
+            resumable,
         }
     }
 
@@ -91,31 +92,28 @@ impl Stream for EngineCoreOutputStream {
 
         match Pin::new(&mut self.rx).poll_recv(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(item)) => {
-                match &item {
-                    Ok(output) => {
-                        // If the output indicates the request is finished, mark the stream as
-                        // terminated with cleanly-finished state and expect no more outputs to
-                        // come.
-                        if output.finished() {
-                            if output.finish_reason == Some(EngineCoreFinishReason::Error) {
-                                error!(
-                                    self.request_id,
-                                    "request failed with an internal error during generation"
-                                );
-                            }
-                            debug!(self.request_id, "request completed via final output");
-                            self.state = State::Finished;
-                        }
-                    }
-                    Err(error) => {
-                        // If we get an error from the output stream, mark the stream as terminated
-                        // with an error.
-                        warn!(self.request_id, error = %error.as_report(), "request encountered an error");
-                        self.state = State::ClosedWithError;
-                    }
+            Poll::Ready(Some(Ok(Some(output)))) => {
+                if output.finish_reason == Some(EngineCoreFinishReason::Error) {
+                    error!(
+                        self.request_id,
+                        "request failed with an internal error during generation"
+                    );
                 }
-                Poll::Ready(Some(item))
+                if output.finished() && !self.resumable {
+                    debug!(self.request_id, "request completed via final output");
+                    self.state = State::Finished;
+                }
+                Poll::Ready(Some(Ok(output)))
+            }
+            Poll::Ready(Some(Ok(None))) => {
+                debug!(self.request_id, "request completed via registry signal");
+                self.state = State::Finished;
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(error))) => {
+                warn!(self.request_id, error = %error.as_report(), "request encountered an error");
+                self.state = State::ClosedWithError;
+                Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(None) => {
                 // If we get a `None` without seeing a finished output, this is an unexpected
@@ -160,5 +158,68 @@ impl Drop for EngineCoreOutputStream {
                 "auto-abort worker already shut down; skip auto-abort"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt;
+
+    use super::*;
+
+    fn segment_stop() -> EngineCoreStreamOutput {
+        EngineCoreStreamOutput {
+            engine_index: 0,
+            timestamp: 0.0,
+            output: EngineCoreOutput {
+                request_id: "rt-abc".to_string(),
+                finish_reason: Some(EngineCoreFinishReason::Stop),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A segment stop leaves a resumable stream running, so losing the sender
+    /// afterwards must surface an error rather than a silently truncated
+    /// transcript.
+    #[tokio::test]
+    async fn resumable_sender_drop_after_segment_finish_is_unexpected() {
+        let (abort_tx, _abort_rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut stream = EngineCoreOutputStream::new("rt-abc".to_string(), 0, abort_tx, rx, true);
+
+        tx.send(Ok(Some(segment_stop()))).unwrap();
+        let segment = stream.next().await.unwrap().unwrap();
+        assert_eq!(segment.finish_reason, Some(EngineCoreFinishReason::Stop));
+
+        drop(tx);
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(matches!(
+            error,
+            Error::RequestStreamClosed { request_id } if request_id == "rt-abc"
+        ));
+    }
+
+    /// Explicit completion has to terminate the stream, not merely end the
+    /// iteration: a stream left running auto-aborts a request the engine has
+    /// already finished.
+    #[tokio::test]
+    async fn resumable_completion_terminates_the_stream_without_aborting() {
+        let (abort_tx, mut abort_rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut stream = EngineCoreOutputStream::new("rt-abc".to_string(), 0, abort_tx, rx, true);
+
+        tx.send(Ok(Some(segment_stop()))).unwrap();
+        tx.send(Ok(None)).unwrap();
+
+        assert!(stream.next().await.unwrap().is_ok());
+        assert!(stream.next().await.is_none());
+        assert!(stream.is_terminated());
+
+        drop(stream);
+        assert!(
+            abort_rx.try_recv().is_err(),
+            "a completed session must not be aborted"
+        );
     }
 }

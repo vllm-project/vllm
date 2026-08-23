@@ -14,6 +14,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
+use crate::client::state::OutputReceiver;
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::protocol::dtype::ModelDtype;
@@ -22,7 +23,7 @@ use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
-use crate::transport::{self, ConnectedEngine};
+use crate::transport::{self, ConnectedEngine, EngineId};
 
 pub(crate) mod imp;
 mod state;
@@ -580,8 +581,7 @@ impl EngineCoreClient {
     /// Add a new request to the engine and return a per-request raw output
     /// stream.
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
-        req.client_index = self.config.client_index;
-        req.validate()?;
+        self.prepare_add_request(&mut req)?;
         trace!(
             request_id = %req.request_id,
             client_index = req.client_index,
@@ -591,43 +591,99 @@ impl EngineCoreClient {
         );
 
         let request_id = req.request_id.clone();
-        let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
-        let data_parallel_rank = req.data_parallel_rank;
-        let (engine_id, rx) =
-            self.inner.register_request(request_id.clone(), lora_name, data_parallel_rank)?;
-
-        let result: Result<()> = async {
-            if let Some(coordinator) = self.coordinator.as_ref() {
-                let snapshot = coordinator.snapshot();
-                req.current_wave = snapshot.current_wave;
-                if !snapshot.engines_running {
-                    coordinator.notify_first_request(engine_id.clone())?;
-                }
-            }
-
-            debug!(
-                request_id = req.request_id,
-                ?engine_id,
-                "registered request to engine"
-            );
-
-            self.inner.send_request_to_engine(&engine_id, req).await?;
-            Ok(())
-        }
-        .await;
-
-        // Failed to send the request to the engine, roll back the registration.
-        if let Err(error) = result {
-            self.inner.rollback_request(&request_id);
-            return Err(error);
-        }
+        let resumable = req.resumable;
+        let (engine_id, rx) = self.register_and_send(req).await?;
 
         Ok(EngineCoreOutputStream::new(
             request_id,
             engine_id.engine_index().unwrap_or(0),
             self.abort_tx.clone(),
             rx,
+            resumable,
         ))
+    }
+
+    /// Send another chunk for an open resumable request.
+    ///
+    /// Output keeps flowing on the [`EngineCoreOutputStream`] from [`Self::call`].
+    /// Close the session with `resumable: false`. Concurrent sends for the same
+    /// session are rejected.
+    pub async fn call_continuation(&self, mut req: EngineCoreRequest) -> Result<()> {
+        self.prepare_add_request(&mut req)?;
+        let request_id = req.request_id.clone();
+        let sentinel = !req.resumable;
+        let engine_id = self.inner.continue_resumable_request(&request_id, sentinel)?;
+
+        if let Err(error) = self.send_add(engine_id.clone(), req).await {
+            self.inner.rollback_continuation(&request_id);
+            return Err(error);
+        }
+
+        let still_registered = self.inner.commit_continuation(&request_id);
+        if sentinel && !still_registered {
+            self.inner
+                .do_abort_requests(&engine_id, std::slice::from_ref(&request_id))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Shared setup for [`Self::call`] and [`Self::call_continuation`].
+    fn prepare_add_request(&self, req: &mut EngineCoreRequest) -> Result<()> {
+        req.client_index = self.config.client_index;
+        req.validate()
+    }
+
+    /// Register a new request, then send it, rolling the registration back if
+    /// the send fails.
+    async fn register_and_send(
+        &self,
+        req: EngineCoreRequest,
+    ) -> Result<(EngineId, OutputReceiver)> {
+        let request_id = req.request_id.clone();
+        let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
+        let data_parallel_rank = req.data_parallel_rank;
+        let resumable = req.resumable;
+        let (engine_id, rx) = self.inner.register_request(
+            request_id.clone(),
+            lora_name,
+            data_parallel_rank,
+            resumable,
+        )?;
+
+        if let Err(error) = self.send_add(engine_id.clone(), req).await {
+            self.inner.rollback_request(&request_id);
+            return Err(error);
+        }
+
+        Ok((engine_id, rx))
+    }
+
+    async fn send_add(&self, engine_id: EngineId, mut req: EngineCoreRequest) -> Result<()> {
+        self.prepare_add_for_send(&engine_id, &mut req)?;
+        self.inner.send_request_to_engine(&engine_id, req).await
+    }
+
+    fn prepare_add_for_send(
+        &self,
+        engine_id: &EngineId,
+        req: &mut EngineCoreRequest,
+    ) -> Result<()> {
+        if let Some(coordinator) = self.coordinator.as_ref() {
+            let snapshot = coordinator.snapshot();
+            req.current_wave = snapshot.current_wave;
+            if !snapshot.engines_running {
+                coordinator.notify_first_request(engine_id.clone())?;
+            }
+        }
+
+        debug!(
+            request_id = req.request_id,
+            ?engine_id,
+            resumable = req.resumable,
+            "sending add request to engine"
+        );
+        Ok(())
     }
 
     /// Abort currently in-flight requests by request ID.

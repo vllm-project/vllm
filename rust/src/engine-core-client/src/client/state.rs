@@ -15,16 +15,105 @@ use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::ConnectedEngine;
 
-pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
-pub type OutputReceiver = mpsc::UnboundedReceiver<Result<EngineCoreStreamOutput>>;
+/// Internal stream message: `Ok(Some(_))` carries output and `Ok(None)` marks
+/// explicit clean completion.
+pub type OutputMessage = Result<Option<EngineCoreStreamOutput>>;
+pub type OutputSender = mpsc::UnboundedSender<OutputMessage>;
+pub type OutputReceiver = mpsc::UnboundedReceiver<OutputMessage>;
 pub type UtilitySender = oneshot::Sender<Result<UtilityOutput>>;
 pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
+
+/// Where one engine output goes and any resumable accounting deferred until
+/// after that output is enqueued.
+#[derive(Debug)]
+pub struct OutputRoute {
+    pub sender: OutputSender,
+    pub stop_action: Option<ResumableStopAction>,
+}
+
+/// What a terminal output means for a resumable session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumableStopAction {
+    Continue,
+    End,
+}
+
+/// How a tracked request reaches its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestMode {
+    /// An ordinary call, retired by its first terminal output.
+    OneShot,
+    Resumable(ResumableSession),
+}
+
+/// Segment accounting for one resumable request.
+///
+/// The engine stops the request once per submitted segment, so the session is
+/// over when the closing sentinel ADD has been sent and every segment has
+/// stopped. This mirrors the Python frontend's `input_chunk_queue` bookkeeping
+/// in `OutputProcessor.process_outputs`. `EngineCoreOutputs.finished_requests`
+/// cannot drive completion instead: the engine only populates it under
+/// data-parallel internal load balancing (`include_finished_set`), so a
+/// single-engine deployment never reports it for a normal finish.
+/// [`RequestRegistry::finish_many`] therefore leaves resumable IDs registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InFlightAdd {
+    Content,
+    Sentinel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResumableSession {
+    outstanding: u32,
+    sentinel_sent: bool,
+    /// At most one content or sentinel ADD can be in flight at a time.
+    in_flight: Option<InFlightAdd>,
+}
+
+impl ResumableSession {
+    fn open() -> Self {
+        Self {
+            outstanding: 1,
+            sentinel_sent: false,
+            in_flight: None,
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.sentinel_sent && self.outstanding == 0
+    }
+}
+
+fn resumable_stop_action(output: &EngineCoreOutput) -> ResumableStopAction {
+    if matches!(
+        output.finish_reason,
+        Some(EngineCoreFinishReason::Abort | EngineCoreFinishReason::Error)
+    ) {
+        ResumableStopAction::End
+    } else {
+        ResumableStopAction::Continue
+    }
+}
 
 #[derive(Debug)]
 struct TrackedRequest {
     sender: OutputSender,
     engine_id: EngineId,
     lora: Option<LoraRequestState>,
+    mode: RequestMode,
+}
+
+impl TrackedRequest {
+    fn is_resumable(&self) -> bool {
+        matches!(self.mode, RequestMode::Resumable(_))
+    }
+
+    fn session_mut(&mut self) -> Option<&mut ResumableSession> {
+        match &mut self.mode {
+            RequestMode::OneShot => None,
+            RequestMode::Resumable(session) => Some(session),
+        }
+    }
 }
 
 /// Frontend-side view of one LoRA request's scheduling phase.
@@ -122,11 +211,16 @@ impl RequestRegistry {
     /// When `data_parallel_rank` is provided, the request is routed directly to
     /// the engine at that rank index, bypassing load balancing. Otherwise
     /// the engine with the fewest in-flight requests is chosen.
+    ///
+    /// Set `resumable` so later [`Self::continue_resumable`] can reuse this
+    /// entry. Duplicate `request_id`s are rejected — continuations join an
+    /// existing session, they do not register a new one.
     pub fn register(
         &mut self,
         request_id: String,
         lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
+        resumable: bool,
     ) -> Result<(EngineId, OutputReceiver)> {
         if self.requests.contains_key(&request_id) {
             return Err(Error::DuplicateRequestId { request_id });
@@ -147,6 +241,11 @@ impl RequestRegistry {
                 sender: tx,
                 engine_id: engine_id.clone(),
                 lora,
+                mode: if resumable {
+                    RequestMode::Resumable(ResumableSession::open())
+                } else {
+                    RequestMode::OneShot
+                },
             },
         );
 
@@ -157,6 +256,75 @@ impl RequestRegistry {
         state.inflight += 1;
 
         Ok((engine_id, rx))
+    }
+
+    /// Reuse an open resumable session for one continuation ADD.
+    ///
+    /// A content ADD counts one more segment the engine still has to stop. A
+    /// sentinel ADD does not. Concurrent ADDs are rejected while this one is
+    /// in flight.
+    pub fn continue_resumable(&mut self, request_id: &str, sentinel: bool) -> Result<EngineId> {
+        let unknown = || Error::UnknownResumableRequestId {
+            request_id: request_id.to_string(),
+        };
+        let existing = self.requests.get_mut(request_id).ok_or_else(unknown)?;
+        let engine_id = existing.engine_id.clone();
+        let session = existing.session_mut().ok_or_else(unknown)?;
+        if session.in_flight.is_some() {
+            return Err(Error::ContinuationInProgress {
+                request_id: request_id.to_string(),
+            });
+        }
+        if session.sentinel_sent {
+            return Err(unknown());
+        }
+
+        if sentinel {
+            session.in_flight = Some(InFlightAdd::Sentinel);
+        } else {
+            session.outstanding += 1;
+            session.in_flight = Some(InFlightAdd::Content);
+        }
+        Ok(engine_id)
+    }
+
+    /// Undo the accounting for a continuation whose ADD could not be sent.
+    pub fn rollback_continuation(&mut self, request_id: &str) {
+        let Some(session) = self.requests.get_mut(request_id).and_then(TrackedRequest::session_mut)
+        else {
+            return;
+        };
+        if session.in_flight.take() == Some(InFlightAdd::Content) {
+            session.outstanding = session.outstanding.saturating_sub(1);
+        }
+    }
+
+    /// Mark a continuation ADD as sent. A sentinel ADD also commits
+    /// `sentinel_sent` and, if every segment has already stopped, completes
+    /// the session.
+    ///
+    /// Returns `false` if the session was already removed.
+    pub fn commit_continuation(&mut self, request_id: &str) -> bool {
+        let complete = {
+            let Some(session) =
+                self.requests.get_mut(request_id).and_then(TrackedRequest::session_mut)
+            else {
+                return false;
+            };
+            match session.in_flight.take() {
+                None => return true,
+                Some(InFlightAdd::Sentinel) => session.sentinel_sent = true,
+                Some(InFlightAdd::Content) => {}
+            }
+            session.is_complete()
+        };
+        if !complete {
+            return true;
+        }
+        if let Some((sender, _)) = self.remove(request_id) {
+            let _ = sender.send(Ok(None));
+        }
+        true
     }
 
     fn choose_engine_for_request(&mut self, data_parallel_rank: Option<u32>) -> Result<EngineId> {
@@ -198,17 +366,50 @@ impl RequestRegistry {
         by_engine
     }
 
-    /// Obtain the stream sender for one output. If it indicates the request is
-    /// finished, it will be removed from the registry.
-    pub fn sender_for_output(&mut self, output: &EngineCoreOutput) -> Option<OutputSender> {
+    /// Route one output to its stream.
+    ///
+    /// Resumable terminal accounting is deferred until
+    /// [`Self::finish_resumable_output`] so the dispatcher can enqueue this
+    /// output before a concurrent sentinel completes its stream.
+    pub fn route_for_output(&mut self, output: &EngineCoreOutput) -> Option<OutputRoute> {
         self.apply_lora_events(output);
-        if output.finished() {
-            self.remove(output.request_id.as_str()).map(|tracked| tracked.0)
+
+        let request_id = output.request_id.as_str();
+        let resumable = self.requests.get(request_id)?.is_resumable();
+
+        if output.finished() && !resumable {
+            self.remove(request_id).map(|(sender, _)| OutputRoute {
+                sender,
+                stop_action: None,
+            })
         } else {
-            self.requests
-                .get(output.request_id.as_str())
-                .map(|tracked| tracked.sender.clone())
+            self.requests.get(request_id).map(|tracked| OutputRoute {
+                sender: tracked.sender.clone(),
+                stop_action: (resumable && output.finished())
+                    .then(|| resumable_stop_action(output)),
+            })
         }
+    }
+
+    /// Account for a terminal resumable output after it has been enqueued.
+    ///
+    /// Returns the sender that should receive explicit completion when this was
+    /// the session's last output.
+    pub fn finish_resumable_output(
+        &mut self,
+        request_id: &str,
+        stop_action: ResumableStopAction,
+    ) -> Option<(OutputSender, EngineId)> {
+        let retire = {
+            let session =
+                self.requests.get_mut(request_id).and_then(TrackedRequest::session_mut)?;
+            session.outstanding = session.outstanding.saturating_sub(1);
+            session.is_complete() || stop_action == ResumableStopAction::End
+        };
+        if !retire {
+            return None;
+        }
+        self.remove(request_id)
     }
 
     /// Advance the request's LoRA scheduling phase from the engine-core events
@@ -252,24 +453,32 @@ impl RequestRegistry {
         (running, waiting)
     }
 
-    /// Obtain stream senders for a whole engine output batch under one
-    /// registry lock. Finished outputs are removed before returning.
-    pub fn senders_for_outputs<'a>(
+    /// Obtain stream routes for a whole engine output batch under one registry
+    /// lock. Finished one-shot outputs are removed before returning.
+    pub fn routes_for_outputs<'a>(
         &mut self,
         outputs: impl IntoIterator<Item = &'a EngineCoreOutput>,
-    ) -> Vec<Option<OutputSender>> {
-        outputs.into_iter().map(|output| self.sender_for_output(output)).collect()
+    ) -> Vec<Option<OutputRoute>> {
+        outputs.into_iter().map(|output| self.route_for_output(output)).collect()
     }
 
-    /// Remove a batch of requests that have finished or aborted, returning
-    /// their stream senders.
+    /// Remove one-shot requests the engine marked finished, returning their
+    /// stream senders.
+    ///
+    /// Skips resumable IDs; see [`ResumableSession`].
     pub fn finish_many<'a>(
         &mut self,
         request_ids: impl IntoIterator<Item = &'a String>,
     ) -> Vec<OutputSender> {
         request_ids
             .into_iter()
-            .filter_map(|request_id| self.remove(request_id.as_str()).map(|tracked| tracked.0))
+            .filter_map(|request_id| {
+                let tracked = self.requests.get(request_id.as_str())?;
+                if tracked.is_resumable() {
+                    return None;
+                }
+                self.remove(request_id.as_str()).map(|(sender, _)| sender)
+            })
             .collect()
     }
 
@@ -322,7 +531,8 @@ impl RequestRegistry {
                     ..EngineCoreOutput::default()
                 },
             };
-            let _ = sender.send(Ok(output));
+            let _ = sender.send(Ok(Some(output)));
+            let _ = sender.send(Ok(None));
             aborted.push(request_id.clone());
         }
         aborted
@@ -452,8 +662,10 @@ mod tests {
 
     use crate::EngineId;
     use crate::client::state::{
-        EngineLoadSnapshot, EngineRoutingState, RequestRegistry, UtilityRegistry,
+        EngineLoadSnapshot, EngineRoutingState, RequestRegistry, ResumableStopAction,
+        UtilityRegistry,
     };
+    use crate::client::stream::EngineCoreStreamOutput;
     use crate::mock_engine::default_ready_response;
     use crate::protocol::output::{
         EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
@@ -492,11 +704,30 @@ mod tests {
         values.iter().map(|name| (*name).to_string()).collect()
     }
 
+    fn segment_stop(request_id: &str) -> EngineCoreOutput {
+        EngineCoreOutput {
+            request_id: request_id.to_string(),
+            finish_reason: Some(EngineCoreFinishReason::Stop),
+            ..Default::default()
+        }
+    }
+
+    fn admit_content(registry: &mut RequestRegistry, request_id: &str) -> EngineId {
+        let engine_id = registry.continue_resumable(request_id, false).unwrap();
+        assert!(registry.commit_continuation(request_id));
+        engine_id
+    }
+
+    fn admit_close(registry: &mut RequestRegistry, request_id: &str) {
+        registry.continue_resumable(request_id, true).unwrap();
+        assert!(registry.commit_continuation(request_id));
+    }
+
     #[test]
     fn registry_rejects_duplicate_request_ids() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None, None).unwrap();
-        let error = registry.register("req-1".to_string(), None, None).unwrap_err();
+        registry.register("req-1".to_string(), None, None, false).unwrap();
+        let error = registry.register("req-1".to_string(), None, None, false).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::DuplicateRequestId { request_id } if request_id == "req-1"
@@ -504,17 +735,199 @@ mod tests {
     }
 
     #[test]
+    fn resumable_entry_survives_a_segment_finish_reason() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry.register("rt-abc".to_string(), None, None, true).unwrap();
+
+        let route = registry
+            .route_for_output(&segment_stop("rt-abc"))
+            .expect("a segment stop still routes to the open stream");
+        assert_eq!(route.stop_action, Some(ResumableStopAction::Continue));
+        assert!(registry.finish_resumable_output("rt-abc", route.stop_action.unwrap()).is_none());
+        assert!(
+            registry.contains("rt-abc"),
+            "a segment finish reason is not the session's end"
+        );
+        drop(route);
+    }
+
+    #[test]
+    fn finish_many_skips_resumable_requests() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry.register("rt-abc".to_string(), None, None, true).unwrap();
+        registry.register("one-shot".to_string(), None, None, false).unwrap();
+
+        let finished = registry.finish_many(&["rt-abc".to_string(), "one-shot".to_string()]);
+        assert_eq!(finished.len(), 1);
+        assert!(
+            registry.contains("rt-abc"),
+            "finished_requests must not retire a resumable session"
+        );
+        assert!(!registry.contains("one-shot"));
+    }
+
+    #[test]
+    fn completion_does_not_overtake_an_already_routed_output() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        let (_, mut rx) = registry.register("rt-abc".to_string(), None, None, true).unwrap();
+        let output = segment_stop("rt-abc");
+
+        // The dispatcher has decided where the output goes but has not put it
+        // on the channel yet.
+        let route = registry
+            .route_for_output(&output)
+            .expect("the segment stop routes to the open stream");
+        assert_eq!(route.stop_action, Some(ResumableStopAction::Continue));
+
+        registry.continue_resumable("rt-abc", true).unwrap();
+        assert!(registry.commit_continuation("rt-abc"));
+        route
+            .sender
+            .send(Ok(Some(EngineCoreStreamOutput {
+                engine_index: 0,
+                timestamp: 0.0,
+                output,
+            })))
+            .unwrap();
+        let completion = registry
+            .finish_resumable_output("rt-abc", route.stop_action.unwrap())
+            .expect("the committed sentinel completes the session");
+        completion.0.send(Ok(None)).unwrap();
+
+        assert!(
+            matches!(rx.try_recv(), Ok(Ok(Some(_)))),
+            "the routed output must precede completion"
+        );
+        assert!(matches!(rx.try_recv(), Ok(Ok(None))));
+    }
+
+    #[test]
+    fn resumable_session_ends_on_a_stop_it_cannot_resume_from() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry.register("rt-abc".to_string(), None, None, true).unwrap();
+
+        let route = registry
+            .route_for_output(&EngineCoreOutput {
+                request_id: "rt-abc".to_string(),
+                finish_reason: Some(EngineCoreFinishReason::Error),
+                ..Default::default()
+            })
+            .expect("the error still reaches the stream");
+        assert_eq!(route.stop_action, Some(ResumableStopAction::End));
+        assert!(registry.finish_resumable_output("rt-abc", route.stop_action.unwrap()).is_some());
+        assert!(!registry.contains("rt-abc"));
+    }
+
+    #[test]
+    fn continuation_without_an_open_session_is_rejected() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+
+        let error = registry.continue_resumable("rt-abc", false).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::Error::UnknownResumableRequestId { request_id } if request_id == "rt-abc"
+        ));
+
+        // One-shot requests are not continuable.
+        registry.register("one-shot".to_string(), None, None, false).unwrap();
+        let error = registry.continue_resumable("one-shot", false).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::Error::UnknownResumableRequestId { .. }
+        ));
+    }
+
+    #[test]
+    fn closing_session_rejects_later_continuations() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry.register("rt-abc".to_string(), None, None, true).unwrap();
+
+        admit_close(&mut registry, "rt-abc");
+        let error = registry.continue_resumable("rt-abc", false).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::Error::UnknownResumableRequestId { .. }
+        ));
+    }
+
+    #[test]
+    fn concurrent_continuation_is_rejected_until_the_first_finishes() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry.register("rt-abc".to_string(), None, None, true).unwrap();
+
+        registry.continue_resumable("rt-abc", false).unwrap();
+        let error = registry.continue_resumable("rt-abc", false).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::Error::ContinuationInProgress { request_id }
+                if request_id == "rt-abc"
+        ));
+
+        registry.rollback_continuation("rt-abc");
+        admit_content(&mut registry, "rt-abc");
+    }
+
+    #[test]
+    fn commit_reports_a_session_retired_by_abort() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry.register("rt-abc".to_string(), None, None, true).unwrap();
+        registry.continue_resumable("rt-abc", true).unwrap();
+
+        registry.abort_many(&["rt-abc".to_string()], 0.0);
+
+        assert!(!registry.commit_continuation("rt-abc"));
+    }
+
+    /// A rolled-back sentinel reopens the session even when nothing is left
+    /// outstanding, which is the case a premature completion would have closed.
+    #[test]
+    fn failed_closing_send_after_last_stop_reopens_session() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry.register("rt-abc".to_string(), None, None, true).unwrap();
+
+        registry.continue_resumable("rt-abc", true).unwrap();
+        let route = registry
+            .route_for_output(&segment_stop("rt-abc"))
+            .expect("the in-flight stop still routes to the stream");
+        assert_eq!(route.stop_action, Some(ResumableStopAction::Continue));
+        assert!(registry.finish_resumable_output("rt-abc", route.stop_action.unwrap()).is_none());
+
+        registry.rollback_continuation("rt-abc");
+        assert!(registry.contains("rt-abc"));
+        admit_content(&mut registry, "rt-abc");
+    }
+
+    #[test]
+    fn failed_continuation_send_does_not_consume_a_segment() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry.register("rt-abc".to_string(), None, None, true).unwrap();
+
+        registry.continue_resumable("rt-abc", false).unwrap();
+        registry.rollback_continuation("rt-abc");
+        admit_close(&mut registry, "rt-abc");
+
+        let route = registry
+            .route_for_output(&segment_stop("rt-abc"))
+            .expect("the remaining segment routes to the stream it closes");
+        assert_eq!(route.stop_action, Some(ResumableStopAction::Continue));
+        assert!(
+            registry.finish_resumable_output("rt-abc", route.stop_action.unwrap()).is_some(),
+            "a segment that was never sent must not hold the session open"
+        );
+    }
+
+    #[test]
     fn registry_removes_finished_request_on_output() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None, None).unwrap();
+        registry.register("req-1".to_string(), None, None, false).unwrap();
 
-        let sender = registry.sender_for_output(&EngineCoreOutput {
+        let route = registry.route_for_output(&EngineCoreOutput {
             request_id: "req-1".to_string(),
             finish_reason: Some(EngineCoreFinishReason::Length),
             ..Default::default()
         });
 
-        assert!(sender.is_some());
+        assert!(route.is_some());
         assert!(!registry.contains("req-1"));
     }
 
@@ -522,9 +935,14 @@ mod tests {
     fn registry_tracks_lora_phases_from_engine_events() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry
-            .register("req-lora".to_string(), Some("adapter-a".to_string()), None)
+            .register(
+                "req-lora".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+                false,
+            )
             .unwrap();
-        registry.register("req-plain".to_string(), None, None).unwrap();
+        registry.register("req-plain".to_string(), None, None, false).unwrap();
 
         // Registered but not yet scheduled: counted as waiting. The non-LoRA
         // request never shows up.
@@ -534,7 +952,7 @@ mod tests {
         );
 
         // Queued then scheduled in one output: running.
-        drop(registry.sender_for_output(&output_with_events(
+        drop(registry.route_for_output(&output_with_events(
             "req-lora",
             &[EngineCoreEventType::Queued, EngineCoreEventType::Scheduled],
             None,
@@ -545,7 +963,7 @@ mod tests {
         );
 
         // Preempted: back to waiting.
-        drop(registry.sender_for_output(&output_with_events(
+        drop(registry.route_for_output(&output_with_events(
             "req-lora",
             &[EngineCoreEventType::Preempted],
             None,
@@ -556,7 +974,7 @@ mod tests {
         );
 
         // Finished: dropped from tracking entirely.
-        drop(registry.sender_for_output(&output_with_events(
+        drop(registry.route_for_output(&output_with_events(
             "req-lora",
             &[EngineCoreEventType::Scheduled],
             Some(EngineCoreFinishReason::Stop),
@@ -571,18 +989,33 @@ mod tests {
     fn registry_unions_lora_adapters_across_requests() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry
-            .register("req-a1".to_string(), Some("adapter-a".to_string()), None)
+            .register(
+                "req-a1".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+                false,
+            )
             .unwrap();
         registry
-            .register("req-a2".to_string(), Some("adapter-a".to_string()), None)
+            .register(
+                "req-a2".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+                false,
+            )
             .unwrap();
         registry
-            .register("req-b".to_string(), Some("adapter-b".to_string()), None)
+            .register(
+                "req-b".to_string(),
+                Some("adapter-b".to_string()),
+                None,
+                false,
+            )
             .unwrap();
 
         // One of adapter-a's requests starts running while the other waits:
         // the adapter appears in both sets.
-        drop(registry.sender_for_output(&output_with_events(
+        drop(registry.route_for_output(&output_with_events(
             "req-a1",
             &[EngineCoreEventType::Scheduled],
             None,
@@ -600,7 +1033,7 @@ mod tests {
     fn registry_counts_only_active_lora_requests() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
 
-        registry.register("req-plain".to_string(), None, None).unwrap();
+        registry.register("req-plain".to_string(), None, None, false).unwrap();
         assert_eq!(registry.active_lora_requests(), 0);
         assert_eq!(
             registry.lora_adapter_states(),
@@ -612,6 +1045,7 @@ mod tests {
                 "req-lora-a".to_string(),
                 Some("adapter-a".to_string()),
                 None,
+                false,
             )
             .unwrap();
         registry
@@ -619,6 +1053,7 @@ mod tests {
                 "req-lora-b".to_string(),
                 Some("adapter-b".to_string()),
                 None,
+                false,
             )
             .unwrap();
         assert_eq!(registry.active_lora_requests(), 2);
@@ -641,7 +1076,12 @@ mod tests {
     fn registry_clears_lora_count_on_close() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry
-            .register("req-lora".to_string(), Some("adapter-a".to_string()), None)
+            .register(
+                "req-lora".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+                false,
+            )
             .unwrap();
 
         assert_eq!(registry.active_lora_requests(), 1);
@@ -657,7 +1097,12 @@ mod tests {
     fn registry_drops_lora_tracking_on_abort() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry
-            .register("req-lora".to_string(), Some("adapter-a".to_string()), None)
+            .register(
+                "req-lora".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+                false,
+            )
             .unwrap();
 
         drop(registry.finish_many(&["req-lora".to_string()]));
@@ -671,8 +1116,8 @@ mod tests {
     #[test]
     fn registry_closes_all_requests_on_failure() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None, None).unwrap();
-        registry.register("req-2".to_string(), None, None).unwrap();
+        registry.register("req-1".to_string(), None, None, false).unwrap();
+        registry.register("req-2".to_string(), None, None, false).unwrap();
 
         let senders = registry.close();
 
@@ -688,9 +1133,10 @@ mod tests {
             connected_engine(engine_0.clone()),
             connected_engine(engine_1.clone()),
         ]);
-        let (chosen_0, _) = registry.register("req-1".to_string(), None, None).unwrap();
-        let (chosen_1, _) = registry.register("req-2".to_string(), None, None).unwrap();
-        let (chosen_0_again, _) = registry.register("req-3".to_string(), None, None).unwrap();
+        let (chosen_0, _) = registry.register("req-1".to_string(), None, None, false).unwrap();
+        let (chosen_1, _) = registry.register("req-2".to_string(), None, None, false).unwrap();
+        let (chosen_0_again, _) =
+            registry.register("req-3".to_string(), None, None, false).unwrap();
 
         assert_eq!(chosen_0, engine_0);
         assert_eq!(chosen_1, engine_1);
@@ -717,9 +1163,10 @@ mod tests {
             connected_engine(engine_1.clone()),
         ]);
 
-        let (chosen_0, _) = registry.register("req-1".to_string(), None, None).unwrap();
-        let (chosen_1, _) = registry.register("req-2".to_string(), None, None).unwrap();
-        let (chosen_0_again, _) = registry.register("req-3".to_string(), None, None).unwrap();
+        let (chosen_0, _) = registry.register("req-1".to_string(), None, None, false).unwrap();
+        let (chosen_1, _) = registry.register("req-2".to_string(), None, None, false).unwrap();
+        let (chosen_0_again, _) =
+            registry.register("req-3".to_string(), None, None, false).unwrap();
 
         assert_eq!(chosen_0, engine_0);
         assert_eq!(chosen_1, engine_1);
@@ -786,7 +1233,7 @@ mod tests {
             }
         ));
 
-        let (chosen, _) = registry.register("req-stats".to_string(), None, None).unwrap();
+        let (chosen, _) = registry.register("req-stats".to_string(), None, None, false).unwrap();
         assert_eq!(chosen, engine_1);
     }
 
@@ -802,15 +1249,15 @@ mod tests {
         ]);
 
         // Explicitly target rank 2 (third engine).
-        let (chosen, _) = registry.register("req-1".to_string(), None, Some(2)).unwrap();
+        let (chosen, _) = registry.register("req-1".to_string(), None, Some(2), false).unwrap();
         assert_eq!(chosen, engine_2);
 
         // Explicitly target rank 0 (first engine).
-        let (chosen, _) = registry.register("req-2".to_string(), None, Some(0)).unwrap();
+        let (chosen, _) = registry.register("req-2".to_string(), None, Some(0), false).unwrap();
         assert_eq!(chosen, engine_0);
 
         // Explicitly target rank 1.
-        let (chosen, _) = registry.register("req-3".to_string(), None, Some(1)).unwrap();
+        let (chosen, _) = registry.register("req-3".to_string(), None, Some(1), false).unwrap();
         assert_eq!(chosen, engine_1);
     }
 
@@ -824,11 +1271,11 @@ mod tests {
         ]);
 
         // Load-balance: first two go to engine_0 and engine_1.
-        registry.register("req-lb-0".to_string(), None, None).unwrap();
+        registry.register("req-lb-0".to_string(), None, None, false).unwrap();
 
         // Now engine_0 has 1 in-flight. Without dp_rank, next would go to engine_1.
         // But with dp_rank=0, it should still go to engine_0.
-        let (chosen, _) = registry.register("req-dp".to_string(), None, Some(0)).unwrap();
+        let (chosen, _) = registry.register("req-dp".to_string(), None, Some(0), false).unwrap();
         assert_eq!(chosen, engine_0);
     }
 
@@ -839,7 +1286,7 @@ mod tests {
             connected_engine(EngineId::from_engine_index(1)),
         ]);
 
-        let error = registry.register("req-1".to_string(), None, Some(2)).unwrap_err();
+        let error = registry.register("req-1".to_string(), None, Some(2), false).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::InvalidDataParallelRank {
@@ -854,10 +1301,10 @@ mod tests {
         let engine_3 = EngineId::from_engine_index(3);
         let mut registry = RequestRegistry::new(&[connected_engine(engine_3.clone())]);
 
-        let (chosen, _) = registry.register("req-ok".to_string(), None, Some(3)).unwrap();
+        let (chosen, _) = registry.register("req-ok".to_string(), None, Some(3), false).unwrap();
         assert_eq!(chosen, engine_3);
 
-        let error = registry.register("req-bad".to_string(), None, Some(0)).unwrap_err();
+        let error = registry.register("req-bad".to_string(), None, Some(0), false).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::InvalidDataParallelRank {
