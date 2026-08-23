@@ -148,6 +148,12 @@ class ForwardContext:
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
     batch_descriptor: BatchDescriptor | None = None
 
+    # Whether the logical batch contains prefill work before any local
+    # context-parallel partitioning. Collective consumers must use this value
+    # instead of rank-local attention metadata so every rank makes the same
+    # launch decision.
+    global_has_prefill: bool | None = None
+
     ubatch_slices: UBatchSlices | None = None
 
     # Boolean mask over the token axis: True for padding rows that are not real
@@ -220,6 +226,7 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    global_has_prefill: bool | None = None,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -234,6 +241,7 @@ def create_forward_context(
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
+        global_has_prefill=global_has_prefill,
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
@@ -268,6 +276,7 @@ def set_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    global_has_prefill: bool | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -337,6 +346,7 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
         is_padding=is_padding,
+        global_has_prefill=global_has_prefill,
     )
 
     try:

@@ -8,6 +8,7 @@ from vllm.config import CacheConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.linear import get_pcp_o_proj_batch_has_prefill
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
 
@@ -201,8 +202,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             else:
                 attn_metadata = attn_metadata_raw
             self.o_proj.prefetch_full_weight_if_needed(
-                attn_metadata is not None
-                and getattr(attn_metadata, "num_prefills", 0) > 0
+                get_pcp_o_proj_batch_has_prefill(attn_metadata)
             )
 
         # Add head dim of 1 to k_pe

@@ -1124,8 +1124,6 @@ class VllmConfig:
             raise ValueError("PCP O-Proj TP requires a model config.")
         if not model_config.enforce_eager:
             raise ValueError("PCP O-Proj TP MVP requires enforce_eager=True.")
-        if self.quant_config is not None:
-            raise ValueError("PCP O-Proj TP MVP does not support quantization.")
         if model_config.dtype not in (torch.float16, torch.bfloat16):
             raise ValueError("PCP O-Proj TP MVP supports only float16 and bfloat16.")
         if not model_config.use_mla:

@@ -1615,6 +1615,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 has_lora=self.lora_config is not None,
                 num_active_loras=batch_desc.num_active_loras,
             )
+            global_has_prefill = (
+                self.pcp_manager.global_has_prefill
+                if self.pcp_manager is not None
+                else input_batch.has_prefill
+            )
 
             with set_forward_context(
                 attn_metadata,
@@ -1626,6 +1631,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
+                global_has_prefill=global_has_prefill,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:

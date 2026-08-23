@@ -20,6 +20,7 @@ from vllm.model_executor.layers.linear import (
     PCPOProjRowParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    get_pcp_o_proj_batch_has_prefill,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -386,8 +387,7 @@ class DeepseekV32Attention(MLAAttention):
         # projection, indexer, and main attention as overlap candidates.
         if isinstance(self.o_proj, PCPOProjRowParallelLinear):
             self.o_proj.prefetch_full_weight_if_needed(
-                attn_metadata is not None
-                and getattr(attn_metadata, "num_prefills", 0) > 0
+                get_pcp_o_proj_batch_has_prefill(attn_metadata)
             )
 
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
