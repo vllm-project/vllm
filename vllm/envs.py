@@ -1186,9 +1186,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
         in ("true", "1")
     ),
     # Materialise each safetensors tensor into anonymous memory before the
-    # host-to-device copy. Works around a ROCm slow path in which a copy from
-    # a writable MAP_PRIVATE file mapping whose pages are resident runs at
-    # ~2 MiB/s (ROCm/ROCm#6523). Costs one extra host copy per tensor.
+    # host-to-device copy. safetensors maps checkpoints writable, and KFD takes
+    # the fault permission from the VMA rather than from the copy, so the copy
+    # breaks copy-on-write on every resident page and leaves the checkpoint as
+    # anonymous memory instead of evictable page cache (ROCm/ROCm#6523). Costs
+    # one extra host copy per tensor, which does not pay for itself when the
+    # tensors are small.
     "VLLM_ROCM_CLONE_MMAP_WEIGHTS": lambda: (
         os.getenv("VLLM_ROCM_CLONE_MMAP_WEIGHTS", "False").lower() in ("true", "1")
     ),
