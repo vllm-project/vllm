@@ -1039,15 +1039,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         rewound_req_ids = reqs.rewound_req_ids
         if rewound_req_ids:
             assert rewound_req_ids.issubset(reqs.req_ids)
+        rewound_req_indices: list[int] = []
+        rewound_num_output_tokens: list[int] = []
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
-        for req_id, num_computed_tokens, req_new_block_ids in zip(
-            reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
+        for req_id, num_computed_tokens, num_output_tokens, req_new_block_ids in zip(
+            reqs.req_ids,
+            reqs.num_computed_tokens,
+            reqs.num_output_tokens,
+            reqs.new_block_ids,
         ):
             req_index = self.req_states.req_id_to_index[req_id]
             if req_id in rewound_req_ids:
                 self.req_states.num_computed_tokens.stage_write_elem(
                     req_index, num_computed_tokens
                 )
+                rewound_req_indices.append(req_index)
+                # The scheduler clears output placeholders when it marks the
+                # in-flight frames stale, leaving only its accepted prefix.
+                rewound_num_output_tokens.append(num_output_tokens)
             num_computed_tokens_np[req_index] = num_computed_tokens
             if req_new_block_ids is not None:
                 self.block_tables.append_block_ids(
@@ -1055,6 +1064,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
         if rewound_req_ids:
             self.req_states.num_computed_tokens.apply_write()
+            output_bin_counts = (
+                self.sampler.penalties_state.output_bin_counts
+                if self.sampler is not None
+                else None
+            )
+            self.req_states.rewind_sampled_state(
+                rewound_req_indices,
+                rewound_num_output_tokens,
+                output_bin_counts,
+            )
+            if self.sampler is not None:
+                self.sampler.rewind_requests(rewound_req_indices)
+            if self.adaptive_verification is not None:
+                for req_index in rewound_req_indices:
+                    self.adaptive_verification.add_request(req_index)
 
         # Update CPU num_computed_prefill_tokens.
         np.minimum(

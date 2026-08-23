@@ -103,6 +103,9 @@ class Sampler:
         if self.trace_replay_state is not None:
             self.trace_replay_state.apply_staged_writes()
 
+    def rewind_requests(self, req_indices: list[int]) -> None:
+        self.thinking_budget_state.rewind_requests(req_indices)
+
     def get_logprobs_dims(
         self, idx_mapping_np: np.ndarray, include_token_ids: bool = True
     ) -> tuple[int, int] | None:
