@@ -16,6 +16,8 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 from cutlass import BFloat16, Float32, Int32, Int64, Uint32
 
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+
 from .primitives import (
     NUM_LAMPORT_BUFFERS,
     PACKED_BYTES,
@@ -104,6 +106,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
         fp32_internal: bool = False,
         include_reduce_scatter: bool = True,
         include_routed: bool = True,
+        top_k: int = 0,
     ):
         validate_shape(
             tp_size=tp_size,
@@ -153,6 +156,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
         self.fp32_internal = fp32_internal
         self.include_reduce_scatter = include_reduce_scatter
         self.include_routed = include_routed
+        self.top_k = top_k
 
     @cute.jit
     def __call__(
@@ -171,6 +175,8 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
         m: Int32,
         epsilon: Float32,
         stream: cuda.CUstream,
+        expert_weights: cute.Tensor,
+        expanded_idx_to_permuted_idx: cute.Tensor,
     ):
         self.kernel(
             latent_source,
@@ -186,6 +192,8 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
             shared_peer_ptrs,
             m,
             epsilon,
+            expert_weights,
+            expanded_idx_to_permuted_idx,
         ).launch(
             grid=(self.token_ctas, self.cluster_ctas, self.roles),
             block=(self.threads, 1, 1),
@@ -211,6 +219,8 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
         shared_peer_ptrs: cute.Tensor,
         m: Int32,
         epsilon: Float32,
+        expert_weights: cute.Tensor,
+        expanded_idx_to_permuted_idx: cute.Tensor,
     ):
         tidx, _, _ = cute.arch.thread_idx()
         token_cta, cta_y, role = cute.arch.block_idx()
@@ -244,6 +254,8 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                 logical_role,
                 cluster_rank,
                 tidx,
+                expert_weights,
+                expanded_idx_to_permuted_idx,
             )
             token = token + self.token_ctas
 
@@ -269,6 +281,8 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
         role: Int32,
         cluster_rank: Int32,
         tidx: Int32,
+        expert_weights: cute.Tensor,
+        expanded_idx_to_permuted_idx: cute.Tensor,
     ):
         if role == 0:
             # ---------------- routed AllReduce + RMSNorm ----------------
@@ -292,15 +306,48 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
             )
             dirty_elements = Int64(dirty_index) * (Int64(bytes_per_buffer) // Int64(2))
 
-            local_ptr = cute.make_ptr(
-                BFloat16,
-                (latent_source.iterator + element_offset).llvm_ptr,
-                cute.AddressSpace.gmem,
-                assumed_align=16,
-            )
-            local_packed = sanitize_negative_zero(
-                load_global_u32x4(local_ptr, volatile=False)
-            )
+            if cutlass.const_expr(self.top_k > 0):
+                # finalize topk reduction
+                local_values = cute.make_rmem_tensor(
+                    cute.make_layout((VEC_BF16,)), BFloat16
+                )
+                for element in cutlass.range_constexpr(VEC_BF16):
+                    local_values[element] = BFloat16(0.0)
+                for slot in cutlass.range_constexpr(self.top_k):
+                    permuted_idx = expanded_idx_to_permuted_idx[token, slot]
+                    if permuted_idx >= Int32(0):
+                        permuted_element = (
+                            Int64(permuted_idx) * self.latent_dim
+                            + Int64(packed_idx) * VEC_BF16
+                        )
+                        permuted_ptr = cute.make_ptr(
+                            BFloat16,
+                            (latent_source.iterator + permuted_element).llvm_ptr,
+                            cute.AddressSpace.gmem,
+                            assumed_align=16,
+                        )
+                        values = packed_u32x4_to_bf16x8(
+                            load_global_u32x4(permuted_ptr, volatile=False)
+                        )
+                        weight = expert_weights[token, slot].to(Float32)
+                        for element in cutlass.range_constexpr(VEC_BF16):
+                            scaled = (values[element].to(Float32) * weight).to(BFloat16)
+                            local_values[element] = (
+                                local_values[element].to(Float32) + scaled.to(Float32)
+                            ).to(BFloat16)
+                local_packed = sanitize_negative_zero(
+                    bf16x8_to_packed_u32x4(local_values.load())
+                )
+            else:
+                local_ptr = cute.make_ptr(
+                    BFloat16,
+                    (latent_source.iterator + element_offset).llvm_ptr,
+                    cute.AddressSpace.gmem,
+                    assumed_align=16,
+                )
+                local_packed = sanitize_negative_zero(
+                    load_global_u32x4(local_ptr, volatile=False)
+                )
             multicast_offset = (
                 Int64(current_index) * Int64(bytes_per_buffer)
                 + (
@@ -645,6 +692,8 @@ def _compile_key(
     fp32_internal: bool,
     include_reduce_scatter: bool,
     include_routed: bool,
+    *,
+    top_k: int,
 ):
     return (
         torch.accelerator.current_device_index(),
@@ -657,6 +706,7 @@ def _compile_key(
         fp32_internal,
         include_reduce_scatter,
         include_routed,
+        top_k,
     )
 
 
@@ -673,6 +723,9 @@ def _runtime_args(
     shared_flags: torch.Tensor,
     shared_peer_ptrs: torch.Tensor,
     rms_eps: float,
+    *,
+    expert_weights: torch.Tensor,
+    expanded_idx_to_permuted_idx: torch.Tensor,
 ):
     return (
         to_cute_dynamic_m(latent_source, mode=0, assumed_align=16),
@@ -686,9 +739,11 @@ def _runtime_args(
         to_cute(shared_workspace, 16),
         to_cute(shared_flags, 16),
         to_cute(shared_peer_ptrs, 16),
-        Int32(latent_source.shape[0]),
+        Int32(shared_source.shape[0]),
         Float32(rms_eps),
         cuda.CUstream(torch.cuda.current_stream(latent_source.device).cuda_stream),
+        to_cute_dynamic_m(expert_weights, mode=0, assumed_align=16),
+        to_cute_dynamic_m(expanded_idx_to_permuted_idx, mode=0, assumed_align=16),
     )
 
 
@@ -712,6 +767,7 @@ def compile_kernel(
     fp32_internal: bool,
     include_reduce_scatter: bool = True,
     include_routed: bool = True,
+    top_k: int = 0,
 ) -> None:
     """Compile the rank/M specialization without retaining caller tensors."""
 
@@ -725,11 +781,17 @@ def compile_kernel(
         fp32_internal,
         include_reduce_scatter,
         include_routed,
+        top_k=top_k,
     )
     if key in _COMPILED:
         return
     device = latent_output.device
-    latent = torch.empty((max_m, latent_dim), dtype=torch.bfloat16, device=device)
+    latent_rows = max_m * max(top_k, 1)
+    latent = torch.empty((latent_rows, latent_dim), dtype=torch.bfloat16, device=device)
+    expert_weights = torch.empty(
+        (max_m, max(top_k, 1)), dtype=torch.bfloat16, device=device
+    )
+    expanded_idx = torch.empty((max_m, max(top_k, 1)), dtype=torch.int32, device=device)
     gamma = torch.empty((latent_dim,), dtype=torch.bfloat16, device=device)
     shared = torch.empty((max_m, hidden_dim), dtype=torch.bfloat16, device=device)
     kernel = AllReduceRMSNormWithReduceScatterEarlyExit(
@@ -742,6 +804,7 @@ def compile_kernel(
         fp32_internal=fp32_internal,
         include_reduce_scatter=include_reduce_scatter,
         include_routed=include_routed,
+        top_k=top_k,
     )
     _COMPILED[key] = cute.compile(
         kernel,
@@ -758,6 +821,8 @@ def compile_kernel(
             shared_flags,
             shared_peer_ptrs,
             rms_eps,
+            expert_weights=expert_weights,
+            expanded_idx_to_permuted_idx=expanded_idx,
         ),
     )
 
@@ -785,6 +850,9 @@ def launch(
     fp32_internal: bool,
     include_reduce_scatter: bool = True,
     include_routed: bool = True,
+    expert_weights: torch.Tensor,
+    expanded_idx_to_permuted_idx: torch.Tensor,
+    top_k: int = 0,
 ) -> None:
     compile_kernel(
         rank=rank,
@@ -805,6 +873,7 @@ def launch(
         fp32_internal=fp32_internal,
         include_reduce_scatter=include_reduce_scatter,
         include_routed=include_routed,
+        top_k=top_k,
     )
     _COMPILED[
         _compile_key(
@@ -817,6 +886,7 @@ def launch(
             fp32_internal,
             include_reduce_scatter,
             include_routed,
+            top_k=top_k,
         )
     ](
         *_runtime_args(
@@ -832,6 +902,8 @@ def launch(
             shared_flags,
             shared_peer_ptrs,
             rms_eps,
+            expert_weights=expert_weights,
+            expanded_idx_to_permuted_idx=expanded_idx_to_permuted_idx,
         )
     )
 
@@ -851,6 +923,7 @@ class CollectiveKernel:
         max_token_ctas: int,
         rms_eps: float,
         fp32_internal: bool,
+        top_k: int = 0,
     ) -> None:
         validate_shape(
             tp_size=tp_size,
@@ -866,7 +939,15 @@ class CollectiveKernel:
         self.max_token_ctas = max_token_ctas
         self.rms_eps = float(rms_eps)
         self.fp32_internal = fp32_internal
+        self.top_k = top_k
         device = torch.device("cuda", torch.accelerator.current_device_index())
+
+        self._dummy_expert_weights = torch.empty(
+            (max_m, max(top_k, 1)), dtype=torch.bfloat16, device=device
+        )
+        self._dummy_expanded_idx = torch.empty(
+            (max_m, max(top_k, 1)), dtype=torch.int32, device=device
+        )
 
         bytes_per_routed_buffer = max_m * tp_size * latent_dim * 2
         routed_bytes = NUM_LAMPORT_BUFFERS * bytes_per_routed_buffer
@@ -947,38 +1028,91 @@ class CollectiveKernel:
                     shared_peer_ptrs=self._shared_peer_ptrs,
                     rms_eps=self.rms_eps,
                     fp32_internal=fp32_internal,
+                    top_k=top_k,
                 )
             dist.barrier(group=group, device_ids=[device.index])
 
     def __call__(
         self,
-        latent_source: torch.Tensor,
+        latent_source: torch.Tensor | UnfinalizedMoEOutput,
         shared_source: torch.Tensor,
         gamma: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if latent_source.ndim != 2 or shared_source.ndim != 2:
-            raise ValueError("latent_source and shared_source must be rank-2")
-        m = latent_source.shape[0]
+        if shared_source.ndim != 2:
+            raise ValueError("shared_source must be rank-2")
+        expected: list[tuple[torch.Tensor, tuple[int, ...], str, torch.dtype]]
+        if isinstance(latent_source, UnfinalizedMoEOutput):
+            if self.top_k <= 0:
+                raise ValueError("collective was not configured for top-k finalize")
+            gemm2_permuted = latent_source.gemm2_permuted
+            expert_weights = latent_source.expert_weights
+            expanded_idx = latent_source.expanded_idx_to_permuted_idx
+            m = expanded_idx.shape[0]
+            expected = [
+                (
+                    gemm2_permuted,
+                    (gemm2_permuted.shape[0], self.latent_dim),
+                    "gemm2_permuted",
+                    torch.bfloat16,
+                ),
+                (
+                    expert_weights,
+                    (m, self.top_k),
+                    "expert_weights",
+                    torch.bfloat16,
+                ),
+                (
+                    expanded_idx,
+                    (m, self.top_k),
+                    "expanded_idx_to_permuted_idx",
+                    torch.int32,
+                ),
+            ]
+        else:
+            if self.top_k > 0:
+                raise ValueError("top-k collective requires an unfinalized output")
+            if latent_source.ndim != 2:
+                raise ValueError("latent_source must be rank-2")
+            m = latent_source.shape[0]
+            gemm2_permuted = latent_source
+            expert_weights = self._dummy_expert_weights
+            expanded_idx = self._dummy_expanded_idx
+            expected = [
+                (
+                    latent_source,
+                    (m, self.latent_dim),
+                    "latent_source",
+                    torch.bfloat16,
+                ),
+            ]
         device = self._routed_workspace.device
-        expected = (
-            (latent_source, (m, self.latent_dim), "latent_source"),
-            (shared_source, (m, self.hidden_dim), "shared_source"),
-            (gamma, (self.latent_dim,), "gamma"),
+        expected.extend(
+            [
+                (
+                    shared_source,
+                    (m, self.hidden_dim),
+                    "shared_source",
+                    torch.bfloat16,
+                ),
+                (gamma, (self.latent_dim,), "gamma", torch.bfloat16),
+            ]
         )
-        for tensor, shape, name in expected:
+        for tensor, shape, name, dtype in expected:
             if (
                 tensor.shape != shape
-                or tensor.dtype != torch.bfloat16
+                or tensor.dtype != dtype
                 or tensor.device != device
                 or not tensor.is_contiguous()
             ):
-                raise ValueError(f"{name} must be contiguous CUDA BF16 {list(shape)}")
+                raise ValueError(
+                    f"{name} must be contiguous CUDA {dtype} {list(shape)}"
+                )
         if not 1 <= m <= self.max_m:
             raise ValueError(f"runtime M={m} must be in [1, {self.max_m}]")
 
         with torch.accelerator.device_index(device.index):
             launch(
-                latent_source,
+                gemm2_permuted,
                 gamma,
                 self._latent_output,
                 self._routed_workspace,
@@ -997,6 +1131,9 @@ class CollectiveKernel:
                 max_m=self.max_m,
                 max_token_ctas=self.max_token_ctas,
                 fp32_internal=self.fp32_internal,
+                top_k=self.top_k,
+                expert_weights=expert_weights,
+                expanded_idx_to_permuted_idx=expanded_idx,
             )
         return (
             self._latent_output[:m],
