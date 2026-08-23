@@ -766,6 +766,15 @@ class KimiMoE(nn.Module):
             )
         else:
             self.shared_experts = None
+        # Native fusion computes one complete shared MLP per local token shard.
+        # Under PP+TP the shared MLP is tensor-sharded instead, so fusing a
+        # rank-local partial would make the replicated residual stream diverge.
+        self.fuse_shared_mega_moe = bool(
+            self.use_mega_moe
+            and self.shared_experts is not None
+            and not envs.VLLM_DISABLE_KIMI_K3_MEGAMOE_SHARED_EXPERT_FUSION
+            and (use_sequence_parallel or self.tp_size == 1)
+        )
 
         self.routed_expert_down_proj: ReplicatedLinear | None
         self.routed_expert_norm: RMSNorm | None
@@ -948,7 +957,10 @@ class KimiMoE(nn.Module):
             assert topk_ids is not None
             shared_experts = (
                 self.shared_experts
-                if self.routed_output_transform.norm is not None
+                if (
+                    self.routed_output_transform.norm is not None
+                    and self.fuse_shared_mega_moe
+                )
                 else None
             )
             self.experts.finalize_weights(shared_experts)

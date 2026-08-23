@@ -211,6 +211,7 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
+    VLLM_DISABLE_KIMI_K3_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_K3_GEMM_RS: bool = False
@@ -1614,6 +1615,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # serving.
     "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT": lambda: bool(
         int(os.getenv("VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", "0"))
+    ),
+    # Emergency rollback for Kimi-K3's native BF16 shared-expert MegaMoE
+    # fusion. The serial shared MLP remains available when this is disabled.
+    "VLLM_DISABLE_KIMI_K3_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
+        int(
+            os.getenv(
+                "VLLM_DISABLE_KIMI_K3_MEGAMOE_SHARED_EXPERT_FUSION",
+                "0",
+            )
+        )
     ),
     # Kimi K3 only, and unrelated to the MoE flags above. Tap the pre-norm
     # AttnRes mixture, rather than the post-mixture sum, as the auxiliary
