@@ -38,6 +38,34 @@ def test_postprocess_state_scalar_with_int32_mapping(
     torch.testing.assert_close(state.num_accepted_tokens_gpu, expected)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_rewind_requests_restores_mamba_align_state() -> None:
+    state = object.__new__(MambaHybridModelState)
+    state.device = torch.device("cuda")
+    state.cache_config = SimpleNamespace(block_size=8)
+    state._align_mode = True
+    state.num_accepted_tokens_gpu = torch.full(
+        (5,), 9, dtype=torch.int32, device="cuda"
+    )
+    state._mamba_state_idx_gpu = torch.tensor(
+        [4, 5, 6, 7, 8], dtype=torch.int32, device="cuda"
+    )
+    state._mamba_src_col_gpu = torch.tensor(
+        [14, 15, 16, 17, 18], dtype=torch.int32, device="cuda"
+    )
+    state._mamba_src_off_gpu = torch.tensor(
+        [24, 25, 26, 27, 28], dtype=torch.int32, device="cuda"
+    )
+
+    state.rewind_requests([4, 1, 3], [0, 8, 9])
+    torch.accelerator.synchronize()
+
+    assert state.num_accepted_tokens_gpu.tolist() == [9, 1, 9, 1, 1]
+    assert state._mamba_state_idx_gpu.tolist() == [4, 0, 6, 1, -1]
+    assert state._mamba_src_col_gpu.tolist() == [14, -1, 16, -1, -1]
+    assert state._mamba_src_off_gpu.tolist() == [24, 0, 26, 0, 0]
+
+
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     state = RecoverSSMState()
     metadata = Mock(spec=RecoverSSMMetadata)

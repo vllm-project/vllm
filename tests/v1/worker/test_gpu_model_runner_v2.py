@@ -45,6 +45,7 @@ def test_update_requests_rewinds_all_explicit_device_state():
     offsets = StagedOffsets()
     sampled_state_rewinds: list[tuple[list[int], list[int], object]] = []
     sampler_rewinds: list[list[int]] = []
+    model_state_rewinds: list[tuple[list[int], list[int]]] = []
     output_bin_counts = object()
     runner = SimpleNamespace(
         req_states=SimpleNamespace(
@@ -66,6 +67,13 @@ def test_update_requests_rewinds_all_explicit_device_state():
             ),
         ),
         adaptive_verification=None,
+        model_state=SimpleNamespace(
+            rewind_requests=lambda req_indices, num_computed_tokens: (
+                model_state_rewinds.append(
+                    (list(req_indices), list(num_computed_tokens))
+                )
+            )
+        ),
         block_tables=SimpleNamespace(
             append_block_ids=lambda *_args, **_kwargs: pytest.fail(
                 "no block append expected"
@@ -97,6 +105,7 @@ def test_update_requests_rewinds_all_explicit_device_state():
     assert runner.req_states.num_computed_prefill_tokens.tolist() == [0, 18, 7]
     assert sampled_state_rewinds == [([0], [4], output_bin_counts)]
     assert sampler_rewinds == [[0]]
+    assert model_state_rewinds == [([0], [0])]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

@@ -10,6 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadataBuilder
@@ -112,6 +113,36 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_state_idx_gpu[req_index].fill_(
                 (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
             )
+
+    def rewind_requests(
+        self,
+        req_indices: list[int],
+        num_computed_tokens: list[int],
+    ) -> None:
+        assert req_indices
+        assert len(req_indices) == len(num_computed_tokens)
+        assert all(num_tokens >= 0 for num_tokens in num_computed_tokens)
+
+        req_indices_gpu = async_tensor_h2d(
+            req_indices, dtype=torch.int64, device=self.device
+        )
+        self.num_accepted_tokens_gpu.index_fill_(0, req_indices_gpu, 1)
+        if not self._align_mode:
+            return
+
+        num_computed_tokens_gpu = async_tensor_h2d(
+            num_computed_tokens, dtype=torch.int32, device=self.device
+        )
+        block_size = self.cache_config.block_size
+        assert block_size is not None
+        state_indices = torch.div(
+            num_computed_tokens_gpu - 1,
+            block_size,
+            rounding_mode="floor",
+        )
+        self._mamba_state_idx_gpu.index_copy_(0, req_indices_gpu, state_indices)
+        self._mamba_src_col_gpu.index_fill_(0, req_indices_gpu, -1)
+        self._mamba_src_off_gpu.index_fill_(0, req_indices_gpu, 0)
 
     def _get_mamba_group_info(
         self, kv_cache_config: KVCacheConfig

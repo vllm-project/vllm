@@ -1040,6 +1040,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if rewound_req_ids:
             assert rewound_req_ids.issubset(reqs.req_ids)
         rewound_req_indices: list[int] = []
+        rewound_num_computed_tokens: list[int] = []
         rewound_num_output_tokens: list[int] = []
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
         for req_id, num_computed_tokens, num_output_tokens, req_new_block_ids in zip(
@@ -1054,6 +1055,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_index, num_computed_tokens
                 )
                 rewound_req_indices.append(req_index)
+                rewound_num_computed_tokens.append(num_computed_tokens)
                 # The scheduler clears output placeholders when it marks the
                 # in-flight frames stale, leaving only its accepted prefix.
                 rewound_num_output_tokens.append(num_output_tokens)
@@ -1073,6 +1075,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 rewound_req_indices,
                 rewound_num_output_tokens,
                 output_bin_counts,
+            )
+            self.model_state.rewind_requests(
+                rewound_req_indices,
+                rewound_num_computed_tokens,
             )
             if self.sampler is not None:
                 self.sampler.rewind_requests(rewound_req_indices)
