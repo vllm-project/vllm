@@ -11,9 +11,10 @@ import pytest
 import torch
 from utils import skip_unsupported
 
-from vllm.model_executor.layers.batch_invariant import (
+from vllm.model_executor.layers.batch_invariant import matmul_batch_invariant
+from vllm.model_executor.layers.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
-    matmul_batch_invariant,
+    _get_tuned_matmul_arch_family,
 )
 from vllm.platforms import current_platform
 
@@ -112,9 +113,12 @@ def test_matmul_batch_invariance(dtype):
 @pytest.mark.parametrize("m", [8, 32, 256, 2048])
 def test_matmul_batch_invariance_across_tuned_m_buckets(m):
     # Tuned M buckets must preserve each row's K-reduction order.
-    device_name = current_platform.get_device_name()
-    if device_name not in _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS:
-        pytest.skip("No tuned persistent matmul config for this device")
+    capability = (
+        current_platform.get_device_capability() if current_platform.is_cuda() else None
+    )
+    arch_family = _get_tuned_matmul_arch_family(capability)
+    if arch_family not in _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS:
+        pytest.skip("No tuned persistent matmul config for this architecture")
 
     device = torch.device(DEVICE_TYPE)
     n = k = 2048
