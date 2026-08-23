@@ -161,3 +161,95 @@ def test_nvfp4_style_uint8_packing_is_rejected():
     assert divmod(32 * packed.shape[1], HIDDEN) == (16, 0)  # the trap, pinned
     with pytest.raises(ValueError, match="torch.uint8 packed weight"):
         dequant_kv_slice(attn, ACT_DTYPE)
+
+
+BLOCK = 128
+
+
+def _block_scaled(rows=OUT_SIZE, cols=HIDDEN, block=(BLOCK, BLOCK)):
+    weight = torch.randn(rows, cols).to(torch.float8_e4m3fn)
+    scale = torch.rand(-(-rows // block[0]), -(-cols // block[1])) * 0.05 + 0.001
+    return weight, scale
+
+
+def test_block_scaled_fp8_matches_expanding_the_whole_scale():
+    """Block-scaled FP8 stores the scale as `weight_scale_inv` over 2-D tiles.
+
+    Real geometry: the drafter's fused qkv is 4096 + 2*1024 rows over 5120
+    features, so q ends exactly on a 128-row block boundary and the K/V rows can
+    be taken before the scale is expanded.
+    """
+    q_size, kv_size, hidden = 4096, 1024, 5120
+    rows = q_size + 2 * kv_size
+    weight, scale = _block_scaled(rows, hidden)
+    attn = SimpleNamespace(
+        qkv_proj=SimpleNamespace(
+            weight=weight,
+            weight_scale_inv=scale,
+            weight_block_size=[BLOCK, BLOCK],
+            input_size=hidden,
+        ),
+        q_size=q_size,
+    )
+
+    out = dequant_kv_slice(attn, ACT_DTYPE)
+
+    full = scale.repeat_interleave(BLOCK, 0).repeat_interleave(BLOCK, 1)[:rows, :hidden]
+    expected = (weight.to(torch.float32) * full)[q_size:].to(ACT_DTYPE)
+    assert torch.equal(out, expected)
+
+
+def test_block_scaled_fp8_refuses_a_cut_inside_a_block():
+    """A q_size off the block grid would hand K part of q's scale."""
+    rows, hidden, q_size = 6144, 5120, 4000  # 4000 % 128 != 0
+    weight, scale = _block_scaled(rows, hidden)
+    attn = SimpleNamespace(
+        qkv_proj=SimpleNamespace(
+            weight=weight,
+            weight_scale_inv=scale,
+            weight_block_size=[BLOCK, BLOCK],
+            input_size=hidden,
+        ),
+        q_size=q_size,
+    )
+    with pytest.raises(ValueError, match="falls inside a 128-row block"):
+        dequant_kv_slice(attn, ACT_DTYPE)
+
+
+def test_block_size_that_does_not_explain_the_scale_is_rejected():
+    """Which axis each block size describes is a convention, so it is checked."""
+    weight, scale = _block_scaled(6144, 5120)
+    attn = SimpleNamespace(
+        qkv_proj=SimpleNamespace(
+            weight=weight,
+            weight_scale_inv=scale,
+            weight_block_size=[64, BLOCK],  # would imply twice as many scale rows
+            input_size=5120,
+        ),
+        q_size=4096,
+    )
+    with pytest.raises(ValueError, match="implies a scale of"):
+        dequant_kv_slice(attn, ACT_DTYPE)
+
+
+def test_non_square_blocks_pin_which_axis_is_which():
+    """Real checkpoints use 128x128, where swapping the two block sizes is
+    invisible. A non-square block is the only case that pins the convention."""
+    rows, hidden, q_size = 6144, 5120, 4096
+    weight, scale = _block_scaled(rows, hidden, block=(BLOCK, 64))
+    assert tuple(scale.shape) == (48, 80)
+    attn = SimpleNamespace(
+        qkv_proj=SimpleNamespace(
+            weight=weight,
+            weight_scale_inv=scale,
+            weight_block_size=[BLOCK, 64],
+            input_size=hidden,
+        ),
+        q_size=q_size,
+    )
+
+    out = dequant_kv_slice(attn, ACT_DTYPE)
+
+    full = scale.repeat_interleave(BLOCK, 0).repeat_interleave(64, 1)[:rows, :hidden]
+    expected = (weight.to(torch.float32) * full)[q_size:].to(ACT_DTYPE)
+    assert torch.equal(out, expected)
