@@ -235,29 +235,23 @@ class DeepseekVL2DummyInputsBuilder(BaseDummyInputsBuilder[DeepseekVL2Processing
 class DeepseekVL2MultiModalProcessor(
     BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
         if not mm_data:
-            tokenizer = self.info.get_tokenizer()
-            return tokenizer(prompt, add_special_tokens=True, return_tensors="pt")
+            return processed_data
 
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        processed_data["num_patches"] = (
+            processed_data["images_spatial_crop"].prod(-1) + 1
         )
 
-        processed_outputs["num_patches"] = (
-            processed_outputs["images_spatial_crop"].prod(-1) + 1
-        )
-
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -268,7 +262,9 @@ class DeepseekVL2MultiModalProcessor(
 
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            images_spatial_crop=MultiModalFieldConfig.batched("image"),
+            images_spatial_crop=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -291,6 +287,7 @@ class DeepseekVL2MultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
 
                 num_image_tokens = self.info.get_num_image_tokens(
@@ -312,7 +309,7 @@ class DeepseekVL2MultiModalProcessor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+    ) -> MultiModalProcessingInfo:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
@@ -406,7 +403,9 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return parent, names[-1]
 
     # patch for timm ViT instance to support tensor parallel
-    def patch_vit_for_tp(self, vit: torch.nn.Module, quant_config: QuantizationConfig):
+    def patch_vit_for_tp(
+        self, vit: torch.nn.Module, quant_config: QuantizationConfig | None
+    ):
         try:
             import timm
         except ImportError as e:

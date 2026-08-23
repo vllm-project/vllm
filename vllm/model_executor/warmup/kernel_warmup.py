@@ -6,12 +6,15 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import sys
+import time
 from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
@@ -34,9 +37,6 @@ from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     sparse_mla_triton_warmup,
-)
-from vllm.model_executor.warmup.v1_block_table_warmup import (
-    warm_v1_block_table_kernels,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -96,22 +96,50 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _warmup_kimi_k3_gemm_rs_ar() -> None:
+    # Kimi-K3 model construction imports this module only when GEMM-RS/AR is
+    # enabled and initializes its singleton before kernel_warmup runs. Avoid
+    # importing it here so other models do not compile the RS/AR variants.
+    module = sys.modules.get("vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar")
+    if module is None:
+        return
+    compiled = module.warmup_gemm_rs_ar()
+    if compiled:
+        logger.info_once("Warmed up %d Kimi-K3 GEMM-RS/AR variants.", compiled)
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
 
     if not worker.use_v2_model_runner:
-        # Pooling models do not use the generation slot-mapping path.
-        if not worker.model_runner.is_pooling_model:
-            warm_v1_block_table_kernels(worker.model_runner)
         # The KV-block zeroing kernel is driven by the scheduler's
         # `new_block_ids_to_zero`, so no dummy run ever reaches it.
         zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
         if zeroer is not None:
             zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
 
+    if worker.vllm_config.kernel_config.enable_jit_warmup:
+        logger.info("JIT kernel warmup starting.")
+        jit_warmup_start = time.perf_counter()
+        try:
+            worker.model_runner.jit_warmup_registry.warmup()
+        except Exception:
+            logger.exception(
+                "JIT kernel warmup failed after %.2fs.",
+                time.perf_counter() - jit_warmup_start,
+            )
+            raise
+        logger.info(
+            "JIT kernel warmup finished in %.2fs.",
+            time.perf_counter() - jit_warmup_start,
+        )
+
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+
+    compilation_config = worker.vllm_config.compilation_config
+    cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
@@ -119,9 +147,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     deepseek_v4_mhc_warmup(
         worker.get_model(),
         max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=(
-            worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
-        ),
+        cudagraph_capture_sizes=cudagraph_capture_sizes,
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
@@ -132,6 +158,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
+
+    _warmup_kimi_k3_gemm_rs_ar()
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
@@ -155,6 +183,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
+
+    b12x_warmup(worker, cudagraph_capture_sizes)
 
     minimax_m3_msa_warmup(worker)
 

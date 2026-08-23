@@ -316,7 +316,7 @@ class Granite4VisionLLMForCausalLM(GraniteForCausalLM):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
             logit_scale = getattr(config, "logit_scale", 1.0)
             if hasattr(config, "logits_scaling"):
                 logit_scale /= config.logits_scaling
@@ -398,7 +398,7 @@ class Granite4VisionMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
 
