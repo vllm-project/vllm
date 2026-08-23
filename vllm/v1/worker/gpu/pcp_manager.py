@@ -174,20 +174,10 @@ class PCPManager:
                 raise NotImplementedError(
                     "MRV2 PCP speculative decoding does not support DCP yet."
                 )
-            if speculative_config.draft_sample_method != "greedy":
-                raise NotImplementedError(
-                    "MRV2 PCP speculative decoding currently requires greedy "
-                    "draft sampling."
-                )
             if speculative_config.enable_adaptive_verification:
                 raise NotImplementedError(
                     "MRV2 PCP speculative decoding does not support adaptive "
                     "verification yet."
-                )
-            if speculative_config.num_speculative_tokens_per_batch_size:
-                raise NotImplementedError(
-                    "MRV2 PCP speculative decoding does not support dynamic "
-                    "draft lengths yet."
                 )
             if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
                 raise NotImplementedError(
@@ -706,10 +696,25 @@ class PCPManager:
         return gathered_kv_slot_mappings
 
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self._global_batch is not None
         if self._hidden_restore_idx is None:
             return hidden_states
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
-        return gathered[self._hidden_restore_idx]
+        restored = gathered[self._hidden_restore_idx]
+        num_tokens = self._global_batch.num_tokens
+        num_tokens_padded = self._global_batch.num_tokens_after_padding
+        assert restored.shape[0] == num_tokens
+        if num_tokens == num_tokens_padded:
+            return restored
+
+        # PCP restore reconstructs only active global tokens, whereas
+        # PIECEWISE graphs keep the target batch padded to a capture size. The
+        # drafter follows that padded shape contract, so append explicit zero
+        # rows rather than aliasing a real token through an arbitrary index.
+        padded_shape = (num_tokens_padded, *restored.shape[1:])
+        padded = restored.new_zeros(padded_shape)
+        padded[:num_tokens].copy_(restored)
+        return padded
 
     def restore_hidden_state_buffer(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert self._padded_gather_idx is not None

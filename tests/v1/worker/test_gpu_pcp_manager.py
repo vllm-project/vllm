@@ -158,6 +158,34 @@ def test_partition_reuses_gpu_cursor_for_replicated_spec_decode():
     assert local_batch.num_computed_tokens_np.tolist() == [20]
 
 
+def test_restore_hidden_states_appends_zero_graph_padding(monkeypatch):
+    manager = PCPManager(
+        pcp_world_size=4,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+    )
+    manager._global_batch = SimpleNamespace(
+        num_tokens=5,
+        num_tokens_after_padding=8,
+    )
+    restored = torch.arange(10, dtype=torch.float32).reshape(5, 2)
+    manager._hidden_restore_idx = torch.arange(5)
+    monkeypatch.setattr(
+        pcp_module,
+        "get_pcp_group",
+        lambda: SimpleNamespace(all_gather=lambda *_args, **_kwargs: restored),
+    )
+
+    actual = manager.restore_hidden_states(torch.empty(0))
+
+    assert actual.shape == (8, 2)
+    torch.testing.assert_close(
+        actual[:5],
+        restored,
+    )
+    torch.testing.assert_close(actual[5:], torch.zeros(3, 2))
+
+
 def test_maybe_prepare_replicated_pcp_attn_uses_global_gpu_metadata(monkeypatch):
     speculator = Mock(spec=DraftModelSpeculator)
     speculator.block_tables = Mock()
