@@ -42,8 +42,11 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
 #   6: Validate EAGLE/MTP speculative configuration compatibility
+#   7: Include NIXL transfer mode (push vs pull) in the compatibility hash
+#   8: Add dcp_size and pcp_size to NixlAgentMetadata
+#   9: Add block_strides
 #
-NIXL_CONNECTOR_VERSION: int = 6
+NIXL_CONNECTOR_VERSION: int = 9
 
 
 @dataclass
@@ -54,11 +57,14 @@ class NixlAgentMetadata:
     device_id: int
     num_blocks: int
     block_lens: list[int]
+    block_strides: list[int]
     kv_cache_layout: str
     block_size: int
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    dcp_size: int = 1
+    pcp_size: int = 1
 
 
 @dataclass
@@ -123,7 +129,9 @@ def _get_speculative_compatibility_factors(
 
 
 def compute_nixl_compatibility_hash(
-    vllm_config: VllmConfig, attn_backend_name: str, cross_layers_blocks: bool
+    vllm_config: VllmConfig,
+    attn_backend_name: str,
+    transfer_mode: str = "pull",
 ) -> str:
     """
     Compute compatibility hash for NIXL KV transfer.
@@ -137,6 +145,11 @@ def compute_nixl_compatibility_hash(
     - KV cache format (dtype, sliding window)
     - Attention backend
     - EAGLE/MTP configuration that affects transferred state
+    - Transfer mode (push vs pull)
+
+    The transfer mode is included because the push (WRITE) and pull (READ)
+    connectors use incompatible transfer protocols; a push connector and a
+    pull connector must never complete a handshake with each other.
 
     Note: Factors like tensor_parallel_size, block_size, and kv_cache_layout
     are validated at runtime in _validate_remote_agent_handshake and are not
@@ -168,9 +181,10 @@ def compute_nixl_compatibility_hash(
         # Attention backend and KV cache dtype affect memory layout
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
-        "cross_layers_blocks": cross_layers_blocks,
         "is_hma_enabled": is_hma_enabled,
         "speculative_config": _get_speculative_compatibility_factors(vllm_config),
+        # push (WRITE) and pull (READ) connectors are protocol-incompatible
+        "transfer_mode": transfer_mode,
     }
 
     compat_hash = hash_factors(factors)
