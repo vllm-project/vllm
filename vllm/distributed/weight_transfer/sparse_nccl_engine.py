@@ -2,16 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sparse NCCL weight transfer engine.
 
-A standalone engine (not a subclass of `NCCLWeightTransferEngine`) for applying
-sparse, flat-index weight patches in place. It shares only NCCL process-group
-initialization with the dense engine (via `nccl_common`); the update path
-applies index/value patches directly to existing model parameters and never runs
-layerwise reload.
-
-MVP limitations:
-* TP=1 and PP=1 only
-* uses runtime/kernel-format parameter names
-* not composable with checkpoint-format or packed updates
+Sparse patches use checkpoint names, shapes, and flat indices. The model's native
+weight loader maps them to rank-local runtime parameters, including TP shards and
+packed parameters.
 """
 
 from collections.abc import Iterable
@@ -42,6 +35,10 @@ from vllm.distributed.weight_transfer.nccl_common import (
 from vllm.distributed.weight_transfer.nccl_common import (
     trainer_init as open_trainer_endpoint,
 )
+from vllm.model_executor.model_loader.checkpoint_weight_patch import (
+    CheckpointWeightPatch,
+    load_checkpoint_weight_patches,
+)
 
 __all__ = [
     "SparseWeightPatch",
@@ -54,15 +51,13 @@ __all__ = [
 
 @dataclass
 class SparseWeightPatch:
-    """A sparse in-place patch for one existing parameter."""
+    """A sparse patch in checkpoint coordinates."""
 
     name: str
     indices: torch.Tensor
     values: torch.Tensor
-    full_shape: tuple[int, ...] | None = None
-    """Full shape of the patched parameter. Required when the patch is sent
-    via `SparseNCCLTrainerWeightTransferEngine` (it ships in the per-round
-    update info); the worker-side apply path does not read it."""
+    full_shape: tuple[int, ...]
+    """Full checkpoint shape."""
 
 
 @dataclass
@@ -119,10 +114,9 @@ class SparseNCCLWeightTransferEngine(
     """
     Sparse weight transfer engine using NCCL.
 
-    Receives flat-index (indices, values) patches broadcast from the trainer
-    (rank 0) and applies them in place to existing model parameters. Weights are
-    applied directly without layerwise reload, so `start_weight_update` and
-    `finish_weight_update` are no-ops.
+    Receives checkpoint-coordinate patches broadcast from the trainer and applies
+    them through the model's native weight loader. Sparse updates modify initialized
+    model tensors in place, so the layerwise reload lifecycle is not used.
     """
 
     init_info_cls = NCCLWeightTransferInitInfo
@@ -147,10 +141,7 @@ class SparseNCCLWeightTransferEngine(
 
     def start_weight_update(self) -> None:
         """No-op: sparse patches are applied in place, no layerwise reload."""
-        if self.parallel_config.world_size != 1:
-            raise NotImplementedError(
-                "Sparse weight updates currently require TP=1 and PP=1"
-            )
+        pass
 
     def finish_weight_update(self) -> None:
         """No-op: sparse patches are applied in place, no layerwise reload."""
@@ -170,58 +161,30 @@ class SparseNCCLWeightTransferEngine(
         # is not guaranteed to match self.device. The recv buffers must live on
         # the same device as the NCCL communicator (created on self.device).
         device = self.device
-        for name, dtype_name, num_updates in zip(
+        patches = []
+        stream = torch.cuda.current_stream()
+        for name, dtype_name, shape, num_updates in zip(
             update_info.names,
             update_info.dtype_names,
+            update_info.shapes,
             update_info.num_updates_list,
+            strict=True,
         ):
             dtype = getattr(torch, dtype_name)
             indices = torch.empty(num_updates, dtype=torch.int32, device=device)
             values = torch.empty(num_updates, dtype=dtype, device=device)
-            self.model_update_group.broadcast(
-                indices, src=0, stream=torch.cuda.current_stream()
+            self.model_update_group.broadcast(indices, src=0, stream=stream)
+            self.model_update_group.broadcast(values, src=0, stream=stream)
+            patches.append(
+                CheckpointWeightPatch(
+                    name=name,
+                    shape=tuple(shape),
+                    dtype=dtype,
+                    values=values,
+                    indices=indices,
+                )
             )
-            self.model_update_group.broadcast(
-                values, src=0, stream=torch.cuda.current_stream()
-            )
-            self._apply_patch(
-                SparseWeightPatch(name=name, indices=indices, values=values)
-            )
-            del indices
-            del values
-
-    def _apply_patch(self, patch: SparseWeightPatch) -> None:
-        """Apply a single sparse flat-index patch to an existing model param."""
-        param = self.model.get_parameter(patch.name)
-        if not param.data.is_contiguous():
-            raise NotImplementedError(
-                "Sparse weight updates currently require contiguous params: "
-                f"{patch.name}"
-            )
-        if patch.indices.dtype != torch.int32:
-            raise ValueError(
-                f"Sparse weight updates currently require int32 indices: {patch.name}"
-            )
-        if patch.indices.ndim != 1 or patch.values.ndim != 1:
-            raise ValueError(
-                f"Sparse weight patches must be 1D flattened updates: {patch.name}"
-            )
-        if patch.indices.numel() != patch.values.numel():
-            raise ValueError(
-                f"`indices` and `values` must have matching lengths for {patch.name}"
-            )
-        if patch.values.dtype != param.dtype:
-            raise ValueError(
-                f"Sparse values dtype {patch.values.dtype} does not match "
-                f"parameter dtype {param.dtype} for {patch.name}"
-            )
-
-        flat_param = param.data.view(-1)
-        flat_param.index_copy_(
-            0,
-            patch.indices.to(device=flat_param.device, dtype=torch.long),
-            patch.values.to(device=flat_param.device),
-        )
+        load_checkpoint_weight_patches(self.model, patches)
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
@@ -242,8 +205,8 @@ class SparseNCCLTrainerWeightTransferEngine(
     patches are passed straight to `send_weights(patches)`. A round with no
     patches is a no-op.
 
-    The sparse backend assumes a single-rank trainer (matching its TP=1 / PP=1
-    MVP scope), so non-sender ranks skip `send_weights` entirely.
+    Only the designated trainer sender joins the transfer group; other trainer
+    ranks skip `send_weights`.
     """
 
     init_info_cls = SparseNCCLTrainerInitInfo
@@ -313,20 +276,13 @@ class SparseNCCLTrainerWeightTransferEngine(
         if not patches:
             return
 
-        shapes = []
         for patch in patches:
-            if patch.full_shape is None:
-                raise ValueError(
-                    "SparseWeightPatch.full_shape must be set to send via the "
-                    f"trainer engine: {patch.name}"
-                )
             self._validate_patch(patch)
-            shapes.append(list(patch.full_shape))
 
         update_info = SparseNCCLWeightTransferUpdateInfo(
             names=[patch.name for patch in patches],
             dtype_names=[str(patch.values.dtype).split(".")[-1] for patch in patches],
-            shapes=shapes,
+            shapes=[list(patch.full_shape) for patch in patches],
             num_updates_list=[patch.indices.numel() for patch in patches],
         )
 
@@ -362,11 +318,12 @@ class SparseNCCLTrainerWeightTransferEngine(
     def _validate_patch(patch: SparseWeightPatch) -> None:
         """Reject a malformed patch before any NCCL call.
 
-        The worker checks the same invariants in `_apply_patch`, but by then the
-        broadcasts are already under way: a mismatch surfaces as a size mismatch
-        mid-transfer, which wedges both sides instead of raising. Checking here
-        keeps the failure on the trainer, before `start_weight_update`.
+        The worker validates again after receiving the payload, but a malformed
+        transfer may wedge both sides before then. Validate on the trainer before
+        `start_weight_update`.
         """
+        if patch.full_shape is None:
+            raise ValueError(f"Sparse patch requires full_shape: {patch.name}")
         if patch.indices.dtype != torch.int32:
             raise ValueError(
                 f"Sparse weight updates require int32 indices: {patch.name}"
@@ -385,7 +342,7 @@ class SparseNCCLTrainerWeightTransferEngine(
         rebuild or free the patch tensors as soon as `send_weights` returns
         rather than relying on same-stream ordering. See
         `NCCLTrainerWeightTransferEngine._post_send_sync` for why there is no
-        cross-rank barrier (and sparse is single-rank on the trainer anyway)."""
+        cross-rank barrier."""
         if torch.cuda.is_available():
             torch.cuda.current_stream().synchronize()
 

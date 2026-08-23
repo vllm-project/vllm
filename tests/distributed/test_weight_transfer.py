@@ -313,101 +313,44 @@ class TestEngineRegistry:
             )
 
 
-# --- Unit Tests: Sparse patch application (CPU) ---
+# --- Unit Tests: Sparse checkpoint patch application (CPU) ---
 
 
-class TestSparseNCCLPatchApplication:
-    """Test SparseNCCLWeightTransferEngine._apply_patch on a real param."""
+def test_sparse_nccl_maps_checkpoint_indices_to_tp_shard(monkeypatch):
+    model = torch.nn.Module()
+    model.register_parameter(
+        "w", torch.nn.Parameter(torch.full((2,), -1.0), requires_grad=False)
+    )
 
-    def _make_engine(self, model):
-        config = WeightTransferConfig(backend="sparse_nccl")
-        return SparseNCCLWeightTransferEngine(
-            config, create_mock_vllm_config(), torch.device("cpu"), model
-        )
-
-    def _make_model(self, numel: int = 8):
-        model = torch.nn.Module()
-        model.register_parameter(
-            "w", torch.nn.Parameter(torch.zeros(numel), requires_grad=False)
-        )
-
-        def get_parameter(name):
+    def load_weights(weights):
+        for name, weight in weights:
             assert name == "w"
-            return model.w
+            model.w.data.copy_(weight[2:])
+        return {"w"}
 
-        model.get_parameter = get_parameter
-        return model
-
-    def test_apply_patch_updates_only_selected_entries(self):
-        model = self._make_model(8)
-        engine = self._make_engine(model)
-        engine._apply_patch(
-            SparseWeightPatch(
-                name="w",
-                indices=torch.tensor([1, 3], dtype=torch.int32),
-                values=torch.tensor([5.0, 7.0], dtype=torch.float32),
-            )
+    model.load_weights = load_weights
+    engine = SparseNCCLWeightTransferEngine(
+        WeightTransferConfig(backend="sparse_nccl"),
+        create_mock_vllm_config(world_size=2),
+        torch.device("cpu"),
+        model,
+    )
+    payloads = iter([torch.tensor([0, 3], dtype=torch.int32), torch.tensor([5.0, 7.0])])
+    engine.model_update_group = MagicMock()
+    engine.model_update_group.broadcast.side_effect = lambda tensor, **_: tensor.copy_(
+        next(payloads)
+    )
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: None)
+    engine.start_weight_update()
+    engine.receive_weights(
+        SparseNCCLWeightTransferUpdateInfo(
+            names=["w"],
+            dtype_names=["float32"],
+            shapes=[[4]],
+            num_updates_list=[2],
         )
-        expected = torch.zeros(8)
-        expected[1] = 5.0
-        expected[3] = 7.0
-        assert torch.equal(model.w.data, expected)
-
-    def test_apply_patch_rejects_mismatched_lengths(self):
-        model = self._make_model(8)
-        engine = self._make_engine(model)
-        with pytest.raises(ValueError, match="matching lengths"):
-            engine._apply_patch(
-                SparseWeightPatch(
-                    name="w",
-                    indices=torch.tensor([1, 3], dtype=torch.int32),
-                    values=torch.tensor([5.0], dtype=torch.float32),
-                )
-            )
-
-    def test_apply_patch_rejects_non_int32_indices(self):
-        model = self._make_model(8)
-        engine = self._make_engine(model)
-        with pytest.raises(ValueError, match="int32 indices"):
-            engine._apply_patch(
-                SparseWeightPatch(
-                    name="w",
-                    indices=torch.tensor([1], dtype=torch.int64),
-                    values=torch.tensor([5.0], dtype=torch.float32),
-                )
-            )
-
-    def test_apply_patch_rejects_dtype_mismatch(self):
-        model = self._make_model(8)
-        engine = self._make_engine(model)
-        with pytest.raises(ValueError, match="does not match"):
-            engine._apply_patch(
-                SparseWeightPatch(
-                    name="w",
-                    indices=torch.tensor([1], dtype=torch.int32),
-                    values=torch.tensor([5.0], dtype=torch.bfloat16),
-                )
-            )
-
-    def test_apply_patch_rejects_non_contiguous_param(self):
-        model = torch.nn.Module()
-        model.register_parameter(
-            "w",
-            torch.nn.Parameter(
-                torch.arange(12, dtype=torch.float32).view(3, 4).t(),
-                requires_grad=False,
-            ),
-        )
-        model.get_parameter = lambda name: model.w
-        engine = self._make_engine(model)
-        with pytest.raises(NotImplementedError, match="contiguous params"):
-            engine._apply_patch(
-                SparseWeightPatch(
-                    name="w",
-                    indices=torch.tensor([1], dtype=torch.int32),
-                    values=torch.tensor([1.0], dtype=torch.float32),
-                )
-            )
+    )
+    assert torch.equal(model.w, torch.tensor([-1.0, 7.0]))
 
 
 # --- Test receive_weights without init raises ---
@@ -714,12 +657,19 @@ def inference_receive_sparse_tensor(
     vllm_config.parallel_config = parallel_config
     vllm_config.model_config = MagicMock()
 
-    # Real module holding the target parameter the patch will modify.
+    # Real module holding the target parameter the checkpoint loader will modify.
     model = torch.nn.Module()
     model.register_parameter(
         "w", torch.nn.Parameter(torch.zeros(30, device="cuda"), requires_grad=False)
     )
-    model.get_parameter = lambda name: model.w
+
+    def load_weights(weights):
+        for name, weight in weights:
+            assert name == "w"
+            model.w.data.copy_(weight)
+        return {"w"}
+
+    model.load_weights = load_weights
 
     update_info = SparseNCCLWeightTransferUpdateInfo(
         names=["w"],
