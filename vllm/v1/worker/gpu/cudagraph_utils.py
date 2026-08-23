@@ -4,7 +4,7 @@ import gc
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from itertools import product
+from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 import torch
@@ -291,13 +291,24 @@ class CudaGraphManager:
         for mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
             for num_active_loras in self.lora_capture_cases:
                 current_range_start = 0
-                for desc in reversed(descs_by_mode.get(mode, [])):
-                    if desc.num_active_loras != num_active_loras:
+                # Descriptors are sorted by num_tokens. Under dynamic speculative
+                # decoding several decode graphs share a num_tokens (one per query
+                # length), so offer the whole group for the range: advancing the
+                # range once per descriptor would leave every descriptor after the
+                # first with an empty range and no candidate list at all.
+                for num_tokens, group in groupby(
+                    reversed(descs_by_mode.get(mode, [])),
+                    key=lambda d: d.num_tokens,
+                ):
+                    matching = [
+                        d for d in group if d.num_active_loras == num_active_loras
+                    ]
+                    if not matching:
                         continue
-                    for i in range(current_range_start, desc.num_tokens + 1):
+                    for i in range(current_range_start, num_tokens + 1):
                         key = (i, num_active_loras)
-                        self._candidates.setdefault(key, []).append(desc)
-                    current_range_start = desc.num_tokens + 1
+                        self._candidates.setdefault(key, []).extend(matching)
+                    current_range_start = num_tokens + 1
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
