@@ -1121,6 +1121,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(FUSED_KDA_DECODE_ARCHS
       "9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
     cuda_archs_loose_intersection(FUSED_GDN_DECODE_ARCHS
       "8.0;8.6;8.9;9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
   endif()

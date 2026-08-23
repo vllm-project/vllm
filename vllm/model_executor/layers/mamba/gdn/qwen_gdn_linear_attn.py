@@ -517,6 +517,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
+        if self.enable_fused_gdn_decode:
+            # num_accepted_tokens (all ones) for the fused non-spec decode
+            # path; preallocated so CUDA-graph capture stays allocation-free.
+            self._fused_decode_ones = torch.ones(
+                vllm_config.scheduler_config.max_num_seqs,
+                dtype=torch.int32,
+                device=current_platform.current_device(),
+            )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -1830,6 +1838,80 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
         )
 
+    def _can_use_fused_gdn_nonspec_decode(
+        self, attn_metadata: GDNAttentionMetadata
+    ) -> bool:
+        return (
+            attn_metadata.spec_sequence_masks is None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes > 0
+            and attn_metadata.num_actual_tokens == attn_metadata.num_decodes
+            and attn_metadata.non_spec_state_indices_tensor is not None
+            and attn_metadata.non_spec_query_start_loc is not None
+            and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES
+            and self.gdn_decode_kernel == "cuda"
+            and self.num_v_heads % self.num_k_heads == 0
+            and self.num_v_heads // self.num_k_heads in (1, 2, 3, 4, 8)
+            and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
+        )
+
+    def _forward_core_decode_non_spec_fused_norm(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        output_gate: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+    ) -> None:
+        """Single-token decode through the fused CUDA kernel.
+
+        Reuses the MTP decode kernel with draft width 1: each request loads
+        its recurrent state slot, advances it in place, and the kernel writes
+        the gated-RMSNorm output directly, replacing the Triton recurrent
+        kernel plus the separate norm launch.
+        """
+        state_indices = attn_metadata.non_spec_state_indices_tensor
+        cu_seqlens = attn_metadata.non_spec_query_start_loc
+        assert state_indices is not None
+        assert cu_seqlens is not None
+
+        num_requests = attn_metadata.num_decodes
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        conv_state = (
+            self.kv_cache[0]
+            if is_conv_state_dim_first()
+            else self.kv_cache[0].transpose(-1, -2)
+        )
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+        mixed_qkv = causal_conv1d_update(
+            mixed_qkv[:num_actual_tokens],
+            conv_state,
+            conv_weights,
+            self.conv1d.bias,
+            self.activation,
+            conv_state_indices=state_indices[:num_actual_tokens],
+            validate_data=False,
+        )
+        ops.fused_gdn_decode_post_conv_mtp(
+            mixed_qkv=mixed_qkv,
+            a=a[:num_actual_tokens],
+            b=b[:num_actual_tokens],
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            state_indices=state_indices[:num_requests].unsqueeze(1),
+            cu_seqlens=cu_seqlens[: num_requests + 1],
+            num_accepted_tokens=self._fused_decode_ones[:num_requests],
+            state=self.kv_cache[1],
+            output_gate=output_gate[:num_actual_tokens],
+            norm_weight=self.norm.weight,
+            out=core_attn_out[:num_actual_tokens],
+            scale=self.head_k_dim**-0.5,
+            norm_eps=self.layer_norm_epsilon,
+        )
+
     def _rms_norm_gated_cuda(
         self,
         x: torch.Tensor,
@@ -1887,6 +1969,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_prefills == 0
         ):
             self._forward_core_decode_spec_fused_norm(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                output_gate=output_gate,
+                core_attn_out=core_attn_out,
+                attn_metadata=attn_metadata,
+            )
+            return
+        if self._can_use_fused_gdn_nonspec_decode(attn_metadata):
+            logger.info_once("GDN non-spec decode: using the fused CUDA kernel")
+            self._forward_core_decode_non_spec_fused_norm(
                 mixed_qkv=mixed_qkv,
                 b=b,
                 a=a,
