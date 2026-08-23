@@ -4759,6 +4759,7 @@ class GPUModelRunner(
                 spec_config.use_eagle()
                 or spec_config.uses_draft_model()
                 or spec_config.uses_extract_hidden_states()
+                or spec_config.method == "orthrus"
             )
             use_gpu_toks = (
                 drafter_runs_model_forward
@@ -4773,7 +4774,8 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer,
+                    | Gemma4Proposer
+                    | OrthrusProposer,
                 )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
