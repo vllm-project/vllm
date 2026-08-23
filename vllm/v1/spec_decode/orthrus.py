@@ -158,17 +158,42 @@ class OrthrusProposer(SpecDecodeBaseProposer):
             )
             return
 
+        target_layers = target_model.model.layers
         for idx, layer in enumerate(self.model.model.layers):
-            attn_diff = getattr(layer.self_attn, "attn_diff", None)
-            if attn_diff is None:
-                continue
             target_layer_name = f"{target_prefix}.{idx}.self_attn.attn"
-            attn_diff.kv_sharing_target_layer_name = target_layer_name
-            logger.info(
-                "OrthrusProposer: draft layer %d attn_diff -> %s",
-                idx,
-                target_layer_name,
-            )
+
+            attn_diff = getattr(layer.self_attn, "attn_diff", None)
+            if attn_diff is not None:
+                attn_diff.kv_sharing_target_layer_name = target_layer_name
+
+            # The draft's *AR* attention layer is never called (its
+            # forward() routes through the diffusion path), but it is still
+            # a registered Attention module -- so without a sharing target
+            # it would be handed a full KVCacheSpec of its own and allocate
+            # an entire unused second KV cache. Point it at the same target
+            # layer so it allocates nothing.
+            attn_ar = getattr(layer.self_attn, "attn", None)
+            if attn_ar is not None:
+                attn_ar.kv_sharing_target_layer_name = target_layer_name
+
+            # Share the modules the diffusion forward uses but does not
+            # specialize (MLP and both layernorms are identical to the
+            # target's -- Orthrus only adds *_diff attention parameters on
+            # top of a frozen backbone). Dropping the draft's duplicate
+            # copies frees most of its redundant weight memory; the AR
+            # attention projections it also never uses are left in place
+            # since they are comparatively small.
+            if idx < len(target_layers):
+                target_layer = target_layers[idx]
+                layer.mlp = target_layer.mlp
+                layer.input_layernorm = target_layer.input_layernorm
+                layer.post_attention_layernorm = target_layer.post_attention_layernorm
+
+        logger.info(
+            "OrthrusProposer: wired %d draft layers to KV-share with the "
+            "target and share its MLP/layernorm weights.",
+            len(self.model.model.layers),
+        )
 
     @override
     def set_inputs_first_pass(
