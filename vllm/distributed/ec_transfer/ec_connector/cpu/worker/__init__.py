@@ -8,9 +8,12 @@ blocks to copy in each direction.
 """
 
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import chain
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from vllm._custom_ops import swap_blocks_batch
@@ -35,6 +38,28 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+
+def _coalesce_runs(
+    block_ids: Sequence[int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Split block ids into runs that are consecutive in the region.
+
+    Returns `(slots, first_blocks, num_blocks)`, one element per run, where
+    `slots` is the run's offset in the flat block sequence. Per-descriptor
+    overhead dominates these copies, so describing a run with one descriptor
+    rather than one per block is worth an order of magnitude.
+
+    Both callers derive the non-region side of a run from its slot, so that
+    side advances in lockstep with the region and only the region has to be
+    split. `EmbeddingCache` hands out ascending ids, which is what makes runs
+    findable at all.
+    """
+    ids = np.fromiter(block_ids, dtype=np.int64, count=len(block_ids))
+    breaks = np.flatnonzero(np.diff(ids) != 1) + 1
+    slots = np.concatenate(([0], breaks))
+    ends = np.concatenate((breaks, [ids.size]))
+    return slots, ids[slots], ends - slots
 
 
 @dataclass
@@ -102,6 +127,8 @@ class ECCPUWorker:
         # Active save buffer being filled during save_caches calls this step.
         self._save_bufs: DescriptorBuffers | None = None
         self._save_count: int = 0
+        # Bytes accumulated into the active save buffer this step, for logging.
+        self._save_bytes: int = 0
         # mm_hashes accumulated into the active save buffer this step.
         self._save_mm_hashes: list[str] = []
         # Stream the active save buffer's copy will run on, held from the moment
@@ -205,15 +232,23 @@ class ECCPUWorker:
         src.record_stream(self._save_stream)
         src_base = src.view(-1).view(torch.uint8).data_ptr()
         dst_base = self._region.blocks.data_ptr()
-        idx = self._save_count
+        # Entries are sized by placeholder count, which can exceed the number
+        # of embeddings, so blocks the output never reaches get no descriptor.
+        n_used = -(-total_bytes // block_size)
+        if n_used:
+            slots, first_blocks, num_blocks = _coalesce_runs(block_ids[:n_used])
+            run_bytes = num_blocks * block_size
+            # The output can stop partway into the final run.
+            run_bytes[-1] = total_bytes - slots[-1] * block_size
+            bufs.add_copies(
+                self._save_count,
+                src_base + slots * block_size,
+                dst_base + first_blocks * block_size,
+                run_bytes,
+            )
+            self._save_count += slots.size
 
-        for i, block_idx in enumerate(block_ids):
-            start = i * block_size
-            bufs.set_ptrs(idx, src_base + start, dst_base + block_idx * block_size)
-            bufs.sizes[idx] = min(block_size, total_bytes - start)
-            idx += 1
-
-        self._save_count = idx
+        self._save_bytes += total_bytes
         self._save_mm_hashes.append(mm_hash)
 
     def flush_saves(self) -> None:
@@ -234,7 +269,7 @@ class ECCPUWorker:
         assert bufs is not None and stream is not None
         src_ptrs, dst_ptrs, sizes = bufs.src_ptrs, bufs.dst_ptrs, bufs.sizes
         n = self._save_count
-        num_bytes = int(sizes[:n].sum().item())
+        num_bytes = self._save_bytes
 
         # Gate the GPU→CPU copy behind the compute stream: it reads the encoder
         # outputs the model just produced there.
@@ -260,6 +295,7 @@ class ECCPUWorker:
         self._save_bufs = None
         self._save_stream = None
         self._save_count = 0
+        self._save_bytes = 0
         self._save_mm_hashes = []
 
     def start_load_caches(
@@ -287,8 +323,13 @@ class ECCPUWorker:
         # copying unconditionally means every participating rank reports each
         # transfer exactly once, which is what the scheduler counts to release
         # the pin.
-        load_items = connector_metadata.loads
-        total_blocks = sum(len(block_ids) for _, block_ids in load_items.values())
+        # Ordered by first block so entries that neighbour each other in the
+        # region land next to each other in the destination and coalesce into
+        # one descriptor. Every loop below consumes this same order.
+        load_items = sorted(
+            connector_metadata.loads.items(), key=lambda kv: kv[1][1][0]
+        )
+        total_blocks = sum(len(block_ids) for _, (_, block_ids) in load_items)
 
         stream = self._acquire_stream()
         compute_stream = current_platform.current_stream()
@@ -303,20 +344,19 @@ class ECCPUWorker:
             dst_buf_base = dst_buf.data_ptr()
 
             bufs = self._buf_pool.acquire(total_blocks)
-            src_ptrs = bufs.src_ptrs[:total_blocks]
-            dst_ptrs = bufs.dst_ptrs[:total_blocks]
-            sizes = bufs.sizes[:total_blocks]
-            sizes[:] = block_size
-
-            op_idx = 0
-            for _, block_ids in load_items.values():
-                for block_idx in block_ids:
-                    bufs.set_ptrs(
-                        op_idx,
-                        src_base + block_idx * block_size,
-                        dst_buf_base + op_idx * block_size,
-                    )
-                    op_idx += 1
+            slots, first_blocks, num_blocks = _coalesce_runs(
+                list(chain.from_iterable(ids for _, (_, ids) in load_items))
+            )
+            bufs.add_copies(
+                0,
+                src_base + first_blocks * block_size,
+                dst_buf_base + slots * block_size,
+                num_blocks * block_size,
+            )
+            op_idx = slots.size
+            src_ptrs = bufs.src_ptrs[:op_idx]
+            dst_ptrs = bufs.dst_ptrs[:op_idx]
+            sizes = bufs.sizes[:op_idx]
 
             start_event.record(stream)
             swap_blocks_batch(src_ptrs, dst_ptrs, sizes, is_src_access_order_any=True)
@@ -325,7 +365,7 @@ class ECCPUWorker:
                 Transfer(
                     start_event=start_event,
                     end_event=end_event,
-                    completions=[tid for tid, _ in load_items.values()],
+                    completions=[tid for _, (tid, _) in load_items],
                     bufs=bufs,
                     stream=stream,
                     num_bytes=total_blocks * block_size,
@@ -334,7 +374,7 @@ class ECCPUWorker:
 
             # Slice contiguous buffer into per-hash views.
             offset = 0
-            for mm_hash, (_, block_ids) in load_items.items():
+            for mm_hash, (_, block_ids) in load_items:
                 n = len(block_ids)
                 encoder_cache[mm_hash] = (
                     dst_buf[offset : offset + n].view(dtype).reshape(n, -1)
@@ -364,6 +404,7 @@ class ECCPUWorker:
         self._save_bufs = None
         self._save_stream = None
         self._save_count = 0
+        self._save_bytes = 0
         self._save_mm_hashes = []
         self._inflight_saves.clear()
         self._inflight_loads.clear()

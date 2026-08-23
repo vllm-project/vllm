@@ -201,14 +201,16 @@ def _warm_up_stream_pools(worker: ECCPUWorker) -> None:
 
 @_requires_accelerator
 @pytest.mark.parametrize(
-    "n_elements,n_blocks",
+    "n_elements,block_ids",
     [
-        (3 * _HIDDEN_DIM, 3),  # exact fit: 3 full blocks, no remainder
-        (3 * _HIDDEN_DIM + 4, 4),  # partial last block: 4 fp16 trail in slot 3
+        (3 * _HIDDEN_DIM, [7, 2, 5]),  # exact fit: 3 full blocks, no remainder
+        (3 * _HIDDEN_DIM + 4, [7, 2, 5, 0]),  # partial last block: 4 fp16 trail
+        (3 * _HIDDEN_DIM, [2, 3, 4]),  # adjacent: one coalesced copy
+        (3 * _HIDDEN_DIM + 4, [2, 3, 4, 6]),  # coalesced run, then a gap
     ],
-    ids=["exact-fit", "partial-last-block"],
+    ids=["exact-fit", "partial-last-block", "adjacent-blocks", "run-then-gap"],
 )
-def test_save_caches_writes_to_assigned_blocks(make_worker, n_elements, n_blocks):
+def test_save_caches_writes_to_assigned_blocks(make_worker, n_elements, block_ids):
     """``save_caches`` + ``flush_saves`` copies the source GPU tensor's bytes
     into the block IDs named by ``meta.saves``, in the order they appear,
     via a single batched GPU→CPU copy.
@@ -216,6 +218,8 @@ def test_save_caches_writes_to_assigned_blocks(make_worker, n_elements, n_blocks
     When ``total_bytes`` is not a multiple of ``block_size_bytes`` the last
     block is partially written; the unwritten tail must remain whatever
     was there before. Blocks not named in ``meta.saves`` must be untouched.
+    Blocks adjacent in the region share one descriptor, which must land the
+    same bytes in the same blocks as one descriptor per block does.
     """
     worker = make_worker()
     sentinel = 0x5A
@@ -225,7 +229,6 @@ def test_save_caches_writes_to_assigned_blocks(make_worker, n_elements, n_blocks
     expected_bytes = src.cpu().reshape(-1).view(torch.uint8)
     total_bytes = n_elements * _DTYPE.itemsize
 
-    block_ids = [7, 2, 5, 0][:n_blocks]
     worker.save_caches({"h": src}, "h", _meta(saves={"h": block_ids}))
     worker.flush_saves()
     _wait_for_completion(worker, "h", "saves")
@@ -248,6 +251,42 @@ def test_save_caches_writes_to_assigned_blocks(make_worker, n_elements, n_blocks
         assert torch.all(worker._region.blocks[idx] == sentinel), (
             f"block {idx} (unassigned) was overwritten"
         )
+
+
+@_requires_accelerator
+@pytest.mark.parametrize(
+    "n_elements,block_ids,expected_sizes",
+    [
+        (3 * _HIDDEN_DIM, [2, 3, 4], [3 * _BLOCK_SIZE_BYTES]),
+        (3 * _HIDDEN_DIM, [7, 2, 5], [_BLOCK_SIZE_BYTES] * 3),
+        (3 * _HIDDEN_DIM, [2, 3, 6], [2 * _BLOCK_SIZE_BYTES, _BLOCK_SIZE_BYTES]),
+        (2 * _HIDDEN_DIM + 4, [2, 3, 4], [(2 * _HIDDEN_DIM + 4) * _DTYPE.itemsize]),
+        (_HIDDEN_DIM, [2, 3, 4], [_BLOCK_SIZE_BYTES]),
+    ],
+    ids=[
+        "one-run",
+        "no-run",
+        "run-then-gap",
+        "run-stops-at-output",
+        "blocks-past-output-skipped",
+    ],
+)
+def test_save_caches_coalesces_only_adjacent_blocks(
+    make_worker, n_elements, block_ids, expected_sizes
+):
+    """One descriptor per run of region-adjacent blocks, not one per block.
+
+    Per-descriptor overhead dominates these copies, so the byte tests above
+    would pass either way; this pins the descriptor layout that makes them
+    fast. A coalesced copy also stops at the encoder output, since entries are
+    sized by placeholder count, which can exceed the number of embeddings.
+    """
+    worker = make_worker()
+    src = torch.arange(n_elements, dtype=_DTYPE, device=DEVICE_TYPE)
+
+    worker.save_caches({"h": src}, "h", _meta(saves={"h": block_ids}))
+
+    assert worker._save_bufs.sizes[: worker._save_count].tolist() == expected_sizes
 
 
 def test_save_caches_noop_when_mm_hash_not_in_saves(make_worker):
@@ -347,6 +386,34 @@ def test_start_load_caches_copies_with_correct_shape_dtype_and_bytes(make_worker
     assert out.shape == (n_blocks, _HIDDEN_DIM)
     assert out.dtype == _DTYPE
     assert torch.equal(out.cpu(), src_orig)
+
+
+@_requires_accelerator
+@pytest.mark.parametrize(
+    "loads,expected_sizes",
+    [
+        ({"a": [2, 3], "b": [4, 5]}, [4 * _BLOCK_SIZE_BYTES]),
+        ({"b": [4, 5], "a": [2, 3]}, [4 * _BLOCK_SIZE_BYTES]),
+        ({"a": [2, 3], "b": [6, 7]}, [2 * _BLOCK_SIZE_BYTES] * 2),
+    ],
+    ids=["adjacent-entries", "adjacent-entries-reversed", "gap-between-entries"],
+)
+def test_start_load_caches_coalesces_across_entries(make_worker, loads, expected_sizes):
+    """Blocks adjacent in the region share a descriptor across entries too.
+
+    Entries are ordered by first block, so whether they coalesce follows from
+    the region layout rather than the order the scheduler dispatched them.
+    """
+    worker = make_worker()
+    captured: list[list[int]] = []
+
+    with patch(
+        "vllm.distributed.ec_transfer.ec_connector.cpu.worker.swap_blocks_batch",
+        side_effect=lambda src, dst, sizes, **kw: captured.append(sizes.tolist()),
+    ):
+        worker.start_load_caches({}, _meta(loads=loads))
+
+    assert captured == [expected_sizes]
 
 
 @_requires_accelerator

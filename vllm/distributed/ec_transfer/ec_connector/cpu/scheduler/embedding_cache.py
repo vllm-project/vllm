@@ -93,7 +93,10 @@ class EmbeddingCache:
             if len(self._free_blocks) + self._evictable_block_count < n_blocks:
                 return None
             self._evict_until(n_blocks)
-            block_ids = tuple(self._free_blocks.pop() for _ in range(n_blocks))
+            # Canonical ascending order: keeps a freed entry's blocks contiguous
+            # in the free list when it is evicted, and lets consumers detect
+            # which of an entry's blocks are adjacent.
+            block_ids = tuple(sorted(self._free_blocks.pop() for _ in range(n_blocks)))
             entry = CacheEntry(block_ids)
             self._entries[key] = entry
             return entry

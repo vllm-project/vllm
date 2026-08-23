@@ -21,13 +21,15 @@ def _cache(num_blocks: int = 8) -> EmbeddingCache:
 # ── alloc ────────────────────────────────────────────────────────────────────
 
 
-def test_alloc_returns_unique_block_ids():
+def test_alloc_returns_unique_ascending_block_ids():
     cache = _cache()
     entry = cache.alloc("a", 3)
     assert entry is not None
     assert len(entry.block_ids) == 3
     assert len(set(entry.block_ids)) == 3
     assert all(0 <= i < 8 for i in entry.block_ids)
+    # Ascending order lets consumers detect which blocks are adjacent.
+    assert list(entry.block_ids) == sorted(entry.block_ids)
 
 
 def test_alloc_returns_tuple():
