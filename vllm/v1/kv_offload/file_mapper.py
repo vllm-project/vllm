@@ -94,7 +94,10 @@ class FileMapper:
             for group in config.groups
         ]
         parallel = config.parallel
-        canonical_format = canonical_format_id() if config.canonical_layout else None
+        canonical_format = None
+        if config.canonical_layout:
+            assert config.kv_cache_layout is not None
+            canonical_format = canonical_format_id(config.kv_cache_layout)
         return cls(
             root_dir=root_dir,
             model_name=config.model.name,

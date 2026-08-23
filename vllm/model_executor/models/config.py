@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     from vllm.config import CacheConfig, ModelConfig, VllmConfig
+    from vllm.config.cache import MambaDType
 
 
 logger = init_logger(__name__)
@@ -37,6 +38,16 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         if cache_config.cache_dtype == "bfloat16":
             cache_config.cache_dtype = "auto"
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
+
+
+class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
+        # in most cases.
+        vllm_config.parallel_config.set_dcp_defaults(
+            comm_backend="a2a", q_replicate=True
+        )
 
 
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
@@ -461,6 +472,7 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
+        assert pooler_config is not None
         if pooler_config.use_activation is None:
             pooler_config.use_activation = False
 
@@ -527,6 +539,7 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
         config = model_config.hf_config
         config.num_labels = 1
         pooler_config = model_config.pooler_config
+        assert pooler_config is not None
         if pooler_config.logit_mean is None:
             pooler_config.logit_mean = 2.65
 
@@ -549,6 +562,7 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
         if pooling_type is None:
             raise ValueError(f"pool_type {hf_config.pooling!r} not supported")
 
+        assert model_config.pooler_config is not None
         model_config.pooler_config.seq_pooling_type = pooling_type
 
 
@@ -581,10 +595,13 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
         if pooling is None and hasattr(hf_config, "llm_config"):
             pooling = getattr(hf_config.llm_config, "pooling", "avg")
 
+        assert isinstance(pooling, str)
+
         pooling_type = pooling_type_map.get(pooling)
         if pooling_type is None:
             raise ValueError(f"pool_type {pooling!r} not supported")
 
+        assert model_config.pooler_config is not None
         model_config.pooler_config.seq_pooling_type = pooling_type
 
 
@@ -640,7 +657,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
 
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
-    DEFAULT_MAMBA_SSM_CACHE_DTYPE = "float32"
+    DEFAULT_MAMBA_SSM_CACHE_DTYPE: "MambaDType" = "float32"
     """Only `float32` is known to have no accuracy issues by default."""
 
     @classmethod
@@ -652,7 +669,7 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
         `float32` if not specified.
         """
         if cache_config.mamba_ssm_cache_dtype == "auto":
-            mamba_ssm_cache_dtype = getattr(
+            mamba_ssm_cache_dtype: MambaDType = getattr(
                 hf_config, "mamba_ssm_cache_dtype", cls.DEFAULT_MAMBA_SSM_CACHE_DTYPE
             )
             logger.info(
@@ -738,6 +755,7 @@ class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
+        assert pooler_config is not None
 
         if pooler_config.step_tag_id is None:
             pooler_config.step_tag_id = 151651
@@ -747,6 +765,7 @@ class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
+        assert pooler_config is not None
 
         if pooler_config.use_activation is None:
             pooler_config.use_activation = False
@@ -913,6 +932,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
+    "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,

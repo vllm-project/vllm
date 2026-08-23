@@ -23,7 +23,6 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadata,
     TritonAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
 )
@@ -92,48 +91,6 @@ class TritonAttentionDiffKVBackend(TritonAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["TritonAttentionDiffKVMetadataBuilder"]:
         return TritonAttentionDiffKVMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        # Logical (blocks-first, head-major) layout: K and V (with their
-        # different head sizes) packed in the content dim.
-        return (
-            num_blocks,
-            num_kv_heads,
-            block_size,
-            head_size + TritonAttentionDiffKVBackend.head_size_v,
-        )
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, C_k+C_v)) to the actual
-        # memory layout we want.
-        cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, block_size, num_kv_heads, C_k+C_v)
-            return (1, 0, 3, 2, 4)
-        elif cache_layout == "NHD":
-            # (num_blocks, block_size, num_kv_heads, C_k+C_v)
-            return (0, 2, 1, 3)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, block_size, C_k+C_v)
-            return (1, 2, 0, 3, 4)
-        elif cache_layout == "HND":
-            # (num_blocks, num_kv_heads, block_size, C_k+C_v)
-            return (0, 1, 2, 3)
-        else:
-            raise ValueError(f"Unknown cache layout format {cache_layout}.")
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:

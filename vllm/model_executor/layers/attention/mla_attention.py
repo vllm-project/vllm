@@ -204,8 +204,9 @@ import itertools
 import math
 from abc import abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
+from math import lcm
 from typing import ClassVar, Generic, TypeVar, cast
 
 import numpy as np
@@ -222,7 +223,6 @@ from vllm.config import (
     ModelConfig,
     VllmConfig,
     get_current_vllm_config,
-    get_current_vllm_config_or_none,
 )
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
@@ -242,10 +242,6 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
-from vllm.model_executor.layers.attention.pcp import (
-    finalize_mla_pcp_decode,
-    maybe_gather_mla_latent_cache_inputs,
-)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -264,12 +260,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.math_utils import cdiv, round_down
+from vllm.utils.math_utils import cdiv, round_down, round_up
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
     np_to_pinned_tensor,
@@ -292,14 +289,19 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.pcp import (
+    finalize_mla_pcp_decode,
+    maybe_gather_mla_latent_cache_inputs,
+)
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
+    KVQuantMode,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
 
@@ -369,8 +371,17 @@ def _get_kv_b_proj_input_dtype(
         return kv_b_proj.params_dtype
     if weight_dtype == torch.uint8:
         return None
-    if weight_dtype == current_platform.fp8_dtype() and not use_fp8_prefill:
-        return None
+    if weight_dtype == current_platform.fp8_dtype():
+        from vllm.model_executor.layers.quantization.modelopt import (
+            ModelOptFp8PbWoLinearMethod,
+        )
+
+        quant_method = getattr(kv_b_proj, "quant_method", None)
+        # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
+        if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
+            return quant_method.input_dtype
+        if not use_fp8_prefill:
+            return None
     return weight_dtype
 
 
@@ -387,6 +398,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     2. Perform (multi-head/multi-query/grouped-query) attention.
     3. Return the output tensor.
     """
+
+    supports_dense_mha_prefill: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -407,6 +420,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
         non_causal_multi_token_decode: bool = False,
+        sliding_window: int | None = None,
+        prefill_backend_cls: type[MLAPrefillBackend] | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -424,6 +439,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.layer_name = prefix
         self.indexer = indexer
         self.non_causal_multi_token_decode = non_causal_multi_token_decode
+        self.sliding_window = sliding_window
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
@@ -516,7 +532,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             scale=self.scale,
             num_kv_heads=1,
             alibi_slopes=None,
-            sliding_window=None,
+            sliding_window=sliding_window,
             kv_cache_dtype=self.kv_cache_dtype,
             logits_soft_cap=None,
             attn_type=AttentionType.DECODER,
@@ -533,6 +549,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
+        self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
+        # AMX reads kv_b_proj's weight directly and never calls it live; the
+        # reference CPU MLA backend calls it but isn't perf-critical. Skip
+        # the packed-kernel dispatch either way.
+        kv_b_proj._cpu_skip_gemm_dispatch = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
@@ -544,15 +565,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
         self.prefill_backend: MLAPrefillBackend | None
-        if self.impl.is_sparse and not self.impl.supports_dense_mha_prefill:
+        if self.impl.is_sparse and not (
+            self.impl.supports_dense_mha_prefill and self.supports_dense_mha_prefill
+        ):
             logger.warning_once(
-                "Sparse MLA impl has no dense-MHA prefill path; using the top-k "
+                "Sparse MLA layer has no dense-MHA prefill path; using the top-k "
                 "MQA path only."
             )
             self.prefill_backend = None
         else:
             try:
-                prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+                prefill_backend_cls = prefill_backend_cls or get_mla_prefill_backend(
+                    vllm_config
+                )
             except ValueError:
                 if (
                     not self.impl.is_sparse
@@ -579,12 +604,27 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
-        _vllm_config = get_current_vllm_config_or_none()
-        self.dcp_a2a = (
-            _vllm_config is not None
-            and _vllm_config.parallel_config.decode_context_parallel_size > 1
-            and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
-        )
+        self.dcp_manager: MLADCPManager | None = None
+        if self.impl.dcp_world_size > 1:
+            query_dtype = (
+                current_platform.fp8_dtype()
+                if is_quantized_kv_cache(self.kv_cache_dtype)
+                and self.kv_cache_dtype != "fp8_ds_mla"
+                and self.impl.supports_quant_query_input
+                else dtype
+            )
+            self.dcp_manager = MLADCPManager(
+                vllm_config=vllm_config,
+                device=next(kv_b_proj.parameters()).device,
+                num_heads=self.num_heads,
+                query_head_dim=self.kv_lora_rank + self.qk_rope_head_dim,
+                output_head_dim=self.kv_lora_rank,
+                query_dtype=query_dtype,
+                output_dtype=dtype,
+                padded_num_heads=self.q_pad_num_heads,
+                is_lse_base_on_e=self.impl.lse_base_on_e,
+                use_pcp=self.use_pcp,
+            )
 
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
@@ -608,6 +648,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
 
     @property
     def chunked_prefill_workspace_size(self) -> int:
@@ -753,9 +797,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 return quant_output.fill_(0)
             return output.fill_(0)
 
-        if self.impl.dcp_world_size == -1:
-            self.impl.dcp_world_size = get_dcp_group().world_size
-
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
@@ -885,6 +926,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     group_size=128,
                     transpose_bm=True,
                 )
+            elif self.is_amx_bmm_enabled:
+                # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
+                # AMXMLAImpl's own (N, L, P) packed W_UK -- same as prefill.
+                N, B, P = mqa_q_nope.shape
+                L = self.kv_lora_rank
+                mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
+                ops.bmm_cpu(
+                    mqa_ql_nope,
+                    mqa_q_nope,
+                    self.impl._w_uk_packed,  # type: ignore[attr-defined]
+                    True,
+                    None,
+                )
+                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
@@ -914,6 +969,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
             if self.impl.dcp_world_size > 1:
+                assert self.dcp_manager is not None
                 if self.use_pcp:
                     if self.impl.dcp_world_size > self.impl.pcp_world_size:
                         if isinstance(mqa_q, tuple):
@@ -924,8 +980,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                         mqa_q = torch.cat(mqa_q, dim=-1)
                     if not qrep_decode:
-                        # mqa_q do allgather in head dim.
-                        mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+                        assert self.dcp_manager.query_gather is not None
+                        mqa_q = self.dcp_manager.query_gather(mqa_q)
 
             # call decode attn
             if not self.impl.is_sparse:
@@ -935,27 +991,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
-                if self.dcp_a2a:
-                    attn_out = dcp_a2a_lse_reduce(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=self.impl.lse_base_on_e,
-                    )
-                elif self.use_pcp:
-                    attn_out = cp_lse_ag_out_ar(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=self.impl.lse_base_on_e,
-                    )
-                else:
-                    attn_out = cp_lse_ag_out_rs(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=self.impl.lse_base_on_e,
-                    )
+                assert self.dcp_manager is not None
+                seq_lens = (
+                    attn_metadata.decode.seq_lens
+                    if attn_metadata.decode is not None
+                    else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
+                        : attn_metadata.num_decodes
+                    ]
+                )
+                query_start_loc = attn_metadata.query_start_loc[
+                    : attn_metadata.num_decodes + 1
+                ]
+                attn_out = self.dcp_manager.combine(
+                    attn_out,
+                    lse,
+                    seq_lens=seq_lens,
+                    query_start_loc=query_start_loc,
+                )
                 if self.use_pcp:
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
@@ -1006,6 +1058,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Let per-backend impls do their own weight packing first (no-op
+        # unless overridden), mirroring Attention.process_weights_after_loading.
+        self.impl.process_weights_after_loading(act_dtype)
+
+        if self.is_amx_bmm_enabled:
+            # AMXMLAImpl already packed its own W_UK/W_UV above, for both
+            # prefill and decode. Release the now-unused raw weight.
+            self.kv_b_proj.weight = torch.nn.Parameter(
+                torch.empty(0), requires_grad=False
+            )
+            return
+
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
@@ -1131,13 +1195,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
-        return MLAAttentionSpec(
+        common_kwargs = dict(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            # fp8_ds_mla: 656-byte custom layout (kv_lora_rank=512 +
+            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
+            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
+        )
+        if self.sliding_window is not None:
+            return SlidingWindowMLASpec(
+                **common_kwargs,
+                sliding_window=self.sliding_window,
+            )
+        return MLAAttentionSpec(
+            **common_kwargs,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
@@ -1160,6 +1235,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+            )
+        elif self.is_amx_bmm_enabled:
+            # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
+            # AMXMLAImpl's own (N, V, L) packed W_UV -- same as prefill.
+            ops.bmm_cpu(
+                out.transpose(0, 1),
+                x,
+                self.impl._w_uv_packed,  # type: ignore[attr-defined]
+                True,
+                None,
             )
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
@@ -1348,6 +1433,20 @@ class _DecodeConcatQuantFP8(QuantFP8):
 
 
 class MLACommonBackend(AttentionBackend):
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Per-token-head modes pack an inline fp32 scale pair after the
+        latent data (single-sided: ``head_size_v == 0`` for MLA)."""
+        mode = spec.kv_quant_mode
+        if spec.state_content_bytes is not None or not mode.is_per_token_head:
+            return spec
+        head_size = spec.head_size
+        if mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_size //= 2
+        scale_bytes = get_dtype_size(torch.float32)
+        content = head_size * get_dtype_size(spec.dtype) + 2 * scale_bytes
+        return replace(spec, state_content_bytes=content)
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
@@ -1355,27 +1454,6 @@ class MLACommonBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
         return MLACommonMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            # Default to identity permutation to signal cross-layer allocation
-            # is unsupported. Each MLA backend must opt in to support cross-layer
-            # allocation by overriding this method.
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -1427,6 +1505,7 @@ class MLACommonPrefillMetadata:
         chunks: "list[MLACommonPrefillMetadata.ContextChunk]"
         context_lens_list: list[int]
         empty_token_slices: list[slice]
+        dcp_manager: MLADCPManager | None = None
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
@@ -1684,6 +1763,21 @@ def _flat_int32(values: list[int] | np.ndarray) -> torch.Tensor:
     return np_to_pinned_tensor(np.asarray(values, dtype=np.int32))
 
 
+def align_mla_chunked_context_workspace_size(
+    vllm_config: VllmConfig,
+    workspace_size: int,
+) -> int:
+    parallel_config = vllm_config.parallel_config
+    alignment = vllm_config.cache_config.block_size
+    if parallel_config.decode_context_parallel_size > 1:
+        alignment = lcm(
+            alignment,
+            parallel_config.decode_context_parallel_size
+            * parallel_config.cp_kv_cache_interleave_size,
+        )
+    return round_up(max(workspace_size, alignment), alignment)
+
+
 def build_mla_chunked_context_metadata(
     *,
     context_lens_cpu: torch.Tensor,
@@ -1696,6 +1790,7 @@ def build_mla_chunked_context_metadata(
     dcp_world_size: int,
     dcp_local_block_size: int,
     dcp_virtual_block_size: int,
+    dcp_manager: MLADCPManager | None = None,
 ) -> "MLACommonPrefillMetadata.ChunkedContextMetadata | None":
     """Build chunked-context metadata for an MLA prefill.
 
@@ -1714,6 +1809,7 @@ def build_mla_chunked_context_metadata(
         dcp_world_size: Decode-context-parallel world size (1 if disabled).
         dcp_local_block_size: Per-rank interleave block size for DCP.
         dcp_virtual_block_size: ``dcp_local_block_size * dcp_world_size``.
+        dcp_manager: Shared MLA DCP collective manager.
 
     Returns:
         The chunked-context metadata, or None when no prefill has any context.
@@ -1902,6 +1998,7 @@ def build_mla_chunked_context_metadata(
         chunks=chunks,
         context_lens_list=context_lens,
         empty_token_slices=empty_token_slices,
+        dcp_manager=dcp_manager,
     )
 
 
@@ -1924,12 +2021,40 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # Whether this builder can flatten a non-causal query block into decode rows.
     supports_non_causal_multi_token_decode: ClassVar[bool] = False
 
+    # Whether can support non-causal multi-token decode with DCP KV cache.
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = False
+
     # The threshold for reordering the batch into decode and prefill requests.
     # If > 1, the batch will be reordered such that requests with
     # query length <= threshold are classified as decode requests.
     # Use `query_len_support` (above) to set this automatically
     # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
+
+    def _validate_dspark_dcp_support(self, supports_dcp_with_varlen: bool) -> None:
+        speculative_config = getattr(self.vllm_config, "speculative_config", None)
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            speculative_config is None
+            or getattr(speculative_config, "method", None) != "dspark"
+            or parallel_config.decode_context_parallel_size <= 1
+        ):
+            return
+
+        if self.non_causal_multi_token_decode:
+            supported = self.supports_non_causal_multi_token_dcp
+            query_mode = "non-causal draft"
+        else:
+            supported = supports_dcp_with_varlen
+            query_mode = "causal multi-token"
+
+        if not supported:
+            raise ValueError(
+                f"{type(self).__name__} does not support {query_mode} MLA "
+                "attention for DSpark with decode context parallelism. Select "
+                "a backend with explicit DSpark DCP support or set "
+                "decode_context_parallel_size=1."
+            )
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -1954,7 +2079,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             64 * 1024,
         )
 
-        return max(chunked_prefill_workspace_size, cache_config.block_size)
+        return align_mla_chunked_context_workspace_size(
+            vllm_config,
+            chunked_prefill_workspace_size,
+        )
 
     @staticmethod
     def determine_prefill_query_data_type(
@@ -2021,18 +2149,28 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.non_causal_multi_token_decode = getattr(
             kv_cache_spec, "non_causal_multi_token_decode", False
         )
+        self._validate_dspark_dcp_support(supports_dcp_with_varlen)
 
         # A draft cache group can have a different head count from the target.
         self.num_heads = get_num_attention_heads_from_layers(
             vllm_config, layer_names
         ) or self.model_config.get_num_attention_heads(parallel_config)
-        self.mla_dims = get_mla_dims(self.model_config)
+        # Hybrid MLA models may use different latent dimensions per KV group.
+        layer = self.compilation_config.static_forward_context[layer_names[0]]
+        self.mla_dims = MLADims(
+            q_lora_rank=layer.q_lora_rank,
+            kv_lora_rank=layer.kv_lora_rank,
+            qk_nope_head_dim=layer.qk_nope_head_dim,
+            qk_rope_head_dim=layer.qk_rope_head_dim,
+            v_head_dim=layer.v_head_dim,
+        )
         self.aot_schedule = current_platform.is_cuda()
 
         self.kv_cache_spec = kv_cache_spec
         self.q_data_type = self.determine_prefill_query_data_type(
             vllm_config, self.model_config.dtype
         )
+        attention_layer = self.compilation_config.static_forward_context[layer_names[0]]
 
         try:
             self.dcp_world_size = get_dcp_group().world_size
@@ -2050,6 +2188,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         )
 
         use_packed_fp8_cache = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
+        self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP is triggered,
             # an additional kvcache allgather across the DCP group is therefore
@@ -2060,18 +2199,24 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 (
                     self.chunked_prefill_workspace_size
                     + self.chunked_prefill_workspace_size // self.dcp_world_size,
-                    self.model_config.get_head_size(),
+                    self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
                 dtype=torch.bfloat16
                 if use_packed_fp8_cache
                 else self.model_config.dtype,
                 device=device,
             )
+            self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
+            assert isinstance(self.dcp_manager, MLADCPManager)
+            self.dcp_manager.init_kv_gather(
+                self.chunked_prefill_workspace,
+                self.chunked_prefill_workspace_size,
+            )
         else:
             self.chunked_prefill_workspace = torch.empty(
                 (
                     self.chunked_prefill_workspace_size,
-                    self.model_config.get_head_size(),
+                    self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
                 dtype=torch.bfloat16 if use_packed_fp8_cache else self.q_data_type,
                 device=device,
@@ -2080,9 +2225,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         # Metadata builders are created per ubatch when DBO is enabled. MLA
         # prefill backends keep the prepared metadata on the backend object, so
         # each builder needs its own backend instance to avoid cross-ubatch races.
-        self._prefill_backend = self.compilation_config.static_forward_context[
-            layer_names[0]
-        ].prefill_backend.clone()
+        self._prefill_backend = attention_layer.prefill_backend.clone()
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
@@ -2223,6 +2366,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dcp_world_size=self.dcp_world_size,
                 dcp_local_block_size=self.dcp_local_block_size,
                 dcp_virtual_block_size=self.dcp_virtual_block_size,
+                dcp_manager=self.dcp_manager,
             )
 
             prefill_metadata = MLACommonPrefillMetadata(
@@ -2355,6 +2499,22 @@ def reorg_kvcache(
     return reorganized_kv_c_normed, reorganized_k_pe
 
 
+def neutralize_empty_context_partials(
+    chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata",
+    output: torch.Tensor,
+    output_lse: torch.Tensor,
+) -> None:
+    """Neutralize the partial of every prefill that no chunk covers.
+
+    A prefill without context is never gathered, so nothing would write its rows;
+    a zero output with an ``-inf`` lse carries no weight into the final merge
+    against the suffix partial.
+    """
+    for token_slice in chunked_context.empty_token_slices:
+        output[token_slice].zero_()
+        output_lse[:, token_slice].fill_(float("-inf"))
+
+
 def init_mla_context_partial(
     chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata",
     attn_output: torch.Tensor,
@@ -2364,7 +2524,9 @@ def init_mla_context_partial(
     """Allocate the running context partial over all prefill tokens.
 
     Laid out like the chunk partials so the final whole-batch merge against the
-    suffix partial sees matching head strides.
+    suffix partial sees matching head strides. Callers whose backend honors an
+    ``out`` tensor already know that layout and can allocate directly, pairing it
+    with ``neutralize_empty_context_partials``.
     """
     output = torch.empty(
         (num_tokens, *attn_output.shape[1:]),
@@ -2376,10 +2538,7 @@ def init_mla_context_partial(
         dtype=attn_softmax_lse.dtype,
         device=attn_softmax_lse.device,
     )
-    # No chunk covers a prefill without context, so neutralize its partial.
-    for token_slice in chunked_context.empty_token_slices:
-        output[token_slice].zero_()
-        output_lse[:, token_slice].fill_(float("-inf"))
+    neutralize_empty_context_partials(chunked_context, output, output_lse)
     return output, output_lse
 
 
@@ -2389,16 +2548,26 @@ def accumulate_mla_context_chunk(
     attn_softmax_lse: torch.Tensor,
     output: torch.Tensor,
     output_lse: torch.Tensor,
+    output_written: bool = False,
 ) -> None:
     """Fold one chunk's partial into the running context partial.
 
     Only the first request may be a continuation; its tokens are merged and the
     remaining token range is initialized.
+
+    Args:
+        output_written: The chunk's attention output already landed in
+            ``output[chunk.token_slice]`` because the backend was handed it as
+            ``out``, leaving only the lse to fold. Invalid for a continuation
+            chunk, whose leading tokens must be merged rather than overwritten.
     """
     token_start = chunk.token_slice.start
     token_end = chunk.token_slice.stop
     init_start = token_start
     if chunk.is_continuation:
+        assert not output_written, (
+            "a continuation chunk must not write over the partial it merges with"
+        )
         init_start = chunk.continuation_token_end
         num_merged = init_start - token_start
         merge_attn_states(
@@ -2411,7 +2580,8 @@ def accumulate_mla_context_chunk(
         )
     if init_start < token_end:
         written = init_start - token_start
-        output[init_start:token_end].copy_(attn_output[written:])
+        if not output_written:
+            output[init_start:token_end].copy_(attn_output[written:])
         output_lse[:, init_start:token_end].copy_(attn_softmax_lse[:, written:])
 
 
@@ -2533,7 +2703,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 # FP8 path: gather cache without dequantization
                 ops.cp_gather_cache(
                     src_cache=kv_c_and_k_pe_cache,
-                    dst=workspace,
+                    dst=workspace[:toks],
                     block_table=block_table,
                     cu_seq_lens=chunk.cu_seq_lens,
                     batch_size=chunk.num_requests,
@@ -2642,7 +2812,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             else:
                 ops.cp_gather_cache(
                     src_cache=kv_c_and_k_pe_cache,
-                    dst=workspace,
+                    dst=workspace[:toks],
                     block_table=block_table,
                     cu_seq_lens=padded_local_cu_seq_lens,
                     batch_size=chunk.num_requests,
@@ -2660,9 +2830,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             ]
             assert toks * dcp_world_size <= cur_allgather_workspace.shape[0]
             cur_allgather_kvcache = cur_allgather_workspace[: toks * dcp_world_size]
-            cur_allgather_kvcache.copy_(
-                get_dcp_group().all_gather(local_gathered_kvcache, dim=0)
-            )
+            dcp_manager = cast(MLADCPManager, chunked_context.dcp_manager)
+            dcp_manager.kv_gather(cur_allgather_kvcache, local_gathered_kvcache)
             assert (
                 cur_allgather_kvcache.shape[-1]
                 == self.kv_lora_rank + self.qk_rope_head_dim
@@ -2732,8 +2901,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         output_scale: torch.Tensor | None = None,
     ) -> None:
         assert attn_metadata.prefill is not None
-        assert self.dcp_world_size != -1
-
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
@@ -2877,10 +3044,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             and (self.qk_rope_head_dim == 64)
         )
 
-        self.dcp_world_size: int = -1
-
+        parallel_config = get_current_vllm_config().parallel_config
+        # Avoid requiring an initialized DCP group in tests.
+        self.dcp_world_size: int = parallel_config.decode_context_parallel_size
         self.cp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
+            parallel_config.cp_kv_cache_interleave_size
         )
 
     @abstractmethod
