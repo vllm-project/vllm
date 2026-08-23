@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from collections import UserDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,6 +25,8 @@ from vllm.reasoning.cohere_command_reasoning_parser import (
     CohereCommand3ReasoningParser,
     CohereCommand4ReasoningParser,
     _has_effective_tools,
+    _melody_citations_to_vllm,
+    _melody_sources_to_vllm,
     _response_format_type,
     _schema_dict_from_structured_outputs,
     convert_schema_to_structural_tags,
@@ -33,19 +35,11 @@ from vllm.sampling_params import StructuredOutputsParams
 
 
 @dataclass
-class ExpectedToolCall:
-    id: str
-    name: str
-    arguments: dict
-
-
-@dataclass
 class ReasoningCase:
     parser_cls: Any
     model_output: str
     expected_reasoning: str | None
     expected_content: str | None
-    expected_tool_calls: list[ExpectedToolCall] = field(default_factory=list)
 
 
 REASONING_CASES = [
@@ -65,9 +59,6 @@ REASONING_CASES = [
     {"tool_call_id": "0", "tool_name": "foo", "parameters": {"query": "query1"}}
 ]
 <|END_ACTION|>""",
-            expected_tool_calls=[
-                ExpectedToolCall(id="0", name="foo", arguments={"query": "query1"}),
-            ],
         ),
         id="cmd3-single_tool_call",
     ),
@@ -87,9 +78,6 @@ REASONING_CASES = [
     {"tool_call_id": "0", "tool_name": "foo", "parameters": {"query": "query1"}}
 ]
 <|END_ACTION|>""",
-            expected_tool_calls=[
-                ExpectedToolCall(id="0", name="foo", arguments={"query": "query1"}),
-            ],
         ),
         id="cmd4-single_tool_call",
     ),
@@ -234,29 +222,8 @@ class TestExtractReasoning:
         assert reasoning == case.expected_reasoning
 
         content = "".join(content_parts) if content_parts else None
-        if case.expected_tool_calls:
-            assert content is None or content == ""
-        else:
-            assert content == case.expected_content
-
-        accumulated: dict[int, dict] = {}
-        for d in tool_call_deltas:
-            idx = d["index"]
-            if idx not in accumulated:
-                accumulated[idx] = {"id": "", "name": "", "arguments": ""}
-            if d["id"]:
-                accumulated[idx]["id"] = d["id"]
-            if d["name"]:
-                accumulated[idx]["name"] = d["name"]
-            if d["arguments"]:
-                accumulated[idx]["arguments"] += d["arguments"]
-
-        assert len(accumulated) == len(case.expected_tool_calls)
-        for i, expected_tc in enumerate(case.expected_tool_calls):
-            tc = accumulated[i]
-            assert tc["id"] == expected_tc.id
-            assert tc["name"] == expected_tc.name
-            assert json.loads(tc["arguments"]) == expected_tc.arguments
+        assert content == case.expected_content
+        assert tool_call_deltas == []
 
 
 class TestIsReasoningEnd:
@@ -623,3 +590,188 @@ class TestAdjustRequestTools:
         types = _content_types(o.structured_outputs.structural_tag)
         assert "grammar" in types
         assert "json_schema" in types
+
+
+class TestMelodySourceResolution:
+    """Pin the parser-side source resolution (see
+    ``_melody_sources_to_vllm``). The parser receives melody's numeric
+    ``(tool_call_index, tool_result_indices)`` addressing and resolves
+    it against a ``position_to_source`` map handed in by
+    ``CohereServingChatV2._apply_cohere_template_kwargs`` -- the same
+    map that would otherwise live in the serving layer's resolver.
+    """
+
+    @staticmethod
+    def _fake_melody_source(bucket: int, indices: list[int]) -> Any:
+        return SimpleNamespace(tool_call_index=bucket, tool_result_indices=indices)
+
+    def test_multi_index_source_fans_out(self):
+        from vllm.entrypoints.cohere.cohere_chat_message import CitationSource
+
+        position_map: dict[tuple[int, int], CitationSource] = {
+            (0, 0): CitationSource(type="document", id="d0", document={"id": "d0"}),
+            (0, 1): CitationSource(type="document", id="d1", document={"id": "d1"}),
+        }
+        raw = [self._fake_melody_source(0, [0, 1])]
+        out = _melody_sources_to_vllm(raw, position_map)
+        assert [s.id for s in out] == ["d0", "d1"]
+        # Verify type / payload were plumbed through, not just the id.
+        assert out[0].type == "document"
+        assert out[0].document == {"id": "d0"}
+
+    def test_unresolvable_position_skipped(self):
+        from vllm.entrypoints.cohere.cohere_chat_message import CitationSource
+
+        position_map: dict[tuple[int, int], CitationSource] = {
+            (0, 0): CitationSource(type="document", id="d0"),
+        }
+        raw = [self._fake_melody_source(9, [0])]
+        assert _melody_sources_to_vllm(raw, position_map) == []
+
+    def test_missing_position_map_drops_all_sources(self):
+        # A parser instance without a position map (parser wired
+        # outside of ``CohereServingChatV2``) can't attribute anything,
+        # so every source is dropped. Callers downstream will see the
+        # citation with empty ``sources`` and drop it entirely.
+        raw = [self._fake_melody_source(0, [0])]
+        assert _melody_sources_to_vllm(raw, None) == []
+
+    def test_citations_pass_through_is_thinking_tag(self):
+        from vllm.entrypoints.cohere.cohere_chat_message import CitationSource
+
+        position_map: dict[tuple[int, int], CitationSource] = {
+            (0, 0): CitationSource(type="document", id="d0"),
+        }
+        raw = [
+            SimpleNamespace(
+                start_index=0,
+                end_index=5,
+                text="hello",
+                is_thinking=True,
+                sources=[self._fake_melody_source(0, [0])],
+            )
+        ]
+        out = _melody_citations_to_vllm(raw, position_map)
+        assert out is not None
+        assert out[0].type == "THINKING_CONTENT"
+        assert out[0].sources[0].id == "d0"
+
+
+class TestParserStreamingEndToEnd:
+    """End-to-end streaming shape: raw model output text is tokenized
+    with the mock byte-level tokenizer and fed one token at a time
+    through :meth:`CohereCommand3ReasoningParser.extract_reasoning_streaming`.
+    We collect the ordered sequence of ``DeltaMessage``s the parser
+    hands back -- i.e. what the client would receive on the wire --
+    and pin the exact shape.
+
+    Combines the three flavors that reach ``delta``: a thinking block
+    (populates ``reasoning``), a text block (populates ``content``),
+    and a resolved citation (populates ``citations``) referencing
+    ``(start, end)`` offsets into the already-streamed content.
+    """
+
+    _MODEL_OUTPUT = (
+        "<|START_THINKING|>Let me check.<|END_THINKING|>"
+        "<|START_RESPONSE|>The capital is <co>Paris</co: 0:[1]>.<|END_RESPONSE|>"
+    )
+
+    @staticmethod
+    def _drive_parser(
+        parser: CohereCommand3ReasoningParser, text: str, tok: MockCohereTokenizer
+    ) -> list[Any]:
+        """Feed ``text`` through the parser one token at a time
+        (byte-level) and return the ordered list of non-``None``
+        ``DeltaMessage``s.
+        """
+        deltas: list[Any] = []
+        previous_text = ""
+        previous_token_ids: list[int] = []
+        for token_str in _token_deltas(tok, text):
+            current_text = previous_text + token_str
+            current_token_ids = previous_token_ids + [0]
+            delta = parser.extract_reasoning_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=token_str,
+                previous_token_ids=previous_token_ids,
+                current_token_ids=current_token_ids,
+                delta_token_ids=[0],
+            )
+            if delta is not None:
+                deltas.append(delta)
+            previous_text = current_text
+            previous_token_ids = current_token_ids
+        return deltas
+
+    def test_full_wire_stream_shape(self, tokenizer):
+        from vllm.entrypoints.cohere.cohere_chat_message import CitationSource
+        from vllm.renderers.cohere import POSITION_TO_SOURCE_KEY
+
+        # Mimic what ``CohereServingChatV2._apply_cohere_template_kwargs``
+        # installs on a request whose tool_call_index=0 tool result at
+        # index 1 is the "France" document.
+        position_to_source = {
+            (0, 1): CitationSource(
+                type="document",
+                id="doc-paris",
+                document={"id": "doc-paris", "title": "France"},
+            ),
+        }
+
+        parser = CohereCommand3ReasoningParser(
+            tokenizer,
+            chat_template_kwargs={POSITION_TO_SOURCE_KEY: position_to_source},
+        )
+
+        deltas = self._drive_parser(parser, self._MODEL_OUTPUT, tokenizer)
+
+        # -- 1. Reasoning and content stream separately and reach
+        # the wire only as their real payload. Framing tokens
+        # (``<|START_THINKING|>`` etc.) are consumed by the parser's
+        # state machine and never produce a delta.
+        reasoning_stream = [d.reasoning for d in deltas if d.reasoning is not None]
+        content_stream = [d.content for d in deltas if d.content is not None]
+        citation_deltas = [d for d in deltas if getattr(d, "citations", None)]
+
+        assert "".join(reasoning_stream) == "Let me check."
+        assert "".join(content_stream) == "The capital is Paris."
+
+        # -- 2. Exactly one citation reaches the wire, resolved to the
+        # source from ``position_to_source`` (not the raw
+        # ``(bucket, idx)`` coordinates).
+        assert len(citation_deltas) == 1
+        (cite_delta,) = citation_deltas
+        assert cite_delta.citations is not None
+        assert len(cite_delta.citations) == 1
+        cite = cite_delta.citations[0]
+        assert cite.text == "Paris"
+        # Char offsets are into the accumulated ``content``: "The
+        # capital is " is 15 chars, "Paris" is 5.
+        assert cite.start == 15
+        assert cite.end == 20
+        assert len(cite.sources) == 1
+        assert cite.sources[0].id == "doc-paris"
+        assert cite.sources[0].type == "document"
+
+        # -- 3. The citation's ``(start, end)`` offsets point into
+        # bytes that were already emitted as content-deltas earlier
+        # in the stream -- i.e. the citation is anchored to real
+        # already-shipped content.
+        cite_delta_idx = deltas.index(cite_delta)
+        earlier_content = "".join(
+            d.content for d in deltas[:cite_delta_idx] if d.content is not None
+        )
+        assert earlier_content[cite.start : cite.end] == "Paris"
+
+        # Everything after the citation delta is the trailing period.
+        later_content = "".join(
+            d.content for d in deltas[cite_delta_idx + 1 :] if d.content is not None
+        )
+        assert later_content == "."
+
+        # -- 4. Reasoning and content are never mixed on the same
+        # delta: the parser flips modes on the ``<|END_THINKING|>``
+        # boundary and never emits a delta with both fields set.
+        for d in deltas:
+            assert not (d.reasoning is not None and d.content is not None)

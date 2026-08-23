@@ -9,13 +9,9 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    get_uniform_token_count,
-)
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
@@ -23,6 +19,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 logger = init_logger(__name__)
 
@@ -39,25 +36,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.max_num_reqs, dtype=torch.int64, device=device
         )
 
-        self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-            self.draft_model_config
-        )
-        # HACK: the Inkling MTP draft has no MM processor of its own (its draft
-        # config is flattened text-only), but it consumes the target's merged
-        # embeddings at draft prefill — treat it as MM-capable whenever the
-        # target is.
-        if (
-            not self.supports_mm_inputs
-            and self.draft_model_config.hf_config.model_type == "inkling_mtp"
-        ):
-            self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-                vllm_config.model_config
-            )
         self.inputs_embeds: torch.Tensor | None = None
-        if self.supports_mm_inputs:
-            self.inputs_embeds = torch.zeros(
-                self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
-            )
 
         # Input id overrides for the last num_speculative_steps - 1 draft steps.
         # Used by chunked-prefilling requests to swap in the future prefill token
@@ -80,14 +59,6 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             device=self.device,
         )
         self.cached_draft_input_embeds: torch.Tensor | None = None
-        if self.supports_mm_inputs:
-            self.cached_draft_input_embeds = torch.zeros(
-                self.max_num_reqs,
-                self.num_speculative_steps - 1,
-                self.hidden_size,
-                dtype=self.dtype,
-                device=self.device,
-            )
         self.cached_target_hidden_states = torch.zeros(
             self.max_num_reqs,
             self.num_speculative_steps - 1,
@@ -104,6 +75,25 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         target_attn_layer_names: set[str],
     ) -> nn.Module:
         return load_eagle_model(target_model, self.vllm_config)
+
+    def load_model(self, target_model: nn.Module) -> None:
+        super().load_model(target_model)
+        if not self.supports_mm_inputs:
+            return
+
+        self.inputs_embeds = torch.zeros(
+            self.max_num_tokens,
+            self.hidden_size,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        self.cached_draft_input_embeds = torch.zeros(
+            self.max_num_reqs,
+            self.num_speculative_steps - 1,
+            self.hidden_size,
+            dtype=self.dtype,
+            device=self.device,
+        )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # TODO(TheEpicDolphin): Support piecewise cudagraph for multi-module MTP.
@@ -198,10 +188,8 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
-        uniform_token_count = get_uniform_token_count(
-            num_reqs,
-            num_tokens,
-            max_query_len,
+        uniform_token_count = get_uniform_decode_token_count(
+            num_reqs, num_tokens, max_query_len, input_batch.has_prefill
         )
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
