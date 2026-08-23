@@ -6,7 +6,6 @@ from einops import rearrange
 from torch import nn
 
 from vllm import _custom_ops as ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
@@ -51,8 +50,10 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.models.kimi_k3.common import kda_attention_op as _kda_attention_op  # noqa: F401
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -287,17 +288,17 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        self._forward(
-            mixed_qkv=mixed_qkv,
-            g1=g1,
-            g2=g2,
-            beta=beta,
-            core_attn_out=core_attn_out,
+        torch.ops.vllm.kimi_k3_kda_attention(
+            mixed_qkv,
+            g1,
+            g2,
+            beta,
+            core_attn_out,
+            _encode_layer_name(self.prefix),
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
 
-    @eager_break_during_capture
     def _forward(
         self,
         mixed_qkv: torch.Tensor,

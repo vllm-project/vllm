@@ -10,7 +10,6 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
@@ -39,6 +38,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.kimi_k3.common import kda_attention_op as _kda_attention_op  # noqa: F401
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -47,6 +47,7 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -625,19 +626,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        self._forward(
-            mixed_qkv=mixed_qkv,
-            g1=g1,
-            g2=g2,
-            beta=beta,
-            core_attn_out=core_attn_out,
+        torch.ops.vllm.kimi_k3_kda_attention(
+            mixed_qkv,
+            g1,
+            g2,
+            beta,
+            core_attn_out,
+            _encode_layer_name(self.prefix),
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(core_attn_out):
             return self.gemm_rs_ar(core_attn_out, self.o_proj.weight)
         return self.o_proj(core_attn_out)[0]
 
-    @eager_break_during_capture
     def _forward(
         self,
         mixed_qkv: torch.Tensor,
