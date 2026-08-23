@@ -1,0 +1,29 @@
+name: 📚 Documentation
+description: Report an issue related to https://docs.vllm.ai/
+title: "[Doc]: "
+labels: ["documentation"]
+
+body:
+- type: textarea
+  attributes:
+    label: 📚 The doc issue
+    description: >
+      A clear and concise description of what content in https://docs.vllm.ai/ is an issue.
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: Suggest a potential alternative/fix
+    description: >
+      Tell us how we could improve the documentation in this regard.
+- type: markdown
+  attributes:
+    value: >
+      Thanks for contributing 🎉!
+- type: checkboxes
+  id: askllm
+  attributes:
+    label: Before submitting a new issue...
+    options:
+      - label: Make sure you already searched for relevant issues, and asked the chatbot living at the bottom right corner of the [documentation page](https://docs.vllm.ai/en/latest/), which can answer lots of frequently asked questions.
+        required: true

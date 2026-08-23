@@ -1,0 +1,13 @@
+# For vllm script, with -t option (tensor parallel size).
+# bash ./run-lm-eval-gsm-vllm-baseline.sh -m deepseek-ai/DeepSeek-V2-Lite-Chat -b "auto" -l 1000 -f 5 -t 2
+model_name: "deepseek-ai/DeepSeek-V2-Lite-Chat"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.671
+  - name: "exact_match,flexible-extract"
+    value: 0.664
+limit: 1000
+num_fewshot: 5
+trust_remote_code: True

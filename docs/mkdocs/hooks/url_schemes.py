@@ -1,0 +1,176 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+MkDocs hook + markdown extension to enable the following links to render correctly,
+including inside content included via pymdownx.snippets:
+
+- Relative file links outside of the `docs/` directory, e.g.:
+    - [Text](../some_file.py)
+    - [Directory](../../some_directory/)
+- GitHub URLs for issues, pull requests, and projects, e.g.:
+    - Adds GitHub icon before links
+    - Replaces raw links with descriptive text,
+        e.g. <...pull/123> -> [Pull Request #123](.../pull/123)
+    - Works for external repos too by including the `owner/repo` in the link title
+
+The link replacement runs as a markdown preprocessor (priority 25) so that it executes
+after pymdownx.snippets (priority 32) has expanded all included content.
+The on_page_markdown hook passes the current page context to the preprocessor before
+each page is converted.
+"""
+
+import posixpath
+from pathlib import Path
+
+import regex as re
+from markdown import Extension
+from markdown.preprocessors import Preprocessor
+from mkdocs.config.defaults import MkDocsConfig
+from mkdocs.structure.files import Files
+from mkdocs.structure.pages import Page
+
+ROOT_DIR = Path(__file__).parent.parent.parent.parent.resolve()
+DOC_DIR = ROOT_DIR / "docs"
+
+gh_icon = ":octicons-mark-github-16:"
+
+# Regex pieces
+TITLE = r"(?P<title>[^\[\]<>]+?)"
+REPO = r"(?P<repo>.+?/.+?)"
+TYPE = r"(?P<type>issues|pull|projects)"
+NUMBER = r"(?P<number>\d+)"
+VERSION = r"[^/\s]+"
+PATH = r"(?P<path>[^\s]+?)"
+FRAGMENT = r"(?P<fragment>#[^\s]+)?"
+URL_GITHUB = f"https://github.com/{REPO}/{TYPE}/{NUMBER}{FRAGMENT}"
+RELATIVE = rf"(?!(https?|ftp)://|#){PATH}{FRAGMENT}"
+URL_DOCS = f"https://docs.vllm.ai/en/{VERSION}/{PATH}{FRAGMENT}"
+
+# Common titles to use for GitHub links when none is provided in the link.
+TITLES = {"issues": "Issue ", "pull": "Pull Request ", "projects": "Project "}
+
+# Regex to match GitHub issue, PR, and project links with optional titles.
+github_link = re.compile(rf"(\[{TITLE}\]\(|<){URL_GITHUB}(\)|>)")
+# Regex to match relative file links with optional titles.
+relative_link = re.compile(rf"\[{TITLE}\]\({RELATIVE}\)")
+# Regex to match absolute docs.vllm.ai links (should only exist in CLI).
+docs_link = re.compile(rf"\[{TITLE}\]\({URL_DOCS}\)")
+
+
+class UrlSchemesPreprocessor(Preprocessor):
+    """Preprocessor that runs after pymdownx.snippets to process all links."""
+
+    def __init__(self, md, ext):
+        super().__init__(md)
+        self.ext = ext
+
+    def run(self, lines):
+        page = self.ext.page
+        files = self.ext.files
+        if page is None:
+            return lines
+
+        def replace_relative_link(match: re.Match) -> str:
+            """
+            Replace relative file links with URLs if they point outside the docs dir.
+            """
+            title = match.group("title")
+            path = match.group("path")
+            path = ((DOC_DIR / page.file.src_uri).parent / path).resolve()
+            fragment = match.group("fragment") or ""
+
+            # Check if the path exists and is outside the docs dir
+            if not path.exists() or path.is_relative_to(DOC_DIR):
+                return match.group(0)
+
+            # Files and directories have different URL schemes on GitHub
+            slug = "tree/main" if path.is_dir() else "blob/main"
+
+            path = path.relative_to(ROOT_DIR)
+            url = f"https://github.com/vllm-project/vllm/{slug}/{path}{fragment}"
+            return f"[{gh_icon} {title}]({url})"
+
+        def replace_github_link(match: re.Match) -> str:
+            """
+            Replace GitHub issue, PR, and project links with enhanced Markdown links.
+            """
+            repo = match.group("repo")
+            type = match.group("type")
+            number = match.group("number")
+            # Title and fragment could be None
+            title = match.group("title") or ""
+            fragment = match.group("fragment") or ""
+
+            # Use default titles for raw links
+            if not title:
+                title = TITLES[type]
+                if "vllm-project" not in repo:
+                    title += repo
+                title += f"#{number}"
+
+            url = f"https://github.com/{repo}/{type}/{number}{fragment}"
+            return f"[{gh_icon} {title}]({url})"
+
+        def replace_docs_link(match: re.Match) -> str:
+            """Rewrite absolute docs.vllm.ai links as doc-relative links."""
+            title = match.group("title")
+            path = match.group("path").rstrip("/")
+            fragment = match.group("fragment") or ""
+
+            # vllm.config.<Class> API reference -> mkdocstrings cross-reference
+            if path == "api/vllm/config" and re.fullmatch(
+                r"#vllm\.config\.\w+", fragment
+            ):
+                ident = fragment[1:]
+                return f"[`{ident}`][{ident}]"
+
+            # Other docs pages -> link relative to the current page, but only
+            # when the target is a known docs page (real or generated); leave
+            # unknown/external URLs untouched. This is correct even when the same
+            # docstring is also rendered on its API reference page.
+            src = f"{path.removesuffix('.html')}.md"
+            if files.get_file_from_path(src) is None:
+                return match.group(0)
+            rel = posixpath.relpath(src, posixpath.dirname(page.file.src_uri))
+            # Auto-wrapped bare URLs use the URL as their title; make it readable.
+            if title.startswith("http"):
+                title = path.removesuffix(".html")
+            return f"[{title}]({rel}{fragment})"
+
+        markdown = "\n".join(lines)
+        markdown = github_link.sub(replace_github_link, markdown)
+        markdown = relative_link.sub(replace_relative_link, markdown)
+        markdown = docs_link.sub(replace_docs_link, markdown)
+        return markdown.split("\n")
+
+
+class UrlSchemesExtension(Extension):
+    """Markdown extension that registers the URL schemes preprocessor."""
+
+    def __init__(self, **kwargs):
+        self.page = None
+        self.files = None
+        super().__init__(**kwargs)
+
+    def extendMarkdown(self, md):
+        # Priority 25 runs after pymdownx.snippets (priority 32)
+        md.preprocessors.register(UrlSchemesPreprocessor(md, self), "url_schemes", 25)
+
+
+# Singleton extension instance shared between the hook and the preprocessor.
+_ext = UrlSchemesExtension()
+
+
+def on_config(config: MkDocsConfig) -> MkDocsConfig:
+    """Register the URL schemes markdown extension."""
+    config["markdown_extensions"].append(_ext)
+    return config
+
+
+def on_page_markdown(
+    markdown: str, *, page: Page, config: MkDocsConfig, files: Files
+) -> str:
+    """Pass the current page context to the preprocessor."""
+    _ext.page = page
+    _ext.files = files
+    return markdown

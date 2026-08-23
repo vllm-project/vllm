@@ -1,0 +1,262 @@
+######################### RUST BUILD IMAGE #########################
+# Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main image
+# doesn't need the rust toolchain. Runs in parallel with vllm-base.
+FROM ubuntu:22.04 AS rust-build
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git build-essential python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY requirements/build/rust.txt requirements/build/rust.txt
+RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
+
+# Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
+# by the wheel build stage.
+COPY rust rust
+COPY rust-toolchain.toml rust-toolchain.toml
+COPY tools/build_rust.py tools/build_rust.py
+COPY build_rust.sh build_rust.sh
+
+# Cap cargo parallelism to avoid exhausting the CI host's open-file limit
+# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
+ENV CARGO_BUILD_JOBS=4
+
+# Only Rust inputs are present, so suppress the artificial dirty state caused
+# by other tracked files being absent from this build stage.
+ENV SETUPTOOLS_SCM_PRETEND_METADATA={dirty=false}
+
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=bind,source=.git,target=.git \
+    bash build_rust.sh
+
+FROM ubuntu:24.04 AS vllm-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /workspace/
+
+ARG PYTHON_VERSION=3.12
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/xpu"
+
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    ffmpeg \
+    git \
+    gpg \
+    libsndfile1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    lsb-release \
+    libaio-dev \
+    numactl \
+    wget \
+    vim \
+    ca-certificates \
+    python3.12 \
+    python3.12-dev \
+    python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install UMD
+RUN mkdir neo && \
+    cd neo && \
+    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.38.2/intel-igc-core-2_2.38.2+22051_amd64.deb && \
+    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.38.2/intel-igc-opencl-2_2.38.2+22051_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/26.27.39122.11/intel-ocloc_26.27.39122.11-0_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/26.27.39122.11/intel-opencl-icd_26.27.39122.11-0_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/26.27.39122.11/libigdgmm12_22.10.0_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/26.27.39122.11/libze-intel-gpu1_26.27.39122.11-0_amd64.deb && \
+    wget https://github.com/oneapi-src/level-zero/releases/download/v1.32.0/libze1_1.32.0+u24.04_amd64.deb && \
+    wget https://github.com/oneapi-src/level-zero/releases/download/v1.32.0/libze-dev_1.32.0+u24.04_amd64.deb && \
+    dpkg -i *.deb && \
+    cd .. && \
+    rm -rf neo
+
+# Install XPU-Manager payloads without registering conflicting libze package
+# dependencies in dpkg.
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends libhwloc15 libpciaccess0 libigsc1 intel-metrics-library && \
+    mkdir xpu-m && \
+    cd xpu-m && \
+    wget https://github.com/intel/xpumanager/releases/download/v2.1.0/xpu-smi_2.1.0+26.33.6468cec-1.24.04_amd64.deb && \
+    apt install -y ./xpu-smi_2.1.0+26.33.6468cec-1.24.04_amd64.deb --install-suggests && \
+    cd .. && \
+    rm -rf xpu-m && \
+    add-apt-repository --remove -y ppa:kobuk-team/intel-graphics && \
+    apt-get update -y
+
+ENV PATH="/root/.local/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+
+WORKDIR /workspace/vllm
+
+ENV UV_HTTP_TIMEOUT=500
+
+# Configure package index for XPU
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE="copy"
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
+    --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    uv pip install --upgrade pip
+
+
+ENV LD_LIBRARY_PATH=/opt/venv/lib:/usr/local/lib
+CMD ["/bin/bash"]
+
+######################### UCX + NIXL BUILD STAGE #########################
+# Build UCX and NIXL in a dedicated stage so compiler/autotools layers are
+# never included in the final runtime image (mirrors ROCm's build_rixl stage).
+######################### WHEEL BUILD STAGE #########################
+# Produces a standalone dist/*.whl artifact (used by the release pipeline's
+# "Build wheel - XPU" step), independent of the runtime image below.
+FROM vllm-base AS vllm-build
+
+ARG GIT_REPO_CHECK=0
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
+    --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    uv pip install grpcio-tools protobuf nanobind && \
+    uv pip install -r /workspace/vllm/requirements/xpu.txt
+
+# Keep source-dependent layers near the end so frequent code-only changes
+# don't invalidate heavy dependency layers.
+COPY . .
+
+# Drop the pre-built Rust artifacts into the source tree. setup.py detects
+# them and ships them as-is, skipping the local Rust build.
+COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
+
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=.git,target=.git \
+    VLLM_TARGET_DEVICE=xpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+
+FROM vllm-base AS ucx-nixl-build
+
+# Keep UCX_VERSION aligned with the UCX that NIXL itself builds against for this
+# NIXL_VERSION (nixl contrib/Dockerfile.manylinux: ARG UCX_REF), so XPU runs the
+# same UCX commit as the released nixl-cu* wheels rather than an untested pairing.
+ARG UCX_VERSION=v1.21.x
+ARG NIXL_VERSION=v1.3.2
+
+# Build-time only: compiler, autotools, and verbs dev headers
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+    build-essential \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    libibverbs-dev \
+    librdmacm-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build UCX and produce a NIXL wheel so the final image needs no compiler.
+# patchelf (installed via uv) is used by the NIXL wheel build to rewrite
+# RPATH entries, making the wheel portable across stages.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    git clone --depth 1 --branch "${UCX_VERSION}" https://github.com/openucx/ucx /tmp/ucx_source && \
+    cd /tmp/ucx_source && \
+    bash autogen.sh && \
+    ./configure --prefix=/tmp/ucx_install --with-ze=yes --enable-examples --enable-mt && \
+    make CFLAGS="-Wno-error=incompatible-pointer-types" -j"$(nproc)" && make install && \
+    git clone --depth 1 --branch "${NIXL_VERSION}" https://github.com/ai-dynamo/nixl /tmp/nixl_source && \
+    cd /tmp/nixl_source && \
+    uv pip install --upgrade meson pybind11 patchelf && \
+    uv pip install -r requirements.txt && \
+    PKG_CONFIG_PATH=/tmp/ucx_install/lib/pkgconfig \
+    LD_LIBRARY_PATH=/tmp/ucx_install/lib \
+    python -m pip wheel --no-deps . -w /tmp/nixl_wheels/ && \
+    find /tmp/ucx_install -type f \( -name '*.a' -o -name '*.la' \) -delete && \
+    rm -rf /tmp/ucx_install/{include,share,etc,bin} /tmp/ucx_install/lib/cmake \
+           /tmp/ucx_source /tmp/nixl_source
+
+FROM vllm-base AS vllm-openai
+
+# Must match the ucx-nixl-build stage above: ARG does not cross stages, so a stale
+# value here installs a meta package that disagrees with the wheel built there.
+ARG NIXL_VERSION=v1.3.2
+
+# Copy compiled UCX runtime libraries and the pre-built NIXL wheel.
+# No compiler or autotools are installed in this stage.
+COPY --from=ucx-nixl-build /tmp/ucx_install /tmp/ucx_install
+COPY --from=ucx-nixl-build /tmp/nixl_wheels /tmp/nixl_wheels
+
+ENV LD_LIBRARY_PATH=/tmp/ucx_install/lib:${LD_LIBRARY_PATH}
+
+# Install RDMA runtime libraries (no build tools) and the pre-built NIXL wheel.
+# Do not uninstall/reinstall large Python packages here to avoid extra layer
+# churn; final package resolution remains in the later app install step.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    apt-get update -y && apt-get install -y --no-install-recommends \
+    rdma-core \
+    libibverbs1 \
+    librdmacm1 \
+    libibumad3 \
+    libibmad5 \
+    libmlx5-1 \
+    libmlx4-1 \
+    ibverbs-providers \
+    librdmacm1t64 \
+    && rm -rf /var/lib/apt/lists/* \
+    && uv pip install --no-deps /tmp/nixl_wheels/nixl*.whl \
+    && uv pip install nixl==${NIXL_VERSION} && uv pip uninstall nixl-cu13 \
+    && rm -rf /tmp/nixl_wheels
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
+    --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    --mount=type=bind,src=requirements/test/xpu.txt,target=/workspace/vllm/requirements/test/xpu.txt \
+    uv pip install grpcio-tools protobuf nanobind && \
+    uv pip install -r /workspace/vllm/requirements/xpu.txt && \
+    uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt
+
+# Keep source-dependent layers near the end so frequent code-only changes
+# don't invalidate heavy dependency and UCX/NIXL layers.
+COPY . .
+
+# Drop the pre-built Rust artifacts into the source tree. setup.py detects
+# them and ships them as-is, skipping the local Rust build.
+COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
+
+ARG GIT_REPO_CHECK=0
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
+
+ENV VLLM_TARGET_DEVICE=xpu
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=.git,target=.git \
+    uv pip install --no-build-isolation --no-deps .
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -e tests/vllm_test_utils
+
+ENTRYPOINT ["vllm", "serve"]
