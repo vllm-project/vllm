@@ -45,16 +45,16 @@ def _make_vllm_config():
 
 
 @pytest.mark.parametrize(
-    ("extra_config", "expected_layout"),
+    "extra_config",
     [
-        ({"store_tp_size": 4}, "LBHNC"),
-        ({"enable_store_tp_lcm": True, "prefill_tp_sizes": [6, 4]}, "LBHNC"),
-        ({"prefill_tp_sizes": [4, 2]}, None),
-        ({"enable_store_tp_lcm": True, "prefill_tp_sizes": [4, 0]}, None),
-        (None, None),
+        {"store_tp_size": 4},
+        {"enable_store_tp_lcm": True, "prefill_tp_sizes": [6, 4]},
+        {"prefill_tp_sizes": [4, 2]},
+        {"enable_store_tp_lcm": True, "prefill_tp_sizes": [4, 0]},
+        None,
     ],
 )
-def test_store_tp_required_kv_cache_layout(extra_config, expected_layout):
+def test_store_tp_does_not_override_backend_kv_cache_layout(extra_config):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeStoreConnector",
         kv_role="kv_both",
@@ -65,7 +65,7 @@ def test_store_tp_required_kv_cache_layout(extra_config, expected_layout):
         mooncake_store_connector.MooncakeStoreConnector.get_required_kvcache_layout(
             vllm_config
         )
-        == expected_layout
+        is None
     )
 
 

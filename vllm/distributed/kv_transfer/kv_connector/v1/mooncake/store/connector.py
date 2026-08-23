@@ -48,7 +48,7 @@ from vllm.v1.request import Request
 from .data import MooncakeStoreConnectorMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
-from .worker import MooncakeStoreWorker, resolve_store_tp_size
+from .worker import MooncakeStoreWorker
 
 logger = init_logger(__name__)
 
@@ -88,19 +88,6 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
-
-    @classmethod
-    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is None:
-            return None
-        if resolve_store_tp_size(kv_transfer_config.kv_connector_extra_config) is None:
-            return None
-        logger.info_once(
-            "MooncakeStoreConnector setting KV cache layout to LBHNC for "
-            "heterogeneous TP store sharing."
-        )
-        return "LBHNC"
 
     @staticmethod
     def _validate_kv_cache_config(

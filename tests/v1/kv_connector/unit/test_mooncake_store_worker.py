@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-import ctypes
 import itertools
 import json
 import logging
@@ -33,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LBHNCStoreLayout,
+    LBNHCStoreLayout,
     LoadSpec,
     PoolKey,
     RankLocalStoreLayout,
@@ -49,7 +49,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
-_TP_SHARED_NAMESPACE = "@store_tp:4@store_pp:1@store_format:tp_shared_v1"
+_TP_SHARED_NAMESPACE = "@store_tp:4@store_pp:1@store_format:tp_shared_lbhnc"
+_TP_SHARED_LBNHC_NAMESPACE = "@store_tp:4@store_pp:1@store_format:tp_shared_lbnhc"
 
 
 def _tp_shared_prefix(tp_rank: int) -> str:
@@ -125,7 +126,7 @@ def _make_tp_shared_db(
         num_kv_heads=8,
     )
     db = ChunkedTokenDatabase(metadata, block_size, store_layout=layout)
-    layout.register_kv_caches([tensor], num_blocks, (), ())
+    layout.register_kv_caches([tensor], num_blocks)
     return db, tensor
 
 
@@ -401,82 +402,7 @@ def test_pool_key_store_tp_namespace():
     assert key.to_string() == f"{_tp_shared_prefix(2)}@deadbeef"
 
 
-def test_tp_shared_lbhnc_round_trips_prefill_shards_into_decode():
-    block_size = 16
-    shape = (1, 2, block_size, 4)
-    producer_strides = (128, 64, 4, 1)
-
-    stored: dict[int, bytes] = {}
-    producer_tensors = []
-    for tp_rank in range(4):
-        tensor = torch.empty_strided(shape, producer_strides, dtype=torch.float16)
-        tensor.copy_(
-            torch.arange(128, dtype=torch.float16).view(shape) + tp_rank * 1000
-        )
-        producer_tensors.append(tensor)
-        metadata = KeyMetadata(
-            "test-model",
-            tp_rank,
-            0,
-            0,
-            0,
-            store_namespace=_TP_SHARED_NAMESPACE,
-        )
-        layout = LBHNCStoreLayout(
-            metadata,
-            block_size,
-            block_size,
-            local_tp_size=4,
-            store_tp_size=4,
-            tp_rank=tp_rank,
-            num_kv_heads=8,
-        )
-        layout.register_kv_caches([tensor], 1, (), ())
-        addrs, sizes, _ = layout.prepare_values([(0, block_size)], [0], [tp_rank])
-        stored[tp_rank] = b"".join(
-            ctypes.string_at(addr, size)
-            for addr, size in zip(addrs[0], sizes[0], strict=True)
-        )
-
-    for tp_rank in range(2):
-        tensor = torch.empty_strided(
-            (1, 4, block_size, 4),
-            (256, 64, 4, 1),
-            dtype=torch.float16,
-        )
-        tensor.zero_()
-        metadata = KeyMetadata(
-            "test-model",
-            tp_rank,
-            0,
-            0,
-            0,
-            store_namespace=_TP_SHARED_NAMESPACE,
-        )
-        layout = LBHNCStoreLayout(
-            metadata,
-            block_size,
-            block_size,
-            local_tp_size=2,
-            store_tp_size=4,
-            tp_rank=tp_rank,
-            num_kv_heads=8,
-        )
-        layout.register_kv_caches([tensor], 1, (), ())
-        shard_ids = layout.local_shard_ids
-        addrs, sizes, _ = layout.prepare_values([(0, block_size)] * 2, [0], shard_ids)
-        for shard_id, shard_addrs, shard_sizes in zip(
-            shard_ids, addrs, sizes, strict=True
-        ):
-            offset = 0
-            for addr, size in zip(shard_addrs, shard_sizes, strict=True):
-                ctypes.memmove(addr, stored[shard_id][offset : offset + size], size)
-                offset += size
-        expected = torch.cat(producer_tensors[tp_rank * 2 : tp_rank * 2 + 2], dim=1)
-        torch.testing.assert_close(tensor, expected)
-
-
-def test_tp_shared_sending_writes_each_canonical_shard():
+def test_tp_shared_sending_writes_each_store_shard():
     store = MagicMock()
     store.batch_is_exist.return_value = [0, 0, 0, 0]
     store.batch_put_from_multi_buffers.return_value = [1, 1, 1, 1]
@@ -558,7 +484,7 @@ def test_tp_shared_kv_event_counts_existing_shards_as_satisfied():
     assert len(thread.get_kv_events()) == 1
 
 
-def test_tp_shared_receiving_reads_each_local_canonical_shard():
+def test_tp_shared_receiving_reads_each_local_store_shard():
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
     store = MagicMock()
@@ -1198,10 +1124,10 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
     )
 
     db0.store_layout.prepare_values.assert_called_once_with(
-        [(0, 16), (32, 48)], [1, 2, 3], [None, None]
+        [(0, 16), (32, 48)], [1, 2, 3], [0, 0]
     )
     db1.store_layout.prepare_values.assert_called_once_with(
-        [(16, 32), (32, 48)], [3, 2, 1], [None, None]
+        [(16, 32), (32, 48)], [3, 2, 1], [0, 0]
     )
 
     keys, addrs, sizes, _ = store.batch_put_from_multi_buffers.call_args.args
@@ -2029,7 +1955,7 @@ def test_worker_enables_lbhnc_store_tp_layout(tmp_path, monkeypatch):
     assert len(w._lookup_key_prefixes[0]) == 4
 
 
-def test_store_tp_lbnhc_falls_back_to_rank_local_namespace(tmp_path, monkeypatch):
+def test_worker_enables_lbnhc_store_tp_layout(tmp_path, monkeypatch):
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
@@ -2055,11 +1981,11 @@ def test_store_tp_lbnhc_falls_back_to_rank_local_namespace(tmp_path, monkeypatch
         _make_kv_cache_config(),
     )
 
-    assert w.store_tp_size is None
-    assert type(w.token_dbs[0]) is ChunkedTokenDatabase
-    key = w.token_dbs[0].key_for(BlockHash(b"h"))
-    assert "@store_tp:" not in key
-    assert "@store_format:rank_local_tp2_layout_LBNHC" in key
+    assert w.store_tp_size == 4
+    assert w.token_dbs[0].metadata.store_namespace == _TP_SHARED_LBNHC_NAMESPACE
+    assert isinstance(w.token_dbs[0].store_layout, LBNHCStoreLayout)
+    assert w.token_dbs[0].store_layout.local_shard_ids == (0, 1)
+    assert len(w._lookup_key_prefixes[0]) == 4
 
 
 @pytest.mark.parametrize(
@@ -2083,6 +2009,10 @@ def test_store_tp_lbnhc_falls_back_to_rank_local_namespace(tmp_path, monkeypatch
         ({"enable_store_tp_lcm": True, "prefill_tp_sizes": []}, None),
         ({"enable_store_tp_lcm": True, "prefill_tp_sizes": [4, 0]}, None),
         ({"enable_store_tp_lcm": True, "prefill_tp_sizes": [4, 2.0]}, None),
+        ({"store_tp_size": 0}, None),
+        ({"store_tp_size": -1}, None),
+        ({"store_tp_size": True}, None),
+        ({"store_tp_size": 4.0}, None),
     ],
 )
 def test_resolve_store_tp_size(extra_config: dict[str, object], expected: int | None):
@@ -2438,7 +2368,7 @@ def test_mqa_p4_to_d2_uses_shared_rank_zero_namespace(tmp_path, monkeypatch):
         == get_keys
         == {
             (
-                "test-model@store_pp:1@store_format:tp_shared_mqa_v1"
+                "test-model@store_pp:1@store_format:tp_shared_mqa"
                 "@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@68617368"
             )
         }
@@ -3075,7 +3005,7 @@ def test_lookup_key_prefixes_cover_dcp_rank_namespaces():
     )
 
 
-def test_lookup_key_prefixes_cover_canonical_store_tp_shards():
+def test_lookup_key_prefixes_cover_store_tp_shards():
     worker = _make_bare_worker()
     worker.store_tp_size = 4
     metadata = KeyMetadata(

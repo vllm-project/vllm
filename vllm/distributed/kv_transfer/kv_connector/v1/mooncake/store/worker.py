@@ -46,6 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     ChunkedTokenDatabase,
     KeyMetadata,
     LBHNCStoreLayout,
+    LBNHCStoreLayout,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
     PoolKey,
@@ -61,7 +62,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
-from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -94,7 +94,7 @@ _T = TypeVar("_T")
 
 
 def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
-    """Resolve the canonical Store TP requested by connector config."""
+    """Resolve the common Store TP requested by connector config."""
     if extra_config.get("enable_store_tp_lcm") is True:
         prefill_tp_sizes = extra_config.get("prefill_tp_sizes")
         if not isinstance(prefill_tp_sizes, list) or not prefill_tp_sizes:
@@ -106,7 +106,7 @@ def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
         return math.lcm(*prefill_tp_sizes)
 
     store_tp_size = extra_config.get("store_tp_size")
-    return store_tp_size if type(store_tp_size) is int else None
+    return store_tp_size if type(store_tp_size) is int and store_tp_size > 0 else None
 
 
 def _rotate_list(values: list[_T], offset: int) -> list[_T]:
@@ -1130,9 +1130,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     stored_events.append(
                         BlockStored(
                             block_hashes=[maybe_convert_block_hash(block_hash)],
-                            # Derive the direct predecessor from the unfiltered
-                            # request chain. Adjacent PUTs need not be adjacent
-                            # after Store dedup, masks, or TP striding.
+                            # Store filtering can separate adjacent request
+                            # blocks, so derive the predecessor from the request.
                             parent_block_hash=(
                                 maybe_convert_block_hash(
                                     req_meta.block_hashes[s // db.hash_block_size - 1]
@@ -1598,8 +1597,14 @@ class MooncakeStoreWorker:
             if store_tp_requested
             else None
         )
+        store_layout_cls = None
+        if cache_layout is not None:
+            store_layout_cls = {
+                KVCacheLayout.LBHNC: LBHNCStoreLayout,
+                KVCacheLayout.LBNHC: LBNHCStoreLayout,
+            }.get(cache_layout)
         share_tp_topology = (
-            cache_layout is KVCacheLayout.LBHNC
+            store_layout_cls is not None
             and self.pcp_size == 1
             and self.dcp_size == 1
             and len(self._kv_cache_groups) == 1
@@ -1622,12 +1627,13 @@ class MooncakeStoreWorker:
         self.store_tp_size = requested_store_tp_size if share_tp_layout else None
         store_namespace = ""
         if share_tp_layout:
-            store_namespace = (
-                f"@store_tp:{requested_store_tp_size}@store_pp:{self.pp_size}"
-                "@store_format:tp_shared_v1"
+            assert store_layout_cls is not None
+            assert requested_store_tp_size is not None
+            store_namespace = store_layout_cls.shared_namespace(
+                requested_store_tp_size, self.pp_size
             )
         elif share_replicated_mqa:
-            store_namespace = f"@store_pp:{self.pp_size}@store_format:tp_shared_mqa_v1"
+            store_namespace = f"@store_pp:{self.pp_size}@store_format:tp_shared_mqa"
             logger.info(
                 "Mooncake heterogeneous-TP store sharing uses the replicated "
                 "MQA layout for store_tp_size=%d",
@@ -1668,6 +1674,7 @@ class MooncakeStoreWorker:
             self._compute_group_tp_replication_factors()
         )
         if self.store_tp_size is not None:
+            assert store_layout_cls is not None
             group = self._kv_cache_groups[0]
             group_metadata = dataclasses.replace(metadata, group_id=0)
             self.token_dbs = [
@@ -1675,7 +1682,7 @@ class MooncakeStoreWorker:
                     group_metadata,
                     group.kv_cache_spec.block_size,
                     hash_block_size=self.hash_block_size,
-                    store_layout=LBHNCStoreLayout(
+                    store_layout=store_layout_cls(
                         group_metadata,
                         group.kv_cache_spec.block_size,
                         self.hash_block_size,
@@ -1752,8 +1759,7 @@ class MooncakeStoreWorker:
 
         self._lookup_key_prefixes = tuple(
             db.store_layout.lookup_key_prefixes(
-                rank_namespaces(self._group_tp_replication_factors[g_idx]),
-                self.pp_size,
+                rank_namespaces(self._group_tp_replication_factors[g_idx])
             )
             for g_idx, db in enumerate(self.token_dbs)
         )
@@ -1773,9 +1779,6 @@ class MooncakeStoreWorker:
         self.num_blocks = self.cache_config.num_gpu_blocks
 
         seen_storage_ptrs: set[int] = set()
-        seen_region_ptrs: set[int] = set()
-        addrs: list[int] = []
-        block_lens: list[int] = []
         cache_tensors: list[torch.Tensor] = []
 
         for cache in kv_caches.values():
@@ -1796,52 +1799,15 @@ class MooncakeStoreWorker:
                         ret,
                     )
 
-            if not is_non_overlapping_and_dense(cache[0]):
-                # A block is scattered across per-head regions; each region's
-                # blocks are contiguous.
-                for head_idx in range(cache.shape[1]):
-                    head_cache = cache[:, head_idx]
-                    assert is_non_overlapping_and_dense(head_cache[0])
-                    region_addr = head_cache.data_ptr()
-                    if region_addr in seen_region_ptrs:
-                        continue
-                    seen_region_ptrs.add(region_addr)
-                    addrs.append(region_addr)
-                    block_lens.append(head_cache.stride(0) * head_cache.element_size())
-            elif cache.stride(0) * cache.element_size() * self.num_blocks == region_len:
-                # The block stride spans the whole per-block window
-                # (block-outermost and packed layouts, and single-layer
-                # tensors), which may hold other layers' pages at higher
-                # offsets. Register the storage once as one whole-window
-                # region; per-layer regions would copy overlapping windows and
-                # run past the storage for offset layers.
-                if base_addr in seen_region_ptrs:
-                    continue
-                seen_region_ptrs.add(base_addr)
-                addrs.append(base_addr)
-                block_lens.append(region_len // self.num_blocks)
-            else:
-                region_addr = cache.data_ptr()
-                if region_addr in seen_region_ptrs:
-                    continue
-                seen_region_ptrs.add(region_addr)
-                addrs.append(region_addr)
-                block_lens.append(cache.stride(0) * cache.element_size())
-
         logger.info(
-            "Registered KV caches: num_groups=%d, num_segments=%d, num_blocks=%d",
+            "Registered KV caches: num_groups=%d, num_tensors=%d, num_blocks=%d",
             len(self.token_dbs),
-            len(addrs),
+            len(cache_tensors),
             self.num_blocks,
         )
 
         for db in self.token_dbs:
-            db.store_layout.register_kv_caches(
-                cache_tensors,
-                self.num_blocks,
-                addrs,
-                block_lens,
-            )
+            db.store_layout.register_kv_caches(cache_tensors, self.num_blocks)
 
         # Start transfer threads
         if self.can_put:

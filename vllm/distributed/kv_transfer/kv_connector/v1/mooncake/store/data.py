@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashListWithBlockSize,
@@ -170,9 +171,7 @@ class PoolKey:
         )
 
 
-# An integer selects a canonical Store TP shard. ``None`` denotes the legacy
-# rank-local object, which has no additional Store-level shard dimension.
-StoreShardId = int | None
+StoreShardId = int
 # Physical ranks encoded in a rank-local key: (TP, PCP, DCP, PP).
 RankNamespace = tuple[int, int, int, int]
 
@@ -189,8 +188,6 @@ class StoreLayout:
         self.metadata = metadata
         self.block_size = block_size
         self.hash_block_size = hash_block_size
-        self.kv_caches_base_addr: list[int] = []
-        self.block_len: list[int] = []
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
@@ -203,7 +200,6 @@ class StoreLayout:
     def lookup_key_prefixes(
         self,
         rank_namespaces: Sequence[RankNamespace],
-        pp_size: int,
     ) -> tuple[str, ...]:
         """Prefixes that must exist for a logical block to be reusable."""
         raise NotImplementedError
@@ -212,17 +208,9 @@ class StoreLayout:
         self,
         kv_caches: Sequence[torch.Tensor],
         num_blocks: int,
-        base_addrs: Sequence[int],
-        block_lens: Sequence[int],
     ) -> None:
-        """Validate and record the local buffers backing this Store layout."""
+        """Build descriptors from the local KV cache tensors."""
         raise NotImplementedError
-
-    def set_kv_caches_base_addr(self, base_addrs: list[int]) -> None:
-        self.kv_caches_base_addr = base_addrs
-
-    def set_block_len(self, block_lens: list[int]) -> None:
-        self.block_len = block_lens
 
     def prepare_values(
         self,
@@ -231,9 +219,6 @@ class StoreLayout:
         shard_ids: Sequence[StoreShardId],
     ) -> tuple[list[list[int]], list[list[int]], list[int]]:
         """Build Store multi-buffer descriptors for logical chunks."""
-        raise NotImplementedError
-
-    def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
         raise NotImplementedError
 
 
@@ -248,21 +233,21 @@ class RankLocalStoreLayout(StoreLayout):
     ) -> None:
         super().__init__(metadata, block_size, hash_block_size)
         self._key_prefix = PoolKey.build_prefix(metadata)
+        self.kv_caches_base_addr: list[int] = []
+        self.block_len: list[int] = []
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
-        return (None,)
+        return (0,)
 
     def key_for(self, shard_id: StoreShardId, chunk_hash: BlockHash) -> str:
-        assert shard_id is None
+        assert shard_id == 0
         return PoolKey.build_key_string(self._key_prefix, chunk_hash.hex())
 
     def lookup_key_prefixes(
         self,
         rank_namespaces: Sequence[RankNamespace],
-        pp_size: int,
     ) -> tuple[str, ...]:
-        del pp_size
         return tuple(
             PoolKey.build_prefix(
                 self.metadata,
@@ -274,16 +259,49 @@ class RankLocalStoreLayout(StoreLayout):
             for tp_rank, pcp_rank, dcp_rank, pp_rank in rank_namespaces
         )
 
+    def set_kv_caches_base_addr(self, base_addrs: list[int]) -> None:
+        self.kv_caches_base_addr = base_addrs
+
+    def set_block_len(self, block_lens: list[int]) -> None:
+        self.block_len = block_lens
+
     def register_kv_caches(
         self,
         kv_caches: Sequence[torch.Tensor],
         num_blocks: int,
-        base_addrs: Sequence[int],
-        block_lens: Sequence[int],
     ) -> None:
-        del kv_caches, num_blocks
-        self.kv_caches_base_addr = list(base_addrs)
-        self.block_len = list(block_lens)
+        seen_region_ptrs: set[int] = set()
+        base_addrs: list[int] = []
+        block_lens: list[int] = []
+        for cache in kv_caches:
+            storage = cache.untyped_storage()
+            storage_addr = storage.data_ptr()
+            storage_len = storage.nbytes()
+            if not is_non_overlapping_and_dense(cache[0]):
+                for head_idx in range(cache.shape[1]):
+                    head_cache = cache[:, head_idx]
+                    assert is_non_overlapping_and_dense(head_cache[0])
+                    region_addr = head_cache.data_ptr()
+                    if region_addr in seen_region_ptrs:
+                        continue
+                    seen_region_ptrs.add(region_addr)
+                    base_addrs.append(region_addr)
+                    block_lens.append(head_cache.stride(0) * head_cache.element_size())
+            elif cache.stride(0) * cache.element_size() * num_blocks == storage_len:
+                if storage_addr in seen_region_ptrs:
+                    continue
+                seen_region_ptrs.add(storage_addr)
+                base_addrs.append(storage_addr)
+                block_lens.append(storage_len // num_blocks)
+            else:
+                region_addr = cache.data_ptr()
+                if region_addr in seen_region_ptrs:
+                    continue
+                seen_region_ptrs.add(region_addr)
+                base_addrs.append(region_addr)
+                block_lens.append(cache.stride(0) * cache.element_size())
+        self.kv_caches_base_addr = base_addrs
+        self.block_len = block_lens
 
     def prepare_values(
         self,
@@ -294,7 +312,7 @@ class RankLocalStoreLayout(StoreLayout):
         if not chunks:
             return [], [], []
         assert len(chunks) == len(shard_ids) and all(
-            shard_id is None for shard_id in shard_ids
+            shard_id == 0 for shard_id in shard_ids
         )
         base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
         length = len(self.block_len)
@@ -330,8 +348,17 @@ class RankLocalStoreLayout(StoreLayout):
         )
 
 
-class LBHNCStoreLayout(StoreLayout):
-    """Canonical head-major (LBHNC) layout shared by divisible TP sizes."""
+class TPShardedStoreLayout(StoreLayout):
+    """Store layout shared by divisible TP sizes."""
+
+    store_format: str
+
+    @classmethod
+    def shared_namespace(cls, store_tp_size: int, pp_size: int) -> str:
+        return (
+            f"@store_tp:{store_tp_size}@store_pp:{pp_size}"
+            f"@store_format:{cls.store_format}"
+        )
 
     def __init__(
         self,
@@ -356,16 +383,15 @@ class LBHNCStoreLayout(StoreLayout):
             shard_id: PoolKey.build_prefix(metadata, tp_rank=shard_id)
             for shard_id in self.store_shard_ids
         }
-        self._shard_segment_templates: tuple[
-            tuple[np.ndarray, np.ndarray, list[int]], ...
-        ] = ()
+        self._shard_addr_bases = np.empty((self.shards_per_rank, 0), dtype=np.uint64)
+        self._shard_block_strides = np.empty((self.shards_per_rank, 0), dtype=np.uint64)
+        self._shard_sizes = np.empty((self.shards_per_rank, 0), dtype=np.uint64)
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
         return self.store_shard_ids
 
     def key_for(self, shard_id: StoreShardId, chunk_hash: BlockHash) -> str:
-        assert shard_id is not None
         return PoolKey.build_key_string(
             self._shard_key_prefixes[shard_id], chunk_hash.hex()
         )
@@ -373,23 +399,76 @@ class LBHNCStoreLayout(StoreLayout):
     def lookup_key_prefixes(
         self,
         rank_namespaces: Sequence[RankNamespace],
-        pp_size: int,
     ) -> tuple[str, ...]:
-        del rank_namespaces
+        pp_ranks = sorted({namespace[3] for namespace in rank_namespaces})
         return tuple(
             PoolKey.build_prefix(self.metadata, tp_rank=shard_id, pp_rank=pp_rank)
             for shard_id in range(self.store_tp_size)
-            for pp_rank in range(pp_size)
+            for pp_rank in pp_ranks
         )
+
+    def _set_segment_templates(
+        self, templates: Sequence[tuple[list[int], list[int], list[int]]]
+    ) -> None:
+        self._shard_addr_bases = np.asarray(
+            [template[0] for template in templates], dtype=np.uint64
+        )
+        self._shard_block_strides = np.asarray(
+            [template[1] for template in templates], dtype=np.uint64
+        )
+        self._shard_sizes = np.asarray(
+            [template[2] for template in templates], dtype=np.uint64
+        )
+
+    def prepare_values(
+        self,
+        chunks: Sequence[tuple[int, int]],
+        block_ids: list[int],
+        shard_ids: Sequence[StoreShardId],
+    ) -> tuple[list[list[int]], list[list[int]], list[int]]:
+        if not chunks:
+            return [], [], []
+        if len(chunks) != len(shard_ids):
+            raise ValueError("Each Store chunk must have one shard ID")
+
+        count = len(chunks)
+        starts = np.fromiter(
+            (chunk[0] for chunk in chunks), dtype=np.int64, count=count
+        )
+        ends = np.fromiter((chunk[1] for chunk in chunks), dtype=np.int64, count=count)
+        if np.any(ends - starts != self.block_size):
+            raise ValueError("TP-shared Mooncake store requires full KV blocks")
+
+        first_shard = self.store_shard_ids[0]
+        local_shards = np.fromiter(
+            (shard_id - first_shard for shard_id in shard_ids),
+            dtype=np.int64,
+            count=count,
+        )
+        if np.any(local_shards < 0) or np.any(local_shards >= self.shards_per_rank):
+            raise ValueError("Store shard is not owned by this TP rank")
+        chunk_block_ids = np.fromiter(
+            (block_ids[index] for index in (starts // self.block_size).tolist()),
+            dtype=np.uint64,
+            count=count,
+        )
+        addr_bases = self._shard_addr_bases[local_shards]
+        block_strides = self._shard_block_strides[local_shards]
+        addrs = addr_bases + chunk_block_ids[:, None] * block_strides
+        sizes = self._shard_sizes[local_shards]
+        return addrs.tolist(), sizes.tolist(), chunk_block_ids.tolist()
+
+
+class LBHNCStoreLayout(TPShardedStoreLayout):
+    """Native head-major layout shared by divisible TP sizes."""
+
+    store_format = "tp_shared_lbhnc"
 
     def register_kv_caches(
         self,
         kv_caches: Sequence[torch.Tensor],
         num_blocks: int,
-        base_addrs: Sequence[int],
-        block_lens: Sequence[int],
     ) -> None:
-        del base_addrs, block_lens
         templates: list[tuple[list[int], list[int], list[int]]] = [
             ([], [], []) for _ in range(self.shards_per_rank)
         ]
@@ -424,38 +503,59 @@ class LBHNCStoreLayout(StoreLayout):
                 block_strides.append(block_stride)
                 sizes.append(self.heads_per_store_shard * head_stride)
 
-        self._shard_segment_templates = tuple(
-            (
-                np.asarray(addr_bases, dtype=np.uint64),
-                np.asarray(block_strides, dtype=np.uint64),
-                sizes,
-            )
-            for addr_bases, block_strides, sizes in templates
-        )
+        self._set_segment_templates(templates)
 
-    def prepare_values(
+
+class LBNHCStoreLayout(TPShardedStoreLayout):
+    """Native token-major layout shared by divisible TP sizes."""
+
+    store_format = "tp_shared_lbnhc"
+
+    def register_kv_caches(
         self,
-        chunks: Sequence[tuple[int, int]],
-        block_ids: list[int],
-        shard_ids: Sequence[StoreShardId],
-    ) -> tuple[list[list[int]], list[list[int]], list[int]]:
-        addr_lists: list[list[int]] = []
-        size_lists: list[list[int]] = []
-        chunk_block_ids: list[int] = []
-        first_shard = self.store_shard_ids[0]
+        kv_caches: Sequence[torch.Tensor],
+        num_blocks: int,
+    ) -> None:
+        templates: list[tuple[list[int], list[int], list[int]]] = [
+            ([], [], []) for _ in range(self.shards_per_rank)
+        ]
+        for cache in kv_caches:
+            if cache.ndim != 4 or tuple(cache.shape[:3]) != (
+                num_blocks,
+                self.local_num_kv_heads,
+                self.block_size,
+            ):
+                raise ValueError(
+                    "TP-shared Mooncake store requires packed KV caches with "
+                    "logical shape (num_blocks, local_kv_heads, block_size, content)"
+                )
 
-        for (start, end), shard_id in zip(chunks, shard_ids, strict=True):
-            if end - start != self.block_size:
-                raise ValueError("TP-shared Mooncake store requires full KV blocks")
-            assert shard_id is not None
-            block_id = block_ids[start // self.block_size]
-            addr_bases, block_strides, sizes = self._shard_segment_templates[
-                shard_id - first_shard
-            ]
-            addr_lists.append((addr_bases + block_id * block_strides).tolist())
-            size_lists.append(sizes)
-            chunk_block_ids.append(block_id)
-        return addr_lists, size_lists, chunk_block_ids
+            element_size = cache.element_size()
+            block_stride, head_stride, token_stride, content_stride = (
+                stride * element_size for stride in cache.stride()
+            )
+            content_bytes = cache.shape[3] * element_size
+            if not (
+                content_stride == element_size
+                and head_stride == content_bytes
+                and token_stride == self.local_num_kv_heads * content_bytes
+            ):
+                raise ValueError(
+                    "TP-shared Mooncake store requires packed LBNHC KV layout"
+                )
+
+            for local_shard, (addr_bases, block_strides, sizes) in enumerate(templates):
+                head_start = local_shard * self.heads_per_store_shard
+                for token_idx in range(self.block_size):
+                    addr_bases.append(
+                        cache.data_ptr()
+                        + token_idx * token_stride
+                        + head_start * head_stride
+                    )
+                    block_strides.append(block_stride)
+                    sizes.append(self.heads_per_store_shard * content_bytes)
+
+        self._set_segment_templates(templates)
 
 
 class ChunkedTokenDatabase:
@@ -482,51 +582,29 @@ class ChunkedTokenDatabase:
 
     @property
     def kv_caches_base_addr(self) -> list[int]:
-        return self.store_layout.kv_caches_base_addr
+        return self._rank_local_layout().kv_caches_base_addr
 
     @property
     def block_len(self) -> list[int]:
-        return self.store_layout.block_len
+        return self._rank_local_layout().block_len
+
+    def _rank_local_layout(self) -> RankLocalStoreLayout:
+        if not isinstance(self.store_layout, RankLocalStoreLayout):
+            raise RuntimeError("This operation requires a rank-local Store layout")
+        return self.store_layout
 
     def key_for(self, chunk_hash: BlockHash) -> str:
-        return self.store_layout.key_for(None, chunk_hash)
+        return self._rank_local_layout().key_for(0, chunk_hash)
 
     def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
-        self.store_layout.set_kv_caches_base_addr(kv_caches_base_addr)
+        self._rank_local_layout().set_kv_caches_base_addr(kv_caches_base_addr)
 
     def set_block_len(self, block_len: list[int]):
-        self.store_layout.set_block_len(block_len)
-
-    def prepare_value(
-        self, start: int, end: int, block_ids: list[int]
-    ) -> tuple[list[int], list[int], int]:
-        """Compute memory addresses and sizes for a single token range.
-
-        Returns:
-            (addr_list, size_list, block_id)
-        """
-        addr_lists, size_lists, chunk_block_ids = self.store_layout.prepare_values(
-            ((start, end),), block_ids, (None,)
-        )
-        return addr_lists[0], size_lists[0], chunk_block_ids[0]
-
-    def prepare_values(
-        self,
-        chunks: Sequence[tuple[int, int]],
-        block_ids: list[int],
-    ) -> tuple[list[list[int]], list[list[int]], list[int]]:
-        """Compute memory addresses and sizes for multiple token ranges.
-
-        Returns:
-            (addr_lists, size_lists, chunk_block_ids), one entry per chunk.
-        """
-        return self.store_layout.prepare_values(
-            chunks, block_ids, (None,) * len(chunks)
-        )
+        self._rank_local_layout().set_block_len(block_len)
 
     def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
         """Return addresses and sizes for one physical block slot."""
-        return self.store_layout.prepare_value_for_block(block_id)
+        return self._rank_local_layout().prepare_value_for_block(block_id)
 
     def process_tokens(
         self,
