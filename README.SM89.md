@@ -56,18 +56,28 @@ the configuration stays rebuildable; see [`assets/`](assets/) for provenance,
 checksum and license.
 
 ```bash
-uv pip install ./assets/flashinfer_python-0.6.14-py3-none-any.whl
+uv pip install ./assets/flashinfer_python-0.6.14+sm89-py3-none-any.whl
 export FLASHINFER_DISABLE_VERSION_CHECK=1
+
+# Required. Without it the server starts, answers, and emits garbage from the
+# first token — no crash, no warning. See assets/README.md for the mechanism.
+python assets/patch-flashinfer-sm89-scale-clamp.py
 ```
 
 Verify before installing:
 
 ```
-sha256  d124369346a3d48eac67e31c42f7a3c813bcc0abc10e2e36db413b7b3dfd97df
+sha256  95ea827b9a6303fc974f7b2872befb23efed9a3eb85074b262261e3c3944730b
 ```
 
 Once installed it reports version `0.6.14+sm89`, which is what
-`has_flashinfer_sparse_mla_sm89()` probes for.
+`has_flashinfer_sparse_mla_sm89()` probes for. **Check that string, not
+`pip list`** — stock FlashInfer `0.6.14` is 6 KB smaller and one filename suffix
+away, installs and imports cleanly, and then rejects SM89 at backend selection.
+[`assets/README.md`](assets/README.md) has three probes that tell the two apart.
+
+After patching, point `FLASHINFER_CACHE_DIR` at a fresh directory so stale
+cached kernels are not reused.
 
 Then overlay this branch's changed files onto the installed package, or install
 from source.
