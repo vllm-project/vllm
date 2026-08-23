@@ -102,15 +102,22 @@ def _dsml_arg_converter(raw_args: str, partial: bool) -> str:
 
             # To avoid leaking partial closing tags into the value,
             # we truncate the value at the first occurrence of a tag prefix.
-            found_prefix = False
+            # We only truncate if the prefix is at the very end and looks like
+            # a potential start of a DSML tag.
             for prefix in _TAG_PREFIXES:
-                for i in range(len(prefix), 0, -1):
-                    sub = prefix[:i]
-                    if value.endswith(sub):
-                        value = value[:-i]
-                        found_prefix = True
-                        break
-                if found_prefix:
+                if len(value) >= 1 and prefix.startswith(value[-len(prefix):] if len(value) < len(prefix) else value[-len(prefix):]):
+                    # Check all possible suffix lengths
+                    for i in range(min(len(value), len(prefix)), 0, -1):
+                        sub = value[-i:]
+                        if prefix.startswith(sub):
+                            # Special case: don't truncate legitimate single characters 
+                            # unless they are definitely the start of a tag.
+                            # For DeepSeek-V4, tags always start with '<'.
+                            if sub == "<" or sub.startswith("<"):
+                                value = value[:-i]
+                                break
+                    else:
+                        continue
                     break
 
             if is_str == "true":
