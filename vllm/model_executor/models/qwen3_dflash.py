@@ -536,24 +536,12 @@ class DFlashQwen3Model(nn.Module):
         if scale is None:
             raise ValueError(
                 f"DFlash context-KV precompute needs to dequantize {kv.dtype} "
-<<<<<<< HEAD
-                f"weights, but {type(qkv).__name__} exposes no weight_scale. "
-                f"Serve this drafter unquantized, or route the fused KV GEMM "
-                f"through quant_method.apply()."
-=======
                 f"weights, but {type(qkv).__name__} exposes no weight_scale."
->>>>>>> 87edb3cad974700aa15bcbd0958fb99c6df330b2
             )
         s = scale.data if hasattr(scale, "data") else scale
         out = kv.to(act_dtype)
         if s.numel() == 1:
             return out * s.to(act_dtype).reshape(())
-<<<<<<< HEAD
-
-        # Per-channel scales: take the K/V rows, matching the weight slice.
-        s = s.reshape(-1)
-        if s.numel() == qkv.weight.shape[0]:
-=======
         s = s.reshape(-1)
 
         # One scalar per fused shard: a per-tensor scheme on a merged layer stores
@@ -566,7 +554,6 @@ class DFlashQwen3Model(nn.Module):
             s = torch.cat([s[i].expand(int(n)) for i, n in enumerate(sizes)])
 
         if s.numel() == w.shape[0]:
->>>>>>> 87edb3cad974700aa15bcbd0958fb99c6df330b2
             s = s[attn.q_size :]
         if s.numel() != out.shape[0]:
             raise ValueError(
