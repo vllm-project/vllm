@@ -1340,6 +1340,7 @@ def _init_stateless_group(
     coord_store: Store,
     use_device_communicator: bool = True,
     use_all2all: bool = False,
+    device_id: torch.device | None = None,
 ) -> "StatelessGroupCoordinator":
     """Create a StatelessGroupCoordinator with the given parameters."""
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -1356,6 +1357,7 @@ def _init_stateless_group(
         global_rank=world.rank,
         global_world_size=world.world_size,
         use_all2all=use_all2all,
+        device_id=device_id,
     )
 
 
@@ -1914,6 +1916,7 @@ def initialize_model_parallel(
             parallel_config.data_parallel_master_ip,
             backend,
             coord_store=coord_store,
+            device_id=get_world_group().device,
         )
     else:
         _DP = init_model_parallel_group(
@@ -1944,6 +1947,7 @@ def initialize_model_parallel(
                 backend,
                 coord_store=coord_store,
                 use_all2all=use_all2all,
+                device_id=get_world_group().device,
             )
         else:
             _EP = init_model_parallel_group(

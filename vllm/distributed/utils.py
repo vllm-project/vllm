@@ -582,6 +582,7 @@ def stateless_init_torch_distributed_process_group(
     group_name: str | None = None,
     return_store: bool = False,
     listen_socket: socket.socket | None = None,
+    device_id: torch.device | None = None,
 ) -> ProcessGroup | tuple[ProcessGroup, Store]:
     """
     A replacement for `torch.distributed.init_process_group` that does not
@@ -670,6 +671,7 @@ def stateless_init_torch_distributed_process_group(
             group_rank=group_rank,
             group_size=group_size,
             timeout=timeout,
+            device_id=device_id,
         )
 
     if group_name is not None:

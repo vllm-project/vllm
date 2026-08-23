@@ -1173,6 +1173,7 @@ class Platform:
         group_rank: int,
         group_size: int,
         timeout: timedelta,
+        device_id: torch.device | None = None,
     ) -> "ProcessGroup":
         """
         Init platform-specific torch distributed process group.

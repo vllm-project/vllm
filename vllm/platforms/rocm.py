@@ -1009,6 +1009,7 @@ class RocmPlatform(Platform):
         group_rank: int,
         group_size: int,
         timeout: timedelta,
+        device_id: torch.device | None = None,
     ) -> ProcessGroup:
         assert is_nccl_available()
         pg: ProcessGroup = ProcessGroup(
@@ -1027,9 +1028,12 @@ class RocmPlatform(Platform):
         backend_type = ProcessGroup.BackendType.NCCL
         device = torch.device("cuda")
         pg._set_default_backend(backend_type)
+        pg.bound_device_id = device_id
         backend_class._set_sequence_number_for_group()
 
         pg._register_backend(device, backend_type, backend_class)
+        if device_id is not None:
+            backend_class.eager_connect_single_device(device_id)
         return pg
 
     @classmethod
