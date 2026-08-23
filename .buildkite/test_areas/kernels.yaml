@@ -350,9 +350,9 @@ steps:
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
-- label: ":nvidia: (DGX) Spark B12X Linear Kernels Nightly"
+- label: ":nvidia: (DGX) Spark b12x Linear Kernels Nightly"
   key: b12x-linear-kernels-dgx-spark-nightly
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   device: dgx-spark
   optional: true
   num_devices: 1
@@ -360,17 +360,34 @@ steps:
   - arm64-image-build
   source_file_dependencies:
   - setup.py
+  - vllm/config/kernel.py
+  - vllm/envs.py
   - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/layers/fused_moe/b12x.py
+  - vllm/model_executor/layers/fused_moe/config.py
+  - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
+  - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
+  - vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/
+  - vllm/model_executor/layers/quantization/inc/schemes/inc_mxfp4_moe.py
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/b12x_moe.py
   - vllm/model_executor/warmup/b12x_warmup.py
   - vllm/utils/b12x.py
+  - tests/kernels/moe/test_b12x.py
+  - tests/kernels/quantization/nvfp4_utils.py
   - tests/model_executor/kernels/test_b12x_linear.py
   - tests/model_executor/test_b12x_warmup.py
   - tests/kernels/quantization/test_block_fp8.py
+  - tests/quantization/reference_mxfp4.py
+  - tests/quantization/test_auto_round.py
   commands:
-  - uv pip install --system b12x==1.2.4
+  - uv pip install --system b12x==1.2.6
   - pytest -v -s model_executor/kernels/test_b12x_linear.py
       model_executor/test_b12x_warmup.py
-      kernels/quantization/test_block_fp8.py -k b12x
+      kernels/quantization/test_block_fp8.py
+      kernels/moe/test_b12x.py
+      quantization/test_auto_round.py -k b12x
 
 - label: ":nvidia: (H100) Helion Kernels Shard %N"
   key: kernels-helion-test

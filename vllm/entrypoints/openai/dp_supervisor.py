@@ -23,13 +23,15 @@ import uvloop
 from fastapi import FastAPI, Response
 
 import vllm.envs as envs
-from vllm.entrypoints.launcher import NoSignalServer
+from vllm.entrypoints.launchers.launcher import NoSignalServer
+from vllm.entrypoints.launchers.utils.server_utils import get_uvicorn_log_config
 from vllm.logger import init_logger
 from vllm.utils.system_utils import (
     decorate_logs,
     kill_process_tree,
     set_process_title,
 )
+from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
 
 logger = init_logger(__name__)
 
@@ -236,7 +238,7 @@ def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
 
 
 def _run_python_vllm_dp_server(child_args: argparse.Namespace) -> None:
-    from vllm.entrypoints.openai.api_server import run_server
+    from vllm.entrypoints.launchers.api_server.entry import run_server
 
     uvloop.run(run_server(child_args))
 
@@ -325,16 +327,24 @@ class DPSupervisor:
         """
         app = _build_dp_supervisor_app(self)
         host = self.args.host or "0.0.0.0"
+
+        uvicorn_kwargs: dict = {}
+        log_config = get_uvicorn_log_config(self.args)
+        if log_config is not None:
+            uvicorn_kwargs["log_config"] = log_config
+
         config = uvicorn.Config(
             app,
             host=host,
             port=self.supervisor_port,
             log_level=self.args.uvicorn_log_level,
+            access_log=not self.args.disable_uvicorn_access_log,
             ssl_keyfile=self.args.ssl_keyfile,
             ssl_certfile=self.args.ssl_certfile,
             ssl_ca_certs=self.args.ssl_ca_certs,
             ssl_cert_reqs=self.args.ssl_cert_reqs,
             ssl_ciphers=self.args.ssl_ciphers,
+            **uvicorn_kwargs,
         )
         supervisor_server = NoSignalServer(config)
         supervisor_server_task = asyncio.create_task(
@@ -513,7 +523,11 @@ class DPSupervisor:
 
     async def _shutdown_children(self) -> None:
         """Terminate the vLLM DP servers."""
-        timeout = self.args.shutdown_timeout + CHILD_EXIT_GRACE_S
+        process_timeout = get_engine_process_shutdown_timeout(
+            self.args.shutdown_timeout, self.args.shutdown_timeout
+        )
+        assert process_timeout is not None
+        timeout = process_timeout + CHILD_EXIT_GRACE_S
 
         try:
             logger.info(

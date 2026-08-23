@@ -461,18 +461,21 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
     def media_token_id(self) -> int:
         return self.info.get_hf_config().text_config.eos_token_id + 1
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """Run the underlying HF processor on text and image data."""
-        # Text-only input is handled as a special case here.
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
         if not mm_data or not mm_data.get("images", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
         # Images
         image_inputs = mm_data.get("images", [])
@@ -494,7 +497,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
 
         tokenizer = self.info.get_tokenizer()
         media_token = tokenizer.convert_ids_to_tokens([self.media_token_id])[0]
-        prompt_replaced = prompt.replace("<image>", media_token)
+        prompt_replaced = prompt_text.replace("<image>", media_token)
         input_ids = tokenizer.encode(prompt_replaced)
         input_ids = torch.tensor(input_ids)
 
@@ -528,7 +531,9 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
             image_token_thw=torch.tensor(image_meta["image_token_thw"]),
             pixel_sizes=torch.tensor(pixel_sizes),
         )
-        return BatchFeature(combined_outputs, tensor_type="pt")
+        processed_data = BatchFeature(combined_outputs, tensor_type="pt")
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -561,8 +566,8 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
 
         mm_fields_config = dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", pixel_sizes),
-            vision_grid_thw=MultiModalFieldConfig.batched("image"),
-            image_token_thw=MultiModalFieldConfig.batched("image"),
+            vision_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            image_token_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
         return mm_fields_config
 
