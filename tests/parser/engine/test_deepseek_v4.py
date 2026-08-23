@@ -165,6 +165,12 @@ class TestArgConverter:
         assert result["n"] == "42"
         assert isinstance(result["n"], str)
 
+    def test_partial_closing_tag_not_leaked(self):
+        # Regression test for issue #53227: partial DSML tags leak into arguments
+        raw = '<｜DSML｜parameter name="location" string="true">Paris</｜DSML｜parameter'
+        result = json.loads(_dsml_arg_converter(raw, partial=True))
+        assert result == {"location": "Paris"}
+
 
 # ── Bare </think> absorption and duplicate <think> absorption ─────────
 
