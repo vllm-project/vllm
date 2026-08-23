@@ -64,6 +64,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.multimodal.processing.processor import ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -535,7 +536,7 @@ class MossTranscribeDiarizeMultiModalProcessor(
                 raise ValueError("Audio input is too short to produce any tokens.")
             return num_tokens
 
-        def get_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def get_replacement(item_idx: int) -> PromptUpdateDetails:
             num_tokens = get_num_tokens(item_idx)
             audio_tokens = processor._audio_span_ids(num_tokens)
             return PromptUpdateDetails.select_token_id(
@@ -546,7 +547,9 @@ class MossTranscribeDiarizeMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=AUDIO_PLACEHOLDER,
+                target=cached_encode(
+                    tokenizer, AUDIO_PLACEHOLDER, add_special_tokens=False
+                ),
                 replacement=get_replacement,
             ),
         ]
