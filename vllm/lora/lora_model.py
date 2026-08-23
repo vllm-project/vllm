@@ -8,7 +8,7 @@ import safetensors
 import torch
 
 from vllm.logger import init_logger
-from vllm.lora.lora_weights import LoRALayerWeights
+from vllm.lora.lora_weights import LoRAFullModuleWeights, LoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
     get_lora_id,
@@ -66,6 +66,8 @@ class LoRAModel:
         rank: int,
         loras: dict[str, LoRALayerWeights],
         is_3d_lora_weight: bool = False,
+        *,
+        modules_to_save: dict[str, LoRAFullModuleWeights] | None = None,
     ) -> None:
         """
         Args:
@@ -85,6 +87,7 @@ class LoRAModel:
         )
         self.rank = rank
         self.loras: dict[str, LoRALayerWeights] = loras
+        self.modules_to_save = modules_to_save or {}
         self.is_3d_lora_weight = is_3d_lora_weight
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
@@ -96,11 +99,15 @@ class LoRAModel:
             rank=self.rank,
             loras=self.loras.copy(),
             is_3d_lora_weight=self.is_3d_lora_weight,
+            modules_to_save=self.modules_to_save.copy(),
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
         """Get LoRA for a given module by name"""
         return self.loras.get(module_name, None)
+
+    def get_module_to_save(self, module_name: str) -> LoRAFullModuleWeights | None:
+        return self.modules_to_save.get(module_name)
 
     def check_lora_name(self, lora_name: str) -> bool:
         return lora_name in self.loras
@@ -127,6 +134,21 @@ class LoRAModel:
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and PIN_MEMORY
+
+        full_parameters: dict[str, dict[str, torch.Tensor]] = {}
+
+        # parsed_full = parse_fine_tuned_module_to_save_name(
+        #     tensor_name,
+        #     peft_helper.modules_to_save,
+        #     weights_mapper,
+        # )
+        # if parsed_full is not None:
+        #     module_name, parameter_name = parsed_full
+        #     full_parameters.setdefault(module_name, {})[parameter_name] = tensor.to(
+        #         device=device
+        #     )
+        #     continue
+
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             if is_base_embedding_weights(tensor_name):
@@ -161,7 +183,18 @@ class LoRAModel:
                 if pin_memory:
                     loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
 
-        return cls(lora_model_id, peft_helper.r, loras)
+        modules_to_save = {}
+        for module_name, parameters in full_parameters.items():
+            weight = parameters.get("weight")
+            if weight is None:
+                raise ValueError(f"Full module {module_name!r} is missing weight.")
+            modules_to_save[module_name] = LoRAFullModuleWeights(
+                module_name=module_name,
+                weight=weight,
+                bias=parameters.get("bias"),
+            )
+
+        return cls(lora_model_id, peft_helper.r, loras, modules_to_save=modules_to_save)
 
     @classmethod
     def from_local_checkpoint(
@@ -223,6 +256,7 @@ class LoRAModel:
                 ):
                     continue
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
+                base_name = module_name.rsplit(".", 1)[-1]
                 # Case for expert lora weights
                 if ".experts" in module_name:
                     expert_idx = module_name.find(".experts")
@@ -230,7 +264,9 @@ class LoRAModel:
                     if expert_suffix not in expected_lora_modules:
                         unexpected_modules.append(module_name)
 
-                elif module_name.rsplit(".", 1)[-1] not in expected_lora_modules:
+                elif base_name not in expected_lora_modules and base_name not in (
+                    peft_helper.modules_to_save or ()
+                ):
                     unexpected_modules.append(module_name)
 
             if unexpected_modules:

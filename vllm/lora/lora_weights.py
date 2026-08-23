@@ -285,7 +285,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
 @dataclass
 class LoRAFullModuleWeights:
-    """LoRA"""
+    """LoRA weights for classification layers."""
 
     module_name: str
     weight: torch.Tensor

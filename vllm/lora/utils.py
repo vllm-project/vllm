@@ -193,13 +193,13 @@ def parse_fine_tuned_lora_name(
     start_index = 2 if name.startswith("base_model.model.") else 0
 
     parts = name.split(".")
-    if (
-        parts[-1] == "weight"
-        and len(parts) >= 2
-        and (parts[-2] == "lora_A" or parts[-2] == "lora_B")
-    ):
-        new_name = ".".join(parts[start_index:-2])
-        return new_name, parts[-2] == "lora_A"
+    if (parts[-1] == "weight" or parts[-1] == "bias") and len(parts) >= 2:
+        if parts[-2] in ["lora_A", "lora_B"]:
+            new_name = ".".join(parts[start_index:-2])
+            return new_name, parts[-2] == "lora_A"
+        elif parts[-2] in ["score", "classifier"]:
+            new_name = parts[-2]
+            return new_name, False
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
         new_name = ".".join(parts[start_index:-1])
