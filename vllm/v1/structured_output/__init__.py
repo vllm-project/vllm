@@ -17,6 +17,7 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputGrammar,
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.utils import maybe_wrap_mistral_common_tokenizer
 
 if TYPE_CHECKING:
     import numpy as np
@@ -75,8 +76,8 @@ class StructuredOutputManager:
             # of CPUs.
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
-            self.tokenizer = cached_tokenizer_from_config(
-                model_config=self.vllm_config.model_config
+            self.tokenizer = maybe_wrap_mistral_common_tokenizer(
+                cached_tokenizer_from_config(model_config=self.vllm_config.model_config)
             )
             reasoning_parser_plugin = (
                 self.vllm_config.structured_outputs_config.reasoning_parser_plugin
@@ -325,7 +326,12 @@ class StructuredOutputManager:
                             advance_grammar = False
                             post_reasoning_end_in_window = True
                     if advance_grammar and not grammar.is_terminated():
-                        accepted = grammar.accept_tokens(req_id, [token])
+                        if post_reasoning_end_in_window:
+                            accepted = bool(grammar.validate_tokens([token]))
+                            if accepted:
+                                accepted = grammar.accept_tokens(req_id, [token])
+                        else:
+                            accepted = grammar.accept_tokens(req_id, [token])
                         if accepted:
                             state_advancements += 1
                         elif not post_reasoning_end_in_window:

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::future::{join_all, try_join_all};
+use futures::future::join_all;
 use itertools::Itertools;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -14,7 +14,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
-use crate::client::state::{CommitResult, ContinuationKind, OutputReceiver};
+use crate::client::state::{CommitResult, ContinuationKind};
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::protocol::dtype::ModelDtype;
@@ -451,6 +451,11 @@ impl EngineCoreClient {
         self.config.transport_mode.data_parallel_size()
     }
 
+    #[cfg(test)]
+    pub(crate) fn pending_utility_call_count(&self) -> usize {
+        self.inner.pending_utility_call_count()
+    }
+
     /// Return the engine-side indices connected to this client.
     pub fn engine_indices(&self) -> Vec<u32> {
         self.engines
@@ -592,15 +597,32 @@ impl EngineCoreClient {
 
         let request_id = req.request_id.clone();
         let resumable = req.resumable;
-        let (engine_id, rx) = self.register_and_send(req).await?;
+        let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
+        let data_parallel_rank = req.data_parallel_rank;
+        let (engine_id, rx) = self.inner.register_request(
+            request_id.clone(),
+            lora_name,
+            data_parallel_rank,
+            resumable,
+        )?;
 
-        Ok(EngineCoreOutputStream::new(
-            request_id,
+        // Construct the output stream first before actually sending the request to the engine.
+        // This ensures that cancelling the future will properly clean up the request registration
+        // via `Drop` of the stream.
+        let stream = EngineCoreOutputStream::new(
+            request_id.clone(),
             engine_id.engine_index().unwrap_or(0),
             self.abort_tx.clone(),
             rx,
             resumable,
-        ))
+        );
+
+        if let Err(error) = self.send_add(engine_id.clone(), req).await {
+            self.inner.rollback_request(&request_id);
+            return Err(error);
+        }
+
+        Ok(stream)
     }
 
     /// Send another chunk for an open resumable request.
@@ -636,31 +658,6 @@ impl EngineCoreClient {
     fn prepare_add_request(&self, req: &mut EngineCoreRequest) -> Result<()> {
         req.client_index = self.config.client_index;
         req.validate()
-    }
-
-    /// Register a new request, then send it, rolling the registration back if
-    /// the send fails.
-    async fn register_and_send(
-        &self,
-        req: EngineCoreRequest,
-    ) -> Result<(EngineId, OutputReceiver)> {
-        let request_id = req.request_id.clone();
-        let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
-        let data_parallel_rank = req.data_parallel_rank;
-        let resumable = req.resumable;
-        let (engine_id, rx) = self.inner.register_request(
-            request_id.clone(),
-            lora_name,
-            data_parallel_rank,
-            resumable,
-        )?;
-
-        if let Err(error) = self.send_add(engine_id.clone(), req).await {
-            self.inner.rollback_request(&request_id);
-            return Err(error);
-        }
-
-        Ok((engine_id, rx))
     }
 
     async fn send_add(&self, engine_id: EngineId, mut req: EngineCoreRequest) -> Result<()> {
@@ -711,8 +708,9 @@ impl EngineCoreClient {
     }
 
     /// Call a typed utility method on all connected engines, returning one
-    /// decoded result per connected engine if all calls succeed or an error
-    /// if any call fails.
+    /// decoded result per connected engine if all calls succeed. The client
+    /// waits for every engine outcome before returning an error so callers can
+    /// safely compensate partially applied mutations.
     ///
     /// Callers should pass utility arguments using Rust tuple semantics so the
     /// encoded payload matches Python's `(client_index, call_id,
@@ -729,62 +727,47 @@ impl EngineCoreClient {
             "sending utility request"
         );
 
-        // Phase 1: allocate one call id per engine and build the per-engine
-        // request payloads up-front. Any failure here (registry closed, encode
-        // error) must roll back the call ids already allocated so they do not
-        // leak in the utility registry until shutdown.
-        let mut pending_calls = Vec::with_capacity(self.engines.len());
-        let mut prepared_sends = Vec::with_capacity(self.engines.len());
+        /// Removes utility waiters if a call future is cancelled before completion.
+        struct UtilityCallGuard<'a> {
+            inner: &'a ClientInner,
+            call_ids: Vec<u64>,
+        }
+
+        impl Drop for UtilityCallGuard<'_> {
+            fn drop(&mut self) {
+                self.inner.unregister_utility_calls(self.call_ids.drain(..));
+            }
+        }
+
+        let mut call_guard = UtilityCallGuard {
+            inner: self.inner.as_ref(),
+            call_ids: Vec::with_capacity(self.engines.len()),
+        };
+
+        let mut prepared_calls = Vec::with_capacity(self.engines.len());
         for engine in &self.engines {
-            let (call_id, rx) = match self.inner.allocate_and_register_utility_call() {
-                Ok(pair) => pair,
-                Err(err) => {
-                    self.inner.unregister_utility_calls(pending_calls.iter().map(|(id, _)| *id));
-                    return Err(err);
-                }
-            };
-            let request = match EngineCoreUtilityRequest::new(
-                self.config.client_index,
-                call_id,
-                method,
-                &args,
-            ) {
-                Ok(request) => request,
-                Err(err) => {
-                    self.inner.unregister_utility_calls(
-                        pending_calls.iter().map(|(id, _)| *id).chain(std::iter::once(call_id)),
-                    );
-                    return Err(err);
-                }
-            };
-            pending_calls.push((call_id, rx));
-            prepared_sends.push((&engine.engine_id, request));
+            let (call_id, rx) = self.inner.allocate_and_register_utility_call()?;
+            call_guard.call_ids.push(call_id);
+            let request =
+                EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, &args)?;
+            prepared_calls.push((&engine.engine_id, call_id, rx, request));
         }
 
-        // Phase 2: dispatch every utility request concurrently. `try_join_all`
-        // fails fast on the first transport error and drops the remaining send
-        // futures; any engines that already received the request will reply,
-        // but those replies are simply dropped because we roll back the call
-        // ids below.
-        let send_futures = prepared_sends.iter().map(|(engine_id, request)| {
-            self.inner.send_to_engine(engine_id, EngineCoreRequestType::Utility, request)
-        });
-        if let Err(err) = try_join_all(send_futures).await {
-            self.inner.unregister_utility_calls(pending_calls.iter().map(|(id, _)| *id));
-            return Err(err);
-        }
-
-        // Phase 3: wait for all engines to respond and preserve the per-engine
-        // result list.
-        let futures = pending_calls.into_iter().map(|(call_id, rx)| async move {
-            rx.await
-                .map_err(|_| Error::UtilityCallClosed {
-                    method: method.to_string(),
-                    call_id,
-                })??
-                .into_typed_result(method)
-        });
-        try_join_all(futures).await
+        let outcomes = join_all(prepared_calls.into_iter().map(
+            |(engine_id, call_id, rx, request)| async move {
+                self.inner
+                    .send_to_engine(engine_id, EngineCoreRequestType::Utility, &request)
+                    .await?;
+                rx.await
+                    .map_err(|_| Error::UtilityCallClosed {
+                        method: method.to_string(),
+                        call_id,
+                    })??
+                    .into_typed_result(method)
+            },
+        ))
+        .await;
+        outcomes.into_iter().collect()
     }
 
     /// Call a utility method on all connected engines and return the shared

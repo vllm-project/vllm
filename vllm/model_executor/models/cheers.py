@@ -16,7 +16,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -491,24 +490,6 @@ class CheersDummyInputsBuilder(BaseDummyInputsBuilder[CheersProcessingInfo]):
 
 class CheersMultiModalProcessor(BaseMultiModalProcessor[CheersProcessingInfo]):
     """Multimodal processor for Cheers model."""
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
 
     def _get_prompt_updates(
         self,
