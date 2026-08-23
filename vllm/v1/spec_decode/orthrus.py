@@ -213,7 +213,12 @@ class OrthrusProposer(SpecDecodeBaseProposer):
           implementation does not.
         """
         batch_size = cad.batch_size()
-        mask_token_id = self.vllm_config.model_config.hf_config.mask_token_id
+        # Resolved by the base class from the *draft* config at init time
+        # (see _init_parallel_drafting_params, enabled for "orthrus" via
+        # SpeculativeConfig.parallel_drafting), which also raises a clear
+        # error up front if the checkpoint has no mask_token_id -- rather
+        # than failing here on the first decode step.
+        mask_token_id = self.parallel_drafting_token_id
         block_len = self.num_speculative_tokens + 1
         num_tokens = batch_size * block_len
 
