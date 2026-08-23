@@ -160,11 +160,6 @@ class PCPManager:
         if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
 
-    @property
-    def input_buffers(self) -> InputBuffers:
-        assert self._input_buffers is not None
-        return self._input_buffers
-
     @staticmethod
     def _reorder_segments(
         segments: list[RankSegment],
@@ -285,14 +280,8 @@ class PCPManager:
         # Therefore global = gathered[hidden_restore_idx] and
         # padded_gathered = global[padded_gather_idx].
         hidden_restore_idx = np.empty(int(query_start_loc_np[-1]), dtype=np.int64)
-        required_num_tokens = max(per_rank_num_tokens)
         if padded_num_tokens is None:
-            padded_num_tokens = required_num_tokens
-        elif padded_num_tokens < required_num_tokens:
-            raise RuntimeError(
-                "PCP graph token capacity is smaller than the rank-local batch: "
-                f"{padded_num_tokens} < {required_num_tokens}."
-            )
+            padded_num_tokens = max(per_rank_num_tokens)
         num_expanded_tokens = padded_num_tokens * self.pcp_world_size
         padded_gather_idx = np.zeros(num_expanded_tokens, dtype=np.int64)
         gathered_kv_write_mask = np.zeros(num_expanded_tokens, dtype=np.bool_)
