@@ -14,7 +14,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
-use crate::client::state::OutputReceiver;
+use crate::client::state::{CommitResult, ContinuationKind, OutputReceiver};
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::protocol::dtype::ModelDtype;
@@ -611,21 +611,25 @@ impl EngineCoreClient {
     pub async fn call_continuation(&self, mut req: EngineCoreRequest) -> Result<()> {
         self.prepare_add_request(&mut req)?;
         let request_id = req.request_id.clone();
-        let sentinel = !req.resumable;
-        let engine_id = self.inner.continue_resumable_request(&request_id, sentinel)?;
+        let kind = if req.resumable {
+            ContinuationKind::Content
+        } else {
+            ContinuationKind::Final
+        };
+        let engine_id = self.inner.prepare_continuation(&request_id, kind)?;
 
         if let Err(error) = self.send_add(engine_id.clone(), req).await {
             self.inner.rollback_continuation(&request_id);
             return Err(error);
         }
 
-        let still_registered = self.inner.commit_continuation(&request_id);
-        if sentinel && !still_registered {
-            self.inner
-                .do_abort_requests(&engine_id, std::slice::from_ref(&request_id))
-                .await?;
+        match self.inner.commit_continuation(&request_id) {
+            CommitResult::Active | CommitResult::CompletedDuringCommit => Ok(()),
+            CommitResult::RemovedBeforeCommit if kind == ContinuationKind::Final => {
+                self.inner.abort_retired_session(&engine_id, &request_id).await
+            }
+            CommitResult::RemovedBeforeCommit => Ok(()),
         }
-        Ok(())
     }
 
     /// Shared setup for [`Self::call`] and [`Self::call_continuation`].

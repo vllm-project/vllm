@@ -340,7 +340,7 @@ struct ResumableFixture {
 impl ResumableFixture {
     /// Await the first `expected` ADDs the engine decoded, in wire order.
     ///
-    /// The stream can complete before the engine has read the sentinel off its
+    /// The stream can complete before the engine has read the final segment off its
     /// socket, so the ADDs have to be awaited rather than polled.
     async fn observed_adds(&mut self, expected: usize) -> Vec<EngineCoreRequest> {
         let mut observed = Vec::with_capacity(expected);
@@ -3349,7 +3349,7 @@ async fn resumable_session_wire_example() {
     assert_eq!(
         observed.iter().map(|add| add.resumable).collect::<Vec<_>>(),
         vec![true, true, false],
-        "one ADD per segment plus the sentinel"
+        "one ADD per segment plus the final segment"
     );
     assert!(observed.iter().all(|add| add.request_id == RESUMABLE_SESSION_ID));
     assert_eq!(
@@ -3365,9 +3365,9 @@ async fn resumable_session_wire_example() {
 }
 
 /// The engine ran ahead: every submitted segment had already stopped when the
-/// sentinel went out, so the sentinel itself has to end the stream.
+/// final segment went out, so the final ADD itself has to end the stream.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resumable_session_closes_when_the_sentinel_follows_the_last_stop() {
+async fn resumable_session_closes_when_the_final_segment_follows_the_last_stop() {
     init_tracing();
     let fixture = resumable_session_fixture(vec![
         expect_add(true),
@@ -3404,9 +3404,9 @@ async fn resumable_session_closes_when_the_sentinel_follows_the_last_stop() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resumable_session_closes_on_the_last_stop_after_the_sentinel() {
+async fn resumable_session_closes_on_the_last_stop_after_the_final_segment() {
     init_tracing();
-    // The single segment only stops once the sentinel has arrived.
+    // The single segment only stops once the final segment has arrived.
     let fixture = resumable_session_fixture(vec![
         expect_add(true),
         expect_add(false),
@@ -3460,5 +3460,65 @@ async fn resumable_session_abort_ends_open_session() {
         "{error:?}"
     );
 
+    fixture.shutdown().await;
+}
+
+/// Late STOP outputs after the session has closed must be dropped safely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumable_session_late_stop_after_close_is_ignored() {
+    init_tracing();
+    let fixture = resumable_session_fixture(vec![
+        expect_add(true),
+        expect_add(false),
+        emit_stop(vec![9]),
+        emit_stop(vec![99]),
+    ])
+    .await;
+
+    let stream = fixture
+        .client
+        .call(resumable_segment_add(true, vec![11]))
+        .await
+        .expect("open session");
+    fixture
+        .client
+        .call_continuation(resumable_segment_add(false, vec![0]))
+        .await
+        .expect("close session");
+
+    assert_eq!(drain_resumable_stream(stream).await, vec![9]);
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumable_session_abort_races_with_continuation() {
+    init_tracing();
+    let fixture = resumable_session_fixture(vec![expect_add(true)]).await;
+
+    let stream = fixture
+        .client
+        .call(resumable_segment_add(true, vec![11]))
+        .await
+        .expect("open session");
+
+    let client = &fixture.client;
+    let request_ids = vec![RESUMABLE_SESSION_ID.to_string()];
+    let (abort_res, cont_res) = tokio::join!(
+        client.abort(&request_ids),
+        client.call_continuation(resumable_segment_add(true, vec![22]))
+    );
+    abort_res.expect("abort");
+    let _ = cont_res;
+
+    let error = client
+        .call_continuation(resumable_segment_add(true, vec![33]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::UnknownResumableRequestId { .. }),
+        "{error:?}"
+    );
+
+    drop(stream);
     fixture.shutdown().await;
 }

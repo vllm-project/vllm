@@ -16,8 +16,8 @@ use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
 use crate::client::state::{
-    OutputReceiver, OutputRoute, OutputSender, RequestRegistry, ResumableStopAction,
-    UtilityReceiver, UtilityRegistry,
+    CommitResult, ContinuationKind, OutputReceiver, OutputRoute, OutputSender, ReconcileResult,
+    RequestRegistry, ResumableStopAction, StreamEvent, UtilityReceiver, UtilityRegistry,
 };
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
@@ -106,13 +106,17 @@ impl ClientInner {
         registry.register(request_id, lora_name, data_parallel_rank, resumable)
     }
 
-    /// Admit one continuation ADD, rejecting it once the client is closed.
-    pub fn continue_resumable_request(&self, request_id: &str, sentinel: bool) -> Result<EngineId> {
+    /// Prepare one continuation ADD, rejecting it once the client is closed.
+    pub fn prepare_continuation(
+        &self,
+        request_id: &str,
+        kind: ContinuationKind,
+    ) -> Result<EngineId> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.continue_resumable(request_id, sentinel)
+        registry.prepare_continuation(request_id, kind)
     }
 
     /// Release continuation accounting whose ADD never reached the engine.
@@ -121,7 +125,7 @@ impl ClientInner {
     }
 
     /// Mark a continuation ADD as sent. See [`RequestRegistry::commit_continuation`].
-    pub fn commit_continuation(&self, request_id: &str) -> bool {
+    pub fn commit_continuation(&self, request_id: &str) -> CommitResult {
         self.request_reg.lock().commit_continuation(request_id)
     }
 
@@ -169,14 +173,13 @@ impl ClientInner {
         self.request_reg.lock().routes_for_outputs(outputs)
     }
 
-    /// Apply the deferred accounting for one enqueued terminal output. See
-    /// [`RequestRegistry::finish_resumable_output`].
-    pub fn finish_resumable_output(
+    /// Apply deferred segment-stop accounting after the output is enqueued.
+    pub fn reconcile_segment_stop(
         &self,
         request_id: &str,
         stop_action: ResumableStopAction,
-    ) -> Option<(OutputSender, EngineId)> {
-        self.request_reg.lock().finish_resumable_output(request_id, stop_action)
+    ) -> Option<ReconcileResult> {
+        self.request_reg.lock().reconcile_segment_stop(request_id, stop_action)
     }
 
     /// Remove a batch of requests that have finished or aborted, returning
@@ -326,6 +329,20 @@ impl ClientInner {
         self.send_to_engine(engine_id, EngineCoreRequestType::Abort, &request_ids).await
     }
 
+    /// Abort leftover engine state after the client has already retired the session.
+    ///
+    /// Used when a terminal Abort/Error stop ends the session, or when a final ADD
+    /// is committed after the session was already removed. The wire command is the
+    /// same as cancellation.
+    pub async fn abort_retired_session(
+        &self,
+        engine_id: &EngineId,
+        request_id: &str,
+    ) -> Result<()> {
+        let request_id = request_id.to_string();
+        self.do_abort_requests(engine_id, std::slice::from_ref(&request_id)).await
+    }
+
     /// Shut down by closing all active request streams and utility calls with a
     /// sticky client closed error.
     pub fn shutdown(&self) {
@@ -456,27 +473,30 @@ pub(crate) async fn run_output_dispatcher_loop(
                             timestamp: batch.timestamp,
                             output,
                         };
-                        if route.sender.send(Ok(Some(wrapped_output))).is_err() {
+                        if route
+                            .sender
+                            .send(Ok(StreamEvent::Output(Box::new(wrapped_output))))
+                            .is_err()
+                        {
                             debug!(request_id, "request output stream receiver dropped");
                         }
                         if let Some(stop_action) = route.stop_action
-                            && let Some((sender, engine_id)) =
-                                inner.finish_resumable_output(&request_id, stop_action)
+                            && let Some(reconcile) =
+                                inner.reconcile_segment_stop(&request_id, stop_action)
                         {
                             trace!(request_id, "resumable session completed its last segment");
-                            let _ = sender.send(Ok(None));
-                            if stop_action == ResumableStopAction::End
+                            if reconcile.effects.close_stream {
+                                let _ = reconcile.sender.send(Ok(StreamEvent::SessionFinished));
+                            }
+                            if reconcile.effects.cleanup_engine
                                 && let Err(error) = inner
-                                    .do_abort_requests(
-                                        &engine_id,
-                                        std::slice::from_ref(&request_id),
-                                    )
+                                    .abort_retired_session(&reconcile.engine_id, &request_id)
                                     .await
                             {
                                 warn!(
                                     request_id,
                                     error = %error.as_report(),
-                                    "failed to clean up a terminal resumable request"
+                                    "failed to abort leftover engine state for a retired session"
                                 );
                             }
                         }

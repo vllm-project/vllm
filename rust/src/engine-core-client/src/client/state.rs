@@ -15,13 +15,73 @@ use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::ConnectedEngine;
 
-/// Internal stream message: `Ok(Some(_))` carries output and `Ok(None)` marks
-/// explicit clean completion.
-pub type OutputMessage = Result<Option<EngineCoreStreamOutput>>;
+/// Events on a resumable session's internal output channel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamEvent {
+    Output(Box<EngineCoreStreamOutput>),
+    SessionFinished,
+}
+
+pub type OutputMessage = Result<StreamEvent>;
 pub type OutputSender = mpsc::UnboundedSender<OutputMessage>;
 pub type OutputReceiver = mpsc::UnboundedReceiver<OutputMessage>;
 pub type UtilitySender = oneshot::Sender<Result<UtilityOutput>>;
 pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
+
+/// Whether a continuation ADD carries more input or closes the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationKind {
+    Content,
+    Final,
+}
+
+/// High-level phase derived from segment accounting. Not stored separately.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPhase {
+    Running,
+    WaitingForContinuation,
+    SubmittingContinuation { kind: ContinuationKind },
+    Closing,
+}
+
+/// Inputs to the resumable session state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEvent {
+    BeginContinuation { kind: ContinuationKind },
+    ContinuationSendFailed,
+    ContinuationCommitted,
+    SegmentStopped { stop_action: ResumableStopAction },
+}
+
+/// Side effects produced by a lifecycle transition.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionEffects {
+    pub close_stream: bool,
+    pub cleanup_engine: bool,
+}
+
+impl SessionEffects {
+    pub fn should_retire(self) -> bool {
+        self.close_stream
+    }
+}
+
+/// Outcome of committing a continuation ADD after a successful send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitResult {
+    Active,
+    CompletedDuringCommit,
+    RemovedBeforeCommit,
+}
+
+/// Deferred reconciliation after a terminal segment output is enqueued.
+#[derive(Debug)]
+pub struct ReconcileResult {
+    pub sender: OutputSender,
+    pub engine_id: EngineId,
+    pub effects: SessionEffects,
+}
 
 /// Where one engine output goes and any resumable accounting deferred until
 /// after that output is enqueued.
@@ -46,41 +106,124 @@ enum RequestMode {
     Resumable(ResumableSession),
 }
 
-/// Segment accounting for one resumable request.
+/// Segment accounting for one resumable logical session.
+///
+/// # Invariants
+///
+/// A session stays registered while either:
+///
+/// - another continuation may still arrive, or
+/// - a submitted continuation has not yet been reconciled with its engine STOP.
+///
+/// The client output stream closes only when the final continuation has been
+/// committed **and** every submitted segment has been reconciled (or the session
+/// ends on a terminal abort/error).
+///
+/// At most one continuation ADD may be in flight at a time.
+/// Prepare/send/commit-or-rollback protects that transient state under concurrency.
+///
+/// # Transition table
+///
+/// | Phase | Event | Next phase | Stream closed? | Side effects |
+/// |---|---|---|---|---|
+/// | Running | segment STOP (Continue) | WaitingForContinuation | No | decrement outstanding |
+/// | WaitingForContinuation | BeginContinuation Content | SubmittingContinuation | No | outstanding++ |
+/// | WaitingForContinuation | BeginContinuation Final | SubmittingContinuation | No | — |
+/// | SubmittingContinuation | ContinuationSendFailed | restored | No | rollback accounting |
+/// | SubmittingContinuation | ContinuationCommitted (content) | Running | No | — |
+/// | SubmittingContinuation | ContinuationCommitted (final) | Closing or complete | maybe | set final_sent |
+/// | Closing | segment STOP (Continue) | Closing | No | decrement outstanding |
+/// | Closing | segment STOP + outstanding==0 | removed | Yes | CloseStream |
+/// | any active | SegmentStopped End | removed | Yes | CloseStream, CleanupEngine |
+///
+/// Critical race (STOP before commit):
+///
+/// ```text
+/// SubmittingContinuation(Final)
+///     + engine STOP arrives before ContinuationCommitted
+///     → route output first (deferred reconcile)
+///     → ContinuationCommitted completes session
+///     → CloseStream after enqueued output
+/// ```
 ///
 /// The engine stops the request once per submitted segment, so the session is
-/// over when the closing sentinel ADD has been sent and every segment has
-/// stopped. This mirrors the Python frontend's `input_chunk_queue` bookkeeping
-/// in `OutputProcessor.process_outputs`. `EngineCoreOutputs.finished_requests`
+/// over when the closing final ADD has been sent and every segment has stopped.
+/// This mirrors the Python frontend's `input_chunk_queue` bookkeeping in
+/// `OutputProcessor.process_outputs`. `EngineCoreOutputs.finished_requests`
 /// cannot drive completion instead: the engine only populates it under
 /// data-parallel internal load balancing (`include_finished_set`), so a
 /// single-engine deployment never reports it for a normal finish.
 /// [`RequestRegistry::finish_many`] therefore leaves resumable IDs registered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InFlightAdd {
-    Content,
-    Sentinel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResumableSession {
+pub(crate) struct ResumableSession {
     outstanding: u32,
-    sentinel_sent: bool,
-    /// At most one content or sentinel ADD can be in flight at a time.
-    in_flight: Option<InFlightAdd>,
+    final_sent: bool,
+    /// At most one content or final ADD can be in flight at a time.
+    in_flight: Option<ContinuationKind>,
 }
 
 impl ResumableSession {
-    fn open() -> Self {
+    pub(crate) fn open() -> Self {
         Self {
             outstanding: 1,
-            sentinel_sent: false,
+            final_sent: false,
             in_flight: None,
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn phase(&self) -> SessionPhase {
+        if let Some(kind) = self.in_flight {
+            return SessionPhase::SubmittingContinuation { kind };
+        }
+        if self.final_sent {
+            return SessionPhase::Closing;
+        }
+        if self.outstanding == 0 {
+            return SessionPhase::WaitingForContinuation;
+        }
+        SessionPhase::Running
+    }
+
     fn is_complete(&self) -> bool {
-        self.sentinel_sent && self.outstanding == 0
+        self.final_sent && self.outstanding == 0
+    }
+
+    pub(crate) fn on_event(&mut self, event: SessionEvent) -> SessionEffects {
+        match event {
+            SessionEvent::BeginContinuation { kind } => {
+                if kind == ContinuationKind::Content {
+                    self.outstanding += 1;
+                }
+                self.in_flight = Some(kind);
+                SessionEffects::default()
+            }
+            SessionEvent::ContinuationSendFailed => {
+                if self.in_flight.take() == Some(ContinuationKind::Content) {
+                    self.outstanding = self.outstanding.saturating_sub(1);
+                }
+                SessionEffects::default()
+            }
+            SessionEvent::ContinuationCommitted => {
+                if self.in_flight.take() == Some(ContinuationKind::Final) {
+                    self.final_sent = true;
+                }
+                SessionEffects {
+                    close_stream: self.is_complete(),
+                    ..SessionEffects::default()
+                }
+            }
+            SessionEvent::SegmentStopped { stop_action } => {
+                self.outstanding = self.outstanding.saturating_sub(1);
+                if !self.is_complete() && stop_action != ResumableStopAction::End {
+                    return SessionEffects::default();
+                }
+                SessionEffects {
+                    close_stream: true,
+                    cleanup_engine: stop_action == ResumableStopAction::End,
+                }
+            }
+        }
     }
 }
 
@@ -212,7 +355,7 @@ impl RequestRegistry {
     /// the engine at that rank index, bypassing load balancing. Otherwise
     /// the engine with the fewest in-flight requests is chosen.
     ///
-    /// Set `resumable` so later [`Self::continue_resumable`] can reuse this
+    /// Set `resumable` so later [`Self::prepare_continuation`] can reuse this
     /// entry. Duplicate `request_id`s are rejected — continuations join an
     /// existing session, they do not register a new one.
     pub fn register(
@@ -258,12 +401,12 @@ impl RequestRegistry {
         Ok((engine_id, rx))
     }
 
-    /// Reuse an open resumable session for one continuation ADD.
-    ///
-    /// A content ADD counts one more segment the engine still has to stop. A
-    /// sentinel ADD does not. Concurrent ADDs are rejected while this one is
-    /// in flight.
-    pub fn continue_resumable(&mut self, request_id: &str, sentinel: bool) -> Result<EngineId> {
+    /// Prepare one continuation ADD. See [`ResumableSession::on_event`].
+    pub fn prepare_continuation(
+        &mut self,
+        request_id: &str,
+        kind: ContinuationKind,
+    ) -> Result<EngineId> {
         let unknown = || Error::UnknownResumableRequestId {
             request_id: request_id.to_string(),
         };
@@ -275,16 +418,11 @@ impl RequestRegistry {
                 request_id: request_id.to_string(),
             });
         }
-        if session.sentinel_sent {
+        if session.final_sent {
             return Err(unknown());
         }
 
-        if sentinel {
-            session.in_flight = Some(InFlightAdd::Sentinel);
-        } else {
-            session.outstanding += 1;
-            session.in_flight = Some(InFlightAdd::Content);
-        }
+        session.on_event(SessionEvent::BeginContinuation { kind });
         Ok(engine_id)
     }
 
@@ -294,37 +432,29 @@ impl RequestRegistry {
         else {
             return;
         };
-        if session.in_flight.take() == Some(InFlightAdd::Content) {
-            session.outstanding = session.outstanding.saturating_sub(1);
-        }
+        session.on_event(SessionEvent::ContinuationSendFailed);
     }
 
-    /// Mark a continuation ADD as sent. A sentinel ADD also commits
-    /// `sentinel_sent` and, if every segment has already stopped, completes
-    /// the session.
-    ///
-    /// Returns `false` if the session was already removed.
-    pub fn commit_continuation(&mut self, request_id: &str) -> bool {
-        let complete = {
+    /// Mark a continuation ADD as sent after a successful wire send.
+    pub fn commit_continuation(&mut self, request_id: &str) -> CommitResult {
+        let effects = {
             let Some(session) =
                 self.requests.get_mut(request_id).and_then(TrackedRequest::session_mut)
             else {
-                return false;
+                return CommitResult::RemovedBeforeCommit;
             };
-            match session.in_flight.take() {
-                None => return true,
-                Some(InFlightAdd::Sentinel) => session.sentinel_sent = true,
-                Some(InFlightAdd::Content) => {}
+            if session.in_flight.is_none() {
+                return CommitResult::Active;
             }
-            session.is_complete()
+            session.on_event(SessionEvent::ContinuationCommitted)
         };
-        if !complete {
-            return true;
+        if !effects.should_retire() {
+            return CommitResult::Active;
         }
         if let Some((sender, _)) = self.remove(request_id) {
-            let _ = sender.send(Ok(None));
+            let _ = sender.send(Ok(StreamEvent::SessionFinished));
         }
-        true
+        CommitResult::CompletedDuringCommit
     }
 
     fn choose_engine_for_request(&mut self, data_parallel_rank: Option<u32>) -> Result<EngineId> {
@@ -368,9 +498,9 @@ impl RequestRegistry {
 
     /// Route one output to its stream.
     ///
-    /// Resumable terminal accounting is deferred until
-    /// [`Self::finish_resumable_output`] so the dispatcher can enqueue this
-    /// output before a concurrent sentinel completes its stream.
+    /// Resumable terminal accounting is deferred until [`Self::reconcile_segment_stop`]
+    /// so the dispatcher can enqueue this output before a concurrent final
+    /// continuation completes its stream.
     pub fn route_for_output(&mut self, output: &EngineCoreOutput) -> Option<OutputRoute> {
         self.apply_lora_events(output);
 
@@ -392,24 +522,25 @@ impl RequestRegistry {
     }
 
     /// Account for a terminal resumable output after it has been enqueued.
-    ///
-    /// Returns the sender that should receive explicit completion when this was
-    /// the session's last output.
-    pub fn finish_resumable_output(
+    pub fn reconcile_segment_stop(
         &mut self,
         request_id: &str,
         stop_action: ResumableStopAction,
-    ) -> Option<(OutputSender, EngineId)> {
-        let retire = {
+    ) -> Option<ReconcileResult> {
+        let effects = {
             let session =
                 self.requests.get_mut(request_id).and_then(TrackedRequest::session_mut)?;
-            session.outstanding = session.outstanding.saturating_sub(1);
-            session.is_complete() || stop_action == ResumableStopAction::End
+            session.on_event(SessionEvent::SegmentStopped { stop_action })
         };
-        if !retire {
+        if !effects.should_retire() {
             return None;
         }
-        self.remove(request_id)
+        let (sender, engine_id) = self.remove(request_id)?;
+        Some(ReconcileResult {
+            sender,
+            engine_id,
+            effects,
+        })
     }
 
     /// Advance the request's LoRA scheduling phase from the engine-core events
@@ -531,8 +662,8 @@ impl RequestRegistry {
                     ..EngineCoreOutput::default()
                 },
             };
-            let _ = sender.send(Ok(Some(output)));
-            let _ = sender.send(Ok(None));
+            let _ = sender.send(Ok(StreamEvent::Output(Box::new(output))));
+            let _ = sender.send(Ok(StreamEvent::SessionFinished));
             aborted.push(request_id.clone());
         }
         aborted
@@ -662,7 +793,8 @@ mod tests {
 
     use crate::EngineId;
     use crate::client::state::{
-        EngineLoadSnapshot, EngineRoutingState, RequestRegistry, ResumableStopAction,
+        CommitResult, ContinuationKind, EngineLoadSnapshot, EngineRoutingState, RequestRegistry,
+        ResumableStopAction, SessionEffects, SessionEvent, SessionPhase, StreamEvent,
         UtilityRegistry,
     };
     use crate::client::stream::EngineCoreStreamOutput;
@@ -713,14 +845,21 @@ mod tests {
     }
 
     fn admit_content(registry: &mut RequestRegistry, request_id: &str) -> EngineId {
-        let engine_id = registry.continue_resumable(request_id, false).unwrap();
-        assert!(registry.commit_continuation(request_id));
+        let engine_id =
+            registry.prepare_continuation(request_id, ContinuationKind::Content).unwrap();
+        assert_eq!(
+            registry.commit_continuation(request_id),
+            CommitResult::Active
+        );
         engine_id
     }
 
     fn admit_close(registry: &mut RequestRegistry, request_id: &str) {
-        registry.continue_resumable(request_id, true).unwrap();
-        assert!(registry.commit_continuation(request_id));
+        registry.prepare_continuation(request_id, ContinuationKind::Final).unwrap();
+        assert_eq!(
+            registry.commit_continuation(request_id),
+            CommitResult::Active
+        );
     }
 
     #[test]
@@ -743,7 +882,7 @@ mod tests {
             .route_for_output(&segment_stop("rt-abc"))
             .expect("a segment stop still routes to the open stream");
         assert_eq!(route.stop_action, Some(ResumableStopAction::Continue));
-        assert!(registry.finish_resumable_output("rt-abc", route.stop_action.unwrap()).is_none());
+        assert!(registry.reconcile_segment_stop("rt-abc", route.stop_action.unwrap()).is_none());
         assert!(
             registry.contains("rt-abc"),
             "a segment finish reason is not the session's end"
@@ -779,26 +918,29 @@ mod tests {
             .expect("the segment stop routes to the open stream");
         assert_eq!(route.stop_action, Some(ResumableStopAction::Continue));
 
-        registry.continue_resumable("rt-abc", true).unwrap();
-        assert!(registry.commit_continuation("rt-abc"));
+        registry.prepare_continuation("rt-abc", ContinuationKind::Final).unwrap();
+        assert_eq!(registry.commit_continuation("rt-abc"), CommitResult::Active);
         route
             .sender
-            .send(Ok(Some(EngineCoreStreamOutput {
+            .send(Ok(StreamEvent::Output(Box::new(EngineCoreStreamOutput {
                 engine_index: 0,
                 timestamp: 0.0,
                 output,
-            })))
+            }))))
             .unwrap();
         let completion = registry
-            .finish_resumable_output("rt-abc", route.stop_action.unwrap())
-            .expect("the committed sentinel completes the session");
-        completion.0.send(Ok(None)).unwrap();
+            .reconcile_segment_stop("rt-abc", route.stop_action.unwrap())
+            .expect("the committed final continuation completes the session");
+        completion.sender.send(Ok(StreamEvent::SessionFinished)).unwrap();
 
         assert!(
-            matches!(rx.try_recv(), Ok(Ok(Some(_)))),
+            matches!(rx.try_recv(), Ok(Ok(StreamEvent::Output(_)))),
             "the routed output must precede completion"
         );
-        assert!(matches!(rx.try_recv(), Ok(Ok(None))));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ok(StreamEvent::SessionFinished))
+        ));
     }
 
     #[test]
@@ -814,7 +956,7 @@ mod tests {
             })
             .expect("the error still reaches the stream");
         assert_eq!(route.stop_action, Some(ResumableStopAction::End));
-        assert!(registry.finish_resumable_output("rt-abc", route.stop_action.unwrap()).is_some());
+        assert!(registry.reconcile_segment_stop("rt-abc", route.stop_action.unwrap()).is_some());
         assert!(!registry.contains("rt-abc"));
     }
 
@@ -822,7 +964,7 @@ mod tests {
     fn continuation_without_an_open_session_is_rejected() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
 
-        let error = registry.continue_resumable("rt-abc", false).unwrap_err();
+        let error = registry.prepare_continuation("rt-abc", ContinuationKind::Content).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::UnknownResumableRequestId { request_id } if request_id == "rt-abc"
@@ -830,7 +972,9 @@ mod tests {
 
         // One-shot requests are not continuable.
         registry.register("one-shot".to_string(), None, None, false).unwrap();
-        let error = registry.continue_resumable("one-shot", false).unwrap_err();
+        let error = registry
+            .prepare_continuation("one-shot", ContinuationKind::Content)
+            .unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::UnknownResumableRequestId { .. }
@@ -843,7 +987,7 @@ mod tests {
         registry.register("rt-abc".to_string(), None, None, true).unwrap();
 
         admit_close(&mut registry, "rt-abc");
-        let error = registry.continue_resumable("rt-abc", false).unwrap_err();
+        let error = registry.prepare_continuation("rt-abc", ContinuationKind::Content).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::UnknownResumableRequestId { .. }
@@ -855,8 +999,8 @@ mod tests {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry.register("rt-abc".to_string(), None, None, true).unwrap();
 
-        registry.continue_resumable("rt-abc", false).unwrap();
-        let error = registry.continue_resumable("rt-abc", false).unwrap_err();
+        registry.prepare_continuation("rt-abc", ContinuationKind::Content).unwrap();
+        let error = registry.prepare_continuation("rt-abc", ContinuationKind::Content).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::ContinuationInProgress { request_id }
@@ -871,26 +1015,29 @@ mod tests {
     fn commit_reports_a_session_retired_by_abort() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry.register("rt-abc".to_string(), None, None, true).unwrap();
-        registry.continue_resumable("rt-abc", true).unwrap();
+        registry.prepare_continuation("rt-abc", ContinuationKind::Final).unwrap();
 
         registry.abort_many(&["rt-abc".to_string()], 0.0);
 
-        assert!(!registry.commit_continuation("rt-abc"));
+        assert_eq!(
+            registry.commit_continuation("rt-abc"),
+            CommitResult::RemovedBeforeCommit
+        );
     }
 
-    /// A rolled-back sentinel reopens the session even when nothing is left
+    /// A rolled-back final continuation reopens the session even when nothing is left
     /// outstanding, which is the case a premature completion would have closed.
     #[test]
     fn failed_closing_send_after_last_stop_reopens_session() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry.register("rt-abc".to_string(), None, None, true).unwrap();
 
-        registry.continue_resumable("rt-abc", true).unwrap();
+        registry.prepare_continuation("rt-abc", ContinuationKind::Final).unwrap();
         let route = registry
             .route_for_output(&segment_stop("rt-abc"))
             .expect("the in-flight stop still routes to the stream");
         assert_eq!(route.stop_action, Some(ResumableStopAction::Continue));
-        assert!(registry.finish_resumable_output("rt-abc", route.stop_action.unwrap()).is_none());
+        assert!(registry.reconcile_segment_stop("rt-abc", route.stop_action.unwrap()).is_none());
 
         registry.rollback_continuation("rt-abc");
         assert!(registry.contains("rt-abc"));
@@ -902,7 +1049,7 @@ mod tests {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry.register("rt-abc".to_string(), None, None, true).unwrap();
 
-        registry.continue_resumable("rt-abc", false).unwrap();
+        registry.prepare_continuation("rt-abc", ContinuationKind::Content).unwrap();
         registry.rollback_continuation("rt-abc");
         admit_close(&mut registry, "rt-abc");
 
@@ -911,9 +1058,95 @@ mod tests {
             .expect("the remaining segment routes to the stream it closes");
         assert_eq!(route.stop_action, Some(ResumableStopAction::Continue));
         assert!(
-            registry.finish_resumable_output("rt-abc", route.stop_action.unwrap()).is_some(),
+            registry.reconcile_segment_stop("rt-abc", route.stop_action.unwrap()).is_some(),
             "a segment that was never sent must not hold the session open"
         );
+    }
+
+    mod transition_tests {
+        use crate::client::state::ResumableSession;
+
+        use super::*;
+
+        fn open_session() -> ResumableSession {
+            ResumableSession::open()
+        }
+
+        #[test]
+        fn running_phase_after_open() {
+            let session = open_session();
+            assert_eq!(session.phase(), SessionPhase::Running);
+        }
+
+        #[test]
+        fn segment_stop_moves_to_waiting() {
+            let mut session = open_session();
+            assert!(
+                !session
+                    .on_event(SessionEvent::SegmentStopped {
+                        stop_action: ResumableStopAction::Continue,
+                    })
+                    .should_retire()
+            );
+            assert_eq!(session.phase(), SessionPhase::WaitingForContinuation);
+        }
+
+        #[test]
+        fn content_continuation_returns_to_running() {
+            let mut session = open_session();
+            session.on_event(SessionEvent::SegmentStopped {
+                stop_action: ResumableStopAction::Continue,
+            });
+            session.on_event(SessionEvent::BeginContinuation {
+                kind: ContinuationKind::Content,
+            });
+            assert_eq!(
+                session.phase(),
+                SessionPhase::SubmittingContinuation {
+                    kind: ContinuationKind::Content
+                }
+            );
+            session.on_event(SessionEvent::ContinuationCommitted);
+            assert_eq!(session.phase(), SessionPhase::Running);
+        }
+
+        #[test]
+        fn final_continuation_enters_closing() {
+            let mut session = open_session();
+            session.on_event(SessionEvent::BeginContinuation {
+                kind: ContinuationKind::Final,
+            });
+            session.on_event(SessionEvent::ContinuationCommitted);
+            assert_eq!(session.phase(), SessionPhase::Closing);
+        }
+
+        #[test]
+        fn failed_send_restores_waiting() {
+            let mut session = open_session();
+            session.on_event(SessionEvent::SegmentStopped {
+                stop_action: ResumableStopAction::Continue,
+            });
+            session.on_event(SessionEvent::BeginContinuation {
+                kind: ContinuationKind::Content,
+            });
+            session.on_event(SessionEvent::ContinuationSendFailed);
+            assert_eq!(session.phase(), SessionPhase::WaitingForContinuation);
+        }
+
+        #[test]
+        fn terminal_error_requests_cleanup() {
+            let mut session = open_session();
+            let effects = session.on_event(SessionEvent::SegmentStopped {
+                stop_action: ResumableStopAction::End,
+            });
+            assert_eq!(
+                effects,
+                SessionEffects {
+                    close_stream: true,
+                    cleanup_engine: true,
+                }
+            );
+        }
     }
 
     #[test]

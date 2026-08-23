@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use crate::client::AbortRequest;
-use crate::client::state::OutputReceiver;
+use crate::client::state::{OutputReceiver, StreamEvent};
 use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutput};
 use crate::{AbortCause, Error, Result};
 
@@ -43,7 +43,7 @@ impl Deref for EngineCoreStreamOutput {
 /// Stream of raw engine-core outputs for one request.
 ///
 /// One-shot streams end on a terminal `finish_reason`. Resumable streams also
-/// end on an explicit `Ok(None)` from the registry.
+/// end on an explicit [`StreamEvent::SessionFinished`] from the registry.
 pub struct EngineCoreOutputStream {
     request_id: String,
     engine_index: u32,
@@ -92,7 +92,8 @@ impl Stream for EngineCoreOutputStream {
 
         match Pin::new(&mut self.rx).poll_recv(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(Ok(Some(output)))) => {
+            Poll::Ready(Some(Ok(StreamEvent::Output(output)))) => {
+                let output = *output;
                 if output.finish_reason == Some(EngineCoreFinishReason::Error) {
                     error!(
                         self.request_id,
@@ -105,7 +106,7 @@ impl Stream for EngineCoreOutputStream {
                 }
                 Poll::Ready(Some(Ok(output)))
             }
-            Poll::Ready(Some(Ok(None))) => {
+            Poll::Ready(Some(Ok(StreamEvent::SessionFinished))) => {
                 debug!(self.request_id, "request completed via registry signal");
                 self.state = State::Finished;
                 Poll::Ready(None)
@@ -165,6 +166,8 @@ impl Drop for EngineCoreOutputStream {
 mod tests {
     use futures::StreamExt;
 
+    use crate::client::state::StreamEvent;
+
     use super::*;
 
     fn segment_stop() -> EngineCoreStreamOutput {
@@ -188,7 +191,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut stream = EngineCoreOutputStream::new("rt-abc".to_string(), 0, abort_tx, rx, true);
 
-        tx.send(Ok(Some(segment_stop()))).unwrap();
+        tx.send(Ok(StreamEvent::Output(Box::new(segment_stop())))).unwrap();
         let segment = stream.next().await.unwrap().unwrap();
         assert_eq!(segment.finish_reason, Some(EngineCoreFinishReason::Stop));
 
@@ -209,8 +212,8 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut stream = EngineCoreOutputStream::new("rt-abc".to_string(), 0, abort_tx, rx, true);
 
-        tx.send(Ok(Some(segment_stop()))).unwrap();
-        tx.send(Ok(None)).unwrap();
+        tx.send(Ok(StreamEvent::Output(Box::new(segment_stop())))).unwrap();
+        tx.send(Ok(StreamEvent::SessionFinished)).unwrap();
 
         assert!(stream.next().await.unwrap().is_ok());
         assert!(stream.next().await.is_none());
