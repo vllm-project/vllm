@@ -1557,6 +1557,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
+    "Qwen3OmniDSparkModel": _HfExamplesInfo(
+        "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        speculative_model="Qwen/Qwen3-Omni-30B-A3B-DSpark",
+        is_available_online=False,
+        use_original_num_layers=True,
+        min_transformers_version="4.57",
+    ),
     "Gemma4DSparkModel": _HfExamplesInfo(
         "google/gemma-4-12B-it",
         speculative_model="deepseek-ai/dspark_gemma4_12b_block7",
