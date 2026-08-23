@@ -396,21 +396,19 @@ class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
 
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        input_ids = processed_outputs["input_ids"]
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not mm_data:
+            return processed_data
+
+        input_ids = processed_data["input_ids"]
         assert isinstance(input_ids, torch.Tensor)
 
         # Phi3v processor has inserted -1, -2 etc as placeholder in prompt_ids,
@@ -418,7 +416,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         # Therefore, we need to do an early replacement here
         input_ids.masked_fill_(input_ids < 0, _IMAGE_TOKEN_ID)
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -497,12 +495,8 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             if len(token_ids) and token_ids[0] == tokenizer.bos_token_id:
                 token_ids = token_ids[1:]
             text = tokenizer.decode(token_ids)
-            for special_tokens in tokenizer.special_tokens_map.values():
-                if isinstance(special_tokens, str):
-                    text = text.replace(f"{special_tokens} ", special_tokens)
-                elif isinstance(special_tokens, list):
-                    for special_token in special_tokens:
-                        text = text.replace(f"{special_token} ", special_token)
+            for special_token in tokenizer.all_special_tokens:
+                text = text.replace(f"{special_token} ", special_token)
             # perform hf behavior
             # https://huggingface.co/microsoft/Phi-3.5-vision-instruct/blob/64f88b6/processing_phi3_v.py#L407
             pattern = r"<\|image_\d+\|>"

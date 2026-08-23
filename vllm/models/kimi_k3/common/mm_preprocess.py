@@ -231,29 +231,6 @@ class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
 class KimiK3MultiModalProcessor(BaseMultiModalProcessor[KimiK3ProcessingInfo]):
     """Image-only multi-modal processor for Kimi-K3."""
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Override so the base always routes through the text+mm path
-        # (`KimiK3Processor.__call__`). Otherwise the mm-only fast path calls
-        # the checkpoint image processor directly with bare PIL images, but it
-        # requires `{"type": "image", "image": PIL}` media dicts that only our
-        # wrapper builds.
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

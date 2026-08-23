@@ -1154,17 +1154,6 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Override to use the text path instead of token path to use the
-        # video-specific logic in processing_qwen2_5_vl.py
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -1257,6 +1246,7 @@ class Qwen2_5_VLForConditionalGeneration(
 
     supports_encoder_tp_data = True
     supports_mm_device_do_normalize = True
+    supports_tower_connector_lora = True
 
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
