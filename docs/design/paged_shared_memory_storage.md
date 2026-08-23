@@ -5,6 +5,7 @@
 Shared memory allows multiple processes to access the same physical memory region, enabling zero-copy data exchange without serialization. In vLLM V1, the multi‑process architecture (API Server, Engine Core, GPU Workers) benefits greatly from this mechanism for passing large multimodal tensors.
 
 **Why paged shared memory?**
+
 - Multimodal data (images, video frames) vary widely in size; per‑request allocation/deallocation causes fragmentation and overhead.
 - Using system‑level `shm_open`/`mmap` and `pin_memory`/`unpin_memory` repeatedly adds latency.
 - **Paged SHM** pre‑allocates a large, fixed pool divided into pages (default: 1MB, chosen to saturate H2D bandwidth) and manages blocks via a server, avoiding fragmentation and reducing per‑operation overhead.
@@ -35,11 +36,13 @@ The actual tensor bytes are **offloaded** from the ZMQ hot path, eliminating ser
 - **PagedShmClient**: A lightweight client that connects to the server. It provides `open_write`/`close_write` (write lock) and `open_read`/`close_read` (read lock) primitives, plus high‑level helpers for bytes/NumPy/PyTorch.
 
 **Typical Write Flow (API Server):**
+
 1. Call `open_write(items)` to atomically allocate blocks for a batch of tensors.
 2. Copy tensor data into the allocated SHM blocks (e.g., via `storage.write()`).
 3. Call `close_write(uuid)` to finalize the write, making the item readable. If `generate_read_token=True`, a read token is created and a read reference is automatically held.
 
 **Typical Read Flow (GPU Worker):**
+
 1. Call `open_read(uuid_or_token)` to acquire a read lock and obtain block information. If the item is still being written, the call may wait (with timeout).
 2. Read the data from SHM into CPU or GPU memory.
 3. Call `close_read(uuid_or_token)` to release the lock and, if a token is used, destroy it. The server will then cache the item (if cacheable) or free the blocks.
@@ -61,8 +64,9 @@ This design ensures that only the metadata traverses the ZMQ path, while the hea
 
 ## Configuration
 
-Enabled via `multimodal_config.enable_paged_shm = True`. Key parameters:
+Key parameters:
+
 - `paged_shm_size`: Total size of the SHM pool (in bytes).
 - `paged_shm_block_size`: Page size (default 1MB). Must be large enough to amortize H2D transfer overhead.
 
-The server is started automatically when the `ModelConfig` indicates SHM is enabled; clients connect to the published IPC address.
+The server is started automatically when the `ModelConfig` indicates SHM is enabled.
