@@ -29,6 +29,10 @@ logger = init_logger(__name__)
 class AutoRegressiveSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        # Opt-in skip of resolved-K=0 steps; see SpeculativeConfig.
+        self.skip_draft_when_k0 = bool(
+            vllm_config.speculative_config.skip_draft_when_k0
+        )
 
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
@@ -232,6 +236,12 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens = input_batch.num_tokens
         num_tokens_padded = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
+
+        # The prefill below syncs draft KV state for a possible K>0
+        # resume; operators can opt out (drafter-dependent, issue #53420).
+        if self.skip_draft_when_k0 and num_speculative_tokens == 0:
+            return self.draft_tokens[:num_reqs, :0]
+
         max_query_len = input_batch.num_scheduled_tokens.max()
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
         self.draft_max_seq_len = min(

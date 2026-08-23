@@ -473,6 +473,23 @@ class SpeculativeConfig:
     inclusive batch-size range.
     """
 
+    skip_draft_when_k0: bool = False
+    """Opt-in: on engine steps whose dynamically resolved
+    ``num_speculative_tokens`` is 0, skip the draft-model forward entirely
+    (the ``DSD K=0`` prefill normally kept to sync draft KV state for a
+    possible later K>0 resume).
+
+    Measured (see the linked issue): the sync forward costs 4-11% decode
+    time on K=0-resolving batch sizes. Skipping it is safe only for
+    drafters whose proposals do not depend on their own full-attention KV
+    history: on the tested 1-layer target-anchored MTP drafter the resume
+    cost was ~1.5% acceptance at K=2 (12-16% at K=8), while an EAGLE3
+    drafter's acceptance collapsed non-recovering after unsynced K=0
+    steps, at every tested K. Safety is drafter-architecture dependent
+    and validated only on the checkpoints named in issue #53420; EAGLE-family
+    methods are refused. Default off.
+    """
+
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
@@ -1059,6 +1076,11 @@ class SpeculativeConfig:
             )
             self.method = "mtp"
 
+        # Reject before any draft-config work; re-checked post-inference.
+        # `draft_model` is the placeholder for method=None and may be
+        # inferred as mtp (or eagle) later in __post_init__ — defer it.
+        self._validate_skip_draft_when_k0(early=True)
+
         if self.model is None and self.num_speculative_tokens is not None:
             if self.method == "mtp":
                 if self.target_model_config is None:
@@ -1464,7 +1486,70 @@ class SpeculativeConfig:
         if self.method != "dspark" and self.enable_adaptive_verification:
             raise ValueError("Adaptive verification only supported with DSpark")
 
+        self._validate_skip_draft_when_k0(warn_without_dynamic_schedule=True)
+
         return self
+
+    # Methods whose speculators override propose() without the K=0
+    # skip: the flag there would be silently ignored.
+    _SKIP_K0_UNSUPPORTED_SPECULATORS = frozenset({"dflash", "dspark"})
+
+    def _validate_skip_draft_when_k0(
+        self,
+        warn_without_dynamic_schedule: bool = False,
+        early: bool = False,
+    ) -> None:
+        if not self.skip_draft_when_k0:
+            return
+        if early and self.method == "draft_model":
+            # Placeholder for method=None; the real method is inferred
+            # later in __post_init__ — validate at the final call.
+            return
+        if self.method in ("eagle", "eagle3"):
+            raise ValueError(
+                "skip_draft_when_k0 is not supported for method "
+                f"'{self.method}': full-attention drafters lose "
+                "non-recovering speculative acceptance after unsynced "
+                "K=0 steps (measured on an EAGLE3 checkpoint; see "
+                "issue #53420)."
+            )
+        if self.method in self._SKIP_K0_UNSUPPORTED_SPECULATORS:
+            raise ValueError(
+                "skip_draft_when_k0 is not implemented for method "
+                f"'{self.method}': its speculator overrides the "
+                "proposal path without the K=0 skip, so the option "
+                "would be silently ignored."
+            )
+        if self.method != "mtp":
+            raise ValueError(
+                "skip_draft_when_k0 is validated only for method 'mtp' "
+                f"(got '{self.method}'); see issue #53420."
+            )
+        # method == "mtp": the speculator is still selected by the
+        # DRAFT ARCHITECTURE, not the method string — resolve the same
+        # predicates init_speculator uses and reject the variants the
+        # skip does not cover (gemma4: unmeasured; multi-module: own
+        # propose() override — the flag would be silently ignored).
+        if self.use_gemma4_mtp():
+            raise ValueError(
+                "skip_draft_when_k0 is not validated for gemma4 MTP "
+                "drafters (unmeasured); see issue #53420."
+            )
+        if self.use_multi_module_mtp():
+            raise ValueError(
+                "skip_draft_when_k0 is not implemented for multi-module"
+                " MTP drafters: their speculator overrides the proposal"
+                " path without the K=0 skip, so the option would be "
+                "silently ignored; see issue #53420."
+            )
+        if warn_without_dynamic_schedule and (
+            not self.uses_dynamic_speculative_decoding()
+        ):
+            logger.warning(
+                "skip_draft_when_k0 has no effect without "
+                "num_speculative_tokens_per_batch_size: static-K "
+                "configurations never resolve K=0 mid-run."
+            )
 
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():
