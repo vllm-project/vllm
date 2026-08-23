@@ -194,9 +194,6 @@ class CudaGraphManager:
         separate_decode_routine = self.cudagraph_mode.separate_routine()
         max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
-        descs_by_token_lora: dict[tuple[int, int], list[BatchExecutionDescriptor]] = (
-            defaultdict(list)
-        )
         descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
             defaultdict(list)
         )
@@ -244,7 +241,6 @@ class CudaGraphManager:
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[decode_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
             # Capture uniform decode specfifc graphs if required
             #  (i.e. separate decode routine)
             elif separate_decode_routine and decode_mode and not self.varlen_decode:
@@ -270,9 +266,6 @@ class CudaGraphManager:
                     # avoid duplicate graphs
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
-                        descs_by_token_lora[
-                            (rounded_num_tokens, num_active_loras)
-                        ].append(desc)
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
@@ -290,87 +283,21 @@ class CudaGraphManager:
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[mixed_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
-
-        if not descs_by_token_lora:
-            return
-
-        # FULL decode graphs, ascending by token count, can serve any smaller
-        # uniform-decode batch via request/token padding. They are inert for
-        # non-uniform batches (rejected by _is_compatible on uniform_token_count),
-        # so it is safe to offer them ahead of the mixed/PIECEWISE fallback for
-        # every token count. Without this, a uniform-decode batch whose exact
-        # token count has no FULL decode graph (a gap in round_up(size, qlen))
-        # silently drops to an eager PIECEWISE graph -- e.g. with a spec-decode
-        # query length of 3 and the default capture ladder, 12 tokens (4 reqs)
-        # finds only the size-16 PIECEWISE desc and never the size-18 FULL decode
-        # desc that could pad 4->6 reqs, so attention runs eager (metadata build
-        # + kernels on the host critical path) every decode step.
-        #
-        # Gated to ROCm. The gap is not platform-specific -- it comes from
-        # round_up(capture_size, decode_query_len), which no backend influences --
-        # but the end-to-end measurements behind this change were taken on
-        # MI355X, so the behaviour change stays on the platform it was validated
-        # on until there are numbers from another one.
-        pad_up_uniform_decode = (
-            separate_decode_routine
-            and decode_mode == CUDAGraphMode.FULL
-            and current_platform.is_rocm()
-        )
-        decode_full_descs = (
-            sorted(
-                (
-                    d
-                    for d in descs_by_mode.get(decode_mode, [])
-                    if d.uniform_token_count is not None
-                ),
-                key=lambda d: d.num_tokens,
-            )
-            if pad_up_uniform_decode
-            else []
-        )
-
-        all_token_counts = sorted({k[0] for k in descs_by_token_lora})
-        current_range_start = 0
-        for token_cg_size in all_token_counts:
-            for i in range(current_range_start, token_cg_size + 1):
-                for num_active_loras in self.lora_capture_cases:
-                    staging_key = (token_cg_size, num_active_loras)
-                    if staging_key not in descs_by_token_lora:
-                        continue
-                    fallback = descs_by_token_lora[staging_key]
-                    # Prefer the smallest FULL decode graph that can pad up to
-                    # this token count over the mixed/PIECEWISE fallback.
-                    #
-                    # One candidate per query length is enough, given that a
-                    # uniform-decode batch always satisfies
-                    # num_tokens >= num_reqs * query_len -- equality in the
-                    # normal case, and greater when DP token-syncing hands us a
-                    # num_tokens from a larger peer. A decode graph staged at
-                    # num_tokens holds num_tokens // query_len requests, so the
-                    # smallest graph at or above this token count already has
-                    # enough request slots and _is_compatible's num_reqs check
-                    # cannot be what rejects it. Larger graphs of the same query
-                    # length are then never reachable, and offering them would
-                    # only add failed checks to dispatch()'s scan.
-                    pad_up: list[BatchExecutionDescriptor] = []
-                    padded_query_lens: set[int | None] = set()
-                    for d in decode_full_descs:  # ascending by num_tokens
-                        if (
-                            d.num_tokens >= i
-                            and d.num_active_loras == num_active_loras
-                            and d.uniform_token_count not in padded_query_lens
-                        ):
-                            padded_query_lens.add(d.uniform_token_count)
-                            pad_up.append(d)
-                    self._candidates[(i, num_active_loras)] = pad_up + [
-                        d for d in fallback if d not in pad_up
-                    ]
-            current_range_start = token_cg_size + 1
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
             self._capture_descs[mode] = descs
+
+        for mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
+            for num_active_loras in self.lora_capture_cases:
+                current_range_start = 0
+                for desc in reversed(descs_by_mode.get(mode, [])):
+                    if desc.num_active_loras != num_active_loras:
+                        continue
+                    for i in range(current_range_start, desc.num_tokens + 1):
+                        key = (i, num_active_loras)
+                        self._candidates.setdefault(key, []).append(desc)
+                    current_range_start = desc.num_tokens + 1
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
