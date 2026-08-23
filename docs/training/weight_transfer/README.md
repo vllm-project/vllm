@@ -34,6 +34,10 @@ engine drives on your behalf:
 | [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
 | [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
 | [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Sparse flat-index weight patches (TP=1/PP=1) |
+| [disk](disk.md) | Shared filesystem | Complete safetensors checkpoints written by the trainer |
+
+The `disk` backend is inference-side only and is driven directly through the
+weight-transfer client; it does not register a trainer-side data-plane engine.
 
 ## Quickstart
 
@@ -48,7 +52,7 @@ from vllm.config import WeightTransferConfig
 
 llm = LLM(
     model="my-model",
-    weight_transfer_config=WeightTransferConfig(backend="nccl"),  # or "ipc", "sparse_nccl"
+    weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
 ```
 
