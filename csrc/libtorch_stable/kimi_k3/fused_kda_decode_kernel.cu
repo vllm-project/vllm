@@ -952,7 +952,11 @@ void fused_kda_decode(
     torch::stable::Tensor const& state_indices, torch::stable::Tensor& state,
     torch::stable::Tensor& out, std::optional<double> lower_bound,
     std::optional<torch::stable::Tensor> output_gate,
-    std::optional<torch::stable::Tensor> norm_weight, double norm_eps) {
+    std::optional<torch::stable::Tensor> norm_weight, double norm_eps,
+    std::optional<torch::stable::Tensor> cu_seqlens,
+    std::optional<torch::stable::Tensor> num_accepted_tokens) {
+  STD_TORCH_CHECK(!cu_seqlens.has_value() && !num_accepted_tokens.has_value(),
+                  "fused_kda_decode spec metadata is only implemented on ROCm");
   using torch::headeronly::ScalarType;
   constexpr int kHeadDim = 128;
   constexpr int kConvWidth = 4;

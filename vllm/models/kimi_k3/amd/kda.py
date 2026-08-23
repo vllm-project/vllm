@@ -5,7 +5,6 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide
@@ -42,6 +41,7 @@ from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
+    fused_kda_decode,
     is_fused_kda_decode_supported,
     make_decode_conv1d_weight_loader,
     make_decode_norm_weight_loader,
@@ -164,7 +164,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             vllm_config.model_config.dtype,
             conv_state_dtype,
         ):
-            logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
+            logger.info_once(
+                "Fused KDA decode kernel (conv+KDA+norm) is enabled, "
+                "including spec decode with num_spec<=2."
+            )
             decode_conv1d_weight = torch.empty(
                 3,
                 self.conv_size,
@@ -297,7 +300,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
 
-    @eager_break_during_capture
     def _forward(
         self,
         mixed_qkv: torch.Tensor,
@@ -346,7 +348,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             and m.num_decodes > 0
         ):
             assert non_spec_state_indices_tensor is not None
-            ops.fused_kda_decode(
+            fused_kda_decode(
                 x=mixed_qkv,
                 weight=self.decode_conv1d_weight,
                 bias=self.conv1d.bias,
@@ -365,6 +367,80 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             )
             return
 
+        if (
+            self.decode_conv1d_weight is not None
+            and self.decode_norm_weight is not None
+            and spec_sequence_masks is not None
+            and m.num_prefills == 0
+            and m.num_decodes == 0
+        ):
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            assert num_accepted_tokens is not None
+            fused_kda_decode(
+                x=mixed_qkv,
+                weight=self.decode_conv1d_weight,
+                bias=self.conv1d.bias,
+                conv_state=conv_state,
+                raw_g=g1,
+                raw_beta=beta,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                state_indices=spec_state_indices_tensor[: m.num_spec_decodes],
+                state=recurrent_state,
+                out=core_attn_out[:, :num_actual_tokens],
+                lower_bound=self.gate_lower_bound,
+                output_gate=g2[:num_actual_tokens],
+                norm_weight=self.decode_norm_weight,
+                norm_eps=self.o_norm.eps,
+                cu_seqlens=spec_query_start_loc[: m.num_spec_decodes + 1],
+                num_accepted_tokens=num_accepted_tokens[: m.num_spec_decodes],
+            )
+            return
+
+        self._forward_triton(
+            mixed_qkv=mixed_qkv,
+            g1=g1,
+            g2=g2,
+            beta=beta,
+            core_attn_out=core_attn_out,
+            conv_state=conv_state,
+            recurrent_state=recurrent_state,
+            m=m,
+            has_initial_state=has_initial_state,
+            non_spec_query_start_loc=non_spec_query_start_loc,
+            non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+            spec_sequence_masks=spec_sequence_masks,
+            spec_token_indx=spec_token_indx,
+            non_spec_token_indx=non_spec_token_indx,
+            spec_state_indices_tensor=spec_state_indices_tensor,
+            spec_query_start_loc=spec_query_start_loc,
+            num_accepted_tokens=num_accepted_tokens,
+            num_actual_tokens=num_actual_tokens,
+        )
+
+    @eager_break_during_capture
+    def _forward_triton(
+        self,
+        mixed_qkv: torch.Tensor,
+        g1: torch.Tensor,
+        g2: torch.Tensor,
+        beta: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        conv_state: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        m: GDNAttentionMetadata,
+        has_initial_state: torch.Tensor | None,
+        non_spec_query_start_loc: torch.Tensor | None,
+        non_spec_state_indices_tensor: torch.Tensor | None,
+        spec_sequence_masks: torch.Tensor | None,
+        spec_token_indx: torch.Tensor | None,
+        non_spec_token_indx: torch.Tensor | None,
+        spec_state_indices_tensor: torch.Tensor | None,
+        spec_query_start_loc: torch.Tensor | None,
+        num_accepted_tokens: torch.Tensor | None,
+        num_actual_tokens: int,
+    ) -> None:
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
