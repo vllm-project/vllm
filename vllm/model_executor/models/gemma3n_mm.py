@@ -262,7 +262,6 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # HF Transformers audio processor no longer accepts `audios` key.
         # We pop `audios` and replace it with `audio` key to suppress
@@ -273,7 +272,6 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
             prompt,
             mm_data,
             mm_kwargs,
-            tok_kwargs,
         )
 
         if "input_features" in processed_outputs:
