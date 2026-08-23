@@ -440,26 +440,35 @@ class CudaPlatformBase(Platform):
         # auto-selection instead of failing components with other constraints.
         forced_name = os.environ.get("VLLM_FORCE_ATTN_BACKEND")
         if forced_name:
-            forced = AttentionBackendEnum[forced_name]
             try:
-                backend_class = _get_attn_backend_class(forced)
-                invalid_reasons = backend_class.validate_configuration(
-                    device_capability=device_capability,
-                    **attn_selector_config._asdict(),
+                forced = AttentionBackendEnum[forced_name]
+            except KeyError:
+                logger.warning(
+                    "VLLM_FORCE_ATTN_BACKEND=%s is not a known backend; "
+                    "falling back to auto-selection.",
+                    forced_name,
                 )
-            except ImportError:
-                invalid_reasons = ["ImportError"]
-            if not invalid_reasons:
-                logger.info(
-                    "Using %s backend (VLLM_FORCE_ATTN_BACKEND).", forced
+                forced = None
+            if forced is not None:
+                try:
+                    backend_class = _get_attn_backend_class(forced)
+                    invalid_reasons = backend_class.validate_configuration(
+                        device_capability=device_capability,
+                        **attn_selector_config._asdict(),
+                    )
+                except ImportError:
+                    invalid_reasons = ["ImportError"]
+                if not invalid_reasons:
+                    logger.info(
+                        "Using %s backend (VLLM_FORCE_ATTN_BACKEND).", forced
+                    )
+                    return _backend_cls_path(backend_class)
+                logger.warning(
+                    "VLLM_FORCE_ATTN_BACKEND=%s is not valid here (%s); "
+                    "falling back to auto-selection.",
+                    forced_name,
+                    invalid_reasons,
                 )
-                return _backend_cls_path(backend_class)
-            logger.warning(
-                "VLLM_FORCE_ATTN_BACKEND=%s is not valid here (%s); "
-                "falling back to auto-selection.",
-                forced_name,
-                invalid_reasons,
-            )
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
