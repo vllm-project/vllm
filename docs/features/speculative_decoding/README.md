@@ -218,6 +218,13 @@ can occur due to following factors:
 - **Floating-Point Precision**: Differences in hardware numerical precision may lead to slight discrepancies in the output distribution.
 - **Batch Size and Numerical Stability**: Changes in batch size may cause variations in logprobs and output probabilities, potentially
   due to non-deterministic behavior in batched operations or numerical instability.
+- **Penalties in the head dtype**: The speculative verifier processes target logits in place in the LM head dtype instead of an
+  FP32 copy. Temperature, top-k/top-p and the rejection step itself upcast on load, and the masking processors (`min_tokens`,
+  `allowed_token_ids`, `bad_words`) only write `-inf`, so those are unaffected. `repetition_penalty`, `frequency_penalty` and
+  `presence_penalty` write adjusted values back, which rounds them to the head dtype once (about one ulp in BF16/FP16, e.g. ~0.1
+  for a logit near 20). Note that `--generation-config auto` (the default) picks up penalties from the model's
+  `generation_config.json` (Qwen2.5 ships `repetition_penalty: 1.05`, for example); pass `--generation-config vllm` to serve
+  without them.
 
 For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](../../usage/faq.md).
 

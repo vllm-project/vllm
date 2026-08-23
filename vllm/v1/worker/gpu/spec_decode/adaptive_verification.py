@@ -119,7 +119,6 @@ class AdaptiveVerificationManager:
         req_states: "RequestState",
         query_start_loc: torch.Tensor,
         num_bonus_tokens: int,
-        max_total_logits: int,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
@@ -127,10 +126,6 @@ class AdaptiveVerificationManager:
         self._copy_stream = torch.cuda.Stream(device)
 
         self.num_bonus_tokens = num_bonus_tokens
-        # Rejection sampling verifies logits in one contiguous chunk; the
-        # chunked path indexes by scheduled (untrimmed) offsets and cannot
-        # address the compacted layout, so the budget must fit one chunk.
-        self._max_total_logits = max_total_logits
         self.query_start_loc = query_start_loc
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         # Largest cudagraph-captured token count; above it nothing pads.
@@ -299,11 +294,7 @@ class AdaptiveVerificationManager:
         valid = steps[None, :] < scheduled_drafts[:, None]
         scores = np.sort(survival_probability[valid])[::-1]
         num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
-        max_draft_budget = min(
-            int(scheduled_drafts.sum()),
-            max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
-        )
-        scores = scores[:max_draft_budget]
+        max_draft_budget = len(scores)
         draft_cost_ms, verify_cost_ms = self.cost_tables
         num_sampling_requests = np.count_nonzero(
             self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
@@ -357,8 +348,7 @@ class AdaptiveVerificationManager:
 
         num_non_draft_tokens = num_scheduled_tokens - num_draft_tokens_per_req
         if draft_budget == 0:
-            # The draft budget is 0, so we can know cu_num_logits_np exactly. This helps
-            # when we would exceed the sampler logit chunk size.
+            # With no drafts, the compacted CPU boundaries are exact.
             num_reqs = num_scheduled_tokens.shape[0]
             cu_num_logits_np = (
                 np.arange(num_reqs + 1, dtype=cu_num_logits_np.dtype)
@@ -445,7 +435,6 @@ def maybe_create_adaptive_verification_manager(
     req_states: "RequestState",
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
-    max_total_logits: int,
     vllm_config: "VllmConfig",
     target_layer_names: set[str] | None = None,
     additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
@@ -492,5 +481,4 @@ def maybe_create_adaptive_verification_manager(
         req_states,
         query_start_loc,
         num_bonus_tokens,
-        max_total_logits=max_total_logits,
     )

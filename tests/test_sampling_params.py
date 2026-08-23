@@ -49,3 +49,23 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+@dataclass
+class MockSpeculativeConfig:
+    enable_adaptive_verification: bool = False
+
+
+@pytest.mark.parametrize("min_p", [1e-5, 1e-6])
+def test_spec_decode_rejects_tiny_min_p(min_p: float):
+    """The speculative sampler never applies min_p, so no nonzero value may
+    slip past validation and be silently ignored."""
+    params = SamplingParams(min_p=min_p)
+    with pytest.raises(VLLMValidationError, match="speculative decoding"):
+        params.verify(MockModelConfig(), MockSpeculativeConfig(), None, None)
+
+
+def test_spec_decode_accepts_zero_min_p():
+    SamplingParams(min_p=0.0).verify(
+        MockModelConfig(), MockSpeculativeConfig(), None, None
+    )
