@@ -191,6 +191,7 @@ def persistent_masked_m_silu_mul_quant(
     num_parallel_tokens=16,
     group_size: int = 128,
     quant_scale_fmt: DeepGemmQuantScaleFMT = DeepGemmQuantScaleFMT.FLOAT32,
+    clamp_limit: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
@@ -261,6 +262,7 @@ def persistent_masked_m_silu_mul_quant(
             y,
             use_ue8m0=quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
             round_scale=quant_scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
+            clamp_limit=clamp_limit,
             masked_m=tokens_per_expert,
             group_size=group_size,
         )
@@ -360,6 +362,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             require_batch_invariant_quant_kernel()
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
         assert self.quant_config.use_fp8_w8a8
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -537,6 +540,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             workspace1,
             expert_num_tokens,
             quant_scale_fmt=quant_scale_fmt,
+            clamp_limit=self.gemm1_clamp_limit,
         )
         _validate_masked_finite("deepgemm.a2q", a2q, expert_num_tokens)
         _validate_masked_finite("deepgemm.a2q_scale", a2q_scale, expert_num_tokens)

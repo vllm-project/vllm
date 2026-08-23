@@ -237,6 +237,7 @@ def ds4_silu_mul_quant_fp8(
         1e-10,
         -448.0,
         448.0,
+        0.0 if clamp_limit is None else float(clamp_limit),
         round_scale,
         use_ue8m0,
         True,
