@@ -180,6 +180,7 @@ class RequestRunner:
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
         extra_config_overrides: dict[str, Any] | None = None,
         worker_count: int = 1,
+        speculative_config: Any | None = None,
     ):
         assert blocks_per_chunk == 1 or kv_cache_groups is None, (
             "blocks_per_chunk > 1 requires all groups to have the same "
@@ -200,6 +201,8 @@ class RequestRunner:
         )
         vllm_config.scheduler_config.async_scheduling = async_scheduling
         vllm_config.parallel_config.world_size = worker_count
+        if speculative_config is not None:
+            vllm_config.speculative_config = speculative_config
 
         extra_config: dict[str, Any] = {
             "spec_name": "MockOffloadingSpec",
@@ -241,19 +244,13 @@ class RequestRunner:
                 )
             ]
 
-        # Groups overlay one allocation, sized by the largest group.
-        block_stride = max(
-            group.kv_cache_spec.page_size_bytes * len(group.layer_names)
-            for group in kv_cache_groups
-        )
         kv_cache_tensors = [
             KVCacheTensor(
-                size=block_stride * num_gpu_blocks,
-                layers=list(group.layer_names),
-                layer_stride=group.kv_cache_spec.page_size_bytes * num_gpu_blocks,
-                block_stride=group.kv_cache_spec.page_size_bytes,
+                size=group.kv_cache_spec.page_size_bytes * num_gpu_blocks,
+                shared_by=[layer_name],
             )
             for group in kv_cache_groups
+            for layer_name in group.layer_names
         ]
 
         kv_cache_config = KVCacheConfig(
@@ -283,6 +280,7 @@ class RequestRunner:
         )
 
         # register worker kv_caches to enable OffloadingWorker creations
+        # set_current_vllm_config is needed for get_kv_cache_layout() to work
         kv_caches: dict[str, torch.Tensor] = {}
         for group in kv_cache_groups:
             spec = group.kv_cache_spec
@@ -676,6 +674,7 @@ def request_runner():
         kv_cache_groups=None,
         extra_config_overrides=None,
         worker_count=1,
+        speculative_config=None,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -685,6 +684,7 @@ def request_runner():
             kv_cache_groups=kv_cache_groups,
             extra_config_overrides=extra_config_overrides,
             worker_count=worker_count,
+            speculative_config=speculative_config,
         )
         runners.append(runner)
         return runner

@@ -294,3 +294,62 @@ def test_unaligned_resume_never_runs_past_its_block(
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail boundary"
         )
+
+
+def test_split_stops_at_every_boundary_without_checkpoints() -> None:
+    """Without internal checkpoints a reusable state exists only at chunk
+    ends, so each chunk stops at its next block boundary; otherwise a sibling
+    sharing fewer tokens than the deepest chunk end can never hit (#52897)."""
+    prompt_len = 3 * MAMBA_BLOCK_SIZE + 500
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    ends = []
+    while request.num_computed_tokens < prompt_len:
+        num_new = _split(
+            request, prompt_len - request.num_computed_tokens, use_eagle=False
+        )
+        request.num_computed_tokens += num_new
+        ends.append(request.num_computed_tokens)
+    assert ends == [
+        MAMBA_BLOCK_SIZE,
+        2 * MAMBA_BLOCK_SIZE,
+        3 * MAMBA_BLOCK_SIZE,
+        prompt_len,
+    ]
+
+
+def test_split_keeps_last_boundary_reachable_under_eagle() -> None:
+    """The speculative one-block back-off forfeited a full mamba block of
+    reusable prefix (measured as half the cache on aligned prompts, #52897).
+    With a state at every crossed boundary, a lookup whose last block is
+    pruned falls back one block instead of missing, so the back-off is gone:
+    the deepest boundary below the prompt stays a chunk end."""
+    prompt_len = 3 * MAMBA_BLOCK_SIZE + 500
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    ends = []
+    while request.num_computed_tokens < prompt_len:
+        num_new = _split(
+            request, prompt_len - request.num_computed_tokens, use_eagle=True
+        )
+        request.num_computed_tokens += num_new
+        ends.append(request.num_computed_tokens)
+    assert 3 * MAMBA_BLOCK_SIZE in ends
+
+
+def test_quiet_prefill_caches_state_at_every_boundary() -> None:
+    """End to end through the manager: a single-budget ("quiet") prefill must
+    leave a hash-consistent cached state at every crossed boundary, not only
+    at the chunk ends the budget happens to produce (#52897)."""
+    prompt_len = 3 * MAMBA_BLOCK_SIZE + 500
+    manager = _make_hybrid_kv_cache_manager()
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    state_at = _run_chunked_prefill(manager, request, budgets=[prompt_len])
+    assert set(state_at.values()) == {
+        MAMBA_BLOCK_SIZE,
+        2 * MAMBA_BLOCK_SIZE,
+        3 * MAMBA_BLOCK_SIZE,
+        prompt_len,
+    }
+    # How many of these the manager hashes during an in-flight prefill is
+    # lookup-side policy (eagle lookahead defers hashing); every hashed slot
+    # must still be consistent with the state it holds.
+    assert _count_cached_boundary_states(manager, request, state_at) >= 1

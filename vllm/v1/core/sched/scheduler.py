@@ -408,12 +408,11 @@ class Scheduler(SchedulerInterface):
             return num_new_tokens
 
         block_size = self.cache_config.block_size
-        # The last block-aligned position whose state can be cached. With
-        # Eagle, FullAttn prunes the last matching block, so back off one
-        # block to avoid a Mamba cache miss.
+        # The last block-aligned position whose state can be cached. No
+        # speculative back-off: with a state at every crossed boundary (the
+        # unconditional stop below), a lookup whose last block is pruned
+        # falls back to the previous boundary's state instead of missing.
         last_cache_position = request.num_tokens - request.num_tokens % block_size
-        if self.use_eagle:
-            last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
         use_internal_checkpoint = (
@@ -442,9 +441,13 @@ class Scheduler(SchedulerInterface):
             else 0
         )
         stops = (
-            # Same invariant: a chunk starting mid-block stops at the boundary
-            # rather than running past it.
-            next_block_boundary if start % block_size != 0 else 0,
+            # Without internal checkpoints, states exist only at chunk
+            # ends, so every chunk stops at its next block boundary to
+            # materialize a reusable state at every crossed boundary; the
+            # prompt's final sub-block tail may still end unaligned. With
+            # checkpoints, mid-block states are recoverable and deep chunks
+            # need no boundary stops.
+            next_block_boundary if not use_internal_checkpoint else 0,
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
             # Fine-grained hits: the prompt's partial-tail entry can only be
