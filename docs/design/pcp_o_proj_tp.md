@@ -1,118 +1,138 @@
-# PCP O-Proj TP MVP 方案
+# PCP O-Proj TP MVP Design
 
-实现基线：`vllm-project/vllm upstream/main@f8e0602713`。
+Implementation baseline: `vllm-project/vllm upstream/main@f8e0602713`.
 
-## 背景
+## Background
 
-vllm-ascend 的细粒度 O-Proj TP 将 O-Proj 的输入维从 TP 继续切到更多
-rank，以减少每 rank 常驻权重。DSA-CP 场景在运行时按 batch 类型切换：decode
-使用更细的权重分片并归约部分和；包含 prefill 时，先聚合出原 TP 粒度的完整
-权重，再执行原有 O-Proj。
+The fine-grained O-Proj tensor parallelism in vllm-ascend further shards the
+O-Proj input dimension across additional ranks beyond TP, reducing the resident
+weight on each rank. In the DSA-CP implementation, the runtime path depends on
+the batch type: decode uses the finer-grained weight shards and reduces their
+partial sums, while a batch containing prefill first gathers the original
+TP-sized weight shard and then runs the standard O-Proj computation.
 
-vLLM 已有独立的 TP、PCP 和 DCP process group，但通用
-`RowParallelLinear` 只按 TP 切权重。本 MVP 使用 PCP 作为 O-Proj 的第二个
-权重切分轴，实现与上述动态切换等价的 `pcp_o_proj_tp`。
+vLLM already has independent TP, PCP, and DCP process groups, but the generic
+`RowParallelLinear` shards weights only across TP ranks. This MVP uses PCP as a
+second O-Proj weight-sharding axis and provides an equivalent dynamic path under
+the name `pcp_o_proj_tp`.
 
-## MVP 限制
+## MVP limitations
 
-- `prefill_context_parallel_size > 1`。
-- `decode_context_parallel_size = 1`。
-- 仅支持 DeepSeek V2/V3/V3.2 和 GLM-4 MoE Lite MLA。GLM-4 MoE Lite 的
-  attention 继承 DeepSeekV2 MLA 路径，因此复用相同的显式 prefetch 与 O-Proj
-  动态路径。
-- 仅支持 FP16/BF16 非量化权重、`bias=False`。
-- 仅支持 eager，暂不支持 CUDA Graph、torch.compile 和 DBO。
-- 暂不支持 LoRA。
-- 暂不支持 CPU weight offload。
-- attention module 必须在主 attention 计算前显式调用
-  `o_proj.prefetch_full_weight_if_needed(has_prefill)`。
+- `prefill_context_parallel_size > 1`.
+- `decode_context_parallel_size = 1`.
+- Only DeepSeek V2/V3/V3.2 and GLM-4 MoE Lite MLA are supported. GLM-4 MoE Lite
+  attention inherits the DeepSeekV2 MLA path, so it reuses the same explicit
+  prefetch and dynamic O-Proj implementation.
+- Only unquantized FP16/BF16 weights with `bias=False` are supported.
+- Only eager execution is supported. CUDA Graph, `torch.compile`, and DBO are
+  not supported yet.
+- LoRA is not supported yet.
+- CPU weight offloading is not supported yet.
+- The attention module must explicitly call
+  `o_proj.prefetch_full_weight_if_needed(has_prefill)` before the main attention
+  computation.
 
-这些限制全部通过配置或线性层构造检查 fail fast，避免功能开关静默失效。
+Configuration validation and linear-layer construction checks enforce all of
+these restrictions and fail fast instead of silently ignoring the feature.
 
-## 权重布局
+## Weight layout
 
-设 O-Proj 权重为 `W[N, K]`，TP 大小为 `T`，PCP 大小为 `P`。
-普通 row parallel 在 TP rank `t` 上常驻：
+Let the O-Proj weight be `W[N, K]`, the TP size be `T`, and the PCP size be `P`.
+Standard row parallelism keeps the following shard on TP rank `t`:
 
 ```text
 W_tp[t] = W[:, t*K/T : (t+1)*K/T]
 ```
 
-MVP 在同一个 TP shard 内继续按 PCP rank `p` 切分：
+The MVP further shards each TP shard across PCP rank `p`:
 
 ```text
 W_local[t,p] = W[:, (t*P+p)*K/(T*P) : (t*P+p+1)*K/(T*P)]
 ```
 
-checkpoint loader 使用展平 rank `t*P+p` 和 world size `T*P`，因此无需改变
-checkpoint 格式。每 rank 的 O-Proj 常驻权重降为原 TP 方案的 `1/P`。
+The checkpoint loader uses flattened rank `t*P+p` and world size `T*P`, so no
+checkpoint format change is required. The resident O-Proj weight on each rank
+is reduced to `1/P` of the standard TP layout.
 
-## 运行时路径
+## Runtime paths
 
-### Decode-only
+### Decode-only batches
 
-PCP rank `p` 从 TP-sharded attention output `X_t[..., K/T]` 中取对应 feature
-slice，与本地 `W_local[t,p]` 做 GEMM。各 PCP rank 的部分和先在 PCP group
-all-reduce，恢复普通 TP rank 的 O-Proj 部分结果；随后保持原有 TP reduction
-语义。
+PCP rank `p` takes the corresponding feature slice from the TP-sharded
+attention output `X_t[..., K/T]` and multiplies it by the local
+`W_local[t,p]`. The partial sums are first all-reduced over the PCP group to
+recover the standard O-Proj partial result for a TP rank. The existing TP
+reduction semantics are then preserved.
 
 ```text
 Y_t = PCP-AllReduce(X_t,p @ W_local[t,p]^T)
-Y   = TP-AllReduce(Y_t)                    # reduce_results=True 时
+Y   = TP-AllReduce(Y_t)                    # when reduce_results=True
 ```
 
-DeepSeek-V3.2 的 O-Proj 使用 `reduce_results=False`，因此只做 PCP reduction，
-后续已有的 TP fused all-reduce/RMSNorm 仍负责 TP reduction。
+DeepSeek-V3.2 O-Proj uses `reduce_results=False`, so this path performs only the
+PCP reduction. The existing fused TP all-reduce/RMSNorm operation remains
+responsible for the TP reduction.
 
-### Prefill 或 mixed batch
+### Prefill or mixed batches
 
-attention module 根据该层 `MLACommonMetadata.num_prefills` 判断 batch。只要包含
-prefill，就在 attention 主计算前异步执行 PCP all-gather：
+The attention module determines the batch type from the layer's
+`MLACommonMetadata.num_prefills`. If the batch contains any prefill requests,
+it asynchronously all-gathers the weight over PCP before the main attention
+computation:
 
 ```text
 W_local[t,p]^T --PCP AllGather--> W_tp[t]^T
 ```
 
-O-Proj forward 到达时才等待异步 handle，然后直接用 `W_tp[t]` 处理当前 PCP
-rank 的本地 token。该路径不做 PCP output reduction，因为不同 PCP rank 处理的
-是不同 token。原 TP reduction 保持不变。
+O-Proj waits for the asynchronous handle only when its forward method is
+reached, then applies `W_tp[t]` to the local tokens on the current PCP rank.
+This path does not perform a PCP output reduction because different PCP ranks
+process different tokens. The existing TP reduction remains unchanged.
 
-为支持 `all_gather_into_tensor` 沿第 0 维拼接，通信输入使用连续的转置权重
-`[K/(T*P), N]`，输出 buffer 为 `[K/T, N]`。完整 TP 权重只保留转置 view，
-不再额外复制。
+To concatenate along dimension 0 with `all_gather_into_tensor`, the collective
+input is a contiguous transposed weight with shape `[K/(T*P), N]`, and the
+output buffer has shape `[K/T, N]`. The full TP weight is retained only as a
+transposed view, avoiding an additional copy.
 
-## Buffer 生命周期
+## Buffer lifecycle
 
-完整 TP 权重 buffer 按 vLLM config scope、device、dtype 和 shape 复用。模型
-构造时即分配并由各层持有同一个共享 buffer，使该开销进入启动显存预算；正常
-层序执行中，上一层 O-Proj 已等待并消费 gather 后，下一层才能复用它。因此
-常驻额外开销是一份 TP O-Proj 权重，而不是每层一份。
+The full TP weight buffer is shared by vLLM config scope, device, dtype, and
+shape. It is allocated during model construction, and all compatible layers
+hold the same shared buffer, so the cost is included in startup memory
+budgeting. With normal sequential layer execution, one layer waits for and
+consumes its gathered weight before the next layer reuses the buffer. The
+resident overhead is therefore one TP-sized O-Proj shard rather than one copy
+per layer.
 
-异步通信输入是当前层本地权重的连续转置临时 tensor，保持到 handle wait 完成
-后释放。DBO 暂时禁用，以排除两个 microbatch 并发占用共享 buffer。
+The input to the asynchronous collective is a contiguous transpose of the
+current layer's local weight. It remains alive until the handle has completed
+and is then released. DBO is currently disabled to prevent two concurrent
+microbatches from using the shared buffer at the same time.
 
-## 显式触发与正确性约束
+## Explicit triggering and correctness constraints
 
-通用 MLA wrapper 和模块化 DeepSeek-V3.2 attention 均显式触发 prefetch。
-`PCPOProjRowParallelLinear.forward()` 要求每次调用前必须完成触发；遗漏触发会
-直接报错，而不会猜测 batch 类型。这样可保证：
+Both the generic MLA wrapper and the modular DeepSeek-V3.2 attention path
+explicitly trigger the prefetch. `PCPOProjRowParallelLinear.forward()` requires
+the trigger to have occurred before every invocation. A missing trigger raises
+an error instead of inferring the batch type. This guarantees that:
 
-- prefill/mixed 的 gather 足够早，能够与 Q/K/V projection、RoPE、indexer 和
-  attention 主计算重叠；
-- decode-only 不误发 weight gather；
-- O-Proj 不会在异步权重未完成时读取共享 buffer；
-- metadata 为空的 profiling 路径按 decode-sharded 数学执行，零 attention
-  output 的正确性不受影响。
+- the prefill/mixed gather starts early enough to overlap with Q/K/V
+  projections, RoPE, the indexer, and the main attention computation;
+- decode-only batches do not issue an unnecessary weight gather;
+- O-Proj does not read the shared buffer before the asynchronous gather has
+  completed; and
+- profiling paths without metadata use the decode-sharded calculation, which
+  preserves correctness for zero attention outputs.
 
-## 配置
+## Configuration
 
-新增 CLI/config 开关：
+The MVP adds the following CLI/configuration option:
 
 ```text
 --enable-pcp-o-proj-tp
 ```
 
-示例：
+Example:
 
 ```bash
 vllm serve <model> \
@@ -124,41 +144,51 @@ vllm serve <model> \
   --dtype bfloat16
 ```
 
-## MVP 验证结果
+## MVP validation results
 
-2026-08-21 在 4 张 H100 上使用 GLM-4.7-Flash BF16 和 GSM8K test
-（1319 题）完成了 TP4、PCP4TP1、PCP2TP2 的在线精度验证。三组统一使用
-eager、`max_model_len=8192`、5-shot、`temperature=0`、关闭 thinking、32
-并发；32 题门禁使用 `max_tokens=256`，完整集使用
-`max_tokens=4096`。
+Online accuracy was evaluated on August 21, 2026, using four H100 GPUs,
+GLM-4.7-Flash BF16, and the 1,319-question GSM8K test set. TP4, PCP4TP1, and
+PCP2TP2 used eager execution, `max_model_len=8192`, 5-shot prompting,
+`temperature=0`, thinking disabled, and concurrency 32. The 32-question gate
+used `max_tokens=256`; the full evaluation used `max_tokens=4096`.
 
-| 并行策略 | 32 题门禁 | 完整集正确数 | 完整集准确率 | 请求失败 | 无效答案 |
+| Parallel strategy | 32-question gate | Full-set correct | Full-set accuracy | Failed requests | Invalid answers |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | TP4 baseline | 25/32 | 1134/1319 | 85.9742% | 0 | 0 |
 | PCP4TP1 | 25/32 | 1136/1319 | 86.1259% | 0 | 0 |
 | PCP2TP2 | 26/32 | 1135/1319 | 86.0500% | 0 | 0 |
 
-相对 TP4 baseline，PCP4TP1 有 35 题由错变对、33 题由对变错，净增 2
-题；PCP2TP2 有 32 题由错变对、31 题由对变错，净增 1 题。三种归约
-拓扑会产生足以改变部分自回归生成路径的数值扰动，因此逐题文本并不要求完全
-一致；完整集结果未观察到精度回退。
+Relative to the TP4 baseline, PCP4TP1 changed 35 answers from incorrect to
+correct and 33 from correct to incorrect, for a net gain of two. PCP2TP2
+changed 32 answers from incorrect to correct and 31 from correct to incorrect,
+for a net gain of one. The three reduction topologies introduce numerical
+differences large enough to alter some autoregressive generation paths, so
+per-question text is not expected to match exactly. No accuracy regression was
+observed over the full dataset.
 
-按 checkpoint safetensors 元数据核算，48 层 O-Proj 共
-`1,006,632,960` bytes，占模型参数字节的 `3.2242%`。特性开启后：
+Based on checkpoint safetensors metadata, the O-Proj weights across 48 layers
+total `1,006,632,960` bytes, or `3.2242%` of all model parameter bytes. With the
+feature enabled:
 
-- PCP4TP1 每 rank 的 O-Proj 常驻权重从完整 O-Proj 的 100% 降到 25%，即减少
-  75%；
-- PCP2TP2 每 rank 的 O-Proj 常驻权重从原 TP2 shard 的 100% 降到 50%，即
-  减少 50%。
+- PCP4TP1 reduces the resident O-Proj weight on each rank from 100% of the full
+  O-Proj weight to 25%, a 75% reduction; and
+- PCP2TP2 reduces the resident O-Proj weight on each rank from 100% of the
+  original TP2 shard to 50%, a 50% reduction.
 
-该比例只描述参数权重，不包含 CUDA context、KV cache、通信 buffer、共享的
-单层 prefetch buffer 和 allocator 碎片，不能等同于整机 HBM 降幅。
+These percentages describe parameter weights only. They exclude the CUDA
+context, KV cache, communication buffers, the shared single-layer prefetch
+buffer, and allocator fragmentation, and therefore do not represent the total
+HBM reduction.
 
-## 后续工作
+## Future work
 
-1. 补充 TP×PCP 的逐层 prefill、mixed、decode tensor 数值对齐、多轮稳定性
-   验证，并采集 weight gather/attention overlap trace。
-2. 将共享 buffer lease 纳入可并发的模型级 workspace manager，解除 DBO 限制。
-3. 增加 CUDA Graph/torch.compile 可捕获路径。
-4. 为 FP8、block quant 等量化格式定义 weight、scale 和 metadata 的联合聚合。
-5. 评估独立 PCP communicator/stream，避免与 attention PCP collective 互相串行。
+1. Add per-layer tensor comparisons for TP-by-PCP prefill, mixed, and decode
+   paths, multi-run stability tests, and traces of weight-gather/attention
+   overlap.
+2. Integrate the shared-buffer lease with a concurrency-safe model-level
+   workspace manager and remove the DBO restriction.
+3. Add CUDA Graph and `torch.compile`-capturable paths.
+4. Define joint gathering of weights, scales, and metadata for FP8, block
+   quantization, and other quantized formats.
+5. Evaluate a dedicated PCP communicator or stream to avoid serialization with
+   attention PCP collectives.
