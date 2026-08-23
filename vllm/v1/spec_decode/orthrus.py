@@ -201,6 +201,19 @@ class OrthrusProposer(SpecDecodeBaseProposer):
         block_len = self.num_speculative_tokens + 1
         num_tokens = batch_size * block_len
 
+        # cad.seq_lens can be an optimistic upper bound that assumes every
+        # draft token from the *previous* round was accepted (see
+        # CommonAttentionMetadata.seq_lens_cpu_upper_bound's docstring).
+        # Subtract num_rejected_tokens_gpu to get the real continuation
+        # point -- otherwise, starting from round 2 of speculative decoding
+        # (after any rejection at all), every position/slot computed below
+        # would be wrong, silently drifting away from the request's actual
+        # sequence length and writing into the wrong KV-cache slots.
+        # Mirrors DFlashProposer.set_inputs_first_pass's effective_seq_lens.
+        effective_seq_lens = cad.seq_lens[:batch_size]
+        if num_rejected_tokens_gpu is not None:
+            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
+
         # --- input_ids: [batch_size, block_len] -> flattened, row-major
         # (one request's full block before the next request's). ---
         block_ids = torch.full(
@@ -211,7 +224,7 @@ class OrthrusProposer(SpecDecodeBaseProposer):
 
         # --- positions: request i's block covers
         # [seq_len_i, seq_len_i + block_len). ---
-        seq_lens = cad.seq_lens[:batch_size].to(torch.int64)
+        seq_lens = effective_seq_lens.to(torch.int64)
         block_positions = seq_lens.unsqueeze(1) + torch.arange(
             block_len, device=self.device, dtype=torch.int64
         ).unsqueeze(0)  # [batch_size, block_len]
