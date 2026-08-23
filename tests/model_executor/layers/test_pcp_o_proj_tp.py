@@ -2,13 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 import vllm.model_executor.layers.linear as linear_module
 import vllm.model_executor.parameter as parameter_module
-from vllm.model_executor.layers.linear import PCPOProjRowParallelLinear
+from vllm.model_executor.layers.linear import (
+    LinearMethodBase,
+    PCPOProjLinearMethod,
+    PCPOProjRowParallelLinear,
+)
 
 
 class _FakeWork:
@@ -29,6 +35,17 @@ class _FakePCPGroup:
     def all_reduce(self, tensor: torch.Tensor) -> torch.Tensor:
         assert self.other_output is not None
         return tensor + self.other_output
+
+
+class _UnsupportedLinearMethod(LinearMethodBase):
+    def create_weights(self, *args, **kwargs) -> None:
+        raise AssertionError("weights are installed by the test")
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        del layer
+
+    def apply(self, layer, x, bias=None):
+        raise AssertionError("unsupported method must fail during post-load")
 
 
 def _make_layer(
@@ -96,6 +113,23 @@ def test_forward_requires_explicit_attention_prefetch(monkeypatch):
         layer(torch.zeros(1, 4))
 
 
+@pytest.mark.parametrize(
+    ("global_has_prefill", "local_num_prefills", "expected"),
+    [(True, 0, True), (False, 1, False), (None, 1, True), (None, 0, False)],
+)
+def test_prefetch_decision_uses_global_pcp_batch_type(
+    monkeypatch, global_has_prefill, local_num_prefills, expected
+):
+    monkeypatch.setattr(
+        linear_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(global_has_prefill=global_has_prefill),
+    )
+    metadata = SimpleNamespace(num_prefills=local_num_prefills)
+
+    assert linear_module.get_pcp_o_proj_batch_has_prefill(metadata) is expected
+
+
 def test_decode_slices_features_and_reduces_over_pcp(monkeypatch):
     layer, pcp_group = _make_layer(monkeypatch, pcp_rank=1)
     full_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
@@ -109,3 +143,37 @@ def test_decode_slices_features_and_reduces_over_pcp(monkeypatch):
 
     assert output_bias is None
     torch.testing.assert_close(output, F.linear(input_, full_weight))
+
+
+def test_quantized_o_proj_method_is_rejected(monkeypatch):
+    layer, _ = _make_layer(monkeypatch, pcp_rank=0)
+    layer.quant_method = PCPOProjLinearMethod(_UnsupportedLinearMethod())
+
+    with pytest.raises(RuntimeError, match="only an unquantized O-Proj"):
+        layer.quant_method.process_weights_after_loading(layer)
+
+
+def test_unquantized_method_restores_local_weight_after_kernel_failure(monkeypatch):
+    layer, _ = _make_layer(monkeypatch, pcp_rank=0)
+    full_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
+    layer.weight_loader_v2(layer.weight, full_weight)
+
+    def _raise_on_apply(_self, layer, x, bias=None):
+        raise RuntimeError("fake linear kernel failure")
+
+    monkeypatch.setattr(linear_module.UnquantizedLinearMethod, "apply", _raise_on_apply)
+
+    def _all_gather_into_tensor(output, input_, group, async_op):
+        output.copy_(full_weight.transpose(0, 1))
+        return _FakeWork()
+
+    monkeypatch.setattr(
+        torch.distributed, "all_gather_into_tensor", _all_gather_into_tensor
+    )
+
+    layer.prefetch_full_weight_if_needed(has_prefill=True)
+    with pytest.raises(RuntimeError, match="fake linear kernel failure"):
+        layer(torch.zeros(1, 4))
+
+    assert layer.weight.shape == (3, 2)
+    assert layer._use_full_weight is None
