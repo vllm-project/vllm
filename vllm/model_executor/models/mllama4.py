@@ -70,6 +70,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -589,23 +590,23 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
 
 
 class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        processor = self.info.get_hf_processor(**mm_kwargs)
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not mm_data:
+            return processed_data
+
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = processor.image_processor
         vision_config = self.info.get_hf_config().vision_config
 
-        if processed_outputs.get("pixel_values") is not None:
+        if processed_data.get("pixel_values") is not None:
             assert "images" in mm_data, (
                 "images expected to be in mm_data when pixel_values is present"
             )
@@ -636,10 +637,10 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                 1 if r_h * r_w == 1 else 1 + r_h * r_w for (r_h, r_w) in aspect_ratios
             ]
 
-            processed_outputs["aspect_ratios"] = torch.tensor(aspect_ratios)
-            processed_outputs["patches_per_image"] = torch.tensor(patches_per_image)
+            processed_data["aspect_ratios"] = torch.tensor(aspect_ratios)
+            processed_data["patches_per_image"] = torch.tensor(patches_per_image)
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -666,8 +667,12 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
 
         num_patches_per_chunk = self.info.get_patch_per_chunk(vision_config)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token = hf_processor.image_token
         img_patch_token = hf_processor.img_patch_token
+
+        tokenizer = self.info.get_tokenizer()
+        img_patch_token_ids = cached_encode(
+            tokenizer, img_patch_token, add_special_tokens=False
+        )
 
         def get_replacement(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
@@ -678,12 +683,13 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                 num_patches_per_chunk=num_patches_per_chunk,
             )
 
-            return PromptUpdateDetails.select_text(repl, img_patch_token)
+            repl_ids = cached_encode(tokenizer, repl, add_special_tokens=False)
+            return PromptUpdateDetails.select_token_ids(repl_ids, img_patch_token_ids)
 
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[hf_processor.image_token_id],
                 replacement=get_replacement,
             )
         ]
