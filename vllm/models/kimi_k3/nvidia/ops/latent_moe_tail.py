@@ -236,6 +236,71 @@ class KimiK3LatentMoETailOp:
             m=num_tokens,
         ).squeeze(0)
 
+    def from_normalized_replicated_routed(
+        self,
+        routed_output: torch.Tensor,
+        shared_output: torch.Tensor,
+        up_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """Finalize MegaMoE output without a standalone shared all-reduce.
+
+        DeepGEMM MegaMoE has already combined the routed experts across EP and
+        applied routed RMSNorm.  Reduce-scatter only the TP-sharded shared
+        partial, run this rank's column shard of the routed up-projection with
+        the shared add in its beta epilogue, then multicast the shards.
+        """
+        contract = self.contract
+        if routed_output.ndim != 2:
+            raise ValueError("routed_output must be a 2D tensor")
+        num_tokens = routed_output.shape[0]
+        expected = (
+            (
+                routed_output,
+                (num_tokens, contract.latent_size),
+                "routed_output",
+            ),
+            (
+                shared_output,
+                (num_tokens, contract.hidden_size),
+                "shared_output",
+            ),
+            (
+                up_weight,
+                (contract.hidden_size, contract.latent_size),
+                "up_weight",
+            ),
+        )
+        for tensor, shape, name in expected:
+            if (
+                tensor.shape != shape
+                or tensor.device != contract.device
+                or tensor.dtype != contract.dtype
+                or not tensor.is_contiguous()
+            ):
+                raise ValueError(
+                    f"{name} must be contiguous CUDA {contract.dtype} {list(shape)}"
+                )
+        if not 1 <= num_tokens <= contract.max_num_tokens:
+            raise ValueError(
+                "K3 normalized MegaMoE tail requires between 1 and "
+                f"{contract.max_num_tokens} tokens."
+            )
+
+        self._up_projection.ensure_compiled(num_tokens)
+        shared_shard = self._collective.reduce_scatter_shared(shared_output)
+        local_hidden_size = contract.hidden_size // contract.tp_size
+        local_up_weight = up_weight.narrow(
+            0,
+            self.rank * local_hidden_size,
+            local_hidden_size,
+        )
+        mailbox = self._up_projection(
+            routed_output,
+            local_up_weight,
+            shared_shard,
+        )
+        return self._lamport_copy(mailbox, m=num_tokens).squeeze(0)
+
     def _validate_inputs(
         self,
         routed_output: torch.Tensor | UnfinalizedMoEOutput,

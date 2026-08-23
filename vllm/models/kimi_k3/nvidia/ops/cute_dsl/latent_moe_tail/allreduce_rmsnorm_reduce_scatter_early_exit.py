@@ -948,6 +948,9 @@ class CollectiveKernel:
         self._dummy_expanded_idx = torch.empty(
             (max_m, max(top_k, 1)), dtype=torch.int32, device=device
         )
+        self._dummy_gamma = torch.empty(
+            (latent_dim,), dtype=torch.bfloat16, device=device
+        )
 
         bytes_per_routed_buffer = max_m * tp_size * latent_dim * 2
         routed_bytes = NUM_LAMPORT_BUFFERS * bytes_per_routed_buffer
@@ -1030,7 +1033,86 @@ class CollectiveKernel:
                     fp32_internal=fp32_internal,
                     top_k=top_k,
                 )
+                # MegaMoE has already combined and normalized the routed
+                # latent.  That path only needs the shared reduce-scatter from
+                # this collective before the sharded up-projection.
+                compile_kernel(
+                    rank=rank,
+                    tp_size=tp_size,
+                    latent_dim=latent_dim,
+                    hidden_dim=hidden_dim,
+                    max_m=max_m,
+                    max_token_ctas=max_token_ctas,
+                    latent_output=self._latent_output,
+                    routed_workspace=self._routed_workspace,
+                    routed_flags=self._routed_flags,
+                    routed_multicast_ptr=self._routed_multicast_ptr,
+                    shared_output=self._shared_output,
+                    shared_workspace=self._shared_workspace,
+                    shared_flags=self._shared_flags,
+                    shared_peer_ptrs=self._shared_peer_ptrs,
+                    rms_eps=self.rms_eps,
+                    fp32_internal=fp32_internal,
+                    include_routed=False,
+                    top_k=0,
+                )
             dist.barrier(group=group, device_ids=[device.index])
+
+    def reduce_scatter_shared(self, shared_source: torch.Tensor) -> torch.Tensor:
+        """Reduce-scatter a rank-local full-hidden shared-expert partial.
+
+        MegaMoE returns an already-combined, already-normalized routed latent,
+        so repeating the routed all-reduce and RMSNorm from ``__call__`` would
+        be both wasteful and numerically wrong.  The collective kernel already
+        has a shared-only specialization; expose it for that path.
+        """
+        if shared_source.ndim != 2:
+            raise ValueError("shared_source must be rank-2")
+        m = shared_source.shape[0]
+        if (
+            shared_source.shape != (m, self.hidden_dim)
+            or shared_source.dtype != torch.bfloat16
+            or shared_source.device != self._shared_output.device
+            or not shared_source.is_contiguous()
+        ):
+            raise ValueError(
+                "shared_source must be contiguous CUDA bfloat16 "
+                f"[{m}, {self.hidden_dim}]"
+            )
+        if not 1 <= m <= self.max_m:
+            raise ValueError(f"runtime M={m} must be in [1, {self.max_m}]")
+
+        # Routed arguments are compile-signature placeholders and are not read
+        # by the include_routed=False specialization.
+        latent_placeholder = self._latent_output[:m]
+        device = self._shared_output.device
+        with torch.accelerator.device_index(device.index):
+            launch(
+                latent_placeholder,
+                self._dummy_gamma,
+                self._latent_output,
+                self._routed_workspace,
+                self._routed_flags,
+                self._routed_multicast_ptr,
+                shared_source,
+                self._shared_output,
+                self._shared_workspace,
+                self._shared_flags,
+                self._shared_peer_ptrs,
+                self.rms_eps,
+                rank=self.rank,
+                tp_size=self.tp_size,
+                latent_dim=self.latent_dim,
+                hidden_dim=self.hidden_dim,
+                max_m=self.max_m,
+                max_token_ctas=self.max_token_ctas,
+                fp32_internal=self.fp32_internal,
+                include_routed=False,
+                expert_weights=self._dummy_expert_weights,
+                expanded_idx_to_permuted_idx=self._dummy_expanded_idx,
+                top_k=0,
+            )
+        return self._shared_shard
 
     def __call__(
         self,

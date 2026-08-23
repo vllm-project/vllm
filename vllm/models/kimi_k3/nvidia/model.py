@@ -791,6 +791,14 @@ class KimiMoE(nn.Module):
         self.fused_shared_output_needs_tp_reduce = bool(
             self.fuse_shared_mega_moe and self.tp_size > 1 and not use_sequence_parallel
         )
+        fused_shared_api_available = False
+        if self.fuse_shared_mega_moe:
+            from vllm.utils.deep_gemm import _import_deep_gemm
+
+            fused_shared_api_available = hasattr(
+                _import_deep_gemm(), "fp8_fp4_mega_moe_bf16_shared"
+            )
+        self._mega_normalized_tail: Any | None = None
 
         self.routed_expert_down_proj: ReplicatedLinear | None
         self.routed_expert_norm: RMSNorm | None
@@ -886,6 +894,27 @@ class KimiMoE(nn.Module):
                 routed_output_transform=self.routed_output_transform,
                 is_sequence_parallel=use_sequence_parallel,
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
+            )
+        if (
+            self.fused_shared_output_needs_tp_reduce
+            and fused_shared_api_available
+            and self.tp_size in (8, 16)
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            assert self.routed_output_transform is not None
+            norm = self.routed_output_transform.norm
+            assert norm is not None
+            from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import (
+                KimiK3LatentMoETailOp,
+            )
+
+            self._mega_normalized_tail = KimiK3LatentMoETailOp.initialize(
+                hidden_size=hidden_size,
+                latent_size=self.moe_hidden_size,
+                dtype=norm.weight.dtype,
+                device=norm.weight.device,
+                rms_eps=norm.variance_epsilon,
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
@@ -995,17 +1024,32 @@ class KimiMoE(nn.Module):
                     rms_weight=norm.weight,
                     rms_epsilon=norm.variance_epsilon,
                 )
-                if self.fused_shared_output_needs_tp_reduce:
-                    shared_output = tensor_model_parallel_all_reduce(shared_output)
-                # Kernel 1 returned an already-normalized routed latent plus
-                # the BF16 shared output (reduced above when it was TP-sharded).
-                # addmm_ is kernel 2 and folds the shared add into the
-                # up-projection's beta epilogue.
-                final_hidden_states = self.routed_output_transform(
-                    final_hidden_states,
-                    residual=shared_output,
-                    hidden_states_are_normalized=True,
+                normalized_tail = getattr(self, "_mega_normalized_tail", None)
+                use_normalized_tail = (
+                    normalized_tail is not None
+                    and 0 < num_tokens <= normalized_tail.contract.max_num_tokens
                 )
+                if use_normalized_tail:
+                    assert normalized_tail is not None
+                    final_hidden_states = (
+                        normalized_tail.from_normalized_replicated_routed(
+                            final_hidden_states,
+                            shared_output,
+                            self.routed_output_transform.up_proj.weight,
+                        )
+                    )
+                elif self.fused_shared_output_needs_tp_reduce:
+                    shared_output = tensor_model_parallel_all_reduce(shared_output)
+                if not use_normalized_tail:
+                    # Kernel 1 returned an already-normalized routed latent plus
+                    # the BF16 shared output (reduced above when it was TP-sharded).
+                    # addmm_ is kernel 2 and folds the shared add into the
+                    # up-projection's beta epilogue.
+                    final_hidden_states = self.routed_output_transform(
+                        final_hidden_states,
+                        residual=shared_output,
+                        hidden_states_are_normalized=True,
+                    )
             else:
                 final_hidden_states = self.experts(
                     routed_hidden_states,

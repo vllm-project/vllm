@@ -247,6 +247,55 @@ def _test_latent_moe_tail_worker(
     graph.replay()
     torch.testing.assert_close(graph_output, expected, atol=8e-2, rtol=3e-2)
 
+    # DeepGEMM MegaMoE has already combined and normalized the routed latent,
+    # so every TP rank owns the same routed tensor while the shared tensor is a
+    # rank-local partial.
+    torch.manual_seed(3000)
+    routed_normalized = torch.randn(
+        16,
+        LATENT_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    torch.manual_seed(3100 + rank)
+    shared_partial = torch.randn(
+        16,
+        HIDDEN_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    shared_reference = shared_partial.clone()
+    dist.all_reduce(shared_reference, group=group)
+    expected_normalized = F.linear(routed_normalized, up_weight)
+    expected_normalized.add_(shared_reference)
+
+    actual_normalized = op.from_normalized_replicated_routed(
+        routed_normalized,
+        shared_partial,
+        up_weight,
+    )
+    torch.testing.assert_close(
+        actual_normalized,
+        expected_normalized,
+        atol=8e-2,
+        rtol=3e-2,
+    )
+
+    normalized_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(normalized_graph):
+        normalized_graph_output = op.from_normalized_replicated_routed(
+            routed_normalized,
+            shared_partial,
+            up_weight,
+        )
+    normalized_graph.replay()
+    torch.testing.assert_close(
+        normalized_graph_output,
+        expected_normalized,
+        atol=8e-2,
+        rtol=3e-2,
+    )
+
 
 def _run_latent_moe_tail_test(
     monkeypatch: pytest.MonkeyPatch,
