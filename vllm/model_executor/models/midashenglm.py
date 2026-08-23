@@ -662,7 +662,7 @@ class MiDashengLMMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_midashenglm,
             )
         ]
