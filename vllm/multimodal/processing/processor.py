@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from transformers.feature_extraction_utils import BatchFeature
 
     from ..cache import BaseMultiModalProcessorCache
+    from .inputs import MultiModalContentFingerprints
 else:
     BatchFeature = object
 
@@ -1251,6 +1252,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         cache: BaseMultiModalProcessorCache,
         mm_data_items: MultiModalDataItems,
         mm_hashes: MultiModalHashes,
+        mm_fingerprints: "MultiModalContentFingerprints | None" = None,
     ) -> tuple[MultiModalIsCached, MultiModalDataItems]:
         mm_is_cached = {
             modality: cache.is_cached(hashes) for modality, hashes in mm_hashes.items()
@@ -1264,6 +1266,24 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             ]
             for modality, items_is_cached in mm_is_cached.items()
         }
+
+        if mm_fingerprints is not None:
+            for modality, hashes in mm_hashes.items():
+                cached_flags = mm_is_cached[modality]
+                fps = mm_fingerprints.get(modality, [])
+                for idx, (is_cached, mm_hash) in enumerate(zip(cached_flags, hashes)):
+                    if not is_cached:
+                        continue
+                    fp = fps[idx] if idx < len(fps) else None
+                    if fp is None:
+                        continue
+                    stored = cache.get_content_hash(mm_hash)
+                    if stored is not None and stored != fp:
+                        raise ValueError(
+                            f"Multimodal uuid collision for {modality} at "
+                            f"index {idx}: the same uuid was previously "
+                            f"used with different media content."
+                        )
 
         mm_missing_data = {}
         for modality, idxs in mm_missing_idxs.items():
@@ -1399,17 +1419,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         if cache is None or passthrough_data:
             return self._apply_hf_processor(inputs, timing_ctx)
 
+        algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
+        model_id = self.info.model_id
+
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(
-                self.info.model_id,
-                self.info.ctx.get_mm_config().mm_hasher_algorithm,
-            )
+            mm_hashes = inputs.get_mm_hashes(model_id, algorithm)
+
+        mm_fingerprints = inputs.get_content_fingerprints(model_id, algorithm)
 
         with timing_ctx.record("get_cache_missing_items"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
                 cache=cache,
                 mm_data_items=inputs.mm_data_items,
                 mm_hashes=mm_hashes,
+                mm_fingerprints=mm_fingerprints,
             )
 
         # NOTE: The prompt does not correspond to `mm_missing_data_items`,
@@ -1442,6 +1465,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_missing_kwargs=mm_missing_kwargs,
                 mm_missing_prompt_updates=mm_missing_prompt_updates,
             )
+
+        for modality, hashes in mm_hashes.items():
+            fps = mm_fingerprints.get(modality, [])
+            for idx, mm_hash in enumerate(hashes):
+                fp = fps[idx] if idx < len(fps) else None
+                if fp is not None and cache.get_content_hash(mm_hash) is None:
+                    cache.store_content_hash(mm_hash, fp)
 
         mm_info = MultiModalProcessingInfo(
             kwargs=mm_kwargs,

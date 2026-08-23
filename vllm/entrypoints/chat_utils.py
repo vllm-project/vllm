@@ -157,8 +157,10 @@ class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
     """The type of the content part."""
     uuid: str | None
     """
-    User-provided UUID of a media. User must guarantee that it is properly
-    generated and unique for different medias.
+    User-provided UUID of a media used as the cache identity.  Must be
+    generated with a high-entropy method (e.g. UUIDv4 or a content hash)
+    and unique per distinct media content.  Reusing a UUID with different
+    media when the original is still cached will be rejected.
     """
 
 
@@ -173,8 +175,10 @@ class ChatCompletionContentPartAudioEmbedsParam(TypedDict, total=False):
     """The type of the content part."""
     uuid: str | None
     """
-    User-provided UUID of a media. User must guarantee that it is properly
-    generated and unique for different medias.
+    User-provided UUID of a media used as the cache identity.  Must be
+    generated with a high-entropy method (e.g. UUIDv4 or a content hash)
+    and unique per distinct media content.  Reusing a UUID with different
+    media when the original is still cached will be rejected.
     """
 
 
@@ -224,8 +228,10 @@ class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
     image_pil: PILImage | None
     uuid: str | None
     """
-    User-provided UUID of a media. User must guarantee that it is properly
-    generated and unique for different medias.
+    User-provided UUID of a media used as the cache identity.  Must be
+    generated with a high-entropy method (e.g. UUIDv4 or a content hash)
+    and unique per distinct media content.  Reusing a UUID with different
+    media when the original is still cached will be rejected.
     """
 
 
@@ -242,8 +248,10 @@ class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     image_url: str | None
     uuid: str | None
     """
-    User-provided UUID of a media. User must guarantee that it is properly
-    generated and unique for different medias.
+    User-provided UUID of a media used as the cache identity.  Must be
+    generated with a high-entropy method (e.g. UUIDv4 or a content hash)
+    and unique per distinct media content.  Reusing a UUID with different
+    media when the original is still cached will be rejected.
     """
 
 
@@ -271,8 +279,10 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
     video_url: str | None
     uuid: str | None
     """
-    User-provided UUID of a media. User must guarantee that it is properly
-    generated and unique for different medias.
+    User-provided UUID of a media used as the cache identity.  Must be
+    generated with a high-entropy method (e.g. UUIDv4 or a content hash)
+    and unique per distinct media content.  Reusing a UUID with different
+    media when the original is still cached will be rejected.
     """
 
 

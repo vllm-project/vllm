@@ -573,6 +573,17 @@ You can pass pre-computed audio embeddings similar to image embeddings:
 
 When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
 
+!!! warning "UUID uniqueness requirements"
+    Each UUID must be unique per distinct media content.  Generate UUIDs with
+    a high-entropy method such as UUIDv4 or a content hash of the media bytes.
+    Do **not** use predictable values (sequential counters, public URLs, or
+    short strings like `"K"`).
+
+    When media data **is** provided alongside a UUID, vLLM checks whether the
+    UUID was previously stored with different content and rejects the request
+    with HTTP 400 on mismatch.  When media is **omitted** (skip-send), the UUID
+    is trusted as-is, so its uniqueness is the caller's responsibility.
+
 ??? code
 
     ```python

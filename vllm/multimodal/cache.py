@@ -69,17 +69,22 @@ class MultiModalProcessorCacheItem:
     Args:
         item: The processed tensor data corresponding to a multi-modal item.
         prompt_updates: The prompt updates corresponding to `item`.
+        content_hash: Content-based fingerprint of the original media.
+            Used to reject uuid collisions when a subsequent request
+            presents different media under the same uuid.
     """
 
     def __init__(
         self,
         item: MultiModalKwargsItem,
         prompt_updates: Sequence["ResolvedPromptUpdate"],
+        content_hash: str | None = None,
     ) -> None:
         super().__init__()
 
         self.item = item
         self.prompt_updates = prompt_updates
+        self.content_hash = content_hash
 
 
 class MultiModalProcessorCacheItemMetadata:
@@ -94,17 +99,22 @@ class MultiModalProcessorCacheItemMetadata:
         prompt_updates: The prompt updates corresponding to `item`.
             This needs to stay on P0 because for some models, they are
             dependent on the processed tensor data (cached on P1).
+        content_hash: Content-based fingerprint of the original media.
+            Used to reject uuid collisions when a subsequent request
+            presents different media under the same uuid.
     """
 
     def __init__(
         self,
         item: MultiModalKwargsItem,
         prompt_updates: Sequence["ResolvedPromptUpdate"],
+        content_hash: str | None = None,
     ) -> None:
         super().__init__()
 
         self.item_size = MultiModalCache.get_item_size(item)
         self.prompt_updates = prompt_updates
+        self.content_hash = content_hash
 
 
 MultiModalCacheValue: TypeAlias = (
@@ -378,6 +388,14 @@ class BaseMultiModalProcessorCache(
         """
         raise NotImplementedError
 
+    def get_content_hash(self, mm_hash: str) -> str | None:
+        """Return the content fingerprint stored for *mm_hash*, or ``None``."""
+        return None
+
+    def store_content_hash(self, mm_hash: str, content_hash: str | None) -> None:
+        """Persist *content_hash* alongside the cached item keyed by
+        *mm_hash*.  Default implementation is a no-op; P0 caches override."""
+
     @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         """
@@ -431,6 +449,17 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
     @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         self._cache.touch(mm_hash)
+
+    @override
+    def get_content_hash(self, mm_hash: str) -> str | None:
+        cached = self._cache.get(mm_hash)
+        return cached.content_hash if cached is not None else None
+
+    @override
+    def store_content_hash(self, mm_hash: str, content_hash: str | None) -> None:
+        cached = self._cache.get(mm_hash)
+        if cached is not None:
+            cached.content_hash = content_hash
 
     @override
     def clear_cache(self) -> None:
@@ -492,6 +521,17 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         self._cache.touch(mm_hash)
 
     @override
+    def get_content_hash(self, mm_hash: str) -> str | None:
+        cached = self._cache.get(mm_hash)
+        return cached.content_hash if cached is not None else None
+
+    @override
+    def store_content_hash(self, mm_hash: str, content_hash: str | None) -> None:
+        cached = self._cache.get(mm_hash)
+        if cached is not None:
+            cached.content_hash = content_hash
+
+    @override
     def clear_cache(self) -> None:
         self._cache.clear()
 
@@ -537,6 +577,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         )
         # cache prompt_updates for P0 only
         self._p0_cache: dict[str, Sequence[ResolvedPromptUpdate]] = {}
+        self._content_hashes: dict[str, str] = {}
 
         self._hits = 0
         self._total = 0
@@ -613,9 +654,19 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         self._shm_cache.touch(mm_hash)
 
     @override
+    def get_content_hash(self, mm_hash: str) -> str | None:
+        return self._content_hashes.get(mm_hash)
+
+    @override
+    def store_content_hash(self, mm_hash: str, content_hash: str | None) -> None:
+        if content_hash is not None:
+            self._content_hashes[mm_hash] = content_hash
+
+    @override
     def clear_cache(self) -> None:
         self._shm_cache.clear()
         self._p0_cache.clear()
+        self._content_hashes.clear()
 
         self._hits = 0
         self._total = 0
@@ -635,6 +686,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         dangling_hashes = set(self._p0_cache.keys()) - cached_hashes
         for mm_hash in dangling_hashes:
             del self._p0_cache[mm_hash]
+            self._content_hashes.pop(mm_hash, None)
 
     def address_as_item(
         self,

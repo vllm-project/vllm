@@ -9,6 +9,8 @@ from vllm.inputs import MultiModalHashes
 from ..hasher import MultiModalHasher
 from ..parse import MultiModalDataItems, MultiModalUUIDItems
 
+MultiModalContentFingerprints = dict[str, list[str | None]]
+
 
 @dataclass
 class ProcessorInputs:
@@ -60,7 +62,13 @@ class ProcessorInputs:
                             )
                         )
                     else:
-                        hashes.append(uuid_item)
+                        hashes.append(
+                            hasher.hash_kwargs(
+                                hash_algorithm,
+                                model_id=model_id,
+                                mm_uuid=uuid_item,
+                            )
+                        )
 
                 mm_hashes[modality] = hashes
             else:
@@ -75,3 +83,46 @@ class ProcessorInputs:
                 ]
 
         return mm_hashes
+
+    def get_content_fingerprints(
+        self,
+        model_id: str,
+        hash_algorithm: MMHasherAlgorithm,
+    ) -> MultiModalContentFingerprints:
+        """Compute content-based fingerprints for uuid-bearing items.
+
+        Returns a dict mirroring the shape of ``get_mm_hashes``.  For each
+        modality/index the value is:
+
+        * A content hash when the item carries both a uuid **and** media data.
+        * ``None`` when the item has no uuid (content-hashed path) or has a
+          uuid but no media data (skip-send).
+        """
+        mm_data_items = self.mm_data_items
+        mm_uuid_items = self.mm_uuid_items or {}
+        hf_processor_mm_kwargs = self.hf_processor_mm_kwargs
+
+        hasher = MultiModalHasher
+        fingerprints = dict[str, list[str | None]]()
+
+        for modality, data_items in mm_data_items.items():
+            uuid_items = mm_uuid_items.get(modality)
+            fps: list[str | None] = []
+
+            for i, item in enumerate(data_items.get_all_items_for_hash()):
+                uuid_item = uuid_items[i] if uuid_items is not None else None
+                if uuid_item is not None and item is not None:
+                    fps.append(
+                        hasher.hash_kwargs(
+                            hash_algorithm,
+                            model_id=model_id,
+                            **{modality: item},
+                            **hf_processor_mm_kwargs,
+                        )
+                    )
+                else:
+                    fps.append(None)
+
+            fingerprints[modality] = fps
+
+        return fingerprints

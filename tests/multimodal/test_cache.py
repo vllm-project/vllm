@@ -684,6 +684,95 @@ def test_processor_cache_shared_across_loras():
     assert feature_lora_b.data == item_data
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "cache_cls",
+    [
+        MultiModalProcessorOnlyCache,
+        MultiModalProcessorSenderCache,
+    ],
+)
+def test_content_hash_stored_on_insert(cache_cls):
+    """Inserting an item with a content fingerprint must make it retrievable."""
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    cache = cache_cls(model_config)  # type: ignore[arg-type]
+
+    mm_hash = "uuid-derived-key"
+    item = MultiModalKwargsItem.dummy(nbytes=64)
+
+    cache.get_and_update_item((item, []), mm_hash)
+    cache.store_content_hash(mm_hash, "fp-abc123")
+
+    assert cache.get_content_hash(mm_hash) == "fp-abc123"
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "cache_cls",
+    [
+        MultiModalProcessorOnlyCache,
+        MultiModalProcessorSenderCache,
+    ],
+)
+def test_content_hash_none_when_not_stored(cache_cls):
+    """When no fingerprint was stored the getter must return None."""
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    cache = cache_cls(model_config)  # type: ignore[arg-type]
+
+    mm_hash = "uuid-derived-key"
+    item = MultiModalKwargsItem.dummy(nbytes=64)
+
+    cache.get_and_update_item((item, []), mm_hash)
+
+    assert cache.get_content_hash(mm_hash) is None
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "cache_cls",
+    [
+        MultiModalProcessorOnlyCache,
+        MultiModalProcessorSenderCache,
+    ],
+)
+def test_content_hash_survives_touch(cache_cls):
+    """Touching a cached item must not drop its content fingerprint."""
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    cache = cache_cls(model_config)  # type: ignore[arg-type]
+
+    mm_hash = "uuid-key"
+    item = MultiModalKwargsItem.dummy(nbytes=64)
+
+    cache.get_and_update_item((item, []), mm_hash)
+    cache.store_content_hash(mm_hash, "fp-xyz")
+    cache.touch_sender_cache_item(mm_hash)
+
+    assert cache.get_content_hash(mm_hash) == "fp-xyz"
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "cache_cls",
+    [
+        MultiModalProcessorOnlyCache,
+        MultiModalProcessorSenderCache,
+    ],
+)
+def test_content_hash_cleared_on_clear(cache_cls):
+    """clear_cache must drop content fingerprints along with items."""
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    cache = cache_cls(model_config)  # type: ignore[arg-type]
+
+    mm_hash = "uuid-key"
+    item = MultiModalKwargsItem.dummy(nbytes=64)
+
+    cache.get_and_update_item((item, []), mm_hash)
+    cache.store_content_hash(mm_hash, "fp-xyz")
+    cache.clear_cache()
+
+    assert cache.get_content_hash(mm_hash) is None
+
+
 _SLEEP_VISION_PROMPT = (
     "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
     "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
