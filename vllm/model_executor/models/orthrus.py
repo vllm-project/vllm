@@ -159,6 +159,81 @@ class OrthrusAttention(Qwen3Attention):
         output, _ = self.o_proj_diff(attn_output)
         return output
 
+    def forward_ar_eager(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        cached_key: torch.Tensor | None,
+        cached_value: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Eager (non-paged) autoregressive forward.
+
+        Used by the standalone diffusion-decode demo loop
+        (``OrthrusForCausalLM.generate_with_diffusion``), which drives this
+        model outside vLLM's paged-attention runtime so it can also serve
+        as the AR verification pass in the propose/verify/accept loop.
+        Mirrors the normal ``forward`` math (inherited from
+        ``Qwen3Attention``) but explicitly manages a plain tensor KV cache
+        instead of going through ``self.attn``.
+
+        Args:
+            positions: ``[block_len]`` absolute sequence positions.
+            hidden_states: ``[block_len, hidden_size]``.
+            cached_key: ``[past_len, num_kv_heads, head_dim]`` or ``None``
+                for the first (prefill) call.
+            cached_value: matching ``cached_key``.
+
+        Returns:
+            ``(output, updated_key_cache, updated_value_cache)``.
+        """
+        block_len = hidden_states.shape[0]
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+        q_by_head = self.q_norm(q_by_head)
+        q = q_by_head.view(q.shape)
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+        k_by_head = self.k_norm(k_by_head)
+        k = k_by_head.view(k.shape)
+
+        q, k = self.rotary_emb(positions, q, k)
+
+        q = q.view(block_len, self.num_heads, self.head_dim)
+        k = k.view(block_len, self.num_kv_heads, self.head_dim)
+        v = v.view(block_len, self.num_kv_heads, self.head_dim)
+
+        if cached_key is not None:
+            full_key = torch.cat([cached_key, k], dim=0)
+            full_value = torch.cat([cached_value, v], dim=0)
+        else:
+            full_key, full_value = k, v
+
+        num_groups = self.num_heads // self.num_kv_heads
+        if num_groups > 1:
+            attn_key = full_key.repeat_interleave(num_groups, dim=1)
+            attn_value = full_value.repeat_interleave(num_groups, dim=1)
+        else:
+            attn_key, attn_value = full_key, full_value
+
+        total_kv_len = attn_key.shape[0]
+        past_len = total_kv_len - block_len
+        q_idx = torch.arange(block_len, device=hidden_states.device).unsqueeze(1)
+        kv_idx = torch.arange(total_kv_len, device=hidden_states.device).unsqueeze(0)
+        causal = kv_idx <= (q_idx + past_len)
+
+        q_t = q.transpose(0, 1).unsqueeze(0)
+        k_t = attn_key.transpose(0, 1).unsqueeze(0)
+        v_t = attn_value.transpose(0, 1).unsqueeze(0)
+
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            q_t, k_t, v_t, attn_mask=causal, scale=self.scaling
+        ).squeeze(0)
+        attn_output = attn_output.transpose(0, 1).reshape(block_len, -1)
+
+        output, _ = self.o_proj(attn_output)
+        return output, full_key, full_value
+
 
 class OrthrusDecoderLayer(nn.Module):
     def __init__(
@@ -240,6 +315,29 @@ class OrthrusDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
+    def forward_ar_eager(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        cached_key: torch.Tensor | None,
+        cached_value: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states, new_key, new_value = self.self_attn.forward_ar_eager(
+            positions=positions,
+            hidden_states=hidden_states,
+            cached_key=cached_key,
+            cached_value=cached_value,
+        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual, new_key, new_value
+
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -297,6 +395,47 @@ class OrthrusModel(Qwen2Model):
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
+
+    def forward_ar_eager(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        per_layer_cache: list[tuple[torch.Tensor, torch.Tensor] | None],
+    ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+        """Eager (non-paged) autoregressive forward across all layers.
+
+        Companion to ``forward_diffusion`` for the standalone demo loop in
+        ``OrthrusForCausalLM.generate_with_diffusion`` -- used both for the
+        very first prefill and for the AR verification pass over a
+        proposed diffusion block.
+
+        Args:
+            input_ids: ``[block_len]`` token ids.
+            positions: ``[block_len]`` absolute sequence positions.
+            per_layer_cache: one ``(key, value)`` pair per layer (or
+                ``None`` per layer on the first prefill call).
+
+        Returns:
+            ``(hidden_states, updated_per_layer_cache)``, where
+            ``hidden_states`` is ``[block_len, hidden_size]`` and each
+            updated cache entry is ``[past_len + block_len, num_kv_heads,
+            head_dim]``.
+        """
+        hidden_states = self.embed_input_ids(input_ids)
+        residual = None
+        new_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer, cached in zip(self.layers, per_layer_cache):
+            cached_key, cached_value = cached if cached is not None else (None, None)
+            hidden_states, residual, new_key, new_value = layer.forward_ar_eager(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
+                cached_key=cached_key,
+                cached_value=cached_value,
+            )
+            new_cache.append((new_key, new_value))
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states, new_cache
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -442,6 +581,119 @@ class OrthrusForCausalLM(
             input_ids, positions, per_layer_cached_kv
         )
         return self.compute_logits(hidden_states)
+
+    @torch.inference_mode()
+    def generate_with_diffusion(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int,
+        eos_token_id: int | None = None,
+    ) -> torch.Tensor:
+        """Standalone, single-request greedy diffusion-mode decode loop.
+
+        Ports the reference implementation's ``OrthrusLM.generate`` propose
+        /verify/accept loop (greedy-only) onto this module's own eager
+        forward paths, bypassing vLLM's paged-attention runtime and
+        scheduler entirely. This exists to validate that Orthrus' diffusion
+        decoding actually works end-to-end against vLLM's own weight-loaded
+        model code; it is not wired into vLLM's continuous-batching engine
+        (KV-cache paging, CUDA graphs, and multi-request batching are all
+        future work -- see the PR discussion for what that would require).
+
+        Args:
+            input_ids: ``[1, prompt_len]`` prompt token ids.
+            max_new_tokens: number of new tokens to generate, upper bound.
+            eos_token_id: stop generation once this token is produced.
+
+        Returns:
+            ``[1, prompt_len + generated_len]`` full token sequence.
+        """
+        assert input_ids.shape[0] == 1, "generate_with_diffusion only supports batch size 1"
+        device = input_ids.device
+        block_size = self.config.block_size
+        mask_token_id = self.config.mask_token_id
+        eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
+
+        prompt_ids = input_ids[0]
+        num_input_tokens = prompt_ids.shape[0]
+        max_length = num_input_tokens + max_new_tokens
+
+        output_ids = torch.full(
+            (max_length + block_size,), mask_token_id, dtype=torch.long, device=device
+        )
+        output_ids[:num_input_tokens] = prompt_ids
+
+        # Initial AR prefill.
+        positions = torch.arange(num_input_tokens, device=device)
+        num_layers = len(self.model.layers)
+        hidden_states, kv_cache = self.model.forward_ar_eager(
+            prompt_ids, positions, [None] * num_layers
+        )
+        logits = self.compute_logits(hidden_states)
+        next_token = logits[-1].argmax(dim=-1)
+
+        start_idx = num_input_tokens
+        output_ids[start_idx] = next_token
+        if next_token.item() == eos_token_id:
+            return output_ids[: start_idx + 1].unsqueeze(0)
+
+        while start_idx < max_length - 1:
+            diff_len = min(block_size, max_length - start_idx)
+            diff_block_ids = torch.full((diff_len,), mask_token_id, dtype=torch.long, device=device)
+            diff_block_ids[0] = output_ids[start_idx]
+            diff_positions = torch.arange(start_idx, start_idx + diff_len, device=device)
+
+            # --- Propose: one diffusion forward predicts the whole block. ---
+            if diff_len > 1:
+                diff_logits = self.propose_diffusion_block(
+                    diff_block_ids, diff_positions, kv_cache
+                )
+                diff_tokens = diff_logits[:-1].argmax(dim=-1)
+            else:
+                diff_tokens = torch.empty((0,), dtype=torch.long, device=device)
+
+            proposed_block = torch.cat([output_ids[start_idx : start_idx + 1], diff_tokens])
+
+            # --- Verify: a normal AR forward over the proposed block must
+            # agree, position by position, for the block to be accepted
+            # losslessly (this AR pass is exactly what would run anyway
+            # for a plain non-diffusion decode of these positions). ---
+            ar_hidden, verify_cache = self.model.forward_ar_eager(
+                proposed_block, diff_positions, kv_cache
+            )
+            ar_logits = self.compute_logits(ar_hidden)
+            ar_tokens = ar_logits.argmax(dim=-1)
+
+            matches = diff_tokens == ar_tokens[:-1]
+            acceptance_len = int(matches.cumprod(dim=0).sum().item()) if diff_tokens.numel() else 0
+            next_token = ar_tokens[acceptance_len]
+
+            end_idx = start_idx + acceptance_len + 1
+            accepted_block = proposed_block[: acceptance_len + 1]
+
+            eos_positions = (accepted_block == eos_token_id).nonzero()
+            if len(eos_positions) > 0:
+                eos_offset = int(eos_positions[0, 0].item())
+                output_ids[start_idx : start_idx + eos_offset + 1] = accepted_block[: eos_offset + 1]
+                return output_ids[: start_idx + eos_offset + 1].unsqueeze(0)
+
+            output_ids[start_idx:end_idx] = accepted_block
+            # The AR verification pass already computed correct KV entries
+            # for every accepted position (and only those) -- keep just the
+            # accepted prefix of the newly computed cache.
+            keep_len = accepted_block.shape[0]  # == acceptance_len + 1
+            kv_cache = [
+                (k[: k.shape[0] - diff_len + keep_len], v[: v.shape[0] - diff_len + keep_len])
+                for k, v in verify_cache
+            ]
+            start_idx = end_idx
+
+            if start_idx < max_length:
+                output_ids[start_idx] = next_token
+                if next_token.item() == eos_token_id:
+                    return output_ids[: start_idx + 1].unsqueeze(0)
+
+        return output_ids[:max_length].unsqueeze(0)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
