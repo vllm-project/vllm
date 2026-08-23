@@ -20,8 +20,14 @@ vice versa, so the registries stay independent.
 
 ### WeightSource
 
-A `WeightSource` is a **re-iterable** source of the trainer's weights with two
-channels:
+**This is the adapter for whatever shape your trainer's weights are in.**
+`WeightSource` defines how you extract your weights for your specific framework.
+
+What an engine gets is always the same: HF-format parameter names, and tensors
+already materialized to their full (unsharded) shape. Whatever gathering,
+re-fusing, dequantizing or renaming that takes belongs inside the source.
+
+A `WeightSource` is **re-iterable** and has two required channels:
 
 - **`metadata() -> list[ParamMeta]`** — the name, wire dtype, and full shape of
   every parameter, *without transferring anything*. Cheap when shapes are known
@@ -51,9 +57,7 @@ class ParamMeta:
 Materializing is typically a collective, so **every trainer rank must iterate the
 same source in the same order, in lockstep**, or ranks deadlock. `metadata()` can
 itself be a collective for custom producers, so it too runs on every rank — only
-the sender ships the result. Under pipeline parallelism a rank may not own a
-parameter at all; iterating still drives the collective, and the yielded tensor
-is only meaningful on the sender.
+the sender ships the result.
 
 `iter(source)` must yield a *fresh* pass each round.
 
@@ -70,34 +74,132 @@ from vllm.distributed.weight_transfer import ModuleSource
 source = ModuleSource(model)
 ```
 
-#### Custom Sources
+#### Custom sources
 
-Subclass `WeightSource` when the weights you want to send require additional processing to convert to a HF compatible format.
+Subclass `WeightSource` when the weights need work to reach HF format — a
+framework-specific export, a re-fusing step, a dtype cast.
 
 ```python
 from vllm.distributed.weight_transfer import ParamMeta, WeightSource
-from vllm.distributed.weight_transfer.base import materialize_full_tensor
 
 
-class MyExportSource(WeightSource):
-    def __init__(self, model):
-        self._model = model
+class MegatronBridgeSource(WeightSource):
+    """Megatron model -> HF names, via a bridge that gathers TP/PP/EP internally
+    and returns full tensors on every rank."""
+
+    def __init__(self, bridge, module, dtype):
+        self._bridge, self._module, self._dtype = bridge, module, dtype
         self._meta: list[ParamMeta] | None = None
+
+    def _export(self):
+        return self._bridge.export_hf_weights(self._module)
 
     def metadata(self) -> list[ParamMeta]:
         # Cache: for producers that must materialize to learn shapes, this is
         # the expensive channel. Runs on every rank (it may be a collective).
         if self._meta is None:
             self._meta = [
-                ParamMeta(name, t.dtype, tuple(t.shape)) for name, t in self._export()
+                ParamMeta(name, self._dtype, tuple(t.shape))
+                for name, t in self._export()
             ]
         return self._meta
 
     def __iter__(self):
         # Must yield exactly what metadata() declared, in the same order.
         for name, tensor in self._export():
-            yield name, materialize_full_tensor(tensor)
+            yield name, tensor.to(self._dtype).detach().contiguous()
 ```
+
+#### `held_names()`: partial ownership
+
+By default every rank is assumed to be able to produce every parameter — which is
+what the source above does, since its bridge gathers across all parallelism before
+yielding. That is simple and always correct, but it means the gather cost is paid
+in full on every rank.
+
+Optionally, you can override `held_names()` when the ranks are split so each holds only part of the
+model. It returns the
+parameter names this rank holds (or `None`, the default, for all of them):
+
+```python
+def held_names(self):
+    # This pipeline stage's layers, and within them only this EP rank's experts.
+    return self._my_stage_names - self._foreign_expert_names
+```
+
+This covers various trainer layouts — pipeline stages (a rank holds some layers),
+expert parallelism (a rank holds some experts), both at once, or a shape that fits
+neither. Backends that can route per parameter (see
+[sharded RDT](sharded_rdt.md)) then pull each name from a rank that actually
+holds it.
+
+Three requirements come with overriding it:
+
+- **`metadata()` must still describe the whole model on every rank.** Only the
+  sender's metadata reaches the inference side, so a rank that reported just its
+  own share would leave the rest silently un-transferred. Sharded RDT cross-checks
+  this across ranks at init.
+- **Every name must be held by at least one rank**, or it can never be served.
+  The engine raises at init naming the first orphan.
+- **Iteration yields `None` for a name this rank does not hold.** The name still
+  appears, in metadata order, so the order check stays aligned across ranks — only
+  the data is absent. Claiming a name and then yielding `None` for it is an error
+  the engine reports by name.
+
+!!! warning "Partial ownership only works with sharded RDT"
+    Only a backend that routes per parameter honours `held_names()`.
+    Broadcast backends ignore it and send every name from every rank, so
+    declaring partial ownership there changes nothing.
+
+#### Gather groups
+
+Some backends transfer a layer at a time rather than a model at a time, so they
+partition `metadata()` into **gather groups**. `layerwise_groups` keys each name
+on the **outermost index segment** it contains, so **a group is one decoder
+layer**, with runs of un-indexed names (the embeddings, the final norm,
+`lm_head`) forming groups of their own where they appear:
+
+```text
+group 0     model.embed_tokens.weight
+group 1     model.layers.0.*          <- one decoder layer
+group 2     model.layers.1.*
+...
+group N+1   model.norm.weight, lm_head.weight
+```
+
+Keying on the index rather than a literal prefix means no per-architecture table:
+`model.layers.0.`, `model.language_model.layers.0.` (recent Qwen text
+checkpoints), `transformer.h.0.` (GPT-2, Falcon), `backbone.layers.0.` (Mamba)
+and a vision tower's `visual.blocks.0.` all partition the same way. The index
+taken is the *outermost* one, which keeps a MoE layer whole — a per-expert name
+like `model.layers.3.mlp.experts.7.w1` keys on the layer, not the expert.
+
+Group index *g* means the same layer on every rank and every consumer, because
+every side derives it from one rank's `metadata()`. That agreement is what lets a
+backend bound its buffers to one layer and free a layer once everyone is done
+with it.
+
+!!! warning "A leaf module's sources must all fall in one group"
+    The sharded-RDT engine frees a group as soon as its last chunk lands, so a
+    module split across groups would park a pull until the stall watchdog fires.
+    The default partition guarantees this; a `groups()` override must preserve
+    it.
+
+Two hooks follow from this, both with working defaults:
+
+- **`groups()`** — this rank's groups, in metadata order. The default is
+  `layerwise_groups(metadata())` restricted to the groups holding at least one
+  held name. A group with nothing held here is skipped entirely.
+- **`iter_groups()`** — the same stream, batched one group at a time. The default
+  drives `__iter__` and batches its output, checking that names arrive in metadata
+  order. Override it when your framework can produce a whole group in one step:
+  materializing is usually a collective, and driving it per group rather than per
+  tensor turns ~37k generator resumes into ~95 on a per-expert MoE model.
+
+Because `metadata()` order defines the partition, **all names sharing a layer
+index must be contiguous in it**. A source whose natural export order interleaves
+layers — bucketing all the MoE experts together, say — has to reorder before
+returning.
 
 ### VLLMWeightSyncClient
 
@@ -372,7 +474,7 @@ Subclasses must implement five methods:
 The base class provides:
 
 1. `__init__`, taking `config` (`WeightTransferConfig`), `vllm_config` (`VllmConfig`), `device` (`torch.device`), and `model` (`nn.Module`).
-2. `update_weights(update_info_dict)`, a thin wrapper for `receive_weights`: it parses the dict into the typed dataclass, calls `receive_weights`, and synchronizes the device.
+2. `update_weights(update_info_dict)`, a thin wrapper for `receive_weights`: it parses the dict into the typed dataclass, calls `receive_weights`, and synchronizes the device — unless the engine sets `defers_processing`, below.
 3. `parse_init_info` / `parse_update_info`, which convert API-level dicts into the typed dataclasses and raise `ValueError` on a bad payload.
 4. `set_weight_update_target` / `reset_weight_update_target`, used to retarget an update at the speculative draft model.
 
@@ -382,6 +484,25 @@ The base class provides:
     `init_transfer_engine`, then read from `self` in `receive_weights`. Per-round
     update info carries only per-round metadata. This is what makes a
     trainer/worker mismatch unrepresentable.
+
+!!! note "`defers_processing`: when a returned update means queued, not applied"
+    An engine that pipelines its GPU post-processing onto background threads
+    cannot let `update_weights` synchronize the device — that would block on
+    those threads and serialize the pipeline. Such an engine sets the class
+    attribute `defers_processing = True`, omits the per-update sync, and
+    guarantees completion in `finish_weight_update` instead.
+
+    Callers that go through `finish_weight_update` need do nothing; the engine
+    drains there. A caller that drives the tail itself — running its own
+    `finalize_layerwise_reload`, say — must check the flag and call
+    `drain_pending()` first, because with it set a returned `update_weights`
+    means *queued*, not *applied*. `drain_pending()` is idempotent, and a no-op
+    on an engine that processes synchronously, so it is always safe to call.
+
+    [Sharded RDT](sharded_rdt.md) is the built-in engine that sets it: it
+    scatters and quantizes on background threads with their own CUDA streams, so
+    its `drain_pending()` joins both queues and syncs both streams before
+    `finalize_layerwise_reload` runs.
 
 ### Request Classes
 
@@ -497,7 +618,7 @@ Once registered, users select your backend via `WeightTransferConfig(backend="my
 
 ### WeightTransferEngineFactory
 
-The factory uses a registry pattern with lazy loading. Built-in engines (`nccl`, `ipc`, and `sparse_nccl`) are registered at import time but their modules are only loaded when the backend is actually requested. This avoids importing heavy dependencies (like NCCL communicators) when they aren't needed.
+The factory uses a registry pattern with lazy loading. Built-in engines (`nccl`, `ipc`, `sparse_nccl` and `sharded_rdt`) are registered at import time but their modules are only loaded when the backend is actually requested. This avoids importing heavy dependencies (like NCCL communicators) when they aren't needed.
 
 ```python
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
