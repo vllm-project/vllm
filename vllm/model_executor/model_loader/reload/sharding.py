@@ -155,10 +155,6 @@ class ReloadAwareWeightLoader:
         return result
 
 
-# Compatibility for code importing the old private name.
-_ShardingLoader = ReloadAwareWeightLoader
-
-
 def install_sharding_recorders(model: torch.nn.Module) -> None:
     """Wrap direct parameter loaders without changing their call contract."""
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
