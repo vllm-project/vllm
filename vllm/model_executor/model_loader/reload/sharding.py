@@ -18,6 +18,7 @@ from .source import get_current_source_name
 from .units import TRACKER_ATTR
 
 _FRAGMENT_ARGUMENTS = ("loaded_shard_id", "shard_id", "expert_id", "weight_name")
+OBSERVED_SHARDS_ATTR = "_reload_observed_shards"
 _ACTIVE_MODEL: ContextVar[torch.nn.Module | None] = ContextVar(
     "rank_sharding_model", default=None
 )
@@ -104,6 +105,8 @@ class ReloadAwareWeightLoader:
             bound.apply_defaults()
         model = self.model()
         source_name = get_current_source_name()
+        routed_tracker = None
+        routed_key = None
         if model is not None and self.signature is not None:
             fragment = {
                 name: bound.arguments[name]
@@ -114,7 +117,11 @@ class ReloadAwareWeightLoader:
             if "expert_id" in fragment and "shard_id" in fragment:
                 module_name, _, parameter_name = self.target_name.rpartition(".")
                 module = dict(model.named_modules()).get(module_name)
-                tracker = getattr(module, TRACKER_ATTR, None) if module else None
+                tracker = (
+                    getattr(module, TRACKER_ATTR, None)
+                    if module is not None
+                    else None
+                )
                 if tracker is not None:
                     expert_id = int(fragment["expert_id"])
                     mapper = getattr(
@@ -122,6 +129,8 @@ class ReloadAwareWeightLoader:
                     )
                     local_expert = mapper(expert_id) if mapper is not None else -1
                     key = (parameter_name, local_expert, str(fragment["shard_id"]))
+                    routed_tracker = tracker
+                    routed_key = key
                     parameter = bound.arguments.get("param")
                     if parameter is not None:
                         bound.arguments["param"] = tracker.target(key, parameter)
@@ -129,17 +138,18 @@ class ReloadAwareWeightLoader:
                         kwargs = bound.kwargs
 
         result = self.inner(*args, **kwargs)
-        if model is None or source_name is None or _ACTIVE_MODEL.get() is not model:
+        if model is None:
             return result
+        fields = {}
         if isinstance(result, LoadReceipt):
             consumed = result.consumed
             fragment = result.fragment
+            fields = dict(fragment.items)
         else:
             consumed = result is True if (
                 bound is not None
                 and bound.arguments.get("return_success") is True
             ) else True
-            fields = {}
             if bound is not None:
                 fields = {
                     name: bound.arguments[name]
@@ -149,8 +159,27 @@ class ReloadAwareWeightLoader:
                 }
             fragment = LoadFragment.from_fields(**fields)
         if consumed:
+            if routed_tracker is not None and routed_key is not None:
+                routed_tracker.record(routed_key)
+            if "expert_id" in fields and "shard_id" in fields:
+                module_name, _, parameter_name = self.target_name.rpartition(".")
+                module = dict(model.named_modules()).get(module_name)
+                if module is not None:
+                    mapper = getattr(
+                        module, "_map_global_expert_id_to_local_expert_id", None
+                    )
+                    expert_id = int(fields["expert_id"])
+                    local_expert = mapper(expert_id) if mapper else expert_id
+                    if local_expert >= 0:
+                        observed = getattr(module, OBSERVED_SHARDS_ATTR, None)
+                        if observed is None:
+                            observed = set()
+                            setattr(module, OBSERVED_SHARDS_ATTR, observed)
+                        observed.add(
+                            (parameter_name, local_expert, str(fields["shard_id"]))
+                        )
             records = _ACTIVE_SHARDS.get()
-            if records is not None:
+            if records is not None and source_name is not None:
                 records.add(RankShard(source_name, self.target_name, fragment))
         return result
 

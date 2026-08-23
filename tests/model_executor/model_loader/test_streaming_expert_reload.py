@@ -9,16 +9,13 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.reload.expert_loader import (
-    OBSERVED_ATTR,
-    ExpertShardLoader,
-    install_expert_shard_loaders,
-)
 from vllm.model_executor.model_loader.reload.modelwise import (
     ModelwiseReloader,
     record_modelwise_reload_metadata,
 )
 from vllm.model_executor.model_loader.reload.sharding import (
+    OBSERVED_SHARDS_ATTR,
+    ReloadAwareWeightLoader,
     capture_rank_sharding,
     install_sharding_recorders,
     uninstall_sharding_recorders,
@@ -62,7 +59,6 @@ class _FakeExperts(torch.nn.Module):
         )
         for param in self._parameters.values():
             param.weight_loader = self.weight_loader
-        install_expert_shard_loaders(self)
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         return expert_id if expert_id < self.local_num_experts else -1
@@ -128,6 +124,7 @@ def _w13_unit(layer: _FakeExperts, expert: int, commits: list) -> ReloadUnit:
 
 
 def _load(layer, param_name, shard_id, expert_id, value):
+    install_sharding_recorders(layer)
     param = getattr(layer, param_name)
     if "scale" in param_name:
         weight = torch.tensor(value)
@@ -316,7 +313,7 @@ def test_loader_records_shard_keys_without_a_session():
     _load(layer, "w2_weight", "w2", 1, 1.0)
     _load(layer, "w13_weight", "w1", 9, 1.0)
 
-    assert getattr(layer, OBSERVED_ATTR) == {
+    assert getattr(layer, OBSERVED_SHARDS_ATTR) == {
         ("w13_weight", 0, "w1"),
         ("w2_weight", 1, "w2"),
     }
@@ -324,8 +321,9 @@ def test_loader_records_shard_keys_without_a_session():
 
 def test_loader_preserves_moe_loading_marker_and_unwrapping():
     layer = _FakeExperts()
+    install_sharding_recorders(layer)
     loader = layer.w13_weight.weight_loader
-    assert isinstance(loader, ExpertShardLoader)
+    assert isinstance(loader, ReloadAwareWeightLoader)
     assert loader.__wrapped__ == layer.weight_loader
     assert hasattr(loader, "__name__")
 
@@ -354,7 +352,6 @@ class _StreamingModel(torch.nn.Module):
         self.experts = _FakeExperts()
         self.experts.w13_weight_scale = torch.nn.Parameter(torch.ones(2, 2))
         self.experts.w13_weight_scale.weight_loader = self.experts.weight_loader
-        install_expert_shard_loaders(self.experts)
         self.experts.quant_method = _StreamingMethod(self.experts, commits)
         self.dense = torch.nn.Module()
         self.dense.weight = torch.nn.Parameter(torch.zeros(2))

@@ -22,7 +22,6 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
-    "ExpertShardLoader",
     "ReloadAwareWeightLoader",
     "ModelwiseReloader",
     "ModelwiseReloadSession",
@@ -35,7 +34,6 @@ __all__ = [
     "support_quantized_model_reload_from_hp_weights",
 ]
 
-from .expert_loader import ExpertShardLoader
 from .layerwise import (
     finalize_layerwise_processing,
     finalize_layerwise_reload,
