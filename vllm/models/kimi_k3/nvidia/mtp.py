@@ -409,7 +409,12 @@ class KimiK3MTP(nn.Module):
         if use_mega_moe:
             for module in self.modules():
                 if isinstance(module, KimiMoE) and module.use_mega_moe:
-                    module.experts.finalize_weights()
+                    routed_output_transform = module.routed_output_transform
+                    assert routed_output_transform is not None
+                    norm = routed_output_transform.norm
+                    module.experts.finalize_weights(
+                        module.shared_experts if norm is not None else None
+                    )
 
         return loaded_params
 

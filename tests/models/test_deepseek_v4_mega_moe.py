@@ -261,6 +261,61 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(monkeypatch
     )
 
 
+def test_kimi_k3_mega_moe_finalizes_bf16_shared_expert_weights(monkeypatch):
+    from vllm.models.kimi_k3.nvidia.model import KimiK3MegaMoEExperts
+
+    class FakeDeepGemm:
+        fp8_fp4_mega_moe_bf16_shared = object()
+
+        @staticmethod
+        def transform_weights_for_mega_moe(l1, l2, *, activation):
+            assert activation == "situ"
+            return l1.clone(), l2
+
+    experts = KimiK3MegaMoEExperts.__new__(KimiK3MegaMoEExperts)
+    torch.nn.Module.__init__(experts)
+    experts.activation = "situ"
+    experts._transformed_l1_weights = (torch.empty(1), torch.empty(1))
+    experts._transformed_l2_weights = (torch.empty(1), torch.empty(1))
+    experts._transformed_bf16_shared_l1_weight = None
+    experts._transformed_bf16_shared_l2_weight = None
+    experts._bf16_shared_hidden_size = 0
+    experts._bf16_shared_intermediate_size = 0
+
+    shared_experts = SimpleNamespace(
+        shard_sequence_parallel=False,
+        gate_up_proj=SimpleNamespace(
+            weight=torch.nn.Parameter(
+                torch.randn(256, 128, dtype=torch.bfloat16),
+                requires_grad=False,
+            )
+        ),
+        down_proj=SimpleNamespace(
+            weight=torch.nn.Parameter(
+                torch.randn(128, 128, dtype=torch.bfloat16),
+                requires_grad=False,
+            )
+        ),
+    )
+    monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: FakeDeepGemm)
+
+    original_gate_up_ptr = shared_experts.gate_up_proj.weight.data_ptr()
+    experts.finalize_weights(shared_experts)
+
+    assert experts.has_fused_bf16_shared_experts
+    assert shared_experts.gate_up_proj.weight.data_ptr() != original_gate_up_ptr
+    assert (
+        experts._transformed_bf16_shared_l1_weight.data_ptr()
+        == shared_experts.gate_up_proj.weight.data_ptr()
+    )
+    assert (
+        experts._transformed_bf16_shared_l2_weight.data_ptr()
+        == shared_experts.down_proj.weight.data_ptr()
+    )
+    assert experts._bf16_shared_hidden_size == 128
+    assert experts._bf16_shared_intermediate_size == 128
+
+
 @pytest.mark.parametrize("fused", [False, True])
 def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
     monkeypatch, fused
