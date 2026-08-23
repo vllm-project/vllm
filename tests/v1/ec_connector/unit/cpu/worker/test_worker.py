@@ -228,6 +228,7 @@ def test_save_caches_writes_to_assigned_blocks(make_worker, n_elements, n_blocks
     block_ids = [7, 2, 5, 0][:n_blocks]
     worker.save_caches({"h": src}, "h", _meta(saves={"h": block_ids}))
     worker.flush_saves()
+    _wait_for_completion(worker, "h", "saves")
 
     for slot, block_idx in enumerate(block_ids):
         block_byte_start = slot * _BLOCK_SIZE_BYTES
@@ -305,6 +306,7 @@ def test_save_caches_batches_multiple_hashes(make_worker):
     worker.save_caches(cache, "a", _meta(saves={"a": [1], "b": [3]}))
     worker.save_caches(cache, "b", _meta(saves={"a": [1], "b": [3]}))
     worker.flush_saves()
+    _wait_for_completion(worker, "a", "saves")
 
     expected_a = src_a.cpu().view(torch.uint8)
     expected_b = src_b.cpu().view(torch.uint8)
@@ -449,6 +451,7 @@ def test_save_then_load_round_trips_bytes(make_worker):
     ).reshape(n_blocks, _HIDDEN_DIM)
     worker.save_caches({"h": src}, "h", _meta(saves={"h": block_ids}))
     worker.flush_saves()
+    _wait_for_completion(worker, "h", "saves")
 
     encoder_cache: dict[str, torch.Tensor] = {}
     worker.start_load_caches(encoder_cache, _meta(loads={"h": block_ids}))
