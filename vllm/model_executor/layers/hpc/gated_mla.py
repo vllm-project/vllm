@@ -50,12 +50,12 @@ def hpc_gated_mla_supported(
     from vllm.platforms import current_platform
 
     if not current_platform.is_cuda():
-        logger.info_once("HPC gated MLA disabled: only CUDA is supported.")
+        logger.warning_once("HPC gated MLA disabled: only CUDA is supported.")
         return False
 
     capability = current_platform.get_device_capability()
     if capability is None or capability.to_int() not in _HPC_GATED_GEMM_CAPABILITIES:
-        logger.info_once(
+        logger.warning_once(
             "HPC gated MLA disabled: compute capability %s not in %s.",
             capability,
             _HPC_GATED_GEMM_CAPABILITIES,
@@ -65,7 +65,7 @@ def hpc_gated_mla_supported(
     # Headwise gating broadcasts one scalar per head over v_head_dim; the
     # kernel only implements the elementwise product.
     if gating_type != "elementwise":
-        logger.info_once(
+        logger.warning_once(
             "HPC gated MLA disabled: gating_type '%s' has no fused form.",
             gating_type,
         )
@@ -73,7 +73,7 @@ def hpc_gated_mla_supported(
 
     weight = getattr(attn_output_gate, "weight", None)
     if weight is None or weight.dtype != torch.bfloat16:
-        logger.info_once(
+        logger.warning_once(
             "HPC gated MLA disabled: gate weight dtype is %s, the kernel needs "
             "bfloat16 (keep the layer out of quantization).",
             None if weight is None else weight.dtype,
@@ -81,16 +81,14 @@ def hpc_gated_mla_supported(
         return False
 
     if weight.shape[0] % _HPC_GATED_GEMM_N_ALIGN != 0:
-        logger.info_once(
+        logger.warning_once(
             "HPC gated MLA disabled: gate width %d is not a multiple of %d.",
             weight.shape[0],
             _HPC_GATED_GEMM_N_ALIGN,
         )
         return False
 
-    logger.info_once(
-        "HPC gated MLA enabled: output gating runs through hpc.gated_mla_gemm."
-    )
+    logger.info_once("HPC gated MLA enabled by set VLLM_USE_HPC_GATED_MLA.")
     return True
 
 

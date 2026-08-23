@@ -48,6 +48,9 @@ _SUPPORTED_CAPABILITIES: frozenset[int] = frozenset({100, 103})
 
 def _ihc_supported(hc_mult: int, hidden_size: int) -> bool:
     """Shared gate for all three iHC ops."""
+    if not envs.VLLM_ENABLE_HPC_IHC:
+        return False
+
     if not has_hpc():
         logger.warning_once(
             "HPC iHC disabled: 'hpc' package is not installed. "
@@ -55,19 +58,15 @@ def _ihc_supported(hc_mult: int, hidden_size: int) -> bool:
         )
         return False
 
-    if not envs.VLLM_ENABLE_HPC_IHC:
-        logger.info_once("HPC iHC disabled by not set VLLM_ENABLE_HPC_IHC.")
-        return False
-
     from vllm.platforms import current_platform
 
     if not current_platform.is_cuda():
-        logger.info_once("HPC iHC disabled: only CUDA is supported.")
+        logger.warning_once("HPC iHC disabled: only CUDA is supported.")
         return False
 
     capability = current_platform.get_device_capability()
     if capability is None or capability.to_int() not in _SUPPORTED_CAPABILITIES:
-        logger.info_once(
+        logger.warning_once(
             "HPC iHC disabled: compute capability %s not in %s.",
             capability,
             _SUPPORTED_CAPABILITIES,
@@ -75,13 +74,13 @@ def _ihc_supported(hc_mult: int, hidden_size: int) -> bool:
         return False
 
     if hc_mult not in _SUPPORTED_HC_MULTS:
-        logger.info_once(
+        logger.warning_once(
             "HPC iHC disabled: hc_mult=%d not in %s.", hc_mult, _SUPPORTED_HC_MULTS
         )
         return False
 
     if hidden_size not in _SUPPORTED_HIDDEN_SIZES:
-        logger.info_once(
+        logger.warning_once(
             "HPC iHC disabled: hidden_size=%d not in %s.",
             hidden_size,
             _SUPPORTED_HIDDEN_SIZES,
@@ -92,9 +91,12 @@ def _ihc_supported(hc_mult: int, hidden_size: int) -> bool:
         # Batch-invariant mode relies on torch's deterministic reductions; the
         # HPC kernel reduces in a different order, so keep the two regimes
         # apart.
-        logger.info_once("HPC iHC disabled: not supported under VLLM_BATCH_INVARIANT.")
+        logger.warning_once(
+            "HPC iHC disabled: not supported under VLLM_BATCH_INVARIANT."
+        )
         return False
 
+    logger.info_once("HPC iHC enabled by set VLLM_ENABLE_HPC_IHC.")
     return True
 
 
