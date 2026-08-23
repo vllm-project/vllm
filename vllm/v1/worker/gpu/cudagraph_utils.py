@@ -120,6 +120,7 @@ class CudaGraphManager:
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
         self.lora_capture_cases = lora_capture_cases or [0]
@@ -393,6 +394,15 @@ class CudaGraphManager:
         key = (num_tokens, effective_loras)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
             for desc in self._candidates[key]:
+                # PCP mixed batches have rank-local layouts that can change with
+                # the prefill split. Uniform decode keeps a stable replicated
+                # layout and is safe for PIECEWISE replay.
+                if (
+                    self.pcp_size > 1
+                    and desc.cg_mode == CUDAGraphMode.PIECEWISE
+                    and uniform_token_count != self.decode_query_len
+                ):
+                    continue
                 if _is_compatible(
                     desc,
                     num_reqs,
@@ -472,6 +482,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        pcp_input_buffers: InputBuffers | None = None,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
@@ -488,6 +499,9 @@ class ModelCudaGraphManager(CudaGraphManager):
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
+            capture_input_buffers = (
+                pcp_input_buffers if pcp_input_buffers is not None else input_buffers
+            )
 
             # Set LoRA state before capture so kernels see correct adapters.
             if lora_capture_hook is not None:
@@ -500,8 +514,8 @@ class ModelCudaGraphManager(CudaGraphManager):
             )
 
             model_inputs = {
-                "input_ids": input_buffers.input_ids[:num_tokens],
-                "positions": input_buffers.positions[:num_tokens],
+                "input_ids": capture_input_buffers.input_ids[:num_tokens],
+                "positions": capture_input_buffers.positions[:num_tokens],
                 **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
             }
             if not self.is_first_pp_rank:
@@ -524,7 +538,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             )
 
             # Capture with dummy rows marked as padding.
-            input_buffers.is_padding.fill_(True)
+            capture_input_buffers.is_padding.fill_(True)
 
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 batch_descriptor = None
@@ -542,7 +556,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     num_tokens_across_dp=num_tokens_across_dp,
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
-                    is_padding=input_buffers.is_padding[:num_tokens],
+                    is_padding=capture_input_buffers.is_padding[:num_tokens],
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside

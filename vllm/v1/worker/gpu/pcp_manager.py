@@ -160,6 +160,11 @@ class PCPManager:
         if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
 
+    @property
+    def input_buffers(self) -> InputBuffers:
+        assert self._input_buffers is not None
+        return self._input_buffers
+
     @staticmethod
     def _reorder_segments(
         segments: list[RankSegment],
@@ -255,6 +260,7 @@ class PCPManager:
         num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
         query_start_loc_np: np.ndarray,
+        padded_num_tokens: int | None = None,
     ) -> tuple[list[list[RankSegment]], list[int]]:
         segments_by_rank = []
         per_rank_num_tokens = []
@@ -279,7 +285,14 @@ class PCPManager:
         # Therefore global = gathered[hidden_restore_idx] and
         # padded_gathered = global[padded_gather_idx].
         hidden_restore_idx = np.empty(int(query_start_loc_np[-1]), dtype=np.int64)
-        padded_num_tokens = max(per_rank_num_tokens)
+        required_num_tokens = max(per_rank_num_tokens)
+        if padded_num_tokens is None:
+            padded_num_tokens = required_num_tokens
+        elif padded_num_tokens < required_num_tokens:
+            raise RuntimeError(
+                "PCP graph token capacity is smaller than the rank-local batch: "
+                f"{padded_num_tokens} < {required_num_tokens}."
+            )
         num_expanded_tokens = padded_num_tokens * self.pcp_world_size
         padded_gather_idx = np.zeros(num_expanded_tokens, dtype=np.int64)
         gathered_kv_write_mask = np.zeros(num_expanded_tokens, dtype=np.bool_)
@@ -327,6 +340,12 @@ class PCPManager:
         global_batch = input_batch
         self._global_batch = global_batch
 
+        num_tokens_after_padding = (
+            global_batch.num_tokens_after_padding
+            if global_batch.num_tokens_after_padding > global_batch.num_tokens
+            else None
+        )
+
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
         is_prefilling = global_batch.is_prefilling_np
@@ -336,6 +355,7 @@ class PCPManager:
             num_computed_tokens,
             is_prefilling,
             global_batch.query_start_loc_np,
+            padded_num_tokens=num_tokens_after_padding,
         )
 
         local_segments = segments_by_rank[self.pcp_rank]
@@ -384,7 +404,11 @@ class PCPManager:
         ]
 
         num_local_tokens = int(local_num_scheduled_tokens.sum())
-        num_local_tokens_padded = max(per_rank_num_tokens)
+        num_local_tokens_padded = (
+            max(per_rank_num_tokens)
+            if num_tokens_after_padding is None
+            else num_tokens_after_padding
+        )
         fresh_prefills = int(
             np.count_nonzero(is_prefilling & (num_computed_tokens == 0))
         )
