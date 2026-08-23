@@ -890,7 +890,12 @@ def fused_rope_and_unified_kv_cache_update_q_out(
 ) -> None:
     """Write rotated Q and update the layer's hidden K/V cache."""
     layer_name = _resolve_layer_name(layer_name)
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
+    assert layer_slot_mapping is not None or attn_metadata is None, (
+        "Decoder attention metadata requires a per-layer slot mapping."
+    )
     attn_layer = cast(Attention, attn_layer)
     attn_layer._rope_and_kv_cache_update_q_out(
         query,

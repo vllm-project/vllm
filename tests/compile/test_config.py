@@ -318,6 +318,25 @@ def test_splitting_ops_dynamic():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
+@pytest.mark.parametrize(
+    ("is_rocm", "expected_enabled"),
+    [(False, True), (True, False)],
+)
+def test_rope_kvcache_default_splitting_requirement_is_rocm_only(
+    is_rocm: bool, expected_enabled: bool
+):
+    config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        use_inductor_graph_partition=False,
+    )
+    config.pass_config.fuse_rope_kvcache = True
+
+    with patch.object(current_platform, "is_rocm", return_value=is_rocm):
+        config.set_splitting_ops_for_v1(all2all_backend="", data_parallel_size=1)
+
+    assert config.pass_config.fuse_rope_kvcache is expected_enabled
+
+
 def test_moe_splitting_ops_deepep_ht_inductor_partition():
     # Inductor partition case: user-provided splitting_ops should be
     # preserved and MoE ops should be appended for DeepEP HT with dp>1.

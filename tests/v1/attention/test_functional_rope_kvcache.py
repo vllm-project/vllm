@@ -99,7 +99,7 @@ def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
-            use_inductor_graph_partition=True,
+            use_inductor_graph_partition=False,
             inductor_compile_config={"force_disable_caches": True},
             pass_config=PassConfig(
                 fuse_rope_kvcache=True,

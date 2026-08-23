@@ -1162,7 +1162,13 @@ class CompilationConfig:
                 # that doesn't seem to affect performance.
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
-                    if self.pass_config.fuse_rope_kvcache:
+                    # CUDA uses a manual model call site and does not need the
+                    # legacy graph pass to see RoPE and the cache update in the
+                    # same Inductor graph. ROCm still relies on that pass.
+                    if (
+                        self.pass_config.fuse_rope_kvcache
+                        and current_platform.is_rocm()
+                    ):
                         logger.warning_once(
                             "fuse_rope_kvcache is enabled, but splitting_ops is None "
                             "and Inductor graph partition is not enabled."

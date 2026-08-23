@@ -43,7 +43,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
 | `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
 | `fuse_attn_quant` (MLA)\*    | FP8 static\*, FP8 per-group\*, NVFP4\*   | FP8 static\*, FP8 per-group\*            | FP8 static\*, FP8 per-group\*            | —             | FP8 static\* (untested)                  |
-| `fuse_rope_kvcache`          | FP16/BF16, FP8 static                    | FP16/BF16, FP8 static                    | FP16/BF16                                | FP16/BF16     | FP16/BF16                                |
+| `fuse_rope_kvcache`          | FP16/BF16                                | FP16/BF16, FP8 static‡                   | FP16/BF16                                | FP16/BF16     | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
 | `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
 | `fuse_gemm_comms`            | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
@@ -59,6 +59,12 @@ for per-backend details.
 † `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
 other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
 SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
+
+‡ `fuse_rope_kvcache` reaches the FP8 KV-cache path on SM90 only when using
+FlashAttention 4, whose native FP16/BF16 query path does not require separate
+query quantization. The default SM90 FlashAttention 3 path and the SM100 FP8
+path use query quantization and retain the unfused model path. The CUDA operator
+itself supports writing FP8 cache entries.
 
 ## Enabling / Disabling Fusions
 
@@ -184,8 +190,10 @@ a single kernel, avoiding separate reads and writes of the key and value tensors
 The Llama model definition uses a manual call site on supported NVIDIA
 FlashAttention decoder layers. It writes rotated Q to graph-owned storage and writes
 K/V directly to the paged cache before attention. Unsupported layouts, quantization,
-parallelism, long token ranges, and missing cache mappings retain the ordinary RoPE
-and cache-update path. CUDA does not register the legacy graph pass for this flag.
+parallelism, and long token ranges retain the ordinary RoPE and cache-update path.
+Profiling runs without a layer slot mapping perform ordinary RoPE and skip the cache
+write; attention is also skipped because those runs have no attention metadata. CUDA
+does not register the legacy graph pass for this flag.
 
 ROCm model definitions continue to use the compiler pass and require the
 `rotary_embedding` and `kv_cache` update ops to be visible in the same graph,
