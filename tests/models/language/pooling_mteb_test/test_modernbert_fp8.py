@@ -53,6 +53,7 @@ def test_modernbert_online_fp8_mteb(hf_runner, vllm_runner, monkeypatch) -> None
         vllm_runner,
         MODEL_INFO,
         vllm_extra_kwargs={"quantization": "fp8_per_tensor"},
-        atol=1e-3,
+        # Account for Online FP8 kernel variance across GPU architectures.
+        atol=2e-3,
         vllm_model_callback=check_online_fp8,
     )
