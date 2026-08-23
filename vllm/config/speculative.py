@@ -4,6 +4,7 @@
 import copy
 import functools
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -366,6 +367,69 @@ def _validate_qwen3_omni_dspark(
             "Qwen3-Omni DSpark draft checkpoints must use logical 1-D RoPE and "
             "must not define mrope_section."
         )
+
+
+@dataclass(frozen=True)
+class DraftInputLayout:
+    """Per-request draft input layout of the draft model forward.
+
+    Suppose that target forward processes ``Q`` slots, and let ``t_i`` denote i-th
+    target token, then target and draft forward input tokens can be described as:
+
+        target forward:
+        [t_0, t_1, ..., t_{Q-1}] -> bonus/anchor
+
+        how draft uses target:
+        all              [t_0, t_1, ..., t_{Q-1}]
+        all_except_first      [t_1, ..., t_{Q-1}]
+        last_valid               [t_{last_valid}]
+        none                                   []
+
+        draft forward:
+        [target_segment][includes_bonus_as_anchor?][mask * num_parallel_drafting_tokens]
+    """
+
+    target_segment: Literal["all", "all_except_first", "last_valid", "none"]
+    includes_bonus_as_anchor: bool
+    num_parallel_drafting_tokens: int
+
+    @classmethod
+    def make_empty(cls) -> "DraftInputLayout":
+        """Return empty draft input layout when not enabling speculative decoding."""
+        return cls(
+            target_segment="none",
+            includes_bonus_as_anchor=False,
+            num_parallel_drafting_tokens=0,
+        )
+
+    def get_cost(self, num_target_tokens: int) -> int:
+        """Return the draft input size for a request with ``num_target_tokens``."""
+        if num_target_tokens == 0:
+            return 0
+
+        if self.target_segment == "all":
+            num_target_derived_tokens = num_target_tokens
+        elif self.target_segment == "all_except_first":
+            num_target_derived_tokens = num_target_tokens - 1
+        elif self.target_segment == "last_valid":
+            num_target_derived_tokens = 1
+        else:
+            num_target_derived_tokens = 0
+        return (
+            num_target_derived_tokens
+            + int(self.includes_bonus_as_anchor)
+            + self.num_parallel_drafting_tokens
+        )
+
+    @property
+    def minimum_cost(self) -> int:
+        """Return the draft input size for exactly one target token."""
+        return self.get_cost(1)
+
+    @property
+    def grows_with_target_input(self) -> bool:
+        """Whether the draft input size grows with the target input size."""
+        return self.target_segment in ("all", "all_except_first")
 
 
 @config
@@ -1733,45 +1797,60 @@ class SpeculativeConfig:
                 )
 
     @property
-    def max_num_new_slots_for_drafting(self) -> int:
-        """Return the maximum additional drafting slots per request.
+    def draft_input_layout(self) -> DraftInputLayout:
+        """Return per-request draft input layout of the draft model forward.
 
-        The scheduler budget already includes one query slot per decoding request.
-        Let K be ``num_speculative_tokens``. Standard configurations require:
+        ================================= ================ ============ ===============
+        Method / Variant                  Target Segment   Bonus Anchor Parallel Tokens
+        ================================= ================ ============ ===============
+        ngram / ngram_gpu / suffix        none             No           0
+        draft_model                       all              Yes          0
+        draft_model (PARD)                all              Yes          K - 1
+        mtp                               all_except_first Yes          0
+        eagle / eagle3                    all_except_first Yes          0
+        eagle / eagle3 (P-EAGLE)          all_except_first Yes          K - 1
+        dflash                            none             Yes          K
+        dspark (sample_from_anchor=True)  none             Yes          K - 1
+        dspark (sample_from_anchor=False) none             Yes          K
+        medusa                            last_valid       No           0
+        extract_hidden_states             all              No           0
+        ================================= ================ ============ ===============
 
-        ==================== ============= ======== ================
-        Algorithm            Method        Parallel Additional slots
-        ==================== ============= ======== ================
-        EAGLE3               eagle3        No       0
-        P-EAGLE              eagle3        Yes      K - 1
-        DFlash               dflash        Yes      K
-        DSpark               dspark        Yes      K - 1
-        MTP                  mtp           No       0
-        N-gram               ngram         No       0
-        Draft model          draft_model   No       1
-        PARD                 draft_model   Yes      K
-        ==================== ============= ======== ================
+        ``K`` is ``num_speculative_tokens``.
         """
-        num_draft_tokens = self.num_speculative_tokens
+        num_speculative_tokens = self.num_speculative_tokens
+
+        target_segment = "none"
+        includes_bonus_as_anchor = False
+        num_parallel_drafting_tokens = 0
 
         if self.use_dflash():
-            # DFlash uses one bonus query followed by K mask queries.
-            return num_draft_tokens
+            includes_bonus_as_anchor = True
+            num_parallel_drafting_tokens = num_speculative_tokens
+        elif self.use_dspark():
+            hf_config = getattr(self.draft_model_config, "hf_config", None)
+            sample_from_anchor = getattr(hf_config, "sample_from_anchor", True)
+            includes_bonus_as_anchor = True
+            num_parallel_drafting_tokens = (
+                num_speculative_tokens - 1
+                if sample_from_anchor
+                else num_speculative_tokens
+            )
+        elif self.method == "medusa":
+            target_segment = "last_valid"
+        elif self.uses_extract_hidden_states():
+            target_segment = "all"
+        elif self.uses_draft_model() or self.use_eagle():
+            target_segment = "all" if self.uses_draft_model() else "all_except_first"
+            includes_bonus_as_anchor = True
+            if self.parallel_drafting:
+                num_parallel_drafting_tokens = num_speculative_tokens - 1
 
-        if self.parallel_drafting:
-            if self.uses_draft_model():
-                # PARD does not shift the existing input, so all K query
-                # positions require additional slots.
-                return num_draft_tokens
-
-            # The existing query is reused; only masked queries need new slots.
-            return num_draft_tokens - 1
-
-        if self.uses_draft_model():
-            # The autoregressive draft-model input retains one unsliced token.
-            return 1
-
-        return 0
+        return DraftInputLayout(
+            target_segment=target_segment,
+            includes_bonus_as_anchor=includes_bonus_as_anchor,
+            num_parallel_drafting_tokens=num_parallel_drafting_tokens,
+        )
 
     def use_gemma4_mtp(self) -> bool:
         return (

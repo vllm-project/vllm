@@ -1921,9 +1921,6 @@ class VllmConfig:
         worker is configured to handle.
         """
         if self.speculative_config is not None:
-            scheduled_token_delta = (
-                self.speculative_config.max_num_new_slots_for_drafting
-            )
             max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
             if self.scheduler_config.max_num_scheduled_tokens is None:
                 self.scheduler_config.max_num_scheduled_tokens = max_num_batched_tokens
@@ -1947,11 +1944,14 @@ class VllmConfig:
                     " num_speculative_tokens.",
                 )
 
-            if max_num_batched_tokens <= scheduled_token_delta:
+            draft_input_layout = self.speculative_config.draft_input_layout
+            min_num_draft_input_tokens = draft_input_layout.minimum_cost
+            if max_num_batched_tokens < min_num_draft_input_tokens:
                 raise ValueError(
-                    "VllmConfig does not have enough slots to schedule a token and"
-                    " support the speculative decoding settings."
-                    f" Got {max_num_batched_tokens=} and {scheduled_token_delta=}."
+                    "VllmConfig does not have enough slots for"
+                    " the smallest draft input batch."
+                    f" Got {max_num_batched_tokens=} and"
+                    f" {min_num_draft_input_tokens=}."
                 )
 
     def _set_cudagraph_sizes(self):
