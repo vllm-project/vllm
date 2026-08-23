@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """EXPERIMENTAL Orthrus diffusion-mode proposer for speculative decoding.
 
-Status: unvalidated milestone-3 attempt (see the discussion on
-https://github.com/vllm-project/vllm/pull/44792). This is NOT wired up
-end-to-end and has not been run against vLLM's real scheduler/CI.
+Status: EXPERIMENTAL and not yet validated end-to-end (see the discussion
+on https://github.com/vllm-project/vllm/pull/44792). It IS wired into the
+engine -- ``speculative_config={"method": "orthrus", ...}`` constructs
+this proposer and reaches its ``propose()`` path -- but has not completed
+a successful generate() run, and has not been run against vLLM's CI,
+multi-GPU, or CUDA graph capture.
 
 What this implements: loading a second copy of the target Orthrus
 checkpoint as a speculative-decode "draft" model, and KV-sharing each of
@@ -28,10 +31,8 @@ physical KV-cache slot indices from the block table using the standard
 `physical_block_id * block_size + offset` formula (the same one vLLM's own
 `_COMPUTE_SLOT_MAPPING_KERNEL` implements more generally, see
 vllm/v1/worker/block_table.py, including DCP/CP-aware handling this
-simplified version does not), but has NOT been validated against a running
-engine due to persistent Modal-side infrastructure failures during testing
-(see PR discussion) -- treat as an unverified, best-effort attempt for
-review, not a confirmed-working implementation.
+simplified version does not). Treat as unverified until a successful
+generate() run is posted on the PR.
 
 Masking: within each request's proposed block, this now uses non-causal
 (bidirectional) masking matching the reference implementation's
@@ -56,7 +57,6 @@ import torch
 from typing_extensions import override
 
 from vllm.config import VllmConfig, replace
-from vllm.config.compilation import CompilationConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -101,7 +101,12 @@ class OrthrusProposer(SpecDecodeBaseProposer):
         KV-cache-group setup needs to resolve kv_sharing_target_layer_name.
         """
         base = super()._create_draft_vllm_config()
-        base = replace(base, compilation_config=CompilationConfig())
+        # replace() copies only init fields, and static_forward_context is
+        # declared init=False -- so this preserves every compilation setting
+        # (enforce_eager, cudagraph mode, ...) while giving the draft a
+        # fresh, empty layer registry. Constructing a bare CompilationConfig()
+        # instead would silently drop those settings.
+        base = replace(base, compilation_config=replace(base.compilation_config))
         # Force FlexAttentionBackend for the draft's attn_diff layers so the
         # non-causal-within-block mask (see set_inputs_first_pass's
         # mm_req_doc_ranges below) is actually honored -- vLLM's other
@@ -114,6 +119,17 @@ class OrthrusProposer(SpecDecodeBaseProposer):
                 base.attention_config, backend=AttentionBackendEnum.FLEX_ATTENTION
             ),
         )
+
+    @override
+    def _get_model(self) -> torch.nn.Module:
+        # Mark this construction as the diffusion draft, so the model builds
+        # its attn_diff layers and routes forward() through the diffusion
+        # path. See building_diffusion_draft's docstring for why an explicit
+        # context flag is needed rather than a VllmConfig identity check.
+        from vllm.model_executor.models.orthrus import building_diffusion_draft
+
+        with building_diffusion_draft():
+            return super()._get_model()
 
     @override
     def load_model(self, target_model: torch.nn.Module) -> None:
@@ -258,6 +274,12 @@ class OrthrusProposer(SpecDecodeBaseProposer):
 
         new_seq_lens = (seq_lens + block_len).to(torch.int32)
         new_query_start_loc = self.arange[: batch_size + 1] * block_len
+        # Build the CPU copy from the host-side arange rather than a .cpu()
+        # of the device tensor, to avoid a device->host sync per step
+        # (same approach as DFlashProposer.set_inputs_first_pass).
+        new_query_start_loc_cpu = (
+            torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * block_len
+        )
 
         # Non-causal-within-block masking (matching the reference
         # implementation's diffusion pass, see generate_dual_pass_mask in
@@ -270,6 +292,16 @@ class OrthrusProposer(SpecDecodeBaseProposer):
         # bidirectional mask over each listed (start, end) logical position
         # range on top of the base causal mask. Requires attn_diff to be on
         # FlexAttentionBackend -- see _create_draft_vllm_config above.
+        #
+        # KNOWN LIMITATION: mm_req_doc_ranges is a plain Python dict of
+        # per-request position ranges, so populating it forces one
+        # device->host sync per step to read seq_lens. That is inherent to
+        # this API (it is consumed on the host when building the FlexAttention
+        # block mask), and it is the main reason this path is not yet
+        # CUDA-graph-capturable. A first-class, tensor-native mask_mod for
+        # this pattern would remove both limitations at once -- tracked on
+        # the PR checklist alongside the design review of reusing this
+        # mechanism at all.
         seq_lens_list = seq_lens.tolist()
         mm_req_doc_ranges = {
             req: [(seq_lens_list[req], seq_lens_list[req] + block_len - 1)]
@@ -278,12 +310,13 @@ class OrthrusProposer(SpecDecodeBaseProposer):
 
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
-            query_start_loc_cpu=new_query_start_loc.cpu(),
+            query_start_loc_cpu=new_query_start_loc_cpu,
             seq_lens=new_seq_lens,
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=block_len,
-            max_seq_len=int(new_seq_lens.max().item()),
+            # Upper bound is sufficient here and avoids another sync.
+            max_seq_len=cad.max_seq_len + block_len,
             block_table_tensor=cad.block_table_tensor,
             slot_mapping=slot_mapping,
             causal=True,

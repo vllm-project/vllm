@@ -3,6 +3,8 @@
 """Inference-only Orthrus model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import torch
 from torch import nn
@@ -32,6 +34,36 @@ from .utils import (
     is_pp_missing_parameter,
     maybe_prefix,
 )
+
+
+_BUILDING_DIFFUSION_DRAFT: ContextVar[bool] = ContextVar(
+    "orthrus_building_diffusion_draft", default=False
+)
+
+
+@contextmanager
+def building_diffusion_draft():
+    """Marks the enclosing model construction as Orthrus' diffusion draft.
+
+    Set by ``OrthrusProposer._get_model`` around its ``get_model()`` call.
+    Everything built inside this context (a) allocates the extra
+    ``attn_diff`` paged attention layers and (b) routes ``forward()``
+    through the diffusion path.
+
+    An explicit context flag is used rather than inspecting the VllmConfig
+    because the draft is constructed with the *target's* ``model_config``
+    still on the config object -- ``_create_draft_vllm_config`` never
+    replaces it and ``initialize_model`` passes ``vllm_config`` through
+    unchanged, only using its separate ``model_config`` argument to pick
+    the architecture. So identity checks like
+    ``vllm_config.model_config is speculative_config.draft_model_config``
+    are always False here and cannot distinguish draft from target.
+    """
+    token = _BUILDING_DIFFUSION_DRAFT.set(True)
+    try:
+        yield
+    finally:
+        _BUILDING_DIFFUSION_DRAFT.reset(token)
 
 
 class OrthrusAttention(Qwen3Attention):
@@ -92,28 +124,28 @@ class OrthrusAttention(Qwen3Attention):
 
         # EXPERIMENTAL (milestone 3, unvalidated against vLLM's real
         # scheduler/CI): a second paged Attention layer for the diffusion
-        # path, used only when this module is loaded as a speculative-decode
-        # *draft* model (see OrthrusProposer / OrthrusForCausalLM.is_orthrus_
-        # diffusion_draft). It gets its own small ephemeral KV-cache group
-        # allocated by vLLM's normal machinery; the corresponding *target*
-        # model instance's same-index self.attn layer is wired in as its
-        # kv_sharing_target_layer_name by OrthrusProposer.load_model, so a
+        # path. Built ONLY for the speculative-decode *draft* instance --
+        # OrthrusProposer.load_model wires each of these to KV-share with
+        # the corresponding same-index *target* layer's self.attn, so a
         # diffusion-block forward reads the target's real, already-populated
-        # cache. Simplification vs. the reference implementation: this uses
-        # plain causal masking within the proposed block instead of the
-        # reference's non-causal "attend everywhere in the block" scheme --
-        # spec-decode verification still makes generation exactly lossless
-        # regardless of how good the draft's proposals are, so this is a
-        # valid (if weaker) proposer, not a correctness shortcut.
-        self.attn_diff = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn_diff",
-        )
+        # cache and needs no cache of its own.
+        #
+        # It must not be built on the target: a layer with no
+        # kv_sharing_target_layer_name gets a full KVCacheSpec of its own
+        # (see GPUModelRunner.get_kv_cache_spec), so building it there would
+        # allocate a second, entirely unused set of KV cache -- roughly
+        # halving usable context/concurrency for every Orthrus load,
+        # including plain AR serving with no speculative_config at all.
+        if _BUILDING_DIFFUSION_DRAFT.get():
+            self.attn_diff = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn_diff",
+            )
 
     def forward_diffusion_paged(
         self,
@@ -630,15 +662,13 @@ class OrthrusForCausalLM(
         )
 
         # EXPERIMENTAL (milestone 3, unvalidated): true when this instance
-        # is being constructed as a speculative-decode *draft* model (see
-        # OrthrusProposer), i.e. get_model() was called with
-        # model_config=speculative_config.draft_model_config. In that case
-        # forward() routes through the diffusion path instead of the normal
-        # AR path.
-        self.is_orthrus_diffusion_draft = (
-            vllm_config.speculative_config is not None
-            and vllm_config.model_config is vllm_config.speculative_config.draft_model_config
-        )
+        # is being constructed as a speculative-decode *draft* model, i.e.
+        # inside OrthrusProposer._get_model's building_diffusion_draft()
+        # context. In that case forward() routes through the diffusion path
+        # instead of the normal AR path. See building_diffusion_draft's
+        # docstring for why a context flag is used instead of inspecting
+        # vllm_config.
+        self.is_orthrus_diffusion_draft = _BUILDING_DIFFUSION_DRAFT.get()
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
