@@ -1178,6 +1178,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         torch.accelerator.empty_cache()
 
+    def _use_packed_recurrent_decode(self, attn_metadata: GDNAttentionMetadata) -> bool:
+        """Whether ``_forward_core`` takes the packed non-spec decode fast path."""
+        return (
+            self.enable_packed_recurrent_decode
+            and attn_metadata.spec_sequence_masks is None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes > 0
+        )
+
     def _forward_core_rocm(
         self,
         qkvz: torch.Tensor,
@@ -1228,7 +1237,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 attn_metadata=attn_metadata,
             )
 
-        core_attn_out.zero_()
+        # core_attn_out is allocated with torch.empty by the caller, so every
+        # row it later reads must be written here. On a pure non-spec decode
+        # batch the packed decode kernel writes core_attn_out[:num_actual_tokens]
+        # itself, which makes the fill redundant once that covers the buffer:
+        # the full-cudagraph decode case, where num_actual_tokens is itself
+        # token-padded to the buffer size. Any other shape can leave rows
+        # untouched and keeps the fill.
+        packed_decode_owns_buffer = (
+            self._use_packed_recurrent_decode(attn_metadata)
+            and attn_metadata.num_actual_tokens == core_attn_out.shape[0]
+        )
+        if not packed_decode_owns_buffer:
+            core_attn_out.zero_()
         num_tokens_all = qkvz.shape[0]
         mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
             qkvz, ba, num_tokens_all
@@ -1267,12 +1288,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
-        if (
-            self.enable_packed_recurrent_decode
-            and attn_metadata.spec_sequence_masks is None
-            and attn_metadata.num_prefills == 0
-            and attn_metadata.num_decodes > 0
-        ):
+        if self._use_packed_recurrent_decode(attn_metadata):
             return self._forward_core_decode_non_spec(
                 mixed_qkv=mixed_qkv,
                 b=b,
