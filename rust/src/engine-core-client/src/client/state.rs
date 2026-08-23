@@ -943,6 +943,49 @@ mod tests {
         ));
     }
 
+    /// The last STOP is fully reconciled before the closing ADD starts, so
+    /// commit itself must end the session.
+    #[test]
+    fn final_commit_completes_after_last_stop_is_reconciled() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        let (_, mut rx) = registry.register("rt-abc".to_string(), None, None, true).unwrap();
+        let output = segment_stop("rt-abc");
+
+        let route = registry
+            .route_for_output(&output)
+            .expect("the segment stop routes to the open stream");
+        assert_eq!(route.stop_action, Some(ResumableStopAction::Continue));
+        route
+            .sender
+            .send(Ok(StreamEvent::Output(Box::new(EngineCoreStreamOutput {
+                engine_index: 0,
+                timestamp: 0.0,
+                output,
+            }))))
+            .unwrap();
+        assert!(
+            registry.reconcile_segment_stop("rt-abc", route.stop_action.unwrap()).is_none(),
+            "a stop before the final ADD must not retire the session"
+        );
+        assert!(registry.contains("rt-abc"));
+
+        registry.prepare_continuation("rt-abc", ContinuationKind::Final).unwrap();
+        assert_eq!(
+            registry.commit_continuation("rt-abc"),
+            CommitResult::CompletedDuringCommit
+        );
+        assert!(!registry.contains("rt-abc"));
+
+        assert!(
+            matches!(rx.try_recv(), Ok(Ok(StreamEvent::Output(_)))),
+            "the reconciled output must precede completion"
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ok(StreamEvent::SessionFinished))
+        ));
+    }
+
     #[test]
     fn resumable_session_ends_on_a_stop_it_cannot_resume_from() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
