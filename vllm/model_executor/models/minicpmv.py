@@ -88,7 +88,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
     ResolvedPromptUpdate,
-    _seq2text,
+    cached_encode,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -869,7 +869,6 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (images := mm_data.get("images")) is None:
             return {}
@@ -882,11 +881,10 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
             image_inputs = {}
         else:
-            image_inputs = self._base_call_hf_processor(
+            image_inputs = self._call_hf_processor_on_prompts(
                 prompts=[self.info.image_pattern] * len(parsed_images),
                 mm_data={"images": [[image] for image in parsed_images]},
                 mm_kwargs=mm_kwargs,
-                tok_kwargs=tok_kwargs,
                 out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
             )
 
@@ -896,7 +894,6 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (videos := mm_data.get("videos")) is None:
             return {}
@@ -909,7 +906,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
             video_inputs = {}
         else:
-            video_inputs = self._base_call_hf_processor(
+            video_inputs = self._call_hf_processor_on_prompts(
                 prompts=[
                     self.info.image_pattern * len(video) for video in parsed_videos
                 ],
@@ -918,7 +915,6 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                     **mm_kwargs,
                     "max_slice_nums": self.info.get_video_max_slice_num(),
                 },
-                tok_kwargs=tok_kwargs,
                 out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
             )
 
@@ -930,11 +926,10 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         return {
-            **self.process_images(mm_data, mm_kwargs, tok_kwargs),
-            **self.process_videos(mm_data, mm_kwargs, tok_kwargs),
+            **self.process_images(mm_data, mm_kwargs),
+            **self.process_videos(mm_data, mm_kwargs),
         }
 
     def _apply_prompt_updates(
@@ -943,30 +938,24 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """Apply multi-modal prompt updates to token IDs."""
-        tokenizer = self.info.get_tokenizer()
-
         new_token_ids, match_result = self._apply_token_matches(
             token_ids,
             mm_prompt_updates,
         )
 
-        # If the search text does not represent a special token,
-        # it may have different token IDs in the prompt, because
-        # the tokens may go across the boundaries of the search text.
-        # ----
-        # e.g. when searching for "foo" in "food", if "food" itself makes
-        # up a token, then the token ID of "foo" will not appear at all
-        # ----
-        # Since it is inefficient to search for all possible tokenizations
-        # of the search text in the prompt, we instead perform string-based
-        # updates on the decoded token IDs, then encode them back.
+        # If the target does not consist of special tokens, it may be
+        # tokenized differently inside the prompt, so fall back to
+        # performing the updates on the decoded text, then encoding the
+        # result back. The segments are encoded separately to avoid BPE
+        # merges across segment boundaries.
         if not all(
             all(update_idx is not None for update_idx in update_idxs)
             for update_idxs in match_result.values()
         ):
-            new_token_ids, match_result = self._apply_text_matches_as_segmented_tokens(
-                _seq2text(tokenizer, token_ids, use_cache=False),
+            new_token_ids, match_result = self._apply_prompt_updates_via_text(
+                token_ids,
                 mm_prompt_updates,
+                encode_segments_separately=True,
             )
 
         matched_updates = defaultdict[str, list[Sequence[ResolvedPromptUpdate]]](list)
@@ -988,32 +977,29 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return new_token_ids, placeholders
 
-    def _base_call_hf_processor(
+    def _call_hf_processor_on_prompts(
         self,
         prompts: list[str],
         mm_data: Mapping[str, Sequence[object]],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
         *,
         out_keys: set[str],
     ) -> dict[str, NestedTensors]:
         # This processor supports zipping prompt and mm_data together
         if self.info.get_model_version() in {(2, 6), (4, 0), (4, 5), (4, 6)}:
-            inputs = super()._call_hf_processor(
-                prompt=prompts,  # type: ignore
-                mm_data=mm_data,
-                mm_kwargs=mm_kwargs,
-                tok_kwargs=tok_kwargs,
+            inputs = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**mm_kwargs),
+                dict(text=prompts, **mm_data),
+                mm_kwargs,
             )
         else:
             inputs = defaultdict[str, list[torch.Tensor]](list)
 
             for i, prompt in enumerate(prompts):
-                inputs_one = super()._call_hf_processor(
-                    prompt=prompt,
-                    mm_data={k: v[i] for k, v in mm_data.items()},
-                    mm_kwargs=mm_kwargs,
-                    tok_kwargs=tok_kwargs,
+                inputs_one = self.info.ctx.call_hf_processor(
+                    self.info.get_hf_processor(**mm_kwargs),
+                    dict(text=prompt, **{k: v[i] for k, v in mm_data.items()}),
+                    mm_kwargs,
                 )
 
                 for k, v in inputs_one.items():
@@ -1022,33 +1008,31 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return {k: inputs[k] for k in out_keys}
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         tokenizer = self.info.get_tokenizer()
 
-        input_ids = torch.tensor([tokenizer.encode(prompt, **tok_kwargs)])
-        mm_inputs = self.process_mm_inputs(mm_data, mm_kwargs, tok_kwargs)
+        input_ids = torch.tensor([tokenizer.encode(prompt_text)])
+        mm_inputs = self.process_mm_inputs(mm_data, hf_processor_mm_kwargs)
 
-        return BatchFeature(
+        processed_data = BatchFeature(
             {
                 "input_ids": input_ids,
                 **mm_inputs,
             }
         )
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -1072,6 +1056,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 additional_placeholders.append((modality, sub_pattern))
         placeholders += additional_placeholders
 
+        vocab = tokenizer.get_vocab()
+        unk_token_ids = [vocab["<unk>"]]
+
         def get_image_replacement(item_idx: int):
             images = mm_items.get_items(
                 "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems)
@@ -1079,9 +1066,13 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             image_size = images.get_image_size(item_idx)
 
-            return PromptUpdateDetails.select_text(
-                self.get_image_prompt_texts(image_size, item_idx),
-                "<unk>",
+            return PromptUpdateDetails.select_token_ids(
+                cached_encode(
+                    tokenizer,
+                    self.get_image_prompt_texts(image_size, item_idx),
+                    add_special_tokens=False,
+                ),
+                unk_token_ids,
             )
 
         def get_video_replacement(item_idx: int):
@@ -1092,9 +1083,13 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             frame_size = videos.get_frame_size(item_idx)
             num_frames = videos.get_num_frames(item_idx)
 
-            return PromptUpdateDetails.select_text(
-                self.get_video_prompt_texts(frame_size, num_frames),
-                "<unk>",
+            return PromptUpdateDetails.select_token_ids(
+                cached_encode(
+                    tokenizer,
+                    self.get_video_prompt_texts(frame_size, num_frames),
+                    add_special_tokens=False,
+                ),
+                unk_token_ids,
             )
 
         get_replacement = {
@@ -1104,7 +1099,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return [
             PromptReplacement(
-                modality=modality, target=pattern, replacement=get_replacement[modality]
+                modality=modality,
+                target=cached_encode(tokenizer, pattern, add_special_tokens=False),
+                replacement=get_replacement[modality],
             )
             for modality, pattern in placeholders
         ]
@@ -1124,7 +1121,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             image_processor = self.info.get_image_processor()
             version = self.info.get_model_version()
 
-            text = _seq2text(tokenizer, cached_update.content.full)
+            text = tokenizer.decode(cached_update.content.full)
             prev_item_idx = cached_update.item_idx
 
             if version == (2, 0) or version == (2, 5):
@@ -1140,13 +1137,17 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             embed_text = getattr(tokenizer, "image_token", "<unk>")
             new_update = new_update.with_content(
-                PromptUpdateDetails.select_text(
-                    text.replace(
-                        f"{im_start}{prev_item_idx}{im_end}",
-                        f"{im_start}{new_item_idx}{im_end}",
-                        1,
+                PromptUpdateDetails.select_token_ids(
+                    cached_encode(
+                        tokenizer,
+                        text.replace(
+                            f"{im_start}{prev_item_idx}{im_end}",
+                            f"{im_start}{new_item_idx}{im_end}",
+                            1,
+                        ),
+                        add_special_tokens=False,
                     ),
-                    embed_text,
+                    cached_encode(tokenizer, embed_text, add_special_tokens=False),
                 )
             )
 
