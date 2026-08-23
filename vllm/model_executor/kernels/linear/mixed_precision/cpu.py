@@ -17,7 +17,25 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 _CPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
 
 
+def _uses_w4a8(c: MPLinearLayerConfig) -> bool:
+    return (
+        envs.VLLM_CPU_INT4_W4A8
+        and not c.has_g_idx
+        and c.act_type == torch.bfloat16
+        and (
+            torch.cpu._is_amx_tile_supported()
+            or current_platform.get_cpu_architecture() == CpuArchEnum.RISCV
+        )
+    )
+
+
+def _has_cpu_gemm_wna16() -> bool:
+    return hasattr(torch.ops._C, "cpu_gemm_wna16")
+
+
 class CPUWNA16LinearKernel(MPLinearKernel):
+    requires_cpu_gemm_wna16 = True
+
     @classmethod
     def get_min_capability(cls) -> int:
         return -1
@@ -54,6 +72,16 @@ class CPUWNA16LinearKernel(MPLinearKernel):
                 False,
                 f"Output size ({c.partition_weight_shape[1]}) not supported by "
                 "CPUWNA16, supported sizes are multiples of 32",
+            )
+
+        if (
+            cls.requires_cpu_gemm_wna16
+            and not _uses_w4a8(c)
+            and not _has_cpu_gemm_wna16()
+        ):
+            return (
+                False,
+                "cpu_gemm_wna16 is not registered in the loaded CPU extension",
             )
 
         return True, None
@@ -168,14 +196,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             if zp.output_dim == 0:
                 zp.data = zp.t().contiguous()
 
-        supports_amx = torch.cpu._is_amx_tile_supported()
-        supports_riscv = current_platform.get_cpu_architecture() == CpuArchEnum.RISCV
-        layer.use_w4a8 = (
-            envs.VLLM_CPU_INT4_W4A8
-            and not self.config.has_g_idx
-            and self.config.act_type == torch.bfloat16
-            and (supports_amx or supports_riscv)
-        )
+        layer.use_w4a8 = _uses_w4a8(self.config)
         # layer.use_w4a8 = False
         # AWQ format will be converted to GPTQ format in `AutoAWQMarlinLinearMethod`
         if layer.use_w4a8:
