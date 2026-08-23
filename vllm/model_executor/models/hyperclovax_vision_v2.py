@@ -261,34 +261,44 @@ class HCXVisionV2MultiModalProcessor(
 ):
     """Multimodal processor for HyperCLOVAX V2 (32B Think model)."""
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         images = mm_data.get("images")
         videos = mm_data.get("videos")
 
         # Get the HF processor
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         # Build data dict for HF processor (images/videos only)
         # NOTE: We pass the prompt as-is without token normalization.
         # Token expansion is handled by vLLM via _get_prompt_updates.
         data: dict[str, object] = dict(
-            text=prompt,
+            text=prompt_text,
             images=images,
             videos=videos,
         )
 
-        processed_outputs = self.info.ctx.call_hf_processor(
+        processed_data = self.info.ctx.call_hf_processor(
             hf_processor=hf_processor,
             data=data,
-            kwargs=mm_kwargs,
+            kwargs=hf_processor_mm_kwargs,
         )
+        processed_data.update(passthrough_data)
 
-        return processed_outputs
+        return processed_data
 
     def _get_prompt_updates(
         self,
