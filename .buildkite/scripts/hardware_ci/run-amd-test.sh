@@ -83,6 +83,8 @@ export PYTHONFAULTHANDLER
 # depend on their current working directory.
 export PYTHONPATH="${PYTHONPATH:-..}"
 
+ci_started_at=$SECONDS
+
 ###############################################################################
 # Helper Functions
 ###############################################################################
@@ -128,6 +130,66 @@ cleanup_network() {
   if docker network ls | grep -q docker-net; then
     docker network rm docker-net || true
   fi
+}
+
+amd_ci_teardown_log() {
+  local event=$1
+  shift
+
+  printf '[amd-ci-teardown] event=%s' "${event}" >&2
+  if (($#)); then
+    printf ' %s' "$@" >&2
+  fi
+  printf '\n' >&2
+}
+
+run_docker_with_ci_timeout() {
+  local raw_timeout=${CONTAINER_TIMEOUT_S:-0}
+  local configured_timeout=0
+  local elapsed=0
+  local remaining_timeout=0
+  local status=0
+
+  if [[ ! "${raw_timeout}" =~ ^(0|[1-9][0-9]{0,5})$ ]]; then
+    amd_ci_teardown_log configuration_error \
+      "reason=invalid_timeout" "expected=integer_0_to_604800"
+    return 2
+  fi
+  configured_timeout=$((10#${raw_timeout}))
+  if ((configured_timeout > 604800)); then
+    amd_ci_teardown_log configuration_error \
+      "reason=invalid_timeout" "expected=integer_0_to_604800"
+    return 2
+  fi
+
+  remaining_timeout=${configured_timeout}
+  if ((configured_timeout > 0)); then
+    if ! command -v timeout >/dev/null 2>&1; then
+      amd_ci_teardown_log configuration_error \
+        "reason=timeout_command_not_found"
+      return 127
+    fi
+    elapsed=$((SECONDS - ci_started_at))
+    if ((elapsed >= configured_timeout)); then
+      amd_ci_teardown_log deadline_exhausted \
+        "mode=docker" "configured_s=${configured_timeout}" "elapsed_s=${elapsed}"
+      return 124
+    fi
+    remaining_timeout=$((configured_timeout - elapsed))
+  fi
+
+  amd_ci_teardown_log workload_started \
+    "mode=docker" "timeout_s=${remaining_timeout}"
+  if ((remaining_timeout == 0)); then
+    "$@" || status=$?
+  else
+    # Docker runs interactively, so keep it in the foreground process group.
+    # --verbose records both TERM and any KILL escalation caused by timeout.
+    timeout --verbose --foreground --signal=TERM --kill-after=10s \
+      "${remaining_timeout}s" "$@" || status=$?
+  fi
+  amd_ci_teardown_log workload_finished "mode=docker" "status=${status}"
+  return "${status}"
 }
 
 prepare_artifact_image() {
@@ -1599,8 +1661,9 @@ else
     echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
   fi
 
+  exit_code=0
   # shellcheck disable=SC2086  # word splitting is intentional: both hold multiple docker flags
-  docker run \
+  run_docker_with_ci_timeout docker run \
     "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -1636,8 +1699,6 @@ else
     "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
-
-  exit_code=$?
-  handle_pytest_exit "$exit_code"
+    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}" || exit_code=$?
+  handle_pytest_exit "${exit_code}"
 fi
