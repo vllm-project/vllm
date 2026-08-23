@@ -2102,6 +2102,10 @@ class MooncakeStoreWorker:
             return self.kv_send_thread.get_kv_events()
         return []
 
+    @property
+    def group_tp_replication_factors(self) -> tuple[int, ...]:
+        return self._group_tp_replication_factors
+
     def close(self) -> None:
         """Release the MooncakeDistributedStore handle on teardown.
 
