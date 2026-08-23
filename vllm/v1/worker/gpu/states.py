@@ -3,7 +3,48 @@
 import numpy as np
 import torch
 
+from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+
+
+@triton.jit
+def _rewind_sampled_state_kernel(
+    req_indices_ptr,
+    num_output_tokens_ptr,
+    prompt_len_ptr,
+    total_len_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    last_sampled_tokens_ptr,
+    output_bin_counts_ptr,
+    output_bin_counts_stride,
+):
+    batch_idx = tl.program_id(0)
+    req_idx = tl.load(req_indices_ptr + batch_idx)
+    num_output_tokens = tl.load(num_output_tokens_ptr + batch_idx)
+    target_total_len = tl.load(prompt_len_ptr + req_idx) + num_output_tokens
+    old_total_len = tl.load(total_len_ptr + req_idx)
+
+    # The scheduler only marks requests whose accepted output prefix moved
+    # backward. Tokens in this suffix were sampled by in-flight frames whose
+    # outputs the scheduler discarded.
+    for pos in tl.range(target_total_len, old_total_len):
+        token_id = tl.load(all_token_ids_ptr + req_idx * all_token_ids_stride + pos)
+        if output_bin_counts_ptr is not None:
+            tl.atomic_add(
+                output_bin_counts_ptr + req_idx * output_bin_counts_stride + token_id,
+                -1,
+            )
+        tl.store(all_token_ids_ptr + req_idx * all_token_ids_stride + pos, 0)
+
+    last_sampled_token = 0
+    if num_output_tokens > 0:
+        last_sampled_token = tl.load(
+            all_token_ids_ptr + req_idx * all_token_ids_stride + target_total_len - 1
+        )
+    tl.store(last_sampled_tokens_ptr + req_idx, last_sampled_token)
+    tl.store(total_len_ptr + req_idx, target_total_len)
 
 
 class RequestState:
@@ -122,6 +163,40 @@ class RequestState:
         self.total_len.apply_write()
         self.all_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
+
+    def rewind_sampled_state(
+        self,
+        req_indices: list[int],
+        num_output_tokens: list[int],
+        output_bin_counts: torch.Tensor | None,
+    ) -> None:
+        """Restore each request to the scheduler's accepted output prefix."""
+        assert req_indices
+        assert len(req_indices) == len(num_output_tokens)
+        assert all(num_tokens >= 0 for num_tokens in num_output_tokens)
+
+        req_indices_gpu = async_tensor_h2d(
+            req_indices, dtype=torch.int32, device=self.device
+        )
+        num_output_tokens_gpu = async_tensor_h2d(
+            num_output_tokens, dtype=torch.int32, device=self.device
+        )
+        _rewind_sampled_state_kernel[(len(req_indices),)](
+            req_indices_gpu,
+            num_output_tokens_gpu,
+            self.prompt_len.gpu,
+            self.total_len.gpu,
+            self.all_token_ids.gpu,
+            self.all_token_ids.gpu.stride(0),
+            self.last_sampled_tokens,
+            output_bin_counts,
+            output_bin_counts.stride(0) if output_bin_counts is not None else 0,
+            num_warps=1,
+        )
+
+        req_indices_long = req_indices_gpu.long()
+        self.draft_tokens.index_fill_(0, req_indices_long, 0)
+        self.next_prefill_tokens.index_fill_(1, req_indices_long, 0)
 
     def remove_request(self, req_id: str) -> int | None:
         """Return the freed slot index, or None if the request was not found."""
