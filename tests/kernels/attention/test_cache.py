@@ -356,21 +356,21 @@ def test_reshape_and_cache_flash(
             dequant_nvfp4_kv_cache,
         )
 
-        def dequant_nvfp4_cache_nhd(data_cache, scale_cache, global_scale):
-            # data_cache:  [N, T, H, data_dim]  NHD (contiguous inner dims)
-            # scale_cache: [N, T, H, scale_dim] NHD (contiguous inner dims)
-            # Permute to HND layout for the dequant utility.
+        def dequant_nvfp4_cache(data_cache, scale_cache, global_scale):
+            # data_cache:  [B, N, H, data_dim]  logical view (layout in strides)
+            # scale_cache: [B, N, H, scale_dim] logical view (layout in strides)
+            # Permute to [B, H, N, dim] for the dequant utility.
             data_hnd = data_cache.permute(0, 2, 1, 3)
             scale_hnd = scale_cache.permute(0, 2, 1, 3)
             result_hnd = dequant_nvfp4_kv_cache(
                 data_hnd, scale_hnd, global_scale, head_size, block_size
             )
-            return result_hnd.permute(0, 2, 1, 3)  # back to [N, T, H, D]
+            return result_hnd.permute(0, 2, 1, 3)  # back to [B, N, H, dim]
 
-        result_key_cache = dequant_nvfp4_cache_nhd(
+        result_key_cache = dequant_nvfp4_cache(
             nvfp4_key_data, key_scale_cache, k_scale.item()
         )
-        result_value_cache = dequant_nvfp4_cache_nhd(
+        result_value_cache = dequant_nvfp4_cache(
             nvfp4_value_data, value_scale_cache, v_scale.item()
         )
 
