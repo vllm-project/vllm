@@ -242,7 +242,10 @@ if TYPE_CHECKING:
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
-    VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
+    VLLM_KV_CACHE_LAYOUT: (
+        Literal["LBNHC", "LBHNC", "LHBNC", "NHD", "HND", "BLHNC", "BLNHC", "BHLNC"]
+        | None
+    ) = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_RAISE_ON_LOGIT_NANS: bool = False
@@ -299,6 +302,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
+    VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
@@ -1783,18 +1787,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # KV Cache layout used throughout vllm.
     # Some common values are:
-    # - NHD
-    # - HND
-    # Where N=num_blocks, H=num_heads and D=head_size. The default value will
+    # - LBNHC
+    # - LBHNC
+    # Where N=num_states, H=num_heads and C=state_content. The default value will
     # leave the layout choice to the backend. Mind that backends may only
     # implement and support a subset of all possible layouts.
+    # LHBNC hoists the head dim outside the block dim; backends must opt in via
+    # AttentionBackend.supported_kv_cache_layouts().
     "VLLM_KV_CACHE_LAYOUT": env_with_choices(
-        "VLLM_KV_CACHE_LAYOUT", None, ["NHD", "HND"]
+        "VLLM_KV_CACHE_LAYOUT",
+        None,
+        ["LBNHC", "LBHNC", "LHBNC", "NHD", "HND", "BLHNC", "BLNHC", "BHLNC"],
     ),
     # SSM conv state layout used for Mamba models.
     # - SD: (state_len, dim) — dim contiguous (default)
     # - DS: (dim, state_len) — TP-sharded dim on dim1,
-    #   consistent with SSM temporal state and HND KV cache layout.
+    #   consistent with SSM temporal state and LBHNC KV cache layout.
     "VLLM_SSM_CONV_STATE_LAYOUT": env_with_choices(
         "VLLM_SSM_CONV_STATE_LAYOUT", None, ["SD", "DS"]
     ),
@@ -2058,6 +2066,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable using UVA (Unified Virtual Addressing) for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
+    ),
+    # Max descriptors per CPU-KV-offload batch-memcpy call. 0 = platform default
+    # (ROCm chunks at 8192, since hipMemcpyBatchAsync faults above that on
+    # rocm 7.14/7.15 when batch copy is optimized; CUDA uncapped). Set >0 to override.
+    "VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS": lambda: int(
+        os.getenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS", "0")
     ),
     # On WSL2 with a compatible kernel (>= 4.19.121), pinned memory is
     # supported but disabled by default due to a small performance regression.

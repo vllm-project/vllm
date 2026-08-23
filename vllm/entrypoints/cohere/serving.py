@@ -89,12 +89,29 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.parser.abstract_parser import Parser
-from vllm.renderers.cohere import MESSAGES_CITATIONS_KEY, POSITION_TO_SOURCE_KEY
+from vllm.renderers.cohere import (
+    MESSAGES_CITATIONS_KEY,
+    POSITION_TO_SOURCE_KEY,
+    TOOL_MESSAGE_V2_CONTENT_KEY,
+)
 
 if TYPE_CHECKING:
     from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = logging.getLogger(__name__)
+
+
+# Reserved ``chat_template_kwargs`` entries this handler populates for
+# the API-server-side parser and renderer only. Stripped before the dict
+# is forwarded to the engine core -- see
+# :meth:`CohereServingChatV2._engine_chat_template_kwargs`.
+_API_SERVER_ONLY_TEMPLATE_KWARGS = frozenset(
+    {
+        MESSAGES_CITATIONS_KEY,
+        POSITION_TO_SOURCE_KEY,
+        TOOL_MESSAGE_V2_CONTENT_KEY,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +321,28 @@ class CohereServingChatV2(OpenAIServingChat):
             case _:
                 return self._chat_completion_stream_to_v2(generator, request)
 
+    def _engine_chat_template_kwargs(
+        self, chat_template_kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Keep this handler's internal entries out of the engine hop.
+
+        Overrides :meth:`OpenAIServingChat._engine_chat_template_kwargs`.
+        The reserved keys in :data:`_API_SERVER_ONLY_TEMPLATE_KWARGS`
+        exist only to hand request-side state to the API-server-side
+        parser and renderer; the engine-core-side reasoning parser (used
+        for structured-output reasoning-end gating) never reads them. They
+        also can't survive the trip: ``POSITION_TO_SOURCE_KEY`` holds
+        :class:`CitationSource` models, and msgpack -- which encodes
+        ``reasoning_parser_kwargs`` on the way to the engine core -- has
+        no native encoding for Pydantic models, so forwarding them fails
+        the request with a ``TypeError``.
+        """
+        return {
+            k: v
+            for k, v in chat_template_kwargs.items()
+            if k not in _API_SERVER_ONLY_TEMPLATE_KWARGS
+        }
+
     # ==================================================================
     # Request conversion: Cohere V2 -> ChatCompletionRequest
     # ==================================================================
@@ -438,46 +477,53 @@ class CohereServingChatV2(OpenAIServingChat):
                 "content": msg.content,
             }
 
-        # When the tool result is text-only, flatten to a string for
-        # maximum compatibility with standard chat templates. When it
-        # includes documents, preserve them as structured content parts
-        # so the cohere renderer can surface them as grounding sources
-        # (the :class:`CohereRenderer` understands
-        # ``{type: document, document: {...}}`` blocks). Non-cohere
-        # renderers may not honor document blocks, but that matches
-        # the broader "documents are no-op for OSS models" contract
-        # documented on this endpoint.
+        # Map every content block to a plain ``{"type": "text", "text":
+        # ...}`` part, mirroring the shape :meth:`_convert_user_message`
+        # emits for multi-part user content. vLLM's
+        # ``_parse_chat_message_content`` collapses a text-only tool
+        # part list back into ``"\n".join(...)`` on the way to the
+        # renderer, so simple chat templates that expect string tool
+        # content still work; keeping the list here just preserves the
+        # per-block structure at the OpenAI-shape request level for
+        # symmetry with the user-message conversion.
         #
-        # Tool message content uses ``ToolMessageV2Content``, which is a
-        # union of ``TextToolContent`` and ``DocumentToolContent`` -
-        # distinct from the user-message text/image union. We discriminate
-        # on the ``type`` literal so we don't have to import each variant.
-        has_documents = any(block.type == "document" for block in msg.content)
-        if not has_documents:
-            text = "\n".join(
-                block.text for block in msg.content if block.type == "text"
-            )
-            return {
-                "role": "tool",
-                "tool_call_id": msg.tool_call_id,
-                "content": text,
-            }
-
-        parts: list[dict[str, Any]] = []
+        # Tool message content uses ``ToolMessageV2Content``, a union of
+        # ``TextToolContent`` and ``DocumentToolContent``. The latter
+        # produces ``{"type": "document", "document": {...}}`` blocks,
+        # which vLLM's shared ``_parse_chat_message_content_parts`` in
+        # ``vllm/entrypoints/chat_utils.py`` rejects because the OpenAI
+        # ``ChatCompletionContentPartParam`` union only knows text /
+        # image / audio / etc. Emitting them anyway triggers a Pydantic
+        # ``ValidatorIterator`` failure at chat-parsing time, so we
+        # JSON-serialize each document into a text part instead.
+        #
+        # The cohere renderer doesn't consume this flattened content:
+        # :meth:`_collect_v2_tool_message_content` forwards the
+        # original v2 content blocks under
+        # :data:`TOOL_MESSAGE_V2_CONTENT_KEY`, and the renderer applies
+        # :func:`vllm.renderers.cohere._v2_tool_content_to_melody_block`
+        # to produce the melody-shape ``document`` blocks cmd3/cmd4
+        # tool-result rendering expects. Outbound citation binding is
+        # unaffected either way: sources resolve through the
+        # ``POSITION_TO_SOURCE_KEY`` map (built from the original v2
+        # messages, not the converted OpenAI messages).
+        content_parts: list[dict[str, Any]] = []
         for block in msg.content:
             if block.type == "text":
-                parts.append({"type": "text", "text": block.text})
+                content_parts.append({"type": "text", "text": block.text})
             elif block.type == "document":
-                parts.append(
+                content_parts.append(
                     {
-                        "type": "document",
-                        "document": block.document.model_dump(exclude_none=True),
+                        "type": "text",
+                        "text": json.dumps(
+                            block.document.model_dump(exclude_none=True)
+                        ),
                     }
                 )
         return {
             "role": "tool",
             "tool_call_id": msg.tool_call_id,
-            "content": parts,
+            "content": content_parts,
         }
 
     @classmethod
@@ -659,6 +705,16 @@ class CohereServingChatV2(OpenAIServingChat):
         position_to_source = cls._build_position_to_source(request)
         if position_to_source:
             kwargs.setdefault(POSITION_TO_SOURCE_KEY, position_to_source)
+
+        # Forward the original v2 tool-message content blocks so the
+        # renderer can apply its v2 → melody mapping over them (the
+        # renderer owns the melody-shape rules, this handler only
+        # ships the raw structural info that OpenAI validation would
+        # otherwise destroy -- see the flatten comment in
+        # :meth:`_convert_tool_message`).
+        v2_tool_content = cls._collect_v2_tool_message_content(request)
+        if v2_tool_content:
+            kwargs.setdefault(TOOL_MESSAGE_V2_CONTENT_KEY, v2_tool_content)
 
         if kwargs:
             chat_req.chat_template_kwargs = kwargs
@@ -1261,6 +1317,49 @@ class CohereServingChatV2(OpenAIServingChat):
                 tool_output=payload,
             )
         return None
+
+    @classmethod
+    def _collect_v2_tool_message_content(
+        cls, request: CohereChatV2Request
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Collect the original v2 tool-message content blocks so the
+        renderer can apply its v2 → melody mapping.
+
+        Builds the map that
+        :meth:`_apply_cohere_template_kwargs` stashes under
+        :data:`TOOL_MESSAGE_V2_CONTENT_KEY` for the renderer to
+        consume (see the constant definition in
+        :mod:`vllm.renderers.cohere` for why the map exists). Walks
+        ``request.messages`` -- not the OpenAI-shape messages built by
+        :meth:`_convert_messages` -- because that flattening step
+        already threw away the structural distinction between text and
+        document blocks. Each surviving block is
+        :meth:`~pydantic.BaseModel.model_dump`'d to a plain dict so the
+        forwarded map carries no Pydantic instances (msgpack- /
+        general-serialization-safe on principle even though internal
+        underscore-prefixed keys are filtered before crossing the
+        engine-core boundary).
+
+        Only emits an entry for a tool message whose content is a
+        non-empty list of blocks; a bare-string tool message renders
+        fine through the default text-block path in
+        :func:`vllm.renderers.cohere._content_blocks`, so no forwarded
+        blocks are needed there. Returns an empty dict when there is
+        nothing to forward, so the caller can use truthiness to decide
+        whether to stash the key at all.
+        """
+        blocks_by_index: dict[int, list[dict[str, Any]]] = {}
+        for i, msg in enumerate(request.messages):
+            if not isinstance(msg, ToolChatMessageV2):
+                continue
+            if isinstance(msg.content, str) or not msg.content:
+                continue
+            v2_blocks: list[dict[str, Any]] = []
+            for block in msg.content:
+                v2_blocks.append(block.model_dump(exclude_none=True))
+            if v2_blocks:
+                blocks_by_index[i] = v2_blocks
+        return blocks_by_index
 
     @staticmethod
     def _build_usage(response: ChatCompletionResponse) -> CohereUsage | None:
