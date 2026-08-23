@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import CacheConfig
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -153,6 +154,19 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if hasattr(self.o_proj, "prefetch_full_weight_if_needed"):
+            attn_metadata_raw = get_forward_context().attn_metadata
+            if isinstance(attn_metadata_raw, dict):
+                attn_metadata = attn_metadata_raw.get(self.mla_attn.layer_name)
+            elif isinstance(attn_metadata_raw, list):
+                attn_metadata = attn_metadata_raw[0].get(self.mla_attn.layer_name)
+            else:
+                attn_metadata = attn_metadata_raw
+            self.o_proj.prefetch_full_weight_if_needed(
+                attn_metadata is not None
+                and getattr(attn_metadata, "num_prefills", 0) > 0
+            )
+
         q_c = None
         kv_lora = None
 

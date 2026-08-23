@@ -1115,6 +1115,43 @@ class VllmConfig:
         if not self.use_v2_model_runner:
             raise ValueError("trace replay requires Model Runner V2")
 
+    def _verify_pcp_o_proj_tp_config(self) -> None:
+        if not self.parallel_config.enable_pcp_o_proj_tp:
+            return
+
+        model_config = self.model_config
+        if model_config is None:
+            raise ValueError("PCP O-Proj TP requires a model config.")
+        if not model_config.enforce_eager:
+            raise ValueError("PCP O-Proj TP MVP requires enforce_eager=True.")
+        if self.quant_config is not None:
+            raise ValueError("PCP O-Proj TP MVP does not support quantization.")
+        if model_config.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("PCP O-Proj TP MVP supports only float16 and bfloat16.")
+        if not model_config.use_mla:
+            raise ValueError("PCP O-Proj TP requires an MLA model.")
+
+        supported_architectures = {
+            "DeepseekV2ForCausalLM",
+            "DeepseekV3ForCausalLM",
+            "DeepseekV32ForCausalLM",
+            "Glm4MoeLiteForCausalLM",
+        }
+        if supported_architectures.isdisjoint(model_config.architectures):
+            raise ValueError(
+                "PCP O-Proj TP MVP supports only DeepSeek V2/V3/V3.2 and "
+                "GLM-4 MoE Lite MLA architectures."
+            )
+        if self.parallel_config.enable_dbo:
+            raise ValueError("PCP O-Proj TP MVP does not support DBO.")
+        if self.lora_config is not None:
+            raise ValueError("PCP O-Proj TP MVP does not support LoRA.")
+        if (
+            self.offload_config.uva.cpu_offload_gb > 0
+            or self.offload_config.prefetch.offload_group_size > 0
+        ):
+            raise ValueError("PCP O-Proj TP MVP does not support weight offloading.")
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1203,6 +1240,8 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
             )
+
+        self._verify_pcp_o_proj_tp_config()
 
         # "dummy" reads no weights at all, and the sharded formats read a vLLM
         # state dict, which stores tied word embeddings under the lm_head only.

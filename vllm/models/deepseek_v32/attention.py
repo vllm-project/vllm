@@ -17,6 +17,7 @@ from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
+    PCPOProjRowParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -254,7 +255,12 @@ class DeepseekV32Attention(MLAAttention):
         )
         self.kv_a_layernorm = RMSNorm(kv_lora_rank, eps=config.rms_norm_eps)
 
-        self.o_proj = RowParallelLinear(
+        o_proj_cls = (
+            PCPOProjRowParallelLinear
+            if vllm_config.parallel_config.enable_pcp_o_proj_tp
+            else RowParallelLinear
+        )
+        self.o_proj = o_proj_cls(
             num_heads * v_head_dim,
             hidden_size,
             bias=False,
@@ -282,6 +288,19 @@ class DeepseekV32Attention(MLAAttention):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if isinstance(self.o_proj, PCPOProjRowParallelLinear):
+            attn_metadata_raw = get_forward_context().attn_metadata
+            if isinstance(attn_metadata_raw, dict):
+                o_proj_attn_metadata = attn_metadata_raw.get(self.layer_name)
+            elif isinstance(attn_metadata_raw, list):
+                o_proj_attn_metadata = attn_metadata_raw[0].get(self.layer_name)
+            else:
+                o_proj_attn_metadata = attn_metadata_raw
+            self.o_proj.prefetch_full_weight_if_needed(
+                o_proj_attn_metadata is not None
+                and getattr(o_proj_attn_metadata, "num_prefills", 0) > 0
+            )
+
         # Captured: A-projections (+ indexer A-GEMM on indexer layers).
         qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
         q_c, kv_c, k_pe = qkv_lora.split(

@@ -4,6 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from typing import Any
+from weakref import WeakValueDictionary
 
 import torch
 from torch.nn.parameter import Parameter
@@ -13,6 +14,7 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     divide,
+    get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     split_tensor_along_last_dim,
@@ -1556,10 +1558,21 @@ class RowParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        tp_rank: int | None = None,
+        tp_size: int | None = None,
     ):
         # Divide the weight matrix along the first dimension.
-        self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
-        self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
+        if disable_tp:
+            self.tp_rank, self.tp_size = 0, 1
+        else:
+            self.tp_rank = (
+                tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+            )
+            self.tp_size = (
+                tp_size
+                if tp_size is not None
+                else get_tensor_model_parallel_world_size()
+            )
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
@@ -1574,6 +1587,8 @@ class RowParallelLinear(LinearBase):
             prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
         )
 
         self.input_is_parallel = input_is_parallel
@@ -1673,3 +1688,168 @@ class RowParallelLinear(LinearBase):
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s
+
+
+class PCPOProjRowParallelLinear(RowParallelLinear):
+    """MVP row-parallel O-Proj with a second weight shard over PCP."""
+
+    _full_weight_buffers: WeakValueDictionary[tuple[Any, ...], torch.Tensor] = (
+        WeakValueDictionary()
+    )
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = False,
+        input_is_parallel: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: torch.dtype | None = None,
+        reduce_results: bool = True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+    ) -> None:
+        if quant_config is not None:
+            raise ValueError("PCP O-Proj TP MVP does not support quantization.")
+        if bias:
+            raise ValueError("PCP O-Proj TP MVP requires bias=False.")
+        if not input_is_parallel:
+            raise ValueError("PCP O-Proj TP MVP requires input_is_parallel=True.")
+
+        self.pcp_group = get_pcp_group()
+        self.pcp_rank = self.pcp_group.rank_in_group
+        self.pcp_size = self.pcp_group.world_size
+        if self.pcp_size <= 1:
+            raise ValueError("PCP O-Proj TP requires prefill context parallelism.")
+
+        self.o_proj_tp_rank = get_tensor_model_parallel_rank()
+        self.o_proj_tp_size = get_tensor_model_parallel_world_size()
+        weight_tp_rank = self.o_proj_tp_rank * self.pcp_size + self.pcp_rank
+        weight_tp_size = self.o_proj_tp_size * self.pcp_size
+
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            input_is_parallel=input_is_parallel,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            reduce_results=reduce_results,
+            quant_config=quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            tp_rank=weight_tp_rank,
+            tp_size=weight_tp_size,
+        )
+
+        self._tp_input_size = divide(input_size, self.o_proj_tp_size)
+        self._buffer_scope = id(get_current_vllm_config())
+        self._full_weight_buffer: torch.Tensor | None = None
+        self._prefetch_input: torch.Tensor | None = None
+        self._prefetch_handle: Any | None = None
+        self._use_full_weight: bool | None = None
+        self._get_full_weight_buffer()
+
+    def _get_full_weight_buffer(self) -> torch.Tensor:
+        if self._full_weight_buffer is not None:
+            return self._full_weight_buffer
+
+        key = (
+            self._buffer_scope,
+            self.weight.device,
+            self.weight.dtype,
+            self._tp_input_size,
+            self.output_size,
+        )
+        buffer = self._full_weight_buffers.get(key)
+        if buffer is None:
+            buffer = self.weight.new_empty(self._tp_input_size, self.output_size)
+            self._full_weight_buffers[key] = buffer
+        self._full_weight_buffer = buffer
+        return buffer
+
+    def prefetch_full_weight_if_needed(self, has_prefill: bool) -> None:
+        """Start the PCP weight gather before attention compute when needed."""
+        if self._use_full_weight is not None:
+            raise RuntimeError(
+                "PCP O-Proj prefetch was called before the previous forward "
+                "consumed it."
+            )
+
+        self._use_full_weight = has_prefill
+        if not has_prefill:
+            return
+
+        full_weight_buffer = self._get_full_weight_buffer()
+        self._prefetch_input = self.weight.transpose(0, 1).contiguous()
+        try:
+            self._prefetch_handle = torch.distributed.all_gather_into_tensor(
+                full_weight_buffer,
+                self._prefetch_input,
+                group=self.pcp_group.device_group,
+                async_op=True,
+            )
+        except Exception:
+            self._prefetch_input = None
+            self._use_full_weight = None
+            raise
+
+    def _apply_full_tp_weight(self, input_: torch.Tensor) -> torch.Tensor:
+        if self._prefetch_handle is None or self._full_weight_buffer is None:
+            raise RuntimeError("PCP O-Proj full weight was not prefetched.")
+        self._prefetch_handle.wait()
+        self._prefetch_handle = None
+        self._prefetch_input = None
+        return torch.nn.functional.linear(
+            input_, self._full_weight_buffer.transpose(0, 1)
+        )
+
+    def _apply_pcp_weight_shard(self, input_: torch.Tensor) -> torch.Tensor:
+        shard_start = self.pcp_rank * self.input_size_per_partition
+        input_parallel = input_.narrow(
+            -1, shard_start, self.input_size_per_partition
+        ).contiguous()
+        output_parallel = self.quant_method.apply(self, input_parallel, None)
+        return self.pcp_group.all_reduce(output_parallel)
+
+    def forward(
+        self, input_: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        if self._use_full_weight is None:
+            raise RuntimeError(
+                "Attention must call o_proj.prefetch_full_weight_if_needed() "
+                "before PCP O-Proj forward."
+            )
+        if input_.shape[-1] != self._tp_input_size:
+            if self._prefetch_handle is not None:
+                self._prefetch_handle.wait()
+                self._prefetch_handle = None
+                self._prefetch_input = None
+            self._use_full_weight = None
+            raise ValueError(
+                "PCP O-Proj expected a TP-sharded input with last dimension "
+                f"{self._tp_input_size}, but got {input_.shape[-1]}."
+            )
+
+        try:
+            if self._use_full_weight:
+                output_parallel = self._apply_full_tp_weight(input_)
+            else:
+                output_parallel = self._apply_pcp_weight_shard(input_)
+
+            if self.reduce_results and self.o_proj_tp_size > 1:
+                output = tensor_model_parallel_all_reduce(output_parallel)
+            else:
+                output = output_parallel
+        finally:
+            self._use_full_weight = None
+
+        if not self.return_bias:
+            return output
+        return output, None
+
+    def extra_repr(self) -> str:
+        s = super().extra_repr()
+        return f"{s}, pcp_size={self.pcp_size}, o_proj_tp_size={self.o_proj_tp_size}"

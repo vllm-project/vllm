@@ -126,6 +126,9 @@ class ParallelConfig:
     prefill_context_parallel_size: int = Field(default=1, ge=1)
     """Number of ranks that split prefill sequence computation. PCP expands
     the process world size but does not increase the KV-cache shard count."""
+    enable_pcp_o_proj_tp: bool = False
+    """Shard MLA O-Proj weights over TP x PCP. This experimental MVP supports
+    unquantized eager execution with DCP disabled."""
     data_parallel_size: int = Field(default=1, ge=1)
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor, prefill-context, and data parallel sizes."""
@@ -538,6 +541,11 @@ class ParallelConfig:
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
         dcp = self.decode_context_parallel_size
+        if self.enable_pcp_o_proj_tp:
+            if pcp <= 1:
+                raise ValueError("PCP O-Proj TP requires PCP > 1.")
+            if dcp != 1:
+                raise ValueError("PCP O-Proj TP MVP requires DCP = 1.")
         if pcp > 1 and self.data_parallel_size > 1:
             raise ValueError("PCP does not support data parallelism yet.")
         if pcp == 1:

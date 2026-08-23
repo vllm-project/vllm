@@ -67,6 +67,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     DCPGroupColumnParallelLinear,
     MergedColumnParallelLinear,
+    PCPOProjRowParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -1085,7 +1086,12 @@ class DeepseekV2MLAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
         )
-        self.o_proj = RowParallelLinear(
+        o_proj_cls = (
+            PCPOProjRowParallelLinear
+            if vllm_config.parallel_config.enable_pcp_o_proj_tp
+            else RowParallelLinear
+        )
+        self.o_proj = o_proj_cls(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
             bias=False,

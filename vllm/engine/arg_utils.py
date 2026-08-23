@@ -480,6 +480,7 @@ class EngineArgs:
     device_ids: list[int | str] | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
+    enable_pcp_o_proj_tp: bool = ParallelConfig.enable_pcp_o_proj_tp
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
     dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
@@ -1087,6 +1088,10 @@ class EngineArgs:
             "--prefill-context-parallel-size",
             "-pcp",
             **parallel_kwargs["prefill_context_parallel_size"],
+        )
+        parallel_group.add_argument(
+            "--enable-pcp-o-proj-tp",
+            **parallel_kwargs["enable_pcp_o_proj_tp"],
         )
         parallel_group.add_argument(
             "--data-parallel-size", "-dp", **parallel_kwargs["data_parallel_size"]
@@ -2263,6 +2268,7 @@ class EngineArgs:
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             prefill_context_parallel_size=self.prefill_context_parallel_size,
+            enable_pcp_o_proj_tp=self.enable_pcp_o_proj_tp,
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,
             data_parallel_external_lb=data_parallel_external_lb,

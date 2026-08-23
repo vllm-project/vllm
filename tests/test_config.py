@@ -717,6 +717,25 @@ def test_data_parallel_rpc_port_has_fixed_default():
     assert ParallelConfig().data_parallel_rpc_port == 29550
 
 
+def test_pcp_o_proj_tp_requires_pcp_and_dcp_one():
+    with pytest.raises(ValidationError, match="requires PCP > 1"):
+        ParallelConfig(enable_pcp_o_proj_tp=True)
+
+    with pytest.raises(ValidationError, match="requires DCP = 1"):
+        ParallelConfig(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=2,
+            enable_pcp_o_proj_tp=True,
+        )
+
+    config = ParallelConfig(
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=1,
+        enable_pcp_o_proj_tp=True,
+    )
+    assert config.enable_pcp_o_proj_tp
+
+
 @pytest.mark.parametrize("port", [1, 29550, 65535])
 def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
     assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port
