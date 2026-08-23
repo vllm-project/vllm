@@ -15,6 +15,7 @@ untouched). Folds in:
 Default (flag off) is bit-identical to the inherited eager forward.
 """
 
+from collections.abc import Mapping
 from functools import partial
 
 import numpy as np
@@ -40,7 +41,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
-from vllm.model_executor.models.glm4_1v import Glm4vProcessingInfo
+from vllm.model_executor.models.glm4_1v import (
+    Glm4vMultiModalProcessor,
+    Glm4vProcessingInfo,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -50,7 +54,7 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
 )
 from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.multimodal.parse import ImageSize
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -734,3 +738,21 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         num_vision_tokens = num_patches // (merge_size**2)
 
         return preprocessed_size, num_vision_tokens
+
+
+class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
+    """The vLLM-native ``Glm5NextProcessor`` extracts image/video features
+    only and passes the prompt text through unchanged, so prompt expansion
+    (image token repeat, video frame/timestamp structure) is owned by vLLM's
+    prompt-update machinery — the inherited ``_get_prompt_updates`` builds
+    the replacement content and the placeholder scan validates against
+    exactly that."""
+
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False

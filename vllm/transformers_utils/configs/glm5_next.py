@@ -158,6 +158,15 @@ class Glm5NextTextConfig(PretrainedConfig):
         # Per-layer attention / MLP layout. Normalize mlp_layer_types from
         # first_k_dense_replace when the new-schema field is absent so layer
         # construction sees a consistent layout (mirrors cohere2_moe).
+        # Newer checkpoints (300b_0821+) name the sparse MLA layers
+        # "deepseek_sparse_attention", which the transformers base config's
+        # layer-type whitelist rejects; map to the equivalent whitelisted
+        # "sparse" (counted as neither full nor linear attention, so the
+        # hybrid layer accounting is unchanged).
+        if layer_types is not None:
+            layer_types = [
+                "sparse" if t == "deepseek_sparse_attention" else t for t in layer_types
+            ]
         self.layer_types = layer_types
         if mlp_layer_types is None:
             n = self.num_hidden_layers

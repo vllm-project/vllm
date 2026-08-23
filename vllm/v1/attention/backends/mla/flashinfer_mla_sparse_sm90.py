@@ -238,22 +238,33 @@ class _SM90State:
                 "FlashInferMLASparseSM90 plan() called inside CUDA graph "
                 "capture; lengths must be planned host-side before capture."
             )
+        # Cached CPU staging buffers, filled in place: plan() runs per step
+        # (once per draft/verify metadata build), so per-call allocations and
+        # device round trips are on the hot path. Passing CPU tensors lets
+        # the wrapper's internal .to("cpu") no-op; its reserved-buffer
+        # copy_ then performs the single H2D transfer per tensor.
+        if getattr(self, "_arange_cpu", None) is None:
+            self._arange_cpu = torch.arange(self.max_tokens + 1, dtype=torch.int32)
+            self._qo_cpu = torch.empty(self.max_tokens + 1, dtype=torch.int32)
+            self._kv_cpu = torch.empty(self.max_tokens + 1, dtype=torch.int32)
+            self._lens_cpu = torch.full(
+                (self.max_tokens,), self.topk_width, dtype=torch.int32
+            )
         # use_cuda_graph=True makes the wrapper copy qo/kv indptr into its
         # fixed (max_tokens+1)-sized buffers with exact-size copy_, so the
         # indptr must always be full-size. Rows past num_tokens are padded
         # empty (qo_indptr flat at num_tokens) — zero-query rows read no q
-        # and schedule no work.
-        qo = torch.arange(self.max_tokens + 1, dtype=torch.int32).clamp_(max=num_tokens)
-        kv = qo * self.topk_width
-        # Padded (zero-query) rows keep the full width; their len value is
-        # never dereferenced because qo_indptr is flat past num_tokens.
-        lens = torch.full((self.max_tokens,), self.topk_width, dtype=torch.int32)
-        lens[:num_tokens] = kv_lens.to(torch.int32)
+        # and schedule no work. Padded rows keep the full width lens; the
+        # value is never dereferenced.
+        torch.clamp(self._arange_cpu, max=num_tokens, out=self._qo_cpu)
+        torch.mul(self._qo_cpu, self.topk_width, out=self._kv_cpu)
+        self._lens_cpu.fill_(self.topk_width)
+        self._lens_cpu[:num_tokens] = kv_lens.to(torch.int32)
         self.wrapper.plan(
-            qo.to(self.device),
-            kv.to(self.device),
+            self._qo_cpu,
+            self._kv_cpu,
             self.kv_indices,
-            lens.to(self.device),
+            self._lens_cpu,
             self.num_heads,
             self.kv_lora_rank,  # head_dim_ckv
             self.qk_rope_head_dim,  # 0 (NoPE) or 64 (rope MLA)
@@ -285,6 +296,11 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        # seq_lens_cpu_upper_bound is optimistic on decode rows under async
+        # spec decode, so the fast sync-free path is only safe without it;
+        # under async scheduling the exact (device) positions are used at
+        # the cost of one D2H sync per metadata build.
+        self._async_scheduling = bool(vllm_config.scheduler_config.async_scheduling)
         hf_config = vllm_config.model_config.hf_text_config
         self._index_topk = int(getattr(hf_config, "index_topk", 2048))
         self._index_kpool = int(getattr(hf_config, "index_kpool", 1))
@@ -306,13 +322,29 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         num_rows = int(qsl[-1])
         if num_rows == 0:
             return 0, torch.zeros(0, dtype=torch.int32)
-        # Row context == positions[row] + 1: the indexer's own convention for
-        # both prefill and decode top-k (``_decode_topk_seq_lens`` uses
-        # pos + 1). Positions are contiguous per request on real batches
-        # (equivalent to seq_lens - q_len + j + 1) but NOT under capture
-        # dummies, so positions are the only faithful source.
+        # Row context == position + 1. Without async scheduling the
+        # maintained host upper bound is exact, giving a sync-free path;
+        # under async scheduling it is optimistic on decode rows, so fall
+        # back to the exact device positions (one D2H sync per build). The
+        # seq_lens derivation equals position + 1 because positions are
+        # contiguous per request.
+        sl_host = getattr(cam, "seq_lens_cpu_upper_bound", None)
         positions = getattr(cam, "positions", None)
-        if positions is not None and num_rows <= positions.shape[0]:
+        if not getattr(self, "_async_scheduling", False) and sl_host is not None:
+            seq_lens = sl_host[:num_reqs].to(torch.int32)
+            q_lens = qsl[1:] - qsl[:-1]
+            first_pos = seq_lens - q_lens
+            req_of_row = torch.repeat_interleave(
+                torch.arange(num_reqs, dtype=torch.int64), q_lens.to(torch.int64)
+            )
+            rows = torch.arange(num_rows, dtype=torch.int32)
+            ctx = (
+                first_pos.to(torch.int64)[req_of_row]
+                + rows.to(torch.int64)
+                - qsl.to(torch.int64)[req_of_row]
+                + 1
+            )
+        elif positions is not None and num_rows <= positions.shape[0]:
             ctx = positions[:num_rows].cpu().to(torch.int64) + 1
         else:
             seq_lens = cam.seq_lens[:num_reqs].cpu().to(torch.int32)

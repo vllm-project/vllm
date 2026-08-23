@@ -874,94 +874,35 @@ class Glm5NextProcessor(ProcessorMixin):
             image_inputs = self.image_processor(
                 images=images, **output_kwargs["images_kwargs"]
             )
-            image_grid_thw = image_inputs["image_grid_thw"]
         else:
             image_inputs = {}
-            image_grid_thw = None
 
         if videos is not None:
             videos_inputs = self.video_processor(
                 videos=videos, **output_kwargs["videos_kwargs"]
             )
             if "return_metadata" not in kwargs:
-                video_metadata = videos_inputs.pop("video_metadata")
-            else:
-                video_metadata = videos_inputs["video_metadata"]
-            video_grid_thw = videos_inputs["video_grid_thw"]
+                videos_inputs.pop("video_metadata")
         else:
             videos_inputs = {}
-            video_grid_thw = None
 
         if not isinstance(text, list):
             text = [text]
 
-        text = text.copy()  # below lines change text in-place
-        if image_grid_thw is not None:
-            merge_length = self.image_processor.merge_size**2
-            index = 0
-            for i in range(len(text)):
-                while self.image_token in text[i]:
-                    num_image_tokens = image_grid_thw[index].prod() // merge_length
-                    text[i] = text[i].replace(
-                        self.image_token, "<|placeholder|>" * num_image_tokens, 1
-                    )
-                    index += 1
-
-        if video_grid_thw is not None:
-            merge_length = self.video_processor.merge_size**2
-            video_index = 0
-            for i in range(len(text)):
-                while self.video_token in text[i]:
-                    num_frames = video_grid_thw[video_index][0]
-                    video_structure = ""
-
-                    metadata = video_metadata[video_index]
-                    if metadata.fps is None:
-                        logger.warning_once(
-                            "GLM-5-Next requires frame timestamps to construct "
-                            "prompts, but the `fps` of the input video could not "
-                            "be inferred. Defaulting to `fps=24`. Please provide "
-                            "`video_metadata` for more accurate results."
-                        )
-                    metadata.fps = 24 if metadata.fps is None else metadata.fps
-                    timestamps = metadata.timestamps[::2]  # mrope
-
-                    selected_timestamps = list(timestamps[:num_frames])
-                    while len(selected_timestamps) < num_frames:
-                        selected_timestamps.append(
-                            selected_timestamps[-1] if selected_timestamps else 0
-                        )
-
-                    for frame_idx in range(num_frames):
-                        timestamp_sec = selected_timestamps[frame_idx]
-                        video_structure += self.replace_frame_token_id(timestamp_sec)
-
-                    text[i] = text[i].replace(self.video_token, video_structure, 1)
-                    num_image_tokens = (
-                        video_grid_thw[video_index].prod()
-                        // merge_length
-                        // video_grid_thw[video_index][0]
-                    )
-                    for frame_idx in range(num_frames):
-                        if self.image_token in text[i]:
-                            text[i] = text[i].replace(
-                                self.image_token,
-                                "<|placeholder|>" * num_image_tokens,
-                                1,
-                            )
-
-                    video_index += 1
-
-        # Restore all placeholders after both image and video blocks.
-        for i in range(len(text)):
-            text[i] = text[i].replace("<|placeholder|>", self.image_token)
-
+        # The prompt text passes through UNCHANGED: vLLM's prompt-update
+        # machinery (glm4_1v wrapper) owns the textual expansion — a single
+        # ``<|image|>`` per image and the ``<|begin_of_video|><|video|>
+        # <|end_of_video|>`` triple per video are replaced with the
+        # grid-sized placeholder content after this call, and the
+        # placeholder scan validates against exactly those sequences.
+        # (HF-side expansion here produced a different frame/timestamp
+        # structure than ``_construct_video_placeholder`` and broke the
+        # scan with "found 0 prompt placeholders".)
         return_tensors = output_kwargs["text_kwargs"].pop("return_tensors", None)
         return_mm_token_type_ids = output_kwargs["text_kwargs"].pop(
             "return_mm_token_type_ids", False
         )
         text_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
-        self._check_special_mm_tokens(text, text_inputs, modalities=["image", "video"])
 
         if return_mm_token_type_ids:
             array_ids = np.array(text_inputs["input_ids"])
@@ -1009,12 +950,6 @@ class Glm5NextProcessor(ProcessorMixin):
             vision_data["num_video_tokens"] = num_video_tokens
 
         return MultiModalData(**vision_data)
-
-    def replace_frame_token_id(self, timestamp_sec) -> str:
-        return (
-            f"<|begin_of_image|>{self.image_token}<|end_of_image|>"
-            f"{timestamp_sec:.1f} seconds"
-        )
 
     def post_process_image_text_to_text(
         self,

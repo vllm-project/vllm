@@ -58,7 +58,6 @@ from vllm.model_executor.models.deepseek_v2 import _get_moe_router_dtype
 from vllm.model_executor.models.glm4_1v import (
     Glm4vDummyInputsBuilder,
     Glm4vForConditionalGeneration,
-    Glm4vMultiModalProcessor,
 )
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
@@ -87,7 +86,11 @@ from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
-from .multimodal import Glm5NextProcessingInfo, Glm5NextVisionTransformer
+from .multimodal import (
+    Glm5NextMultiModalProcessor,
+    Glm5NextProcessingInfo,
+    Glm5NextVisionTransformer,
+)
 
 logger = init_logger(__name__)
 
@@ -979,7 +982,7 @@ class Glm5NextForCausalLM(
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    Glm4vMultiModalProcessor,
+    Glm5NextMultiModalProcessor,
     info=Glm5NextProcessingInfo,
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
