@@ -181,6 +181,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         use_local_argmax_reduction=False,
         draft_sample_method="greedy",
         enable_adaptive_verification=False,
+        skip_draft_when_k0=False,
     )
     vllm_config = SimpleNamespace(
         speculative_config=speculative_config,
@@ -216,7 +217,10 @@ def test_mm_support_configured_after_model_load(monkeypatch):
 
     target_model_config = _ModelConfig()
     draft_model_config = _ModelConfig()
-    vllm_config = SimpleNamespace(model_config=target_model_config)
+    vllm_config = SimpleNamespace(
+        model_config=target_model_config,
+        speculative_config=SimpleNamespace(skip_draft_when_k0=False),
+    )
     draft_model = _MultimodalDraftModel()
 
     def init_base(speculator, vllm_config, device):
