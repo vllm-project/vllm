@@ -202,7 +202,10 @@ def test_mm_support_configured_after_model_load(monkeypatch):
 
     target_model_config = _ModelConfig()
     draft_model_config = _ModelConfig()
-    vllm_config = SimpleNamespace(model_config=target_model_config)
+    vllm_config = SimpleNamespace(
+        model_config=target_model_config,
+        speculative_config=SimpleNamespace(skip_draft_when_k0=False),
+    )
     draft_model = _MultimodalDraftModel()
 
     def init_base(speculator, vllm_config, device):
@@ -433,6 +436,7 @@ def test_propose_k0_runs_prefill_without_draft_decode(monkeypatch):
     speculator.prefill_cudagraph_manager = None
     speculator.decode_cudagraph_manager = None
     speculator.use_fused_multi_step_decode = False
+    speculator.skip_draft_when_k0 = False
     speculator._copy_request_inputs = Mock()
     speculator._prepare_eplb_forward = Mock()
     speculator.on_prefill_begin = Mock()
