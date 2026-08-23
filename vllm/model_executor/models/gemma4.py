@@ -1349,19 +1349,14 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        """Expert weight mapping, also required by the fused-MoE LoRA path.
 
-        # MoE expert weight mapping: checkpoint can have either:
-        #   1. 3D packed tensors (exploded in _weight_iterator to per-expert 2D)
-        #   2. Already per-expert 2D weights (if quantized)
+        `LoRAModelManager` calls `get_expert_mapping()` on MoE models; without it, serving any
+        LoRA against a MoE Gemma 4 raises
+        `AttributeError: To support LoRA for MoE model, 'get_expert_mapping' must be implemented`
+        before the engine finishes starting. `load_weights` calls this so the two cannot diverge.
+        """
         # Map to MoERunner parameters:
         #   moe.experts.{id}.gate_proj → MoERunner w1 (shard of w13)
         #   moe.experts.{id}.up_proj   → MoERunner w3 (shard of w13)
@@ -1392,9 +1387,28 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 shard_id,
             ) in dot_suffix_expert_params_mapping
         ]
-        expert_params_mapping = (
+        return (
             dot_suffix_expert_params_mapping + underscore_suffix_expert_params_mapping
         )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+
+        # MoE expert weight mapping: checkpoint can have either:
+        #   1. 3D packed tensors (exploded in _weight_iterator to per-expert 2D)
+        #   2. Already per-expert 2D weights (if quantized)
+        # Map to MoERunner parameters:
+        #   moe.experts.{id}.gate_proj → MoERunner w1 (shard of w13)
+        #   moe.experts.{id}.up_proj   → MoERunner w3 (shard of w13)
+        #   moe.experts.{id}.down_proj → MoERunner w2
+        expert_params_mapping = self.get_expert_mapping()
         params_dict = dict(self.named_parameters())
         # Include buffers (e.g. layer_scalar) so they can be loaded too
         params_dict.update(dict(self.named_buffers()))
@@ -1601,6 +1615,9 @@ class Gemma4ForCausalLM(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Checkpoint weight names use "language_model." prefix (from the

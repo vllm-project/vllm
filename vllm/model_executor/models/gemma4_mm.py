@@ -2156,6 +2156,9 @@ class Gemma4ForConditionalGeneration(
     # Weight loading
     # ------------------------------------------------------------------ #
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.language_model.get_expert_mapping()
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Some checkpoints have vestigial embed_vision.embedding and
         # embed_audio.embedding weights from the Gemma3n architecture
