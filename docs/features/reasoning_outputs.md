@@ -335,7 +335,7 @@ vllm serve Qwen/Qwen3-0.6B \
   }'
 ```
 
-Values of `loop_break_min_pattern_size >= 4` and `loop_break_min_count >= 3` are recommended so benign short repeats (separator runs, ellipses) cannot trigger a break. Individual requests can opt out with the `thinking_loop_break: false` sampling parameter; `null` (the default) follows the server configuration.
+Tune on total repeated length, not pattern size. `loop_break_min_pattern_size` does not exclude shorter cycles: a cycle also matches at every multiple of its own period, so twelve identical separator tokens satisfy `loop_break_min_pattern_size: 4` with `loop_break_min_count: 3`. What a break actually costs a benign repeat is `loop_break_min_pattern_size * loop_break_min_count` tokens, so raise `loop_break_min_count` if separator runs, ellipses, or long enumerations are being cut short. Individual requests can opt out with the `thinking_loop_break: false` sampling parameter; `null` (the default) follows the server configuration.
 
 ## Automatic `enable_thinking` Activation
 

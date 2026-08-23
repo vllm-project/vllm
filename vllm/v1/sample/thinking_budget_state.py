@@ -46,6 +46,7 @@ class ThinkingBudgetStateHolder:
 
     think_start_token_ids: list[int]
     think_end_token_ids: list[int]
+    natural_think_end_token_ids: list[int]
 
     def __init__(
         self,
@@ -66,11 +67,21 @@ class ThinkingBudgetStateHolder:
         if reasoning_config is None:
             self.think_start_token_ids = []
             self.think_end_token_ids = []
+            self.natural_think_end_token_ids = []
         else:
             rs = reasoning_config.reasoning_start_token_ids
             re = reasoning_config.reasoning_end_token_ids
+            natural_re = getattr(
+                reasoning_config, "natural_reasoning_end_token_ids", None
+            )
             self.think_start_token_ids = rs if rs else []
             self.think_end_token_ids = re if re else []
+            # ``reasoning_end_str`` may prepend a transition phrase to the
+            # parser's own end marker, so a natural exit emits a shorter
+            # sequence than the one forcing writes.
+            self.natural_think_end_token_ids = (
+                natural_re if natural_re and natural_re != re else []
+            )
 
         self.loop_break_params: RepetitionDetectionParams | None = None
         self.loop_break_min_reasoning_tokens = 256
@@ -242,13 +253,21 @@ class ThinkingBudgetStateHolder:
 
         start_ids = self.think_start_token_ids
         end_ids = self.think_end_token_ids
-        max_marker = max(len(start_ids), len(end_ids), 1)
+        natural_end_ids = self.natural_think_end_token_ids
+        max_marker = max(len(start_ids), len(end_ids), len(natural_end_ids), 1)
         # Overlap by marker-length - 1 so a marker sequence spanning the
         # previous scan edge is still seen.
         window_begin = max(0, scan_pos - (max_marker - 1))
         window = output[window_begin:]
         last_start = self._find_last_sequence_index(window, start_ids)
-        last_end = self._find_last_sequence_index(window, end_ids)
+        # A natural exit emits only the parser's end marker, which is a
+        # shorter sequence than ``reasoning_end_str`` when that carries a
+        # transition phrase; miss it and answer tokens keep counting as
+        # reasoning, so a repetitive answer can force another end sequence.
+        last_end = max(
+            self._find_last_sequence_index(window, end_ids),
+            self._find_last_sequence_index(window, natural_end_ids),
+        )
 
         if last_end > last_start:
             # The section ended (naturally or forced); re-arm for the next.
@@ -316,6 +335,43 @@ class ThinkingBudgetStateHolder:
                 think_len,
             )
 
+    def _scan_markers(self, state: dict[str, Any]) -> None:
+        """Locate the reasoning markers, examining each output token once.
+
+        ``start_thinking``/``end_thinking`` are sticky until the section is
+        reset, and a marker that is absent from the tokens seen so far stays
+        absent, so only tokens appended since the last call need searching.
+        Rescanning ``output[scan_offset:]`` every step would cost O(n) per
+        token while a section is open -- O(n^2) over a long reasoning trace.
+        """
+        output = state.get("output_tok_ids", [])
+        scan_offset = state.get("scan_offset", 0)
+        if state["start_thinking"] == -1 or state["end_thinking"] == -1:
+            overlap = (
+                max(
+                    len(self.think_start_token_ids),
+                    len(self.think_end_token_ids),
+                    1,
+                )
+                - 1
+            )
+            # ``scan_offset`` wins after a section reset, which moves it past
+            # the cursor; the overlap keeps a marker straddling the previous
+            # window edge visible.
+            window_begin = max(scan_offset, state.get("marker_scan_pos", 0) - overlap)
+            window = output[window_begin:]
+            if state["start_thinking"] == -1:
+                found = self._find_last_sequence_index(
+                    window, self.think_start_token_ids
+                )
+                if found >= 0:
+                    state["start_thinking"] = window_begin + found
+            if state["end_thinking"] == -1:
+                found = self._find_last_sequence_index(window, self.think_end_token_ids)
+                if found >= 0:
+                    state["end_thinking"] = window_begin + found
+        state["marker_scan_pos"] = len(output)
+
     @staticmethod
     def _find_last_sequence_index(target_list: list[int], token_ids: list[int]) -> int:
         if not token_ids:
@@ -382,6 +438,7 @@ class ThinkingBudgetStateHolder:
             "bonus_token_forced": False,
             "continue_thinking": continue_thinking,
             "scan_offset": 0,
+            "marker_scan_pos": 0,
         }
 
     def _update_think_state(self, state: dict[str, Any]) -> None:
@@ -393,24 +450,7 @@ class ThinkingBudgetStateHolder:
             state["force_index"] = []
             return
 
-        if state["start_thinking"] == -1:
-            scan_offset = state.get("scan_offset", 0)
-            output_slice = state.get("output_tok_ids", [])[scan_offset:]
-            start_thinking = self._find_last_sequence_index(
-                output_slice, self.think_start_token_ids
-            )
-            if start_thinking >= 0:
-                start_thinking += scan_offset
-            state["start_thinking"] = start_thinking
-        if state["end_thinking"] == -1:
-            scan_offset = state.get("scan_offset", 0)
-            output_slice = state.get("output_tok_ids", [])[scan_offset:]
-            end_thinking = self._find_last_sequence_index(
-                output_slice, self.think_end_token_ids
-            )
-            if end_thinking >= 0:
-                end_thinking += scan_offset
-            state["end_thinking"] = end_thinking
+        self._scan_markers(state)
 
         if (
             not state.get("in_end", False)

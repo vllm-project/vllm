@@ -38,9 +38,10 @@ class ReasoningConfig:
 
     loop_break_min_pattern_size: int = 0
     """Minimum N-gram pattern size for reasoning loop breaking. If 0, it
-    defaults to 1. Must be <= ``loop_break_max_pattern_size``. Values >= 4
-    are recommended to avoid firing on benign short repeats (e.g. separator
-    runs)."""
+    defaults to 1. Must be <= ``loop_break_max_pattern_size``. Raising it does
+    not exclude shorter cycles -- a cycle matches at every multiple of its own
+    period -- so tune benign repeats out with ``loop_break_min_count``, which
+    sets how many tokens must repeat before a break fires."""
 
     loop_break_min_count: int = 0
     """Number of consecutive repetitions of a pattern that triggers reasoning

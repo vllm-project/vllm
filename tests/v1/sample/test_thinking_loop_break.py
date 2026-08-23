@@ -16,6 +16,7 @@ from vllm.v1.sample.thinking_budget_state import (
 
 THINK_START = 100
 THINK_END = 200
+TRANSITION = 201
 VOCAB_SIZE = 256
 
 
@@ -32,6 +33,13 @@ class _LoopBreakReasoningConfig:
 class _NoLoopBreakReasoningConfig:
     reasoning_start_token_ids = [THINK_START]
     reasoning_end_token_ids = [THINK_END]
+
+
+class _TransitionEndReasoningConfig(_LoopBreakReasoningConfig):
+    # ``reasoning_end_str`` may prepend a transition phrase to the parser's own
+    # end marker, so forcing writes a longer sequence than a natural exit.
+    reasoning_end_token_ids = [TRANSITION, THINK_END]
+    natural_reasoning_end_token_ids = [THINK_END]
 
 
 def _make_holder(config=None) -> ThinkingBudgetStateHolder:
@@ -169,6 +177,21 @@ def test_section_end_rearms_detection():
     _feed(h, output, [THINK_START] + _non_periodic(40, base=1000) + cycle * 12)
     assert state["lb_fired"] is True
     assert state["in_end"] is True
+
+
+def test_natural_section_end_stops_loop_tracking():
+    """A natural exit emits only the parser's end marker. Track just the forced
+    sequence and answer tokens keep counting as reasoning, so a repetitive
+    answer forces a second end sequence mid-answer."""
+    h = _make_holder(_TransitionEndReasoningConfig())
+    output = _add_request(h, SamplingParams())
+    _feed(h, output, [THINK_START] + _non_periodic(40) + [THINK_END])
+    state = h._state[0]
+    assert state["lb_in_think"] is False
+
+    _feed(h, output, [7, 8, 9] * 30)
+    assert state["lb_fired"] is False
+    assert state["in_end"] is False
 
 
 def test_budget_and_loop_break_coexist():

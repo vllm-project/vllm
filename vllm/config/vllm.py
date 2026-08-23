@@ -2464,6 +2464,14 @@ class VllmConfig:
         ):
             unsupported.append("sequence parallelism")
 
+        # V2 has its own ThinkingBudgetState, which enforces thinking budgets
+        # only; the loop-break detection lives in the V1 holder.
+        if (
+            self.reasoning_config is not None
+            and self.reasoning_config.loop_break_max_pattern_size > 0
+        ):
+            unsupported.append("reasoning loop breaking")
+
         # V2 does not implement the external_launcher (torchrun) PP-output
         # broadcast that V1 uses to keep all ranks in sync (broadcast_pp_output).
         if (
