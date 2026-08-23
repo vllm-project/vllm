@@ -200,120 +200,6 @@ class TestReadLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# Pin / unpin
-# ---------------------------------------------------------------------------
-
-
-class TestPinUnpin:
-    def test_pin_removes_from_cache(self, manager, item_small):
-        manager.open_write([item_small])
-        manager.close_write("small")
-        manager.pin("small")
-        assert "small" not in manager._lru_cache
-        # Pinned item is not evictable, so available blocks drop
-        assert manager._total_available_blocks == 3
-
-    def test_unpin_returns_to_cache(self, manager, item_small):
-        manager.open_write([item_small])
-        manager.close_write("small")
-        manager.pin("small")
-        manager.unpin("small")
-        assert "small" in manager._lru_cache
-        assert manager._total_available_blocks == 4
-
-    def test_pin_during_read_stays_out_of_cache(self, manager, item_small):
-        """Pinning while item is being read keeps it pinned after reads finish."""
-        manager.open_write([item_small])
-        manager.close_write("small")
-        manager.open_read("small")
-        manager.pin("small")
-        # ref_count=1, so not in cache anyway
-        manager.close_read("small")
-        # ref_count=0, but pinned -> still not in cache
-        assert "small" not in manager._lru_cache
-        assert manager._total_available_blocks == 3  # remains unavailable
-        manager.unpin("small")
-        assert "small" in manager._lru_cache
-        assert manager._total_available_blocks == 4
-
-    def test_pin_non_cacheable(self, manager, item_nocache):
-        """
-        Pin/unpin have no effect on non-cacheable items.
-        Since non-cacheable items are deleted on close_write unless kept alive
-        by open_n_reads, we keep one read reference to test pin/unpin behavior.
-        When the last reference is closed, the item is auto-deleted.
-        """
-        manager.open_write([item_nocache])
-        manager.close_write("nocache", open_n_reads=1)  # keep alive
-        # Pin does nothing
-        manager.pin("nocache")
-        assert "nocache" in manager._all_items
-        # Unpin when ref_count>0 does nothing
-        manager.unpin("nocache")
-        assert "nocache" in manager._all_items
-        # Now close the read -> ref_count=0, and because use_cache=False,
-        # it will be auto-deleted.
-        manager.close_read("nocache")
-        assert "nocache" not in manager._all_items
-        # Blocks are freed
-        assert manager._total_available_blocks == 4
-
-    def test_pin_during_write(self, manager, item_small):
-        """Pinning an item before it is closed keeps it out of cache on close."""
-        manager.open_write([item_small])
-        manager.pin("small")  # pin while still writing
-        manager.close_write("small")  # should NOT go into cache because pinned
-        item = manager._all_items["small"]
-        assert item.ref_count == 0
-        assert "small" not in manager._lru_cache
-        assert manager._total_available_blocks == 3  # blocks remain unavailable
-        manager.unpin("small")
-        assert "small" in manager._lru_cache
-        assert manager._total_available_blocks == 4
-
-    def test_unpin_during_write(self, manager, item_small):
-        """Unpinning during write has no effect because item not yet pinned."""
-        manager.open_write([item_small])
-        manager.unpin("small")  # item not pinned, so no-op
-        manager.close_write("small")
-        # Since unpin did nothing, close_write will put it into cache
-        assert "small" in manager._lru_cache
-        assert manager._total_available_blocks == 4
-
-    def test_unpin_with_ref_count_positive(self, manager, item_small):
-        """Unpinning while ref_count > 0 should not re‑insert into cache."""
-        manager.open_write([item_small])
-        manager.close_write("small")
-        manager.pin("small")
-        manager.open_read("small")  # ref_count becomes 1
-        manager.unpin("small")  # unpin while ref_count=1
-        # Item should not be in cache because ref_count>0
-        assert "small" not in manager._lru_cache
-        assert manager._total_available_blocks == 3
-        manager.close_read("small")  # ref_count=0, unpin already called,
-        # but close_read will put it into cache because use_cache=True
-        assert "small" in manager._lru_cache
-        assert manager._total_available_blocks == 4
-
-    def test_pin_unpin_idempotence(self, manager, item_small):
-        """Repeated pin/unpin should be safe and not change state."""
-        manager.open_write([item_small])
-        manager.close_write("small")
-        # Pin twice
-        manager.pin("small")
-        manager.pin("small")  # should be no-op
-        assert "small" in manager._pinned_items
-        assert "small" not in manager._lru_cache
-        assert manager._total_available_blocks == 3
-        # Unpin twice
-        manager.unpin("small")
-        manager.unpin("small")  # should be no-op
-        assert "small" not in manager._pinned_items
-        assert "small" in manager._lru_cache
-        assert manager._total_available_blocks == 4
-
-
-# ---------------------------------------------------------------------------
 # Delete
 # ---------------------------------------------------------------------------
 
@@ -342,38 +228,6 @@ class TestDelete:
         assert "nocache" not in manager._all_items
         assert manager._total_available_blocks == 4
         assert len(manager._free_blocks) == 4
-
-    def test_delete_pinned_item(self, manager, item_small):
-        manager.open_write([item_small])
-        manager.close_write("small")
-        manager.pin("small")
-        manager.delete("small")
-        assert "small" not in manager._all_items
-        assert len(manager._free_blocks) == 4
-        assert manager._total_available_blocks == 4
-
-    def test_delete_not_in_lru_does_not_raise(self, manager):
-        """
-        Regression test: deleting an item not in the LRU cache (e.g., pinned
-        or non-cacheable) must not raise KeyError and must correctly update
-        _total_available_blocks.
-        """
-        # Pinned item: not in LRU
-        item = ShmWriteRequest(uuid="pinned", size=200, use_cache=True)
-        manager.open_write([item])
-        manager.close_write("pinned")
-        manager.pin("pinned")
-        manager.delete("pinned")
-        assert "pinned" not in manager._all_items
-        assert manager._total_available_blocks == 4
-
-        # Non-cacheable with open reads: not in LRU
-        item2 = ShmWriteRequest(uuid="noncache", size=200, use_cache=False)
-        manager.open_write([item2])
-        manager.close_write("noncache", open_n_reads=1)
-        manager.delete("noncache", force=True)
-        assert "noncache" not in manager._all_items
-        assert manager._total_available_blocks == 4
 
     def test_delete_busy_item_raises(self, manager, item_small):
         manager.open_write([item_small])
@@ -465,21 +319,6 @@ class TestLRUEviction:
         # The freed blocks from "old" (2) were used: 1 for the new item,
         # the other is now in the free list
         assert len(manager._free_blocks) == 1
-
-    def test_pinned_item_not_evicted(self, manager):
-        # Same setup, but pin the older item
-        item1 = ShmWriteRequest(uuid="pinned_old", size=400, use_cache=True)
-        item2 = ShmWriteRequest(uuid="unpinned", size=400, use_cache=True)
-        manager.open_write([item1, item2])
-        manager.close_write("pinned_old")
-        manager.close_write("unpinned")
-        manager.pin("pinned_old")
-
-        # Now only "unpinned" is in cache. total_available_blocks = 2 (from unpinned)
-        # free_blocks = 0.  Requesting a 1‑block item should evict "unpinned".
-        manager.open_write([ShmWriteRequest(uuid="extra", size=100, use_cache=True)])
-        assert "pinned_old" in manager._all_items
-        assert "unpinned" not in manager._all_items
 
     def test_eviction_respects_order_of_close_write(self, manager):
         """LRU order follows close_write, not open_write."""
@@ -582,7 +421,6 @@ class TestInfoAndState:
         assert state["total_available_blocks"] == 4
         assert state["cached_items_count"] == 0
         assert state["cached_blocks_count"] == 0
-        assert state["pinned_items_count"] == 0
         assert state["total_items_count"] == 0
 
         manager.open_write([item_small, item_large])

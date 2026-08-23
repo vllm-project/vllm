@@ -17,7 +17,7 @@ Read flow:
 - close_read(uuid): decrements ref_count; if becomes 0, re-caches if cacheable,
                      else deletes immediately if non-cacheable.
 
-Additional: pin/unpin prevent eviction; delete removes idle items.
+Additional: delete removes idle items.
 """
 
 from collections import deque
@@ -29,7 +29,7 @@ from .types import ShmSlot, ShmWriteRequest
 
 # Special reference count values
 REF_WRITING = -1  # Item is being written (not yet readable)
-REF_IDLE = 0  # Item is idle and may be cached or pinned
+REF_IDLE = 0  # Item is idle and may be cached
 
 
 class PagedShmManager:
@@ -57,7 +57,6 @@ class PagedShmManager:
             capacity=self.n_block,
             getsizeof=lambda x: x.n_block(),
         )
-        self._pinned_items: set[str] = set()
 
     def open_write(self, items: list[ShmWriteRequest]) -> list[ShmSlot]:
         """
@@ -123,14 +122,10 @@ class PagedShmManager:
 
         if open_n_reads <= 0:
             if item.use_cache:
-                if uuid not in self._pinned_items:
-                    # Normal cacheable idle item: put into LRU
-                    item.ref_count = REF_IDLE
-                    self._total_available_blocks += item.n_block()
-                    self._lru_cache.put(uuid, item)
-                else:
-                    # Pinned: keep idle but do not cache (blocks remain occupied)
-                    item.ref_count = REF_IDLE
+                # Normal cacheable idle item: put into LRU
+                item.ref_count = REF_IDLE
+                self._total_available_blocks += item.n_block()
+                self._lru_cache.put(uuid, item)
             else:
                 # Non-cacheable: release immediately
                 # Set ref_count to idle to allow delete, then delete
@@ -149,11 +144,7 @@ class PagedShmManager:
             raise ValueError(f"UUID {uuid} is being written")
 
         # If the item is idle and cacheable, take it out of the cache
-        update_cache = (
-            item.use_cache
-            and item.ref_count == REF_IDLE
-            and uuid not in self._pinned_items
-        )
+        update_cache = item.use_cache and item.ref_count == REF_IDLE
         if update_cache:
             self._lru_cache.pop(uuid)
             self._total_available_blocks -= len(item.blocks)
@@ -164,7 +155,7 @@ class PagedShmManager:
     def close_read(self, uuid: str):
         """
         Decrement the read reference count. If the count drops to zero:
-          - For cacheable items: put back into LRU (if not pinned).
+          - For cacheable items: put back into LRU.
           - For non-cacheable items: delete immediately to free blocks.
         """
         item = self._get_item(uuid)
@@ -182,48 +173,7 @@ class PagedShmManager:
                 # Non-cacheable item is no longer needed
                 self.delete(uuid, force=False)
                 return
-            # Cacheable: re-insert if not pinned
-            if uuid not in self._pinned_items:
-                self._total_available_blocks += len(item.blocks)
-                self._lru_cache.put(uuid, item)
-
-    def pin(self, uuid: str):
-        """
-        Pin an item so it will not be evicted. Only applicable if use_cache is True.
-        """
-        item = self._get_item(uuid)
-
-        if not item.use_cache:
-            return
-
-        if uuid in self._pinned_items:
-            return
-
-        self._pinned_items.add(uuid)
-
-        # If the item is currently in the LRU cache, remove it
-        if item.ref_count == REF_IDLE:
-            self._lru_cache.pop(uuid)
-            self._total_available_blocks -= len(item.blocks)
-
-    def unpin(self, uuid: str):
-        """
-        Unpin an item. If the item becomes idle and cacheable, re‑insert it into LRU.
-        If the item is not cacheable and idle, it is deleted immediately.
-        """
-        item = self._get_item(uuid)
-
-        if not item.use_cache and item.ref_count == REF_IDLE:
-            self.delete(uuid)
-            return
-
-        if uuid not in self._pinned_items:
-            return
-
-        self._pinned_items.discard(uuid)
-
-        # If the item is idle, re‑insert it into the LRU cache
-        if item.ref_count == REF_IDLE:
+            # Cacheable: re-insert
             self._total_available_blocks += len(item.blocks)
             self._lru_cache.put(uuid, item)
 
@@ -246,7 +196,6 @@ class PagedShmManager:
             self._total_available_blocks += item.n_block()
 
         # Remove from all tracking structures.
-        self._pinned_items.discard(uuid)
         self._all_items.pop(uuid)
         self._free_blocks.extend(item.blocks)
 
@@ -285,7 +234,6 @@ class PagedShmManager:
             "total_available_blocks": self._total_available_blocks,
             "cached_items_count": len(self._lru_cache),
             "cached_blocks_count": cached_blocks,
-            "pinned_items_count": len(self._pinned_items),
             "total_items_count": len(self._all_items),
             "idle_items_count": idle_count,
             "writing_items_count": writing_count,
@@ -299,10 +247,6 @@ class PagedShmManager:
         """
         while len(self._free_blocks) < needed:
             uuid, victim = self._lru_cache.popitem()
-
-            # Pinned items are never placed in the LRU cache, so they
-            # cannot appear here. No change to _total_available_blocks;
-            # we just convert evictable blocks into physically free ones.
             self._all_items.pop(uuid)
             self._free_blocks.extend(victim.blocks)
 

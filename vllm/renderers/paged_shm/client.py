@@ -39,8 +39,6 @@ from .constant import (
     OK,
     OPEN_READ,
     OPEN_WRITE,
-    PIN,
-    UNPIN,
     WAIT_WRITE,
 )
 from .storage import PagedShmStorage
@@ -495,14 +493,6 @@ class PagedShmClient(_BaseClient):
         """Wait for an item to become readable. Does NOT acquire a read lock."""
         payload = json.dumps({"uuid": uuid_or_token, "timeout": timeout})
         self._request(WAIT_WRITE, payload)
-
-    def pin(self, uuid: str) -> None:
-        """Pin an item so it is not evicted from the LRU cache."""
-        self._request(PIN, uuid)
-
-    def unpin(self, uuid: str) -> None:
-        """Unpin an item, allowing it to be evicted if idle."""
-        self._request(UNPIN, uuid)
 
     def delete(self, uuid: str) -> None:
         """Delete an item and free its blocks immediately."""

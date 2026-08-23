@@ -55,13 +55,11 @@ def _blocks_needed(size: int, block_size: int = 4096) -> int:
     return math.ceil(size / block_size)
 
 
-def _fill_memory_cacheable(client) -> str:
+def _fill_memory_with_writing(client) -> str:
     """
-    Allocate all available free blocks with a single cacheable item.
-    The item is pinned to prevent automatic eviction, ensuring that
-    subsequent open_write calls truly experience an out-of-memory condition
-    rather than evicting this filler.
-    Returns the UUID so the caller can free it.
+    Allocate all free blocks with a writing item (open_write without close_write).
+    This holds the blocks in the 'writing' state, preventing eviction.
+    Returns the UUID so the caller can delete it to free space.
     """
     state = client.get_manager_state()
     free_blocks = state["free_blocks_count"]
@@ -70,9 +68,11 @@ def _fill_memory_cacheable(client) -> str:
     block_size = client.get_storage_info()["block_size"]
     size = free_blocks * block_size
     uuid = _unique_uuid()
-    data = bytes(size)
-    client.write(uuid, data, use_cache=True)
-    client.pin(uuid)  # pin to prevent eviction
+    # Open write but do NOT close it, so blocks stay reserved
+    client.open_write(
+        [ShmWriteRequest(uuid=uuid, size=size, use_cache=True)], timeout=0.0
+    )
+    # Ensure we've consumed all free blocks
     new_state = client.get_manager_state()
     assert new_state["free_blocks_count"] == 0, "Failed to fill memory"
     return uuid
@@ -431,29 +431,6 @@ class TestErrors:
         with pytest.raises(RuntimeError, match="Server error"):
             client.read(uuid)
 
-    def test_pin_unpin(self, client):
-        uuid = _unique_uuid()
-        client.write(uuid, b"pinned item")
-        state_before_pin = client.get_manager_state()
-        client.pin(uuid)
-        state_after_pin = client.get_manager_state()
-        assert (
-            state_after_pin["pinned_items_count"]
-            == state_before_pin["pinned_items_count"] + 1
-        )
-
-        client.unpin(uuid)
-        state_after_unpin = client.get_manager_state()
-        assert (
-            state_after_unpin["pinned_items_count"]
-            == state_before_pin["pinned_items_count"]
-        )
-
-        result = client.read(uuid)
-        assert result.tobytes() == b"pinned item"
-
-        client.delete(uuid)
-
 
 # ---------------------------------------------------------------------------
 # Server metadata
@@ -474,7 +451,6 @@ class TestMetadata:
         state = client.get_manager_state()
         assert state["free_blocks_count"] == n_block
         assert state["cached_items_count"] == 0
-        assert state["pinned_items_count"] == 0
         assert state["total_items_count"] == 0
         assert state["writing_items_count"] == 0
         assert state["reading_items_count"] == 0
@@ -689,7 +665,7 @@ class TestTokenProtection:
 
 class TestTimeout:
     def test_open_write_timeout_zero_raises_memory_error(self, client):
-        filler_uuid = _fill_memory_cacheable(client)
+        filler_uuid = _fill_memory_with_writing(client)
         try:
             with pytest.raises(RuntimeError, match="Server error"):
                 client.open_write(
@@ -697,10 +673,10 @@ class TestTimeout:
                     timeout=0.0,
                 )
         finally:
-            client.delete(filler_uuid)
+            client.delete(filler_uuid)  # force-delete the writing item
 
     def test_open_write_timeout_positive_succeeds_after_space_freed(self, client):
-        filler_uuid = _fill_memory_cacheable(client)
+        filler_uuid = _fill_memory_with_writing(client)
 
         small_uuid = _unique_uuid()
         result_holder = {}
@@ -734,7 +710,7 @@ class TestTimeout:
         client.delete(small_uuid)
 
     def test_open_write_timeout_negative_infinite(self, client):
-        filler_uuid = _fill_memory_cacheable(client)
+        filler_uuid = _fill_memory_with_writing(client)
 
         small_uuid = _unique_uuid()
         result_holder = {}
@@ -845,7 +821,7 @@ class TestTimeout:
         client.delete(uuid)
 
     def test_open_write_timeout_expires(self, client):
-        filler_uuid = _fill_memory_cacheable(client)
+        filler_uuid = _fill_memory_with_writing(client)
         small_uuid = _unique_uuid()
         start = time.perf_counter()
         with pytest.raises(RuntimeError, match="Server error"):
@@ -856,6 +832,21 @@ class TestTimeout:
         elapsed = time.perf_counter() - start
         assert elapsed >= 0.4, f"Timeout should be ~0.5s, got {elapsed:.2f}s"
         client.delete(filler_uuid)
+
+    def test_open_read_timeout_expires(self, client):
+        uuid = _unique_uuid()
+        # Open write without closing, so item stays in writing state
+        client.open_write(
+            [ShmWriteRequest(uuid=uuid, size=100, use_cache=True)], timeout=0.0
+        )
+        start = time.perf_counter()
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.open_read(uuid, timeout=0.5)
+        elapsed = time.perf_counter() - start
+        assert elapsed >= 0.4, f"Timeout should be ~0.5s, got {elapsed:.2f}s"
+        # Clean up
+        client.close_write(uuid)
+        client.delete(uuid)
 
     def test_wait_write_timeout_expires(self, client):
         uuid = _unique_uuid()

@@ -31,10 +31,8 @@ from .constant import (
     OK,
     OPEN_READ,
     OPEN_WRITE,
-    PIN,
     POLL_INTERVAL,
     SHUTDOWN,
-    UNPIN,
     WAIT_WRITE,
 )
 from .manager import PagedShmManager
@@ -628,16 +626,6 @@ class PagedShmServer:
             self.manager.close_read(real_uuid)
         return _OK_RESPONSE
 
-    def pin(self, uuid: str) -> str:
-        """Pin an item so it is not evicted from the LRU cache."""
-        self.manager.pin(uuid)
-        return _OK_RESPONSE
-
-    def unpin(self, uuid: str) -> str:
-        """Unpin an item, allowing it to be evicted if idle."""
-        self.manager.unpin(uuid)
-        return _OK_RESPONSE
-
     def delete(self, uuid: str) -> str:
         """Delete an item and free its blocks (forcefully)."""
         # Destroy all read tokens associated with this item
@@ -711,8 +699,6 @@ def _zmq_server(
         handlers: dict[bytes, tuple[Callable, bool]] = {
             CLOSE_WRITE: (server.close_write, True),
             CLOSE_READ: (server.close_read, True),
-            PIN: (server.pin, True),
-            UNPIN: (server.unpin, True),
             GET_INFO: (server.get_info, True),
             GET_MANAGER_STATE: (server.get_manager_state, False),
             GET_STORAGE_INFO: (server.get_storage_info, False),
