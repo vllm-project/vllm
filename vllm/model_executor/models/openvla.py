@@ -339,7 +339,7 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
         tokenizer = self.info.get_tokenizer()
         bos_token_id = tokenizer.bos_token_id
 
-        def get_insertion(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def get_insertion(item_idx: int) -> PromptUpdateDetails:
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems)
             )
