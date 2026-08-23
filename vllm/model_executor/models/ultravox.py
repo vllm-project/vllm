@@ -39,6 +39,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
@@ -298,6 +299,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
 
         replacement_id = hf_processor.audio_replacement_token_id  # type: ignore
 
@@ -322,7 +324,15 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         return [
             PromptReplacement(
                 modality="audio",
-                target="<|audio|>",
+                # `<|audio|>` is paired with `replacement_id` in
+                # `UltravoxProcessingInfo.get_hf_processor`, but it is not
+                # guaranteed to be a single vocab entry, so match the encoded
+                # placeholder text instead of `replacement_id`
+                target=cached_encode(
+                    tokenizer,
+                    hf_processor.audio_token_replacement,  # type: ignore
+                    add_special_tokens=False,
+                ),
                 replacement=get_replacement_ultravox,
             )
         ]
