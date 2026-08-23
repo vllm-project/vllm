@@ -65,6 +65,11 @@ from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 
 logger = init_logger(__name__)
 
+# Namespaces the draft's layer names apart from the target's in the shared
+# compilation_config.static_forward_context registry (both are the same
+# OrthrusForCausalLM class, so they would otherwise collide).
+DRAFT_PREFIX = "orthrus_diffusion_draft"
+
 
 class OrthrusProposer(SpecDecodeBaseProposer):
     def __init__(
@@ -84,29 +89,8 @@ class OrthrusProposer(SpecDecodeBaseProposer):
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
-        """Give the draft build its own, isolated attention-layer registry.
-
-        Both the target and this draft are the same OrthrusForCausalLM
-        class with the same default layer-name prefixes (e.g.
-        "model.layers.0.self_attn.attn"). The base class's
-        _create_draft_vllm_config only replaces kernel_config, leaving
-        compilation_config (and its static_forward_context registry, keyed
-        purely by prefix string -- see Attention.__init__ in
-        vllm/model_executor/layers/attention/attention.py) as the SAME
-        shared object as the target's, causing a "Duplicate layer name"
-        error when the draft's layers try to register under the same
-        names. A fresh CompilationConfig gives the draft its own registry.
-        Layer objects are still looked up via self.vllm_config (the
-        target's, unaffected by this) wherever OrthrusProposer or vLLM's
-        KV-cache-group setup needs to resolve kv_sharing_target_layer_name.
-        """
+        """Force FlexAttention for the draft's diffusion attention layers."""
         base = super()._create_draft_vllm_config()
-        # replace() copies only init fields, and static_forward_context is
-        # declared init=False -- so this preserves every compilation setting
-        # (enforce_eager, cudagraph mode, ...) while giving the draft a
-        # fresh, empty layer registry. Constructing a bare CompilationConfig()
-        # instead would silently drop those settings.
-        base = replace(base, compilation_config=replace(base.compilation_config))
         # Force FlexAttentionBackend for the draft's attn_diff layers so the
         # non-causal-within-block mask (see set_inputs_first_pass's
         # mm_req_doc_ranges below) is actually honored -- vLLM's other
@@ -122,14 +106,39 @@ class OrthrusProposer(SpecDecodeBaseProposer):
 
     @override
     def _get_model(self) -> torch.nn.Module:
-        # Mark this construction as the diffusion draft, so the model builds
-        # its attn_diff layers and routes forward() through the diffusion
-        # path. See building_diffusion_draft's docstring for why an explicit
-        # context flag is needed rather than a VllmConfig identity check.
+        """Build the draft under a distinct prefix and the draft-mode flag.
+
+        The draft is the same OrthrusForCausalLM class as the target, so
+        with the default empty prefix its attention layers would register
+        under names the target already claimed (e.g.
+        "model.layers.0.self_attn.attn") in the shared
+        compilation_config.static_forward_context, raising "Duplicate layer
+        name". Building under DRAFT_PREFIX namespaces them instead.
+
+        Note this registry must stay *shared* with the target's: the base
+        class discovers draft layers by diffing that same registry (see
+        load_model's _draft_attn_layer_names), and per-layer attention
+        metadata is keyed by these names at runtime. Giving the draft its
+        own CompilationConfig would hide its layers from that discovery and
+        surface later as a KeyError on the first diffusion forward.
+
+        building_diffusion_draft() additionally makes the model build its
+        attn_diff layers and route forward() through the diffusion path --
+        see its docstring for why a context flag is needed rather than a
+        VllmConfig identity check.
+        """
+        from vllm.compilation.backends import set_model_tag
+        from vllm.model_executor.model_loader import get_model
         from vllm.model_executor.models.orthrus import building_diffusion_draft
 
-        with building_diffusion_draft():
-            return super()._get_model()
+        draft_vllm_config = self._create_draft_vllm_config()
+        with building_diffusion_draft(), set_model_tag("orthrus_diffusion_draft"):
+            return get_model(
+                vllm_config=draft_vllm_config,
+                model_config=self.speculative_config.draft_model_config,
+                load_config=self.speculative_config.draft_load_config,
+                prefix=DRAFT_PREFIX,
+            )
 
     @override
     def load_model(self, target_model: torch.nn.Module) -> None:
