@@ -432,6 +432,35 @@ class CudaPlatformBase(Platform):
                 logger.info("Using %s backend.", selected_backend)
                 return _backend_cls_path(backend_class)
 
+        # Components that do not plumb through the user's --attention-backend
+        # (the spec-decode draft model in particular) arrive here with
+        # selected_backend=None and auto-select. On SM121 auto-selection picks
+        # FLASHINFER, whose kernels fault with MTP + fp8 KV (vllm#37754), so
+        # allow pinning the auto-selection path too. Invalid pins fall back to
+        # auto-selection instead of failing components with other constraints.
+        forced_name = os.environ.get("VLLM_FORCE_ATTN_BACKEND")
+        if forced_name:
+            forced = AttentionBackendEnum[forced_name]
+            try:
+                backend_class = _get_attn_backend_class(forced)
+                invalid_reasons = backend_class.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if not invalid_reasons:
+                logger.info(
+                    "Using %s backend (VLLM_FORCE_ATTN_BACKEND).", forced
+                )
+                return _backend_cls_path(backend_class)
+            logger.warning(
+                "VLLM_FORCE_ATTN_BACKEND=%s is not valid here (%s); "
+                "falling back to auto-selection.",
+                forced_name,
+                invalid_reasons,
+            )
+
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
         valid_backends_priorities, all_invalid_reasons = cls.get_valid_backends(
