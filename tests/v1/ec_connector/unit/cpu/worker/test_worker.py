@@ -574,13 +574,18 @@ def test_load_buffer_survives_eviction_while_consumer_read_is_queued(make_worker
 
 @_requires_accelerator
 def test_buffer_pool_is_reused_across_save_steps(make_worker):
-    """After flush_saves, descriptor buffers are returned to the pool and
-    reused on the next flush — no reallocation."""
+    """Once a save copy completes its descriptor buffers return to the pool and
+    are reused by the next flush — no reallocation.
+
+    The buffers hold the addresses the copy reads, so they stay out of the pool
+    until the transfer's end event fires.
+    """
     worker = make_worker()
     src = torch.arange(_HIDDEN_DIM, dtype=_DTYPE, device=DEVICE_TYPE)
 
     worker.save_caches({"h": src}, "h", _meta(saves={"h": [0]}))
     worker.flush_saves()
+    _wait_for_completion(worker, "h", "saves")
 
     assert len(worker._buf_pool._pool) == 1
     buf_id = id(worker._buf_pool._pool[0].src_ptrs)
@@ -588,6 +593,7 @@ def test_buffer_pool_is_reused_across_save_steps(make_worker):
     # Second step reuses the same buffer.
     worker.save_caches({"h": src}, "h", _meta(saves={"h": [1]}))
     worker.flush_saves()
+    _wait_for_completion(worker, "h", "saves")
 
     assert len(worker._buf_pool._pool) == 1
     assert id(worker._buf_pool._pool[0].src_ptrs) == buf_id
@@ -595,20 +601,24 @@ def test_buffer_pool_is_reused_across_save_steps(make_worker):
 
 @_requires_accelerator
 def test_buffer_pool_is_reused_across_load_steps(make_worker):
-    """After start_load_caches, descriptor buffers are returned to the pool
-    and reused on the next call."""
+    """Once a load copy completes its descriptor buffers return to the pool and
+    are reused by the next call — no reallocation."""
     worker = make_worker()
     worker._region.blocks[0].fill_(0x01)
     worker._region.blocks[1].fill_(0x02)
 
     encoder_cache: dict[str, torch.Tensor] = {}
-    worker.start_load_caches(encoder_cache, _meta(loads={"a": [0]}))
+    meta = _meta(loads={"a": [0]})
+    worker.start_load_caches(encoder_cache, meta)
+    _wait_for_completion(worker, _load_id(meta, "a"), "loads")
 
     assert len(worker._buf_pool._pool) == 1
     buf_id = id(worker._buf_pool._pool[0].src_ptrs)
 
     encoder_cache2: dict[str, torch.Tensor] = {}
-    worker.start_load_caches(encoder_cache2, _meta(loads={"b": [1]}))
+    meta2 = _meta(loads={"b": [1]})
+    worker.start_load_caches(encoder_cache2, meta2)
+    _wait_for_completion(worker, _load_id(meta2, "b"), "loads")
 
     assert len(worker._buf_pool._pool) == 1
     assert id(worker._buf_pool._pool[0].src_ptrs) == buf_id
