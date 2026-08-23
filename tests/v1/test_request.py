@@ -3,6 +3,7 @@
 
 from vllm import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.request import Request, RequestStatus
 
 
@@ -40,3 +41,34 @@ def test_request_copies_session_id_from_engine_core_request():
     request = Request.from_engine_core_request(engine_request, block_hasher=None)
 
     assert request.session_id == "session-1"
+
+
+def test_request_copies_kv_hints_from_engine_core_request():
+    kv_hints = KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="msg-1",
+        actions=[
+            KvHintAction(
+                action_id="action-1",
+                action_type="example.action",
+                action_version="1.0",
+                payload={},
+            )
+        ],
+    )
+    engine_request = EngineCoreRequest(
+        request_id="request-1",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        kv_hints=kv_hints,
+    )
+
+    request = Request.from_engine_core_request(engine_request, block_hasher=None)
+
+    assert request.kv_hints == kv_hints
