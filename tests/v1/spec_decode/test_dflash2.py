@@ -228,3 +228,20 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
     assert isinstance(model.layers[0], DFlash2Qwen3DecoderLayer)
+
+
+def test_dflash2_decoder_layer_cls_is_not_hardcoded():
+    """Static tripwire: the shared constructor must go through ``decoder_layer_cls``.
+
+    ``test_dflash2_model_decoder_layer_cls`` above checks the built model. This
+    checks the source, so the exact regression that caused #53428 -- someone
+    re-hardcoding ``DFlashQwen3DecoderLayer`` in the shared constructor, as #52560
+    did -- fails here without needing a model build.
+    """
+    import inspect
+
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+
+    src = inspect.getsource(DFlashQwen3Model.__init__)
+    assert "self.decoder_layer_cls(" in src
+    assert "DFlashQwen3DecoderLayer(" not in src
