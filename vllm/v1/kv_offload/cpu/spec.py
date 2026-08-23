@@ -84,12 +84,13 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
 
         world_size = config.parallel.world_size
+        local_world_size = config.parallel.local_world_size or world_size
         self.num_blocks = 0
         self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
         self.replicated_layout = config.replicated_layout and self._uses_shared_region()
         if config.worker_kv_bytes_per_block > 0 and world_size > 0:
-            num_copies = 1 if self.replicated_layout else world_size
+            num_copies = 1 if self.replicated_layout else local_world_size
             kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
             kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
 
@@ -156,8 +157,11 @@ class CPUOffloadingSpec(OffloadingSpec):
             if self.replicated_layout:
                 rank = 0
             else:
-                world_size = self.config.parallel.world_size
-                rank = torch.accelerator.current_device_index() % world_size
+                local_world_size = (
+                    self.config.parallel.local_world_size
+                    or self.config.parallel.world_size
+                )
+                rank = torch.accelerator.current_device_index() % local_world_size
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
                 num_blocks=self.num_blocks,
