@@ -689,7 +689,10 @@ steps:
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/passes/distributed/test_async_tp.py
-  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions
+  # Run all models, attn backends and custom op combos but only Inductor partition.
+  # Both custom op combos are kept because the ROCm AITER AR+RMS fusion path depends
+  # on them, unlike CUDA where the Quick jobs also drop +rms_norm.
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions -k "inductor_partition"
 
 - label: ":amd: (MI300) Distributed Compile + RPC" # TBD
   timeout_in_minutes: 180
