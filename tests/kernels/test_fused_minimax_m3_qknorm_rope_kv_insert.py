@@ -147,8 +147,11 @@ def test_dense_norm_rope(num_tokens, num_heads, num_kv_heads):
         eps,
     ).view(num_tokens, kvsz)
 
-    torch.testing.assert_close(q_out, q_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(k_out, k_ref, rtol=1e-2, atol=1e-2)
+    # The fused kernel keeps an fp32 intermediate across norm->rope, while the
+    # reference materializes bf16 after the norm (the unfused boundary), so
+    # rounding-boundary elements can differ by ~1 bf16 ulp.
+    torch.testing.assert_close(q_out, q_ref, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(k_out, k_ref, rtol=2e-2, atol=2e-2)
     # V is untouched.
     torch.testing.assert_close(v_out, v_in, rtol=0, atol=0)
 
@@ -205,6 +208,12 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     # index_q here (de-interleaved from the packed qkv); k/v/index_k stay in
     # place inside qkv and are scatter-inserted into the caches.
     q_out = torch.empty(num_tokens, qsz, dtype=dtype, device=device)
+    q_fp8 = torch.empty(
+        num_tokens,
+        qsz,
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    )
     index_q = torch.empty(num_tokens, iqsz, dtype=dtype, device=device)
 
     ops.fused_minimax_m3_qknorm_rope_kv_insert(
@@ -228,6 +237,8 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
         q_out,
         index_q,
         kv_cache_dtype,
+        q_fp8_out=q_fp8,
+        q_fp8_scale=0.5,
     )
 
     # ── norm+rope parity. q/index_q land in their gather buffers; k/index_k are
@@ -255,8 +266,18 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
         ik_orig.view(num_tokens, 1, HEAD_DIM), ik_w, positions, cos_sin, eps
     ).view(num_tokens, HEAD_DIM)
 
-    torch.testing.assert_close(q_out, q_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(k_out, k_ref, rtol=1e-2, atol=1e-2)
+    # The fused kernel keeps an fp32 intermediate across norm->rope, while the
+    # reference materializes bf16 after the norm (the unfused boundary), so
+    # rounding-boundary elements can differ by ~1 bf16 ulp.
+    torch.testing.assert_close(q_out, q_ref, rtol=2e-2, atol=2e-2)
+    expected_q_fp8 = torch.empty_like(q_fp8)
+    ops.scaled_fp8_quant(
+        q_out,
+        scale=torch.tensor(0.5, dtype=torch.float32, device=device),
+        output=expected_q_fp8,
+    )
+    torch.testing.assert_close(q_fp8, expected_q_fp8, rtol=0, atol=0)
+    torch.testing.assert_close(k_out, k_ref, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(index_q, iq_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(index_k, ik_ref, rtol=1e-2, atol=1e-2)
 
@@ -376,8 +397,11 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
         eps,
     ).view(num_tokens, kvsz)
 
-    torch.testing.assert_close(q_out, q_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(k_out, k_ref, rtol=1e-2, atol=1e-2)
+    # The fused kernel keeps an fp32 intermediate across norm->rope, while the
+    # reference materializes bf16 after the norm (the unfused boundary), so
+    # rounding-boundary elements can differ by ~1 bf16 ulp.
+    torch.testing.assert_close(q_out, q_ref, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(k_out, k_ref, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(v_out, v_in, rtol=0, atol=0)
     torch.testing.assert_close(index_q_out, index_q_in, rtol=0, atol=0)
     torch.testing.assert_close(index_k_out, index_k_in, rtol=0, atol=0)

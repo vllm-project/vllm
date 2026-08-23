@@ -243,42 +243,44 @@ class BaseRenderer(ABC, Generic[_T]):
         """
         from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
 
-        try:
-            logger.debug("Warming up chat template processing...")
-            start_time = time.perf_counter()
-
-            self.render_chat([[{"role": "user", "content": "warmup"}]], chat_params)
-
-            elapsed = time.perf_counter() - start_time
-            logger.debug("Chat template warmup completed in %.3fs", elapsed)
-        except ChatTemplateResolutionError:
-            logger.debug("This model does not support chat template.")
-        except Exception:
-            logger.warning("Chat template warmup failed", exc_info=True)
-
-        if self.mm_processor:
+        # prevent MM processor hangs
+        with set_default_torch_num_threads(1):
             try:
-                logger.debug("Warming up multi-modal processing...")
-                self._warmup_mm_processor(
-                    self.mm_processor,
-                    log_prefix="Multi-modal",
-                )
-            except Exception:
-                logger.warning("Multi-modal warmup failed")
-            finally:
-                self.clear_mm_cache()
+                logger.debug("Warming up chat template processing...")
+                start_time = time.perf_counter()
 
-        if self._readonly_mm_processor is not None:
-            try:
-                logger.debug("Warming up readonly multi-modal processing...")
-                self._warmup_mm_processor(
-                    self._readonly_mm_processor,
-                    log_prefix="Readonly multi-modal",
-                )
+                self.render_chat([[{"role": "user", "content": "warmup"}]], chat_params)
+
+                elapsed = time.perf_counter() - start_time
+                logger.debug("Chat template warmup completed in %.3fs", elapsed)
+            except ChatTemplateResolutionError:
+                logger.debug("This model does not support chat template.")
             except Exception:
-                logger.warning("Readonly multi-modal warmup failed")
-            finally:
-                self._clear_processor_cache(self._readonly_mm_processor)
+                logger.warning("Chat template warmup failed", exc_info=True)
+
+            if self.mm_processor:
+                try:
+                    logger.debug("Warming up multi-modal processing...")
+                    self._warmup_mm_processor(
+                        self.mm_processor,
+                        log_prefix="Multi-modal",
+                    )
+                except Exception:
+                    logger.warning("Multi-modal warmup failed")
+                finally:
+                    self.clear_mm_cache()
+
+            if self._readonly_mm_processor is not None:
+                try:
+                    logger.debug("Warming up readonly multi-modal processing...")
+                    self._warmup_mm_processor(
+                        self._readonly_mm_processor,
+                        log_prefix="Readonly multi-modal",
+                    )
+                except Exception:
+                    logger.warning("Readonly multi-modal warmup failed")
+                finally:
+                    self._clear_processor_cache(self._readonly_mm_processor)
 
     async def clear_mm_cache_async(self) -> None:
         """Serialize clear_mm_cache through the multimodal executor to avoid
@@ -723,14 +725,12 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_uuid_items
 
-    # TODO: Remove str and tokenization_kwargs after deprecating InputPreprocessor
     def _process_multimodal(
         self,
-        prompt: list[int] | str,
+        prompt: list[int],
         mm_data: MultiModalDataDict,
         mm_uuids: MultiModalUUIDDict | None,
         mm_processor_kwargs: Mapping[str, object] | None,
-        tokenization_kwargs: dict[str, Any] | None,
         *,
         skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
@@ -753,7 +753,6 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_data_items,
             mm_uuid_items,
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
-            tokenization_kwargs=tokenization_kwargs or {},
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
@@ -781,7 +780,6 @@ class BaseRenderer(ABC, Generic[_T]):
                 prompt_token_ids,
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
-                tokenization_kwargs=None,  # Tokenization already done in Step 2
                 mm_uuids=prompt.get("multi_modal_uuids"),
                 skip_mm_cache=skip_mm_cache,
             )
@@ -844,7 +842,6 @@ class BaseRenderer(ABC, Generic[_T]):
                 prompt_token_ids,
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
-                tokenization_kwargs=None,
                 mm_uuids=prompt.get("multi_modal_uuids"),
                 skip_mm_cache=skip_mm_cache,
             )

@@ -38,7 +38,13 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    ECConnectorOutput,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+    make_empty_encoder_model_runner_output,
+)
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 
@@ -1107,7 +1113,7 @@ def test_preemption_re_records_prefix_cache_query():
     request = create_requests(num_requests=1)[0]
     scheduler.add_request(request)
 
-    scheduler.schedule()
+    scheduler_output = scheduler.schedule()
     stats = scheduler.kv_cache_manager.prefix_cache_stats
     assert stats is not None
     assert (stats.requests, stats.preempted_requests) == (1, 0)
@@ -1115,6 +1121,21 @@ def test_preemption_re_records_prefix_cache_query():
     scheduler.running.remove(request)
     scheduler._preempt_request(request, 0.0)
     assert request.status == RequestStatus.PREEMPTED
+
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert request.num_stale_output_tokens == 0
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
 
     scheduler.schedule()
     assert request.status == RequestStatus.RUNNING
@@ -1259,31 +1280,68 @@ def test_reset_connector_cache_no_connector_is_no_op_success():
     assert scheduler.reset_prefix_cache(reset_connector=True) is True
 
 
+def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        max_num_seqs=16,
+        max_num_batched_tokens=20,
+        num_speculative_tokens=4,
+        parallel_drafting=True,
+        skip_tokenizer_init=True,
+    )
+    speculative_config = scheduler.vllm_config.speculative_config
+    assert speculative_config is not None
+    assert scheduler.max_num_scheduled_tokens == 20
+    assert speculative_config.max_num_new_slots_for_drafting == 3
+
+    for request in create_requests(num_requests=2, num_tokens=10):
+        scheduler.add_request(request)
+
+    assert scheduler.schedule().num_scheduled_tokens == {"0": 10, "1": 4}
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
-    "spec_tokens,output_tokens,expected",
+    "spec_tokens,output_tokens,expected,expected_per_req",
     [
-        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1])),  # perfect match
-        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0])),  # early mismatch
-        ([[1, 2], [3]], [[1, 2, 5], [3, 4]], (2, 3, 3, [2, 1])),  # multiple sequences
-        ([[1]], [[1, 2]], (1, 1, 1, [1])),  # single token sequence
-        ([[]], [[5]], (0, 0, 0, [0])),  # empty sequence
+        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1]), [[0, 0, 0, 1]]),  # perfect
+        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0]), [[0, 1, 0, 0]]),  # early mismatch
+        (
+            [[1, 2], [3]],
+            [[1, 2, 5], [3, 4]],
+            (2, 3, 3, [2, 1]),
+            [[0, 0, 1], [0, 1, 0]],
+        ),  # multiple sequences
+        ([[1]], [[1, 2]], (1, 1, 1, [1]), [[0, 1]]),  # single token sequence
+        ([[]], [[5]], (0, 0, 0, [0]), [[0, 0]]),  # empty sequence -> empty accumulator
         (
             [[1, 2, 3], [4, 5, 6]],
             [[1, 2, 7], [4, 8]],
             (2, 6, 3, [2, 1, 0]),
+            [[0, 0, 1, 0], [0, 1, 0, 0]],
         ),  # multiple mismatches
     ],
 )
-def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
+def test_schedule_spec_decoding_stats(
+    spec_tokens, output_tokens, expected, expected_per_req
+):
     """Test scheduling behavior with speculative decoding.
 
     This test verifies that:
     1. Speculated tokens get scheduled correctly
-    2. Spec decoding stats properly count number of draft and accepted tokens
+    2. The aggregate SpecDecodingStats count draft and accepted tokens
+    3. The per-request accumulator (enabled via per_request_spec_decode_metrics)
+       buckets the same acceptance by accepted draft count (j)
     """
     num_spec_tokens = max(1, max(len(t) for t in spec_tokens))
-    scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens)
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec_tokens,
+        per_request_spec_decode_metrics="summary",
+    )
     requests = create_requests(num_requests=len(spec_tokens), num_tokens=1)
     req_ids = []
     req_to_index = {}
@@ -1368,6 +1426,97 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert stats.num_draft_tokens == expected[1]
         assert stats.num_accepted_tokens == expected[2]
         assert stats.num_accepted_tokens_per_pos == expected[3]
+
+    # Per-request accumulator: the same acceptance, bucketed by accepted draft
+    # count (j) on each request rather than summed across the batch. The
+    # accumulator is created eagerly on add_request, so every request has one
+    # (an empty histogram when it drafted nothing).
+    for i, req_id in enumerate(req_ids):
+        payload = scheduler.requests[req_id].spec_decode_metrics.to_dict()
+        assert payload["acceptance_histogram"] == expected_per_req[i]
+        assert payload["num_draft_tokens"] == len(spec_tokens[i])
+        assert "per_step_accepted" not in payload  # summary level
+
+
+def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
+    """Drive prefill + one draft/verify step per round for a single request.
+
+    ``rounds`` is a list of ``(spec_token_ids, output_token_ids)`` -- one verify
+    step each. ``num_invalid_per_round`` optionally injects the grammar-invalid
+    draft count structured-output decoding would set on the verify output.
+    Returns the request.
+    """
+    [req] = create_requests(num_requests=1, num_tokens=1)
+    scheduler.add_request(req)
+    rid = req.request_id
+    req_to_index = {rid: 0}
+
+    def _mk_output(sampled):
+        return ModelRunnerOutput(
+            req_ids=[rid],
+            req_id_to_index=req_to_index,
+            sampled_token_ids=sampled,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+
+    # Prefill: sample one token.
+    scheduler.update_from_output(scheduler.schedule(), _mk_output([[0]]))
+    for i, (spec, out) in enumerate(rounds):
+        scheduler.update_draft_token_ids(DraftTokenIds([rid], [spec]))
+        output = scheduler.schedule()
+        if num_invalid_per_round is not None and num_invalid_per_round[i]:
+            output.num_invalid_spec_tokens = {rid: num_invalid_per_round[i]}
+        scheduler.update_from_output(output, _mk_output([out]))
+    return req
+
+
+def test_per_request_spec_decode_detailed_records_per_step():
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        per_request_spec_decode_metrics="detailed",
+    )
+    # Three verify steps for one request; num_accepted = len(output) - 1, so the
+    # outputs below accept 3, 1, then 0 drafts across the steps.
+    req = _run_spec_verify_steps(
+        scheduler,
+        [
+            ([1, 2, 3], [1, 2, 3, 4]),  # accept 3
+            ([5, 6, 7], [5, 8]),  # accept 1
+            ([9, 10, 11], [12]),  # accept 0
+        ],
+    )
+    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
+    assert payload["per_step_accepted"] == [3, 1, 0]
+    assert payload["per_step_drafted"] == [3, 3, 3]
+    assert payload["num_spec_steps"] == 3
+
+
+def test_per_request_spec_decode_subtracts_invalid_drafts():
+    # Grammar-invalidated drafts (num_invalid_spec_tokens, set by structured
+    # output) are excluded from the proposed count, mirroring the aggregate.
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        per_request_spec_decode_metrics="summary",
+    )
+    # One verify step: 3 drafted, 1 grammar-invalid, output accepts 2.
+    req = _run_spec_verify_steps(
+        scheduler,
+        [([1, 2, 3], [1, 2, 5])],
+        num_invalid_per_round=[1],
+    )
+    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
+    assert payload["num_draft_tokens"] == 2  # 3 drafted - 1 invalid
+    assert payload["num_accepted_draft_tokens"] == 2  # len([1,2,5]) - 1
+    assert payload["acceptance_histogram"] == [0, 0, 1, 0]
+
+
+def test_per_request_spec_decode_acceptance_disabled_by_default():
+    scheduler = create_scheduler(num_speculative_tokens=3)
+    assert scheduler.spec_decode_metrics_level == "none"
+    req = _run_spec_verify_steps(scheduler, [([1, 2, 3], [1, 2, 3, 4])])
+    assert scheduler.requests[req.request_id].spec_decode_metrics is None
 
 
 def test_spec_decoding_stats_empty_output():
@@ -3217,6 +3366,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
 
     scheduler.perf_metrics = None
     scheduler.connector = None
+    scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
     scheduler.structured_output_manager.should_advance.return_value = True
     scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
@@ -3235,6 +3385,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
     scheduler.enable_return_routed_experts = False
+    scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
     scheduler.make_stats = Mock(return_value=None)
@@ -3588,6 +3739,90 @@ def test_scheduler_no_ec_connector_by_default():
     """Test scheduler doesn't have EC connector by default."""
     scheduler = create_scheduler()
     assert scheduler.ec_connector is None
+
+
+def test_mamba_align_encoder_cache_cap_makes_progress():
+    """Two individually cacheable images must not deadlock Mamba alignment."""
+    block_size = 768
+    encoder_cache_size = 600
+    scheduler = create_scheduler(
+        max_num_batched_tokens=8192,
+        block_size=block_size,
+        enable_prefix_caching=True,
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler.max_num_encoder_input_tokens = encoder_cache_size
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=encoder_cache_size)
+
+    first_image_end = 510
+    request = create_requests(
+        num_requests=1,
+        num_tokens=1010,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=500),
+                PlaceholderRange(offset=first_image_end, length=500),
+            ]
+        ],
+        max_tokens=1,
+        block_size=block_size,
+        req_ids=["req"],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == first_image_end
+    assert output.scheduled_encoder_inputs[request.request_id] == [0]
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    output = scheduler.schedule()
+    next_block_boundary = block_size
+    assert output.num_scheduled_tokens[request.request_id] == (
+        next_block_boundary - first_image_end
+    )
+    assert output.scheduled_encoder_inputs[request.request_id] == [1]
+
+
+def test_mamba_align_eagle_schedules_encoder_at_boundary():
+    """EAGLE lookahead at an aligned MM boundary requires encoder cache."""
+    block_size = 512
+    scheduler = create_scheduler(
+        max_num_batched_tokens=700,
+        max_model_len=2048,
+        block_size=block_size,
+        enable_prefix_caching=True,
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler.use_eagle = True
+    scheduler.num_prefill_lookahead = 1
+    scheduler.max_num_encoder_input_tokens = 2048
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=1200,
+        mm_positions=[[PlaceholderRange(offset=block_size, length=100)]],
+        max_tokens=1,
+        block_size=block_size,
+        req_ids=["req"],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[request.request_id] == block_size
+    assert output.scheduled_encoder_inputs[request.request_id] == [0]
 
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
@@ -4751,6 +4986,41 @@ def test_scheduler_kv_connector_stats():
         assert final_stats == expected_data
 
 
+def test_ec_connector_update_connector_output_called():
+    """Test that worker-side EC connector output is forwarded to the
+    EC connector's update_connector_output hook."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    scheduler.ec_connector.update_connector_output = Mock()
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    ec_connector_output = ECConnectorOutput(finished_sending={"hash_test1"})
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        ec_connector_output=ec_connector_output,
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    scheduler.ec_connector.update_connector_output.assert_called_once_with(
+        ec_connector_output
+    )
+
+
 # ==============================================================================
 # Variable-length encoder cross-attention block allocation tests
 # ==============================================================================
@@ -5176,8 +5446,9 @@ def test_free_encoder_inputs_defers_for_eagle_lookahead():
     worker-side token-embedding fallback is only a backstop."""
     scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     # create_scheduler only builds ngram spec configs; force the eagle path that
-    # _free_encoder_inputs keys off (self.use_eagle).
+    # _free_encoder_inputs keys off (its read-ahead deferral).
     scheduler.use_eagle = True
+    scheduler.num_prefill_lookahead = 1
     mm_positions = [[PlaceholderRange(offset=50, length=100)]]
     request = create_requests(
         num_requests=1,
@@ -5527,6 +5798,7 @@ def _create_hybrid_mamba_connector_scheduler(
     matched_tokens: int,
     block_size: int = 16,
     num_blocks: int = 100,
+    supports_divergent_hits: bool = True,
 ) -> Scheduler:
     """FA + Mamba ("all" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
@@ -5557,6 +5829,7 @@ def _create_hybrid_mamba_connector_scheduler(
             kv_connector_extra_config={
                 "matched_tokens": matched_tokens,
                 "is_async": False,
+                "supports_divergent_local_hybrid_hits": supports_divergent_hits,
             },
         ),
     )
@@ -5665,15 +5938,34 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     assert replay.num_tokens - num_scheduled == expected_num_computed
 
 
-def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
-    """The opposite divergence: the FA prefix survives deeper than the Mamba
-    state and the connector supplies nothing (ext == 0). Reporting the deep FA
-    hit as locally computed would resume with no valid Mamba state at that
-    boundary (silent bad output). The scheduler must fall back to the
-    convergent boundary that every group agrees on (block 0's surviving state).
+@pytest.mark.parametrize(
+    (
+        "supports_divergent_local_hybrid_hits",
+        "matched_tokens",
+        "replay_blocks",
+        "expected_num_computed",
+    ),
+    [
+        (True, 0, 5, 16),
+        (True, 16, 6, 80),
+        (False, 16, 6, 32),
+    ],
+)
+def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
+    supports_divergent_local_hybrid_hits: bool,
+    matched_tokens: int,
+    replay_blocks: int,
+    expected_num_computed: int,
+):
+    """A capable connector may restore missing Mamba state at the deeper FA
+    boundary. An external miss or an incapable connector uses a locally
+    consistent boundary instead.
     """
     block_size = 16
-    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens=0)
+    scheduler = _create_hybrid_mamba_connector_scheduler(
+        matched_tokens,
+        supports_divergent_hits=supports_divergent_local_hybrid_hits,
+    )
     manager = scheduler.kv_cache_manager
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
@@ -5699,7 +5991,7 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
 
     [replay] = create_requests(
         num_requests=1,
-        num_tokens=5 * block_size,
+        num_tokens=replay_blocks * block_size,
         max_tokens=1,
         same_prompt=True,
         block_size=block_size,
@@ -5713,5 +6005,132 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     scheduler.add_request(replay)
     output = scheduler.schedule()
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
-    # Must resume at the convergent boundary (block 0), not the deep FA hit.
-    assert replay.num_tokens - num_scheduled == block_size
+    assert replay.num_tokens - num_scheduled == expected_num_computed
+
+
+def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
+    """One request whose image sits after some text, as an EPD proxy sends it.
+
+    `create_scheduler` builds a text-only model, so `compute_mm_encoder_budget`
+    leaves the encoder cache at zero capacity; give it room so the admitted path
+    is reachable.
+    """
+    ecm = scheduler.encoder_cache_manager
+    ecm.cache_size = ecm.num_free_slots = ecm.num_freeable_slots = 8 * image_tokens
+    scheduler.max_num_encoder_input_tokens = 8 * image_tokens
+
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=text_prefix + image_tokens + 4,
+        # Completion must hinge on the prompt being encoded, not on max_tokens.
+        max_tokens=16,
+        mm_hashes_list=[["img-hash-0"]],
+        mm_positions=[[PlaceholderRange(offset=text_prefix, length=image_tokens)]],
+    )
+    scheduler.add_request(request)
+    return request
+
+
+def test_encoder_instance_defers_stop_until_prompt_is_consumed():
+    """An encoder instance must not finish a request that has not encoded yet.
+
+    When the encoder cache cannot admit the multi-modal item, the scheduler
+    schedules only the tokens before it. Finishing that step would hand the
+    client a successful completion for a request whose image was never
+    encoded, so no embedding is ever published to the EC connector.
+    """
+    scheduler = create_scheduler(
+        max_num_seqs=8,
+        max_num_batched_tokens=1024,
+        use_ec_connector=True,
+        ec_role="ec_producer",
+    )
+    request = _make_encoder_instance_request(scheduler)
+    req_id = request.request_id
+
+    # Encoder budget exhausted: the item cannot be admitted this step.
+    scheduler.encoder_cache_manager.can_allocate = lambda *a, **k: False
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req_id] > 0
+    assert not output.scheduled_encoder_inputs.get(req_id)
+    assert output.num_scheduled_tokens[req_id] < request.num_prompt_tokens
+
+    scheduler.update_from_output(
+        output,
+        make_empty_encoder_model_runner_output(output),
+    )
+
+    assert not request.is_finished(), (
+        "request finished before its image was encoded, so no embedding was "
+        "published to the EC connector"
+    )
+    assert request.num_output_tokens == 0
+
+    # With the budget restored the item is encoded and only then does the
+    # request finish.
+    del scheduler.encoder_cache_manager.can_allocate  # unshadow the real method
+
+    output = scheduler.schedule()
+    assert output.scheduled_encoder_inputs.get(req_id) == [0]
+
+    scheduler.update_from_output(
+        output,
+        make_empty_encoder_model_runner_output(output),
+    )
+    assert request.is_finished()
+
+
+def test_encoder_instance_finishes_request_once_prompt_is_consumed():
+    """The unblocked path completes in a single step, without sampling."""
+    scheduler = create_scheduler(
+        max_num_seqs=8,
+        max_num_batched_tokens=1024,
+        use_ec_connector=True,
+        ec_role="ec_producer",
+    )
+    request = _make_encoder_instance_request(scheduler)
+    req_id = request.request_id
+
+    output = scheduler.schedule()
+    assert output.scheduled_encoder_inputs.get(req_id) == [0]
+    assert output.num_scheduled_tokens[req_id] == request.num_prompt_tokens
+
+    scheduler.update_from_output(
+        output,
+        make_empty_encoder_model_runner_output(output),
+    )
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    # The encoder instance publishes an embedding, not tokens.
+    assert request.num_output_tokens == 0
+
+
+@pytest.mark.parametrize("ec_role", ["ec_producer", "ec_consumer"])
+def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str):
+    """Neither role re-encodes what the connector already holds.
+
+    For a consumer the item is loaded; for a producer there is nothing left to
+    do at all -- it published that embedding earlier (or a sibling encoder did),
+    so a second ViT pass would be pure waste. Reached on any repeat: a second
+    chat turn re-sending its image, a sibling encoder behind the proxy's
+    round-robin, or a restart that kept the shared storage.
+
+    Pinned because the obvious "fix" for the encoder-instance crash this used to
+    cause is to make the producer encode anyway; the crash belongs to the worker
+    (an encoder instance must not gather embeddings it never needed), and paying
+    for it here would cost every deployment a redundant encode.
+    """
+    scheduler = create_scheduler(
+        max_num_seqs=8,
+        max_num_batched_tokens=1024,
+        use_ec_connector=True,
+        ec_role=ec_role,
+    )
+    request = _make_encoder_instance_request(scheduler)
+    req_id = request.request_id
+    scheduler.ec_connector.has_cache_item = lambda *a, **k: True
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[req_id] > 0
+    assert not output.scheduled_encoder_inputs.get(req_id)

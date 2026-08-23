@@ -97,25 +97,6 @@ class MiniMaxM3IndexerBackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            # M3 does not use cross-layer (per-layer-stacked) KV blocks.
-            raise NotImplementedError
-        return (0, 1, 2)
-
 
 class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
     """Side KV cache for the indexer's per-token index keys (key-only).
@@ -155,6 +136,10 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Key-only: MLAAttentionSpec budgets one vector/token (not 2x for K+V).
@@ -480,10 +465,10 @@ def select_indexer_impl_cls(
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
-    On Blackwell (SM100) with ``topk_blocks`` in ``(4, 8, 16, 32)`` (matching the
-    main MSA attend), the fmha_sm100 score path + Triton top-k is used for both
-    bf16 and fp8 index caches. Everything else falls back to the Triton indexer
-    (bf16 only).
+    On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
+    ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
+    used for both bf16 and fp8 index caches. Everything else falls back to the
+    Triton indexer (bf16 only).
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
@@ -495,7 +480,7 @@ def select_indexer_impl_cls(
     )
     use_msa = (
         is_sm100
-        and topk_blocks in (4, 8, 16, 32)
+        and topk_blocks == 16
         and indexer_kv_dtype in ("bf16", "fp8", "fp8_e4m3")
     )
     if use_msa:
@@ -505,7 +490,7 @@ def select_indexer_impl_cls(
         )
 
         logger.info_once(
-            "MiniMax M3 indexer: selected MSA (fmha_sm100 score + Triton top-k) "
+            "MiniMax M3 indexer: selected MSA (fmha_sm100 score + top-k) "
             "[topk_blocks=%d, indexer_kv_dtype=%s]",
             topk_blocks,
             indexer_kv_dtype,

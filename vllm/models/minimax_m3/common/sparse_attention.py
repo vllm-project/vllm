@@ -51,10 +51,13 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    get_kv_cache_layout,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    is_quantized_kv_cache,
+)
 
 logger = init_logger(__name__)
 
@@ -112,47 +115,13 @@ class MiniMaxM3SparseBackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if minimax_m3_use_aiter_sparse_pa(num_kv_heads):
-            # AITER's assembly paged-attention kernels require independently
-            # contiguous K and V storage. Keep that specialized layout behind
-            # the shuffle flag while every other implementation uses the
-            # packed-content contract introduced by #44455.
-            return (num_blocks, 2, block_size, num_kv_heads, head_size)
-        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
-        # layout we want.
-        if include_num_layers_dimension:
-            raise NotImplementedError  # no cross-layer KV blocks in M3
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+        # AITER sparse PA unbinds K and V as separate contiguous regions, which
+        # requires the head dimension to sit outside the block dimension.
         if _minimax_m3_aiter_sparse_pa_requested():
-            # The AITER page-16 sparse PA path reinterprets the K and V slices
-            # as separate SHUFFLE caches. Keep K/V physically separated so
-            # kv_cache[:, 0] and kv_cache[:, 1] are contiguous byte ranges.
-            return (1, 0, 2, 3, 4)
-        cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD":
-            # (num_blocks, block_size, num_kv_heads, 2*head_size)
-            stride_order = (0, 2, 1, 3)
-        elif cache_layout == "HND":
-            # (num_blocks, num_kv_heads, block_size, 2*head_size)
-            stride_order = (0, 1, 2, 3)
-        else:
-            raise ValueError(f"Unknown cache layout format {cache_layout}.")
-        return stride_order
+            return (KVCacheLayout.LHBNC,)
+        return super().supported_kv_cache_layouts()
 
 
 @dataclass
@@ -330,6 +299,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         *,
         topk_blocks: int,
         sparse_block_size: int,
+        msa_decode_backend: str = "triton",
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -355,6 +325,8 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
+        *,
+        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Attend the queries to the indexer-selected blocks. Per kernel.
 
@@ -363,6 +335,9 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         ``[:, nd:num_tokens]``); the attend reads them from there.
         """
         raise NotImplementedError
+
+    def should_use_msa_decode(self, layer_name: str) -> bool:
+        return False
 
 
 class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
@@ -374,6 +349,8 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
+        *,
+        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
@@ -442,18 +419,18 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
         return output
 
 
-def select_main_impl_cls(
+def select_main_backend_and_impl_cls(
     *,
     topk_blocks: int,
     kv_cache_dtype: str,
     num_kv_heads: int,
-) -> type[MiniMaxM3SparseImpl]:
-    """Pick the main attend impl off the main KV-cache dtype.
+) -> tuple[type[MiniMaxM3SparseBackend], type[MiniMaxM3SparseImpl]]:
+    """Pick the main attention backend and implementation.
 
     Blackwell (SM100) uses the MSA attend for supported top-k block counts
     when the KV cache is BF16 or FP8 E4M3; MI355 uses AITER sparse PA
     with shuffle KV cache layout; Other platforms and FP8 E5M2 fall
-    back to Triton. The MSA modules are imported lazily avoid import errors
+    back to Triton. The MSA modules are imported lazily to avoid import errors
     on unsupported platforms.
     """
     use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(num_kv_heads)
@@ -477,11 +454,26 @@ def select_main_impl_cls(
             MiniMaxM3SparseAiterPAImpl,
         )
 
-        return MiniMaxM3SparseAiterPAImpl
+        return MiniMaxM3SparseBackend, MiniMaxM3SparseAiterPAImpl
     if use_msa:
         from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
+            MiniMaxM3SparseMSABackend,
             MiniMaxM3SparseMSAImpl,
         )
 
-        return MiniMaxM3SparseMSAImpl
-    return MiniMaxM3SparseTritonImpl
+        return MiniMaxM3SparseMSABackend, MiniMaxM3SparseMSAImpl
+    return MiniMaxM3SparseBackend, MiniMaxM3SparseTritonImpl
+
+
+def select_main_impl_cls(
+    *,
+    topk_blocks: int,
+    kv_cache_dtype: str,
+    num_kv_heads: int,
+) -> type[MiniMaxM3SparseImpl]:
+    """Backward-compatible implementation-only selector."""
+    return select_main_backend_and_impl_cls(
+        topk_blocks=topk_blocks,
+        kv_cache_dtype=kv_cache_dtype,
+        num_kv_heads=num_kv_heads,
+    )[1]

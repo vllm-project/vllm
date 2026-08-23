@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.config import AttentionConfig, ModelConfig, VllmConfig
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
@@ -62,6 +63,7 @@ class TestGetMLAPrefillBackend:
 
         with patch("vllm.platforms.current_platform") as mock_platform:
             mock_platform.get_device_capability.return_value = None
+            mock_platform.is_cpu.return_value = False
 
             backend = get_mla_prefill_backend(vllm_config)
             assert backend.get_name() == "FLASH_ATTN"
@@ -287,6 +289,11 @@ class TestBackendValidation:
             assert invalid_reasons == []
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Imports vllm.platforms.rocm, whose module init requires a CUDA or "
+    "ROCm torch build; not importable on XPU/CPU/TPU.",
+)
 class TestROCmAiterFAPrefillSelection:
     """Tests for the ROCm AITER FlashAttention MLA prefill backend."""
 

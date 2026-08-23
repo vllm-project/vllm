@@ -99,6 +99,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import get_processor_cls_name_from_config
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -535,7 +536,8 @@ class Glm4vVisionEmbeddings(nn.Module):
         total_seq = h_coords.shape[0]
         device = pos_embed_weight.device
 
-        # Move coordinates to correct device
+        # Move coordinates to correct device. The only caller already hands
+        # these over pinned + non-blocking, so this is normally a no-op.
         h_coords, w_coords = h_coords.to(device), w_coords.to(device)
 
         # Handle empty sequence case
@@ -544,14 +546,6 @@ class Glm4vVisionEmbeddings(nn.Module):
                 0, hidden_size, device=device, dtype=pos_embed_weight.dtype
             )
         else:
-            # Convert inputs to tensors if needed
-            if isinstance(lengths, list):
-                lengths = torch.tensor(lengths, device=device, dtype=torch.long)
-            if not isinstance(image_shapes, torch.Tensor):
-                image_shapes = torch.tensor(
-                    image_shapes, device=device, dtype=torch.long
-                )
-
             # Prepare 2D position embedding
             orig_size_sq = pos_embed_weight.shape[0]
             orig_size = int(orig_size_sq**0.5)
@@ -562,32 +556,23 @@ class Glm4vVisionEmbeddings(nn.Module):
                 .to(device=device, dtype=torch.float32)
             )
 
-            # Calculate target dimensions for each patch
-            # Add bounds checking for data parallel mode
-            if len(lengths) > image_shapes.shape[0]:
-                # In data parallel mode, some GPUs might not have all
-                # image shapes
-                # Use available image shapes, cycling if necessary
-                target_h_list = []
-                target_w_list = []
-                for i in range(len(lengths)):
-                    # Cycle through available shapes
-                    shape_idx = i % image_shapes.shape[0]
-                    target_h_list.append(image_shapes[shape_idx, 1].repeat(lengths[i]))
-                    target_w_list.append(image_shapes[shape_idx, 2].repeat(lengths[i]))
-                target_h = torch.cat(target_h_list).to(
-                    device=device, dtype=torch.float32
-                )
-                target_w = torch.cat(target_w_list).to(
-                    device=device, dtype=torch.float32
-                )
-            else:
-                target_h = torch.cat(
-                    [image_shapes[i, 1].repeat(lengths[i]) for i in range(len(lengths))]
-                ).to(device=device, dtype=torch.float32)
-                target_w = torch.cat(
-                    [image_shapes[i, 2].repeat(lengths[i]) for i in range(len(lengths))]
-                ).to(device=device, dtype=torch.float32)
+            # Calculate target dimensions for each patch. `lengths` and
+            # `image_shapes` are host data, so expand them with numpy and move
+            # the result across once rather than per-image.
+            # Shapes are cycled: in data parallel mode some GPUs might not
+            # have all image shapes.
+            shapes_np = np.asarray(image_shapes)
+            shape_idx = np.arange(len(lengths)) % shapes_np.shape[0]
+            target_h = async_tensor_h2d(
+                np.repeat(shapes_np[shape_idx, 1], lengths),
+                device=device,
+                dtype=torch.float32,
+            )
+            target_w = async_tensor_h2d(
+                np.repeat(shapes_np[shape_idx, 2], lengths),
+                device=device,
+                dtype=torch.float32,
+            )
 
             # Normalize coordinates to [-1, 1] range for grid_sample
             h_coords = h_coords.to(device=device, dtype=torch.float32)
@@ -816,10 +801,13 @@ class Glm4vVisionTransformer(nn.Module):
             )
 
             lengths = [h * w] * t
-            image_shapes = torch.tensor([[t, h, w]], device=device)
+            image_shapes = [[t, h, w]]
 
-            h_coords_repeated = h_coords.repeat(t)
-            w_coords_repeated = w_coords.repeat(t)
+            # Build the coordinates on the host (cheap integer math) but move
+            # them across pinned + non-blocking, so the consumer's
+            # `.to(device)` below is a no-op rather than a blocking H2D.
+            h_coords_repeated = async_tensor_h2d(h_coords.repeat(t), device=device)
+            w_coords_repeated = async_tensor_h2d(w_coords.repeat(t), device=device)
 
             embeds = self.embeddings(
                 embeddings=torch.zeros(
@@ -1082,8 +1070,8 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             preprocessed_size = ImageSize(width=image_width, height=image_height)
 
         # NOTE: Frames are padded to be divisible by `temporal_patch_size`
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
-        padded_num_frames = num_frames + num_frames % temporal_patch_size
+        # https://github.com/huggingface/transformers/blob/v5.13.0/src/transformers/models/qwen2_vl/video_processing_qwen2_vl.py#L249-L252
+        padded_num_frames = num_frames + (-num_frames % temporal_patch_size)
 
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
@@ -1588,34 +1576,39 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         return prepared_data, prepared_kwargs
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_data = dict(mm_data)
-        if not mm_data:
-            tokenizer = self.info.get_tokenizer()
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        mm_data = dict(mm_data)
+
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         use_direct_path = (
             not isinstance(processor, Glm4vProcessor) and TRANSFORMERS_WITH_GA
         )
         if use_direct_path:
             prepared_data, prepared_kwargs = self._get_direct_path_inputs(
-                mm_data, mm_kwargs
+                mm_data, hf_processor_mm_kwargs
             )
-            return super()._call_hf_processor(
-                prompt=prompt,
-                mm_data=prepared_data,
-                mm_kwargs=prepared_kwargs,
-                tok_kwargs=tok_kwargs,
+            processed_data = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**prepared_kwargs),
+                dict(text=prompt_text, **prepared_data),
+                prepared_kwargs,
             )
+            processed_data.update(passthrough_data)
+            return processed_data
 
         if (
             "videos" in mm_data
@@ -1630,7 +1623,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_array, metadata = item
 
                 # don't update mm_kwargs inplace
-                video_mm_kwargs = dict(**mm_kwargs)
+                video_mm_kwargs = dict(**hf_processor_mm_kwargs)
                 video_mm_kwargs["do_sample_frames"] = metadata.get(
                     "do_sample_frames", True
                 )
@@ -1639,11 +1632,13 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_mm_data["videos"] = [[video_array]]
                 video_mm_data["video_metadata"] = [[_to_video_metadata(metadata)]]
 
-                video_outputs = super()._call_hf_processor(
-                    prompt="<|begin_of_video|><|video|><|end_of_video|>",
-                    mm_data=video_mm_data,
-                    mm_kwargs=video_mm_kwargs,
-                    tok_kwargs=tok_kwargs,
+                video_outputs = self.info.ctx.call_hf_processor(
+                    self.info.get_hf_processor(**video_mm_kwargs),
+                    dict(
+                        text="<|begin_of_video|><|video|><|end_of_video|>",
+                        **video_mm_data,
+                    ),
+                    video_mm_kwargs,
                 )
                 input_ids = video_outputs.pop("input_ids")
                 if swap_video_frame_tokens:
@@ -1651,7 +1646,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                         processor.video_token_id
                     )
                 video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
-                prompt = prompt.replace(
+                prompt_text = prompt_text.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
                     video_placeholder,
                     1,
@@ -1667,21 +1662,20 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             video_outputs = dict()
             swap_video_frame_tokens = False
 
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
         )
         if swap_video_frame_tokens:
-            input_ids = processed_outputs["input_ids"]
+            input_ids = processed_data["input_ids"]
             input_ids[input_ids == processor.video_token_id] = processor.image_token_id
-            processed_outputs["input_ids"] = input_ids
-        combined_outputs = dict(
-            processed_outputs,
-            **video_outputs,
-        )
-        return BatchFeature(combined_outputs)
+            processed_data["input_ids"] = input_ids
+
+        processed_data.update(video_outputs)
+        processed_data.update(passthrough_data)
+
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -1771,6 +1765,7 @@ class Glm4vForConditionalGeneration(
     )
 
     supports_encoder_tp_data = True
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

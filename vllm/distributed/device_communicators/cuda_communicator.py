@@ -36,6 +36,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         global_ranks: list[int] | None = None,
         global_world_size: int | None = None,
         tcp_store_group: StatelessProcessGroup | None = None,
+        use_all2all: bool = False,
     ):
         super().__init__(
             cpu_group,
@@ -44,6 +45,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             unique_name,
             global_ranks,
             global_world_size,
+            use_all2all=use_all2all,
         )
         if "tp" not in unique_name:
             # custom allreduce or torch symm mem can be used only by tp
@@ -56,7 +58,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
-            use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
+            # FlashInfer all-reduce does not provide a fixed reduction order.
+            use_flashinfer_allreduce = (
+                envs.VLLM_ALLREDUCE_USE_FLASHINFER and not envs.VLLM_BATCH_INVARIANT
+            )
             use_aiter_allreduce = use_custom_allreduce and bool(
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )
@@ -338,6 +343,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
+    def custom_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
+        ca_comm = self.ca_comm
+        if ca_comm is None:
+            return None
+        return ca_comm.custom_all_gather(input_.contiguous())
+
+    def custom_reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor | None:
+        ca_comm = self.ca_comm
+        if ca_comm is None:
+            return None
+        return ca_comm.custom_reduce_scatter(input_.contiguous())
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
         # enabled (mirrors reduce_scatter); otherwise fall back to the
@@ -434,7 +451,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output = torch.empty(
                 output_shape, dtype=input_tensor.dtype, device=input_tensor.device
             )
-            if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+            use_deterministic_rs = envs.VLLM_BATCH_INVARIANT and world_size > 2
+            if use_deterministic_rs:
+                # Reduce to a fixed root (0) for determinism
+                reduced = torch.empty_like(input_tensor)
+                sizes = sizes if sizes else [chunk_size] * world_size
+                pynccl_comm.reduce(reduced, input_tensor, root=0)
+                pynccl_comm.scatter(output, reduced, sizes, root=0)
+            elif sizes is not None and sizes.count(sizes[0]) != len(sizes):
                 pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
             else:
                 pynccl_comm.reduce_scatter(output, input_tensor)

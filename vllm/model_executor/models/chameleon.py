@@ -55,6 +55,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -134,36 +135,16 @@ class ChameleonDummyInputsBuilder(BaseDummyInputsBuilder[ChameleonProcessingInfo
 
 
 class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if not mm_data:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        # ChameleonProcessor requires text corresponding to the images
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         # HF processor adds sep token for chat mode
         tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
+        sep_token_id = tokenizer.get_vocab()[tokenizer.sep_token]  # type: ignore
 
-        sep_token_id = vocab[tokenizer.sep_token]  # type: ignore
-
-        return prompt_tokens + [sep_token_id]
+        return [*prompt, sep_token_id]
 
     def _get_mm_fields_config(
         self,
@@ -819,8 +800,20 @@ class ChameleonImageVocabularyMapping:
 
     def convert_img2bpe(self, img_batch: torch.Tensor) -> torch.Tensor:
         device = img_batch.device
-        img_tokens = self.img2bpe_mapping_tensor[img_batch.to("cpu")]
-        return img_tokens.to(device)
+        # Cache a per-device copy of the (small, static) mapping tensor so we
+        # can index entirely on `device` instead of forcing a D2H on
+        # `img_batch` and an H2D on the result.
+        cache = getattr(self, "_img2bpe_mapping_cache", None)
+        if cache is None:
+            cache = {}
+            self._img2bpe_mapping_cache = cache
+        mapping_on_device = cache.get(device)
+        if mapping_on_device is None:
+            mapping_on_device = async_tensor_h2d(
+                self.img2bpe_mapping_tensor, device=device
+            )
+            cache[device] = mapping_on_device
+        return mapping_on_device[img_batch]
 
 
 class ChameleonModel(nn.Module):
@@ -964,7 +957,7 @@ class ChameleonForConditionalGeneration(
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
@@ -1025,12 +1018,26 @@ class ChameleonForConditionalGeneration(
         # Disallow image tokens which does not include special
         # begin-image and end-image tokens
         if logits is not None:
-            image_tokens = self.model.vocabulary_mapping.image_tokens
-            logits[:, image_tokens] = torch.finfo(logits.dtype).min
+            # Cache a per-device index tensor for the (static) image-token
+            # set, and use `index_fill_` instead of advanced-index assign
+            # so the scatter runs entirely on device (no host roundtrip
+            # for the scalar fill value or for the Python-list indices).
+            cache = getattr(self, "_image_tokens_index_cache", None)
+            if cache is None:
+                cache = {}
+                self._image_tokens_index_cache = cache
+            image_tokens_idx = cache.get(logits.device)
+            if image_tokens_idx is None:
+                image_tokens_idx = async_tensor_h2d(
+                    self.model.vocabulary_mapping.image_tokens,
+                    dtype=torch.long,
+                    device=logits.device,
+                )
+                cache[logits.device] = image_tokens_idx
+            logits.index_fill_(1, image_tokens_idx, torch.finfo(logits.dtype).min)
 
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

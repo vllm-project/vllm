@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
-from vllm.utils.torch_utils import np_to_pinned_tensor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -24,10 +23,14 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+    from vllm.v1.kv_cache_interface import (
+        AttentionSpec,
+        KVCacheLayout,
+        KVCacheSpec,
+        KVQuantMode,
+    )
 
-from vllm.v1.kv_cache_interface import get_kv_quant_mode
+from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
@@ -85,68 +88,6 @@ class AttentionBackend(ABC):
     def get_builder_cls():  # -> Type["AttentionMetadataBuilder"]:
         raise NotImplementedError
 
-    @staticmethod
-    @abstractmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        raise NotImplementedError
-
-    @classmethod
-    def get_kv_cache_block_dim(
-        cls,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> int:
-        """Discover which tensor dim is the block index, since different
-        backends lay out dims differently."""
-        _S = 1234567
-        shape = cls.get_kv_cache_shape(
-            _S,
-            block_size,
-            num_kv_heads,
-            head_size,
-            cache_dtype_str=cache_dtype_str,
-        )
-        return shape.index(_S)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        """
-        Get the physical (memory layout) ordering of the kv cache dimensions.
-        Standard attention backends pack K and V into the content dim, giving
-        the logical shape [num_blocks, num_heads, block_size, 2 * head_size].
-        e.g. if get_kv_cache_stride_order returns (0, 2, 1, 3) then the physical
-        ordering of dimensions is
-        [num_blocks, block_size, num_heads, 2 * head_size].
-
-        If this function is unimplemented / raises NotImplementedError,
-        the physical layout of the KV cache will match the logical shape.
-
-        Args:
-            include_num_layers_dimension: if True, includes an additional
-                num_layers dimension, which is assumed to be prepended
-                to the logical KV cache shape.
-                With the above example, a return value (1, 0, 3, 2, 4)
-                corresponds to
-                [num_blocks, num_layers, block_size, num_heads, 2 * head_size].
-
-                If an additional dimension is NOT included in the returned
-                tuple, the physical layout will not include a layers dimension.
-
-        Returns:
-            A tuple of ints which is a permutation of range(len(shape)).
-        """
-        raise NotImplementedError
-
     @classmethod
     def full_cls_name(cls) -> tuple[str, str]:
         return (cls.__module__, cls.__qualname__)
@@ -192,6 +133,20 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Adjust the layer's KV cache spec for this backend's kernels. Used when the
+        kernels want KV packed in a specific way.
+
+        NOTE: temporary compatibility API. Today the Attention layer builds the spec
+        from the model config and the backend only gets to adjust it post-hoc; the end
+        state is for the backend to build and return the spec directly, at which point
+        this hook goes away.
+
+        (see: https://github.com/vllm-project/vllm/issues/42449)
+        """
+        return spec
+
+    @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
         supported_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_sizes:
@@ -201,38 +156,6 @@ class AttentionBackend(ABC):
             return default_block_size
 
         return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
-
-    @classmethod
-    def indexes_kv_by_block_stride(cls) -> bool:
-        """Whether the backend reads KV pages by the runtime block stride.
-
-        True when ``num_blocks`` is the outermost physical dimension of the KV
-        cache, so the backend tolerates a non-contiguous block dim. This gates
-        page size padding and cross-layer uniform KV layout.
-
-        Returns:
-            True if the backend's physical KV layout is num-blocks-first. False
-            otherwise, including when the backend does not define a layered
-            stride order.
-        """
-        try:
-            kv_cache_stride_order = cls.get_kv_cache_stride_order(
-                include_num_layers_dimension=False
-            )
-            layered_kv_cache_stride_order = cls.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
-            )
-        except (AttributeError, NotImplementedError):
-            return False
-
-        # Check that attention backend includes a layers dimension.
-        if len(layered_kv_cache_stride_order) != len(kv_cache_stride_order) + 1:
-            return False
-
-        # stride_order[0] == 0 means num_layers stays first in physical
-        # layout (identity permutation), so indexing by block stride is
-        # not supported.
-        return layered_kv_cache_stride_order[0] != 0
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -282,11 +205,31 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        """Whether this backend can run a batch whose device query_start_loc disagrees
+        with the CPU one; backends that plan off the CPU query lengths must opt out.
+
+        Currently only verification requests are affected: adaptive verification trims
+        their drafts on device. On the CPU the draft budget is evenly distributed across
+        requests, so the total draft budget, the decode/prefill split point and the CPU
+        prefill query lengths all stay correct.
+
+        SSM backends opt out: their recurrent-state planning is built from the CPU
+        per-request boundaries, which the trimmed batch no longer matches.
+        """
+        return not cls.is_ssm()
+
+    @classmethod
     def supports_pcp(cls) -> bool:
         try:
             return cls.get_impl_cls().supports_pcp
         except NotImplementedError:
             return False
+
+    @classmethod
+    def supports_non_causal_dcp(cls) -> bool:
+        builder_cls = cls.get_builder_cls()
+        return bool(getattr(builder_cls, "supports_non_causal_multi_token_dcp", False))
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -335,6 +278,8 @@ class AttentionBackend(ABC):
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
         use_pcp: bool = False,
+        use_adaptive_verification: bool = False,
+        use_dcp: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -371,12 +316,22 @@ class AttentionBackend(ABC):
             invalid_reasons.append("sliding window not supported")
         if use_non_causal and not cls.supports_non_causal():
             invalid_reasons.append("non-causal attention not supported")
+        if use_mla and use_non_causal and use_dcp and not cls.supports_non_causal_dcp():
+            invalid_reasons.append("non-causal MLA attention with DCP not supported")
         if use_batch_invariant and not cls.supports_batch_invariance():
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():
             invalid_reasons.append("KV connector not supported")
         if use_pcp and not cls.supports_pcp():
             invalid_reasons.append("PCP not supported")
+        if (
+            use_adaptive_verification
+            and not cls.supports_device_cpu_query_lens_mismatch()
+        ):
+            invalid_reasons.append(
+                "device-cpu query lens mismatch not supported, "
+                "this is needed for adaptive verification"
+            )
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -393,7 +348,9 @@ class AttentionBackend(ABC):
         return invalid_reasons
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+        """Layouts this backend's kernels can consume, most preferred first, or
+        None when the kernels consume any layout and express no preference."""
         return None
 
     @classmethod
@@ -442,6 +399,7 @@ class CommonAttentionMetadata:
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: torch.Tensor | None = None
     num_logits_indices: int | None = None
+    max_logits_per_req: int | None = None
 
     # Needed by CrossAttentionBuilder
     encoder_seq_lens: torch.Tensor | None = None
@@ -471,7 +429,7 @@ class CommonAttentionMetadata:
     """PrefixLM bidirectional ranges for multimodal tokens. Maps
     request index to list of (start, end) token position ranges
     where bidirectional attention should apply. None for text-only
-    batches or non-PrefixLM models."""
+    batches or non-PrefixLM models. A request's ranges must not overlap."""
 
     rswa_prefix_lens: torch.Tensor | None = None
     """(batch_size,) per-request prefix length (prompt/image token count) for
@@ -548,17 +506,19 @@ class CommonAttentionMetadata:
             assert self._token_to_req_indices_cache.shape[0] >= num_tokens
             return self._token_to_req_indices_cache[:num_tokens]
 
-        starts = np.asarray(self.query_start_loc_cpu, dtype=np.int32)
-        query_lens = np.diff(starts)
-        token_to_req_indices = np.repeat(
-            np.arange(query_lens.shape[0], dtype=np.int32), query_lens
-        )
-        num_mapped_tokens = token_to_req_indices.shape[0]
+        # Built from the device query_start_loc: adaptive verification decides the
+        # per-request draft split on device, so the CPU copy carries the right total
+        # but not the right per-request boundaries. Padding requests have a query
+        # length of zero and drop out of the repeat.
+        num_mapped_tokens = int(self.query_start_loc_cpu[-1])
+        query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
         assert buffer.shape[0] >= max(num_mapped_tokens, num_tokens)
-        # copy from CPU to GPU
-        buffer[:num_mapped_tokens].copy_(
-            np_to_pinned_tensor(token_to_req_indices), non_blocking=True
+        token_to_req_indices = torch.repeat_interleave(
+            torch.arange(query_lens.shape[0], dtype=torch.int32, device=buffer.device),
+            query_lens,
+            output_size=num_mapped_tokens,
         )
+        buffer[:num_mapped_tokens].copy_(token_to_req_indices)
         if num_mapped_tokens < num_tokens:
             buffer[num_mapped_tokens:num_tokens].zero_()
         self._token_to_req_indices_cache = buffer[: max(num_mapped_tokens, num_tokens)]
@@ -590,6 +550,7 @@ class CommonAttentionMetadata:
             else self.causal,
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
+            max_logits_per_req=self.max_logits_per_req,
             encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
@@ -631,11 +592,16 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
+    # Whether the builder constructor requires the block-table width.
+    requires_block_table_width: ClassVar[bool] = False
+    # Whether all step-dependent draft decode metadata can be updated in place,
+    # allowing one metadata build to be reused across autoregressive draft steps.
+    supports_draft_decode_metadata_update: bool = False
 
     @abstractmethod
     def __init__(
         self,
-        kv_cache_spec: "AttentionSpec",
+        kv_cache_spec: "KVCacheSpec",
         layer_names: list[str],
         vllm_config: "VllmConfig",
         device: torch.device,
@@ -649,7 +615,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     def get_cudagraph_support(
         cls: type["AttentionMetadataBuilder"],
         vllm_config: "VllmConfig",
-        kv_cache_spec: "AttentionSpec",
+        kv_cache_spec: "KVCacheSpec",
     ) -> AttentionCGSupport:
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
@@ -755,6 +721,16 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             fast_build=True,
         )
 
+    def update_draft_decode_metadata(self, metadata: M) -> None:
+        """Update step-dependent draft decode metadata in place.
+
+        The fused draft loop may call this method during full CUDA graph
+        capture. CUDA graph replay does not run this Python method, so
+        implementations must emit capture-safe operations and keep replayed
+        tensor state in persistent storage.
+        """
+        raise NotImplementedError
+
     def use_cascade_attention(
         self,
         common_prefix_len: int,
@@ -822,7 +798,7 @@ class AttentionImplBase(ABC, Generic[T]):
     # False => base 2      (lse = log2(sum(exp(qk))))
     #          -- e.g. FlashInfer trtllm-gen MLA
     # The DCP combine kernel (cp_lse_ag_out_rs / dcp_a2a_lse_reduce in
-    # vllm/v1/attention/ops/common.py) branches on this via its IS_BASE_E
+    # vllm/v1/attention/ops/dcp.py) branches on this via its IS_BASE_E
     # constexpr; getting it wrong silently corrupts the cross-shard
     # softmax denominator.
     lse_base_on_e: bool = True

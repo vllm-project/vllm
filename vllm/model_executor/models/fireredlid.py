@@ -445,35 +445,42 @@ class FireRedLIDMultiModalProcessor(
 ):
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         # Dummy encoder prompt for profiling (encoder only processes audio).
         return [0]
 
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+
+        mm_data = dict(mm_data)
+        mm_data["audio"] = mm_data.pop("audios")
+
+        hf_processor_mm_kwargs = dict(
+            **hf_processor_mm_kwargs,
+            sampling_rate=feature_extractor.sampling_rate,
         )
-        if "labels" in processed_outputs:
-            processed_outputs["input_ids"] = processed_outputs.pop("labels")
-        return processed_outputs
+
+        return mm_data, hf_processor_mm_kwargs
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if "labels" in processed_data:
+            processed_data["input_ids"] = processed_data.pop("labels")
+
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -483,7 +490,7 @@ class FireRedLIDMultiModalProcessor(
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
             speech_lengths=MultiModalFieldConfig.batched("audio"),
-            fake_token_lengths=MultiModalFieldConfig.batched("audio"),
+            fake_token_lengths=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -589,7 +596,15 @@ class FireRedLIDForConditionalGeneration(
             "net.0": "pre_layer_norm",
             "net.1": "linear_expand",
             "net.4": "linear_project",
-        }
+        },
+        orig_to_new_prefix={
+            # Position encoding buffers are rebuilt at init, and the output
+            # projection is tied to the embedding.
+            "model.encoder.positional_encoding.pe": None,
+            "model.decoder.positional_encoding.pe": None,
+            "model.decoder.tgt_word_prj.weight": None,
+            "proj_out.": None,
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -778,15 +793,5 @@ class FireRedLIDForConditionalGeneration(
         return text.strip()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=[
-                # Position encoding buffers are rebuilt at init
-                "model.encoder.positional_encoding.pe",
-                "model.decoder.positional_encoding.pe",
-                # Tied output projection (shared with embedding)
-                "model.decoder.tgt_word_prj.weight",
-                "proj_out.",
-            ],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

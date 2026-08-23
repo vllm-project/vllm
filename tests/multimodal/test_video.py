@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import subprocess
 import sys
 import threading
 from contextlib import ExitStack, contextmanager
@@ -14,15 +15,13 @@ from transformers import AutoVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
+from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
-    PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
     DynamicVideoBackend,
     GLM46VVideoBackend,
     Molmo2VideoBackend,
-    PyNvVideoCodecDecoderSlot,
-    PyNvVideoCodecVideoBackend,
     Qwen2VLVideoBackend,
     Qwen3VLVideoBackend,
     VideoBackend,
@@ -31,10 +30,21 @@ from vllm.multimodal.video import (
     VideoTargetMetadata,
     get_video_loader_backend_for_processor,
 )
+from vllm.multimodal.video_decoders import decode_video, resolve_video_backend_kwargs
+from vllm.multimodal.video_decoders.pynvvideocodec import (
+    PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+    PyNvVideoCodecDecoderSlot,
+    PyNvVideoCodecVideoBackendMixin,
+    _pynv_decoder_pool,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
 
-from .utils import create_long_gop_video, create_video_from_image
+from .utils import (
+    create_edit_list_trimmed_video,
+    create_long_gop_video,
+    create_video_from_image,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -44,6 +54,27 @@ assert ASSETS_DIR.exists()
 NUM_FRAMES = 10
 FAKE_OUTPUT_1 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
 FAKE_OUTPUT_2 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
+
+
+@contextmanager
+def _fresh_decoder_pool():
+    """Reset module-level decoder pool for isolated test runs."""
+    pool = _pynv_decoder_pool
+    old_slots = pool.slots
+    old_active = pool.active
+    old_cond = pool.cond
+    old_max = pool.max_slots
+    pool.slots = []
+    pool.active = 0
+    pool.cond = threading.Condition()
+    pool.max_slots = None
+    try:
+        yield pool
+    finally:
+        pool.slots = old_slots
+        pool.active = old_active
+        pool.cond = old_cond
+        pool.max_slots = old_max
 
 
 @VIDEO_LOADER_REGISTRY.register("test_video_loader_1")
@@ -73,6 +104,126 @@ def test_video_loader_registry():
 def test_video_loader_type_doesnt_exist():
     with pytest.raises(AssertionError):
         VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
+
+
+def test_video_decoder_backends_are_lazy_imported():
+    code = """
+import sys
+import vllm.multimodal.video  # noqa: F401
+
+backend_modules = {
+    f"vllm.multimodal.video_decoders.{backend}"
+    for backend in ("opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream")
+}
+loaded = sorted(backend_modules & sys.modules.keys())
+assert not loaded, loaded
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"],
+)
+def test_decode_video_imports_only_selected_backend(
+    backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    imports = []
+    decoded = object()
+
+    def fake_decoder(*args, **kwargs):
+        return decoded
+
+    class FakeBackendModule:
+        pass
+
+    setattr(FakeBackendModule, f"decode_{backend}", fake_decoder)
+
+    def fake_import_module(name: str, package: str):
+        imports.append((name, package))
+        return FakeBackendModule
+
+    monkeypatch.setattr(
+        "vllm.multimodal.video_decoders.import_module", fake_import_module
+    )
+    result = decode_video(
+        backend,
+        loader_cls=None,
+        data=b"",
+        target=VideoTargetMetadata(-1, -1, 300),
+        sampling_kwargs={},
+        backend_kwargs={},
+        frame_recovery=False,
+    )
+
+    assert result is decoded
+    assert imports == [(f".{backend}", "vllm.multimodal.video_decoders")]
+
+
+@pytest.mark.parametrize(
+    ("backend", "kwargs", "expected_sampling", "expected_backend"),
+    [
+        (
+            "torchcodec",
+            {"min_frames": 4, "num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+            {"min_frames": 4},
+            {"num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+        ),
+        (
+            "deepstream",
+            {"max_frames": 16, "pool_size": 3, "timeout_sec": 10.0},
+            {"max_frames": 16},
+            {"pool_size": 3, "timeout_sec": 10.0},
+        ),
+    ],
+)
+def test_video_backend_kwargs_are_separated_from_sampling_kwargs(
+    backend: str,
+    kwargs: dict,
+    expected_sampling: dict,
+    expected_backend: dict,
+):
+    original_kwargs = dict(kwargs)
+    sampling_kwargs, backend_kwargs = resolve_video_backend_kwargs(backend, kwargs)
+
+    assert sampling_kwargs == expected_sampling
+    assert backend_kwargs == expected_backend
+    assert kwargs == original_kwargs
+
+
+def test_video_backend_rejects_options_for_another_decoder():
+    with pytest.raises(
+        ValueError, match="num_ffmpeg_threads is not supported by the 'pyav' backend"
+    ):
+        resolve_video_backend_kwargs("pyav", {"num_ffmpeg_threads": 2})
+
+
+@pytest.mark.parametrize(
+    ("backend", "error"),
+    [
+        ("pyav", AssertionError),
+        (PYNVVIDEOCODEC_VIDEO_BACKEND, ValueError),
+    ],
+)
+def test_video_decoder_spec_validates_frame_recovery(
+    backend: str, error: type[Exception]
+):
+    with pytest.raises(error, match="frame_recovery is not supported"):
+        decode_video(
+            backend,
+            loader_cls=None,
+            data=b"",
+            target=VideoTargetMetadata(-1, -1, 300),
+            sampling_kwargs={},
+            backend_kwargs={},
+            frame_recovery=True,
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -121,7 +272,9 @@ def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
         "vllm.multimodal.gpu_ipc_memory.get_mm_gpu_ipc_pool", lambda: pool
     )
     monkeypatch.setattr(
-        PyNvVideoCodecVideoBackend, "_decode_to_pinned_host", classmethod(fake_decode)
+        PyNvVideoCodecVideoBackendMixin,
+        "_decode_to_pinned_host",
+        classmethod(fake_decode),
     )
 
     loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
@@ -181,7 +334,9 @@ def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
         "vllm.multimodal.gpu_ipc_memory.get_mm_gpu_ipc_pool", lambda: pool
     )
     monkeypatch.setattr(
-        DynamicVideoBackend, "_decode_to_pinned_host", classmethod(fake_decode)
+        PyNvVideoCodecVideoBackendMixin,
+        "_decode_to_pinned_host",
+        classmethod(fake_decode),
     )
 
     loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
@@ -199,6 +354,46 @@ def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
     assert metadata["frames_indices"] == [0, 9]
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_pynvvideocodec_corrupted_videos_raise_value_error():
+    valid_video = create_long_gop_video(num_frames=2, width=64, height=64)
+    corrupted_video = (ASSETS_DIR / "corrupted.mp4").read_bytes()
+    malformed_video = corrupted_video[:128]
+
+    with _fresh_decoder_pool():
+        loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid or unsupported video file\.$",
+        ) as malformed_exc:
+            loader.load_bytes(
+                malformed_video,
+                num_frames=1,
+                hw_decoders=1,
+            )
+
+        assert malformed_exc.value.__cause__ is not None
+
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid or unsupported video file\.$",
+        ) as exc_info:
+            loader.load_bytes(
+                corrupted_video,
+                num_frames=-1,
+                hw_decoders=1,
+            )
+
+        assert exc_info.value.__cause__ is not None
+
+        frames, _ = loader.load_bytes(
+            valid_video,
+            num_frames=1,
+            hw_decoders=1,
+        )
+        assert frames.shape[0] == 1
+
+
 @pytest.mark.parametrize("hw_decoders", [1, 3])
 def test_pynvvideocodec_decoder_slots_are_bounded(
     monkeypatch: pytest.MonkeyPatch,
@@ -208,16 +403,8 @@ def test_pynvvideocodec_decoder_slots_are_bounded(
         pass
 
     create_count = 0
-    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
-    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
-    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
-    old_max_slots = PyNvVideoCodecVideoBackend._max_decoder_slots
-    try:
-        PyNvVideoCodecVideoBackend._decoder_slots = []
-        PyNvVideoCodecVideoBackend._active_decoder_slots = 0
-        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
-        PyNvVideoCodecVideoBackend._max_decoder_slots = None
-        PyNvVideoCodecVideoBackend._configure_decoder_slots(hw_decoders)
+    with _fresh_decoder_pool():
+        PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(hw_decoders)
 
         def fake_create_slot(cls):
             nonlocal create_count
@@ -225,7 +412,7 @@ def test_pynvvideocodec_decoder_slots_are_bounded(
             return FakeSlot()
 
         monkeypatch.setattr(
-            PyNvVideoCodecVideoBackend,
+            PyNvVideoCodecVideoBackendMixin,
             "_create_decoder_slot",
             classmethod(fake_create_slot),
         )
@@ -235,12 +422,16 @@ def test_pynvvideocodec_decoder_slots_are_bounded(
 
         with ExitStack() as stack:
             retained_slots = [
-                stack.enter_context(PyNvVideoCodecVideoBackend._borrow_decoder_slot())
+                stack.enter_context(
+                    PyNvVideoCodecVideoBackendMixin._borrow_decoder_slot()
+                )
                 for _ in range(hw_decoders)
             ]
 
             def borrow_extra_slot():
-                with PyNvVideoCodecVideoBackend._borrow_decoder_slot() as extra_slot:
+                with (
+                    PyNvVideoCodecVideoBackendMixin._borrow_decoder_slot()
+                ) as extra_slot:
                     seen_slots.append(extra_slot)
                     borrowed.set()
 
@@ -254,23 +445,202 @@ def test_pynvvideocodec_decoder_slots_are_bounded(
 
         assert seen_slots[0] in retained_slots
         assert create_count == hw_decoders
-    finally:
-        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
-        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
-        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
-        PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
 
 
 def test_pynvvideocodec_decoder_slots_are_configured_once(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(PyNvVideoCodecVideoBackend, "_max_decoder_slots", None)
+    monkeypatch.setattr(_pynv_decoder_pool, "max_slots", None)
 
-    PyNvVideoCodecVideoBackend._configure_decoder_slots(2)
-    PyNvVideoCodecVideoBackend._configure_decoder_slots(2)
+    PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(2)
+    PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(2)
 
     with pytest.raises(RuntimeError, match="already configured as 2, got 3"):
-        PyNvVideoCodecVideoBackend._configure_decoder_slots(3)
+        PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(3)
+
+
+def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
+    events: list[tuple[str, str]] = []
+
+    class FakeStream:
+        cuda_stream = "cuda-stream"
+
+    class FakeDecoder:
+        poisoned = False
+
+        def reconfigure_decoder(self, file_path: str):
+            self.poisoned = True
+            events.append(("reconfigure", file_path))
+            raise RuntimeError("reconfigure failed")
+
+    old_decoder = FakeDecoder()
+    slot = PyNvVideoCodecDecoderSlot(FakeStream())
+    slot.decoder = old_decoder
+    slot.source_path = "valid.mp4"
+
+    class FakeNvc:
+        class OutputColorType:
+            RGB = "rgb"
+
+        @staticmethod
+        def SimpleDecoder(file_path: str, **kwargs):
+            events.append(("construct", file_path))
+            assert slot.decoder is None
+            assert slot.source_path is None
+            raise RuntimeError("construct failed")
+
+    pool = _pynv_decoder_pool
+    old_slots = pool.slots
+    old_active = pool.active
+    old_cond = pool.cond
+    old_max = pool.max_slots
+    try:
+        pool.slots = [slot]
+        pool.active = 1
+        pool.cond = threading.Condition()
+        pool.max_slots = 1
+
+        with (
+            pytest.raises(RuntimeError, match="construct failed"),
+            PyNvVideoCodecVideoBackendMixin._borrow_decoder_slot() as borrowed,
+        ):
+            assert borrowed is slot
+            borrowed.get_decoder(
+                "unsupported-8k.mp4",
+                FakeNvc,
+                device_index=0,
+            )
+
+        assert events == [
+            ("reconfigure", "unsupported-8k.mp4"),
+            ("construct", "unsupported-8k.mp4"),
+        ]
+        assert old_decoder.poisoned
+        assert slot.decoder is None
+        assert slot.source_path is None
+        assert pool.slots == [slot]
+    finally:
+        pool.slots = old_slots
+        pool.active = old_active
+        pool.cond = old_cond
+        pool.max_slots = old_max
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
+    import PyNvVideoCodec as nvc
+    import torch
+
+    if "H200" not in torch.cuda.get_device_name(0):
+        pytest.skip("Requires H200 NVDEC resolution limits")
+
+    valid_video = create_long_gop_video(num_frames=2, width=64, height=64)
+    unsupported_video = (ASSETS_DIR / "unsupported_8k_h264.mp4").read_bytes()
+
+    old_slots = _pynv_decoder_pool.slots
+    old_active = _pynv_decoder_pool.active
+    old_cond = _pynv_decoder_pool.cond
+    old_max = _pynv_decoder_pool.max_slots
+    try:
+        _pynv_decoder_pool.slots = []
+        _pynv_decoder_pool.active = 0
+        _pynv_decoder_pool.cond = threading.Condition()
+        _pynv_decoder_pool.max_slots = None
+
+        loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
+        frames_before, _ = loader.load_bytes(
+            valid_video,
+            num_frames=1,
+            hw_decoders=1,
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            loader.load_bytes(
+                unsupported_video,
+                num_frames=1,
+                hw_decoders=1,
+            )
+
+        root_cause = exc_info.value
+        while root_cause.__cause__ is not None:
+            root_cause = root_cause.__cause__
+        assert isinstance(root_cause, nvc.PyNvVCExceptionUnsupported)
+        assert "MBCount not supported" in str(root_cause)
+
+        frames_after, _ = loader.load_bytes(
+            valid_video,
+            num_frames=1,
+            hw_decoders=1,
+        )
+
+        assert frames_after.shape == frames_before.shape
+    finally:
+        for slot in _pynv_decoder_pool.slots:
+            slot.invalidate()
+        _pynv_decoder_pool.slots = old_slots
+        _pynv_decoder_pool.active = old_active
+        _pynv_decoder_pool.cond = old_cond
+        _pynv_decoder_pool.max_slots = old_max
+
+
+def test_pynvvideocodec_cross_subclass_shares_single_pool():
+    """Regression test for GHSA-j682-9xp5-rrf3.
+
+    Multiple subclasses of PyNvVideoCodecVideoBackendMixin must share the
+    same process-wide decoder slot limit rather than getting independent
+    counters via ClassVar shadowing.
+    """
+
+    class MixinSubclassA(PyNvVideoCodecVideoBackendMixin):
+        pass
+
+    class MixinSubclassB(PyNvVideoCodecVideoBackendMixin):
+        pass
+
+    class FakeSlot:
+        pass
+
+    create_count = 0
+
+    def fake_create_slot(cls):
+        nonlocal create_count
+        create_count += 1
+        return FakeSlot()
+
+    with _fresh_decoder_pool() as pool:
+        pool.max_slots = 2
+
+        orig_create = PyNvVideoCodecVideoBackendMixin._create_decoder_slot
+        PyNvVideoCodecVideoBackendMixin._create_decoder_slot = classmethod(
+            fake_create_slot
+        )
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(MixinSubclassA._borrow_decoder_slot())
+                stack.enter_context(MixinSubclassB._borrow_decoder_slot())
+                assert pool.active == 2
+
+                blocked = threading.Event()
+                acquired = threading.Event()
+
+                def try_borrow():
+                    blocked.set()
+                    with MixinSubclassB._borrow_decoder_slot():
+                        acquired.set()
+
+                t = threading.Thread(target=try_borrow)
+                t.start()
+                blocked.wait(timeout=2.0)
+                assert not acquired.wait(timeout=0.3)
+
+            assert acquired.wait(timeout=2.0)
+            t.join(timeout=2.0)
+            assert not t.is_alive()
+
+            assert create_count == 2
+            assert len(pool.slots) == 2
+        finally:
+            PyNvVideoCodecVideoBackendMixin._create_decoder_slot = orig_create
 
 
 @pytest.mark.parametrize("hw_decoders", [0, -1, 1.5, True, "2"])
@@ -388,6 +758,12 @@ def test_cosmos3_edge_uses_qwen3_vl_video_backend():
             {"fps": 2},
             id="qwen2_5_vl",
         ),
+        pytest.param(
+            "MiniMaxAI/MiniMax-M3",
+            MiniMaxM3VideoBackend,
+            None,
+            id="minimax_m3_vl",
+        ),
     ],
 )
 def test_video_processor_from_model_repo(
@@ -490,6 +866,44 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
         )
 
 
+def test_video_backend_handles_edit_list_trimmed_video(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    An mp4 edit list (e.g. from a lossless ``ffmpeg -ss ... -c copy`` cut)
+    hides the decode lead-in: the header still counts every physical sample
+    while sequential decode only yields the visible frames. Sampling over the
+    header count used to collapse such videos to the few indices below the
+    visible count (a single frame for the Qwen loaders) — the loader must
+    resample over the true stream length instead.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        video_data, num_visible = create_edit_list_trimmed_video(
+            num_frames=90, trim_start_frame=60
+        )
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+        for backend in ["opencv", "pyav"]:
+            frames, metadata = loader.load_bytes(
+                video_data, num_frames=-1, backend=backend
+            )
+            assert metadata["total_num_frames"] == num_visible, backend
+            assert frames.shape[0] == num_visible, backend
+            assert len(metadata["frames_indices"]) == num_visible, backend
+            # The green channel encodes the source frame index: the visible
+            # frames must be the trailing ones (60..89), not the lead-in.
+            mean_green = frames[..., 1].reshape(frames.shape[0], -1).mean(axis=1)
+            assert abs(mean_green[0] - 60) <= 5, backend
+            assert abs(mean_green[-1] - 89) <= 5, backend
+
+        # The Qwen samplers used to degenerate to a single frame here.
+        qwen_frames, qwen_metadata = Qwen2VLVideoBackend.load_bytes(video_data)
+        assert qwen_metadata["total_num_frames"] == num_visible
+        assert qwen_frames.shape[0] >= 4
+
+
 # ============================================================================
 # Frame Recovery Tests
 # ============================================================================
@@ -539,6 +953,14 @@ def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
 
             def get(self, prop):
                 return self._cap.get(prop)
+
+            def set(self, prop, value):
+                # get_video_metadata probes the stream end with a seek;
+                # keep the simulated frame counter aligned with rewinds.
+                result = self._cap.set(prop, value)
+                if prop == cv2.CAP_PROP_POS_FRAMES:
+                    self._current_frame = int(value) - 1
+                return result
 
             def isOpened(self):
                 return self._cap.isOpened()

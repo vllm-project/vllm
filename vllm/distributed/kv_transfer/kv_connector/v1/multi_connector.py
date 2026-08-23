@@ -27,7 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -204,10 +204,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self._extra_async_saves: dict[str, int] = {}
 
     @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        if not self._connectors:
-            return False
-        return all(c.prefer_cross_layer_blocks for c in self._connectors)
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return bool(self._connectors) and all(
+            c.supports_divergent_local_hybrid_hits for c in self._connectors
+        )
+
+    @property
+    def requires_kv_delivery(self) -> bool:
+        return any(c.requires_kv_delivery for c in self._connectors)
 
     @classmethod
     def _get_connector_classes_and_configs(
@@ -234,13 +238,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 )
             )
         return ret
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
-    ):
-        # Register on all connectors
-        for c in self._connectors:
-            c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
@@ -353,9 +350,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.handle_preemptions(cm)
 
     def get_finished_count(self) -> int | None:
-        # TODO(https://github.com/vllm-project/vllm/issues/33400)
-        # Currently no connectors return non-None
-        return None
+        child_counts = [
+            connector.get_finished_count() for connector in self._connectors
+        ]
+        if any(count is None for count in child_counts):
+            return None
+        counts = {count for count in child_counts if count is not None}
+        if len(counts) > 1:
+            raise ValueError(
+                "MultiConnector children returned incompatible finished counts: "
+                f"{sorted(counts)}"
+            )
+        return next(iter(counts), None)
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         metadata_list: list[KVConnectorWorkerMetadata | None] | None = None
