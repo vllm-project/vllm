@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -1060,8 +1061,8 @@ class RoutedExperts(PluggableLayer):
         if routed_experts_prefix != "":
             routed_experts_prefix = f"{routed_experts_prefix}."
 
-        w13 = f"experts.{routed_experts_prefix}{lora_base_layer_prefix}w13_"
-        w2 = f"experts.{routed_experts_prefix}{lora_base_layer_prefix}w2_"
+        w13 = f"experts.{lora_base_layer_prefix}{routed_experts_prefix}w13_"
+        w2 = f"experts.{lora_base_layer_prefix}{routed_experts_prefix}w2_"
 
         fused_mapping = []
         if include_fused:
@@ -1216,7 +1217,7 @@ class RoutedExperts(PluggableLayer):
             shared_experts_input: Input for shared experts (if any)
 
         Returns:
-            Output tensor from routed experts
+            Output tensor from routed experts.
         """
         assert not self.quant_method.is_monolithic
 
@@ -1235,7 +1236,7 @@ class RoutedExperts(PluggableLayer):
         x: torch.Tensor,
         router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """
         Execute routed experts using the quantization method's apply function.
 
@@ -1250,7 +1251,7 @@ class RoutedExperts(PluggableLayer):
             input_ids: input ids for DeepSeek V4
 
         Returns:
-            Output tensor from routed experts
+            Finalized routed states or a deferred-finalize output.
         """
         assert self.quant_method.is_monolithic
 

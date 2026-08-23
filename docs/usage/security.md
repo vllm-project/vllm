@@ -531,6 +531,60 @@ ensure that only trusted principals can submit work to the cluster:
 - Place the Ray cluster on an isolated network segment.
 - Do not expose the Ray client port or dashboard to untrusted networks.
 
+## Prefix Cache Timing Side-Channel Mitigation (Cache Salting)
+
+### Background
+
+Prefix caching reuses KV cache blocks across requests that share a common prompt prefix. In multi-tenant deployments, that reuse is a timing side channel ([CVE-2025-46570](https://github.com/vllm-project/vllm/security/advisories/GHSA-4qjh-9fv9-r85r)).
+
+An attacker sharing the same backend can measure differences in Time to First Token (TTFT) to infer whether a guessed prompt prefix matches another user's cached prompt: when the prefix is already cached, prefill is faster. Research has shown this signal is nearly perfectly distinguishable (ROC AUC of 0.99) at prefix lengths of just 8 tokens. See [Leaking Secrets from Prefix Caches](https://arxiv.org/html/2411.18191v1) for details.
+
+### Cache Salting
+
+vLLM accepts an optional `cache_salt` parameter on requests. The salt is mixed into the hash of the first KV cache block, so only requests carrying the same salt can share cached prefix blocks. See [Automatic Prefix Caching](../design/prefix_caching.md) for the implementation details.
+
+`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, and by the Anthropic `/v1/messages` endpoint.
+
+#### Usage with the OpenAI Python client
+
+```python
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_body={
+        "cache_salt": "per-user-or-per-tenant-secret",
+    },
+)
+```
+
+#### Usage with a raw request
+
+```json
+{
+  "model": "meta-llama/Llama-3-8b",
+  "messages": [
+    {"role": "user", "content": "Hello"}
+  ],
+  "cache_salt": "per-user-or-per-tenant-secret"
+}
+```
+
+### How to choose a salt value
+
+Treat the salt as a secret. An attacker who can guess or obtain the salt used by another tenant can still mount the timing attack against that tenant, so use random values that are long enough to be unpredictable (e.g. 43 base64 characters, 256 bits) rather than predictable identifiers such as a user name or account ID.
+
+Scope the salt to the isolation boundary you need:
+
+- **Per-user isolation**: A unique random salt per user prevents any cross-user cache inference.
+- **Per-group sharing**: A shared random salt for users who are allowed to benefit from each other's cached prefixes, such as users within the same organization.
+- **No salt**: Omitting `cache_salt` preserves the default behavior where all requests can share cached prefixes. This is appropriate for single-tenant deployments or when prefix privacy is not a concern.
+
+### Recommendations
+
+- **Multi-tenant deployments**: Set `cache_salt` on every request, using a secret scoped to the tenant boundary you want to enforce.
+- **Single-tenant deployments**: Cache salting is unnecessary and can be omitted to maximize cache hit rates.
+- Salting reduces cache efficiency, since cached blocks are only reusable by requests with the same salt. Choose the granularity of your salt values to balance privacy against performance.
+
 ## Reporting Security Vulnerabilities
 
 If you believe you have found a security vulnerability in vLLM, please report it following the project's security policy. For more information on how to report security issues and the project's security policy, please see the [vLLM Security Policy](https://github.com/vllm-project/vllm/blob/main/SECURITY.md).

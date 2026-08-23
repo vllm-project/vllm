@@ -13,7 +13,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     OpenAIBaseModel,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
     StopParam,
     StreamOptions,
     UsageInfo,
@@ -413,6 +413,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_response_format(cls, data):
+        if not isinstance(data, dict):
+            return data
         response_format = data.get("response_format")
         if response_format is None:
             return data
@@ -444,6 +446,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_structured_outputs_count(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("structured_outputs", None) is None:
             return data
 
@@ -472,6 +476,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("logprob_token_ids") and data.get("use_beam_search"):
             raise VLLMValidationError(
                 "`logprob_token_ids` is not supported with beam search.",
@@ -520,9 +526,13 @@ class CompletionRequest(OpenAIBaseModel):
                     parameter="prompt_logprobs",
                     value=prompt_logprobs,
                 )
-        if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
+        if (
+            (logprobs := data.get("logprobs")) is not None
+            and logprobs < 0
+            and logprobs != -1
+        ):
             raise VLLMValidationError(
-                "`logprobs` must be a positive value.",
+                "`logprobs` must be a positive value or -1.",
                 parameter="logprobs",
                 value=logprobs,
             )
@@ -532,6 +542,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_stream_options(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("stream_options") and not data.get("stream"):
             raise VLLMValidationError(
                 "Stream options can only be defined when `stream=True`.",
@@ -543,6 +555,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt_and_prompt_embeds(cls, data):
+        if not isinstance(data, dict):
+            return data
         prompt = data.get("prompt")
         prompt_embeds = data.get("prompt_embeds")
 
@@ -562,6 +576,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt_list_length(cls, data):
+        if not isinstance(data, dict):
+            return data
         max_prompts = envs.VLLM_MAX_COMPLETION_PROMPTS
 
         prompt = data.get("prompt")
@@ -644,7 +660,7 @@ class CompletionResponse(OpenAIBaseModel):
     ec_transfer_params: dict[str, Any] | None = Field(
         default=None, description="ECTransfer parameters."
     )
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -676,4 +692,4 @@ class CompletionStreamResponse(OpenAIBaseModel):
     # Set only on the final chunk of a stream to mirror non-streaming responses
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
