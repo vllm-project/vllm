@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -16,6 +17,7 @@ from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    DCPGroupColumnParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -146,6 +148,16 @@ class DeepseekV32Attention(MLAAttention):
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         scaling = qk_head_dim**-0.5
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        qrep_requested = (
+            envs.VLLM_DCP_Q_REPLICATE
+            if envs.is_set("VLLM_DCP_Q_REPLICATE")
+            else bool(vllm_config.parallel_config.dcp_q_replicate)
+        )
+        qrep_enabled = (
+            qrep_requested
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.prefill_context_parallel_size <= 1
+        )
 
         # DSA checkpoints may use plain ("default") or yarn-scaled RoPE.
         if config.rope_parameters["rope_type"] != "default":
@@ -205,6 +217,7 @@ class DeepseekV32Attention(MLAAttention):
             q_lora_rank=q_lora_rank,
             kv_lora_rank=kv_lora_rank,
             kv_b_proj=kv_b_proj,
+            dcp_q_replicate=qrep_enabled,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -245,13 +258,17 @@ class DeepseekV32Attention(MLAAttention):
             prefix=f"{prefix}.fused_qkv_a_proj",
         )
         self.q_a_layernorm = RMSNorm(q_lora_rank, eps=config.rms_norm_eps)
-        self.q_b_proj = ColumnParallelLinear(
+        q_proj_cls = (
+            DCPGroupColumnParallelLinear if qrep_enabled else ColumnParallelLinear
+        )
+        self.q_b_proj = q_proj_cls(
             q_lora_rank,
             num_heads * qk_head_dim,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.q_b_proj",
         )
+        self.dcp_q_replicate = getattr(self.q_b_proj, "qrep_active", False)
         self.kv_a_layernorm = RMSNorm(kv_lora_rank, eps=config.rms_norm_eps)
 
         self.o_proj = RowParallelLinear(
@@ -376,9 +393,11 @@ class DeepseekV32Attention(MLAAttention):
             index_k_out=index_k_out,
         )
 
-        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        q = self.q_b_proj(q_c)[0].view(q_c.shape[0], -1, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
+        W_UK_T = self.W_UK_T_dcp_qrep if self.dcp_q_replicate else self.W_UK_T
+        assert W_UK_T is not None
+        ql_nope = torch.bmm(q_nope.transpose(0, 1), W_UK_T).transpose(0, 1)
 
         if self.indexer is not None and not self.skip_topk:
             index_q = self.indexer.wq_b(q_c)[0]
@@ -414,6 +433,25 @@ class DeepseekV32Attention(MLAAttention):
             output,
         )
         return self.o_proj(output)[0]
+
+    def _gather_dcp_query(
+        self,
+        mqa_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.use_pcp and self.impl.dcp_world_size > self.impl.pcp_world_size:
+            if isinstance(mqa_q, tuple):
+                mqa_q = torch.cat(mqa_q, dim=-1)
+            return get_tp_group().all_gather(mqa_q, dim=1)
+        if (
+            not self.use_pcp
+            and self.impl.dcp_world_size > 1
+            and not self.dcp_q_replicate
+        ):
+            assert self.dcp_manager is not None
+            if isinstance(mqa_q, tuple):
+                mqa_q = torch.cat(mqa_q, dim=-1)
+            return self.dcp_manager.group.all_gather(mqa_q, dim=1)
+        return mqa_q
 
     @eager_break_during_capture
     def _sparse_indexer_and_attn(
@@ -508,21 +546,10 @@ class DeepseekV32Attention(MLAAttention):
         else:
             mqa_q_arg = (ql_nope[:num_actual], mqa_q[:num_actual])
 
-        if self.use_pcp and self.impl.dcp_world_size > self.impl.pcp_world_size:
-            if isinstance(mqa_q_arg, tuple):
-                mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
-            mqa_q_arg = get_tp_group().all_gather(mqa_q_arg, dim=1)
-        elif not self.use_pcp and self.impl.dcp_world_size > 1:
-            # Pure DCP: all-gather the query heads across the DCP group so
-            # every rank attends to its local KV shard with the full head
-            # set; the LSE merge below reduce-scatters the heads back.
-            # Plain all-gather rather than dcp_manager.query_gather: the
-            # sparse mixed batch also gathers prefill rows, which can exceed
-            # the decode-sized direct symmetric-memory workspace.
-            assert self.dcp_manager is not None
-            if isinstance(mqa_q_arg, tuple):
-                mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
-            mqa_q_arg = self.dcp_manager.group.all_gather(mqa_q_arg, dim=1)
+        # Pure DCP all-gathers local query heads unless qrep materialized the
+        # full group set locally. Use the dynamic collective because sparse
+        # mixed batches can exceed the decode-sized direct workspace.
+        mqa_q_arg = self._gather_dcp_query(mqa_q_arg)
         attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
             mqa_q_arg, kv_cache, attn_metadata, self
         )
