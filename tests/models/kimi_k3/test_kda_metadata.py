@@ -614,6 +614,30 @@ def _build_non_spec(batch, is_prefilling, full_cuda_graph=False):
     return builder, common_attn_metadata, builder.build(0, common_attn_metadata)
 
 
+def test_one_token_first_chunk_excludes_padded_tokens():
+    """`num_prefill_tokens` must exclude cudagraph token padding.
+
+    It inherits `num_actual_tokens`, which a full cudagraph pads past the last
+    real token, so it has to be recomputed from the real query boundary."""
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[100, 50, 1, 0], query_lens=[1, 1, 1, 0]),
+        BLOCK_SIZE,
+        DEVICE,
+    ).replace(
+        is_prefilling=torch.tensor([False, False, True, False], dtype=torch.bool),
+        num_actual_tokens=4,
+    )
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder, num_speculative_tokens=0, full_cuda_graph=False
+    )
+    actual = builder.build(0, common)
+
+    assert actual.num_decodes == 2
+    assert actual.num_prefills == 1
+    assert actual.num_decode_tokens == 2
+    assert actual.num_prefill_tokens == 1, "padded token counted as a prefill token"
+
+
 def test_one_token_first_chunk_excludes_trailing_padding():
     """Trailing cudagraph padding must not be counted as prefill requests.
 

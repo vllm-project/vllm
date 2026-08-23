@@ -430,10 +430,16 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             # `split_decodes_and_prefills` counts the whole suffix after the
             # first prefill, so trailing cudagraph padding lands in
             # `num_prefills` once a stateless first chunk promotes a row ahead
-            # of it. The padding rows carry no tokens, so only the request
-            # count needs correcting.
+            # of it. `num_prefill_tokens` is inflated separately: it inherits
+            # `num_actual_tokens`, which a full cudagraph pads past the last
+            # real token. Padding rows only ever trail the batch, so dropping
+            # them from the request count also gives the real token boundary.
             if num_prefills:
                 num_prefills -= int((query_lens_cpu[num_decodes:] == 0).sum())
+                num_prefill_tokens = (
+                    int(query_start_loc_cpu[num_decodes + num_prefills])
+                    - num_decode_tokens
+                )
             num_spec_decode_tokens = 0
             spec_token_indx = None
             non_spec_token_indx = None
