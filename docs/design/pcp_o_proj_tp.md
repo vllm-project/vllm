@@ -112,12 +112,15 @@ microbatches from using the shared buffer at the same time.
 ## Explicit triggering and correctness constraints
 
 Both the generic MLA wrapper and the modular DeepSeek-V3.2 attention path
-explicitly trigger the prefetch. `PCPOProjRowParallelLinear.forward()` requires
-the trigger to have occurred before every invocation. A missing trigger raises
-an error instead of inferring the batch type. This guarantees that:
+explicitly trigger the prefetch after their Q/KV normalization and before the
+remaining query projection and main attention computation.
+`PCPOProjRowParallelLinear.forward()` requires the trigger to have occurred
+before every invocation. A missing trigger raises an error instead of inferring
+the batch type. This guarantees that:
 
-- the prefill/mixed gather starts early enough to overlap with Q/K/V
-  projections, RoPE, the indexer, and the main attention computation;
+- the prefill/mixed gather avoids contending with Q/KV RMSNorm while retaining
+  the remaining query projection, RoPE, the indexer, and the main attention
+  computation as overlap candidates;
 - decode-only batches do not issue an unnecessary weight gather;
 - O-Proj does not read the shared buffer before the asynchronous gather has
   completed; and
