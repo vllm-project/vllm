@@ -573,7 +573,14 @@ class FlexibleArgumentParser(ArgumentParser):
             if isinstance(value, bool):
                 if value:
                     processed_args.append("--" + key)
-                elif (no_key := f"--no-{key}") in self._option_string_actions:
+                # Registered option strings use dashes, so normalize before the
+                # lookup. Without this a key written with underscores misses and
+                # the branch emits nothing, silently applying the opposite value.
+                # Keys with no --no- counterpart, such as store_true flags, are
+                # still dropped, which is the correct result for those.
+                elif (
+                    no_key := f"--no-{key.replace('_', '-')}"
+                ) in self._option_string_actions:
                     processed_args.append(no_key)
             elif isinstance(value, list):
                 if value:

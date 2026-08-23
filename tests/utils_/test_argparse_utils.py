@@ -82,6 +82,33 @@ def test_with_bool_flag(parser):
     assert args.enable_feature is True
 
 
+def test_config_bool_false_with_underscore_key(tmp_path):
+    """A false boolean must be honored whether the key uses dashes or underscores.
+
+    Registered option strings use dashes, so an underscore key used to miss the
+    --no- lookup and emit nothing, leaving the option at its opposite value.
+    """
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--enable-prefix-caching", action=BooleanOptionalAction)
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("enable_prefix_caching: false\n")
+    assert parser.load_config_file(str(config_file)) == ["--no-enable-prefix-caching"]
+
+    config_file.write_text("enable-prefix-caching: false\n")
+    assert parser.load_config_file(str(config_file)) == ["--no-enable-prefix-caching"]
+
+
+def test_config_bool_false_without_no_variant_is_dropped(tmp_path):
+    """store_true options register no --no- counterpart, so false stays a no-op."""
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--headless", action="store_true")
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("headless: false\n")
+    assert parser.load_config_file(str(config_file)) == []
+
+
 def test_invalid_choice(parser):
     with pytest.raises(SystemExit):
         parser.parse_args(["--image_input_type", "invalid_choice"])
