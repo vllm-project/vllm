@@ -305,23 +305,54 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         attention_config = vllm_config.attention_config
         if attention_config.backend == AttentionBackendEnum.FLASHINFER:
             import vllm.envs as envs
+            from vllm.config.compilation import CUDAGraphMode
+            from vllm.platforms import current_platform
 
-            if envs.VLLM_NVFP4_KV_VOSPLIT:
-                # The unified FlashInfer prefill grouping (FIPrefillGroup, keyed
-                # by ``(is_mm, causal)``) serves DiffusionGemma's mixed
+            cache_config = vllm_config.cache_config
+            nvfp4_vosplit = (
+                cache_config is not None
+                and cache_config.cache_dtype.startswith("nvfp4")
+                and envs.VLLM_NVFP4_KV_VOSPLIT
+                and current_platform.is_device_capability_family(120)
+            )
+            if nvfp4_vosplit:
+                # The unified FlashInfer prefill grouping (FIPrefillGroup,
+                # keyed by ``(is_mm, causal)``) serves DiffusionGemma's mixed
                 # causal/bidirectional batches (encoder=causal, denoise=
-                # non-causal), including the D=512 NVFP4 VO-split path. Allowed
-                # when the NVFP4 VO-split path is enabled.
+                # non-causal), including the D=512 NVFP4 VO-split path. Only
+                # that path builds nvfp4-aware group wrappers, so the gate
+                # matches Gemma4Config's: NVFP4 KV, the VO-split knob, and
+                # consumer Blackwell.
+                # The grouped prefill path partitions the batch in Python by
+                # (is_mm, causal), so its control flow is data-dependent and
+                # cannot be baked into a full CUDA graph. Forcing per-request
+                # causal batches off the decode split means uniform
+                # decode-shaped denoise steps reach that path too, so keep
+                # capture piecewise.
+                compilation_config = vllm_config.compilation_config
+                # cudagraph_mode is still None here (CompilationConfig
+                # defaults it later), so test for that before dereferencing.
+                if (
+                    compilation_config.cudagraph_mode is None
+                    or compilation_config.cudagraph_mode.has_full_cudagraphs()
+                ):
+                    compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                    logger.info(
+                        "DiffusionGemma on FLASHINFER: forcing PIECEWISE "
+                        "cudagraph mode; the grouped prefill partition is "
+                        "data-dependent and cannot be full-graph captured."
+                    )
                 logger.info(
                     "DiffusionGemma on FLASHINFER via unified per-request "
                     "causal grouping (NVFP4 VO-split active)."
                 )
             else:
                 raise ValueError(
-                    "FlashInfer does not support DiffusionGemma's mixed "
-                    "causal/bidirectional attention without the NVFP4 VO-split "
-                    "path. Use --attention-backend FLASH_ATTN or TRITON_ATTN "
-                    "instead."
+                    "FlashInfer supports DiffusionGemma's mixed "
+                    "causal/bidirectional attention only on the NVFP4 "
+                    "VO-split path (NVFP4 KV cache on CC 12.x with "
+                    "VLLM_NVFP4_KV_VOSPLIT). Use --attention-backend "
+                    "FLASH_ATTN or TRITON_ATTN instead."
                 )
         if attention_config.backend is None and not attention_config.use_non_causal:
             attention_config.use_non_causal = True
