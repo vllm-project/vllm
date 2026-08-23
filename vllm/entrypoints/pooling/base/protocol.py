@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -179,6 +180,26 @@ class CompletionRequestMixin(OpenAIBaseModel):
         ),
     )
     # --8<-- [end:completion-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_input_list_length(cls, data):
+        if not isinstance(data, dict):
+            return data
+        max_prompts = envs.VLLM_MAX_COMPLETION_PROMPTS
+        input_val = data.get("input")
+        if not isinstance(input_val, list) or len(input_val) == 0:
+            return data
+        if isinstance(input_val[0], int):
+            return data
+        if len(input_val) > max_prompts:
+            raise VLLMValidationError(
+                f"input list length {len(input_val)} exceeds the maximum "
+                f"allowed count of {max_prompts}. To increase this limit, "
+                "set the VLLM_MAX_COMPLETION_PROMPTS environment variable.",
+                parameter="input",
+            )
+        return data
 
 
 class ChatRequestOptionsMixin(OpenAIBaseModel):
