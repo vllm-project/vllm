@@ -105,6 +105,24 @@ def _mm_feature_mixed(offset: int, length: int) -> MultiModalFeatureSpec:
     )
 
 
+def test_strip_covered_mm_data_xdrope() -> None:
+    """XD-RoPE models (e.g. HunyuanOCR) compute positions the same way, so a
+    covered item must keep its grid dims: stripping them made the worker index
+    an empty ``image_grid_thw`` and crash the engine on the second request with
+    an identical prompt."""
+    covered = _mm_feature_mixed(offset=0, length=100)
+    uncovered = _mm_feature_mixed(offset=300, length=100)
+
+    stripped = strip_covered_mm_data(
+        [covered, uncovered], num_computed_tokens=250, uses_xdrope=True
+    )
+
+    assert stripped[0].data is not None
+    assert list(stripped[0].data.keys()) == ["image_grid_thw"]
+    assert stripped[1].data is not None
+    assert set(stripped[1].data.keys()) == {"pixel_values", "image_grid_thw"}
+
+
 def test_strip_covered_mm_data_mrope() -> None:
     """For M-RoPE models, covered items keep their keep_on_cpu metadata fields
     (the worker needs them to compute positions); payload fields are dropped."""

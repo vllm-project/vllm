@@ -55,6 +55,7 @@ class NewRequestData:
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
         uses_mrope: bool = False,
+        uses_xdrope: bool = False,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -63,6 +64,7 @@ class NewRequestData:
                 request.mm_features,
                 request.num_computed_tokens,
                 uses_mrope=uses_mrope,
+                uses_xdrope=uses_xdrope,
             ),
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
