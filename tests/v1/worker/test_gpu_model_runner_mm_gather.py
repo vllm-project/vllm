@@ -98,3 +98,62 @@ def test_target_path_raises_on_encoder_cache_miss():
     f0 = _feature("h0", offset=0, length=8)
     with pytest.raises(RuntimeError, match="Encoder cache miss"):
         _gather([f0], [], num_scheduled=8, shift=0)
+
+
+def _draft_gather(features, cached, *, num_scheduled, num_computed=0):
+    """Drive _gather_draft_mm_embed_inputs end to end against the real
+    _gather_mm_embeddings, using the same lightweight stub as _gather."""
+    encoder_cache = {
+        f.identifier: torch.arange(
+            f.mm_position.length * HIDDEN, dtype=torch.float32
+        ).reshape(f.mm_position.length, HIDDEN)
+        for f in cached
+    }
+    req_state = SimpleNamespace(num_computed_tokens=num_computed, mm_features=features)
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(req_ids=["req0"]),
+        requests={"req0": req_state},
+        encoder_cache=encoder_cache,
+        _get_encoder_output_from_cache=lambda mm_hash: encoder_cache.get(mm_hash),
+        is_multimodal_pruning_enabled=False,
+        uses_mrope=False,
+    )
+    runner._gather_mm_embeddings = (
+        lambda so, shift_computed_tokens: GPUModelRunner._gather_mm_embeddings(
+            runner, so, shift_computed_tokens=shift_computed_tokens
+        )
+    )
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=num_scheduled,
+        num_scheduled_tokens={"req0": num_scheduled},
+    )
+    return GPUModelRunner._gather_draft_mm_embed_inputs(runner, scheduler_output)
+
+
+def test_draft_wrapper_degrades_on_interior_miss():
+    """An evicted entry within the processed range must not kill the engine
+    on the drafter path (vllm-project/vllm#38551): the wrapper degrades to
+    text-only drafting by returning None."""
+    f0 = _feature("h0", offset=0, length=8)  # interior, evicted
+    assert _draft_gather([f0], [], num_scheduled=8) is None
+
+
+def test_draft_wrapper_passes_through_when_cached():
+    f0 = _feature("h0", offset=0, length=8)
+    f1 = _feature("h1", offset=8, length=8)
+    result = _draft_gather([f0, f1], [f0, f1], num_scheduled=8)
+    assert result is not None
+    mm_embeds, is_mm_embed = result
+    assert len(mm_embeds) == 2
+    assert int(is_mm_embed.sum()) == 8
+
+
+def test_draft_wrapper_reraises_unrelated_runtime_errors():
+    def _boom(scheduler_output, shift_computed_tokens):
+        raise RuntimeError("boom")
+
+    runner = SimpleNamespace(_gather_mm_embeddings=_boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        GPUModelRunner._gather_draft_mm_embed_inputs(
+            runner, SimpleNamespace(total_num_scheduled_tokens=0)
+        )
