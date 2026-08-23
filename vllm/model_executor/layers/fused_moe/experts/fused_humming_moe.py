@@ -571,6 +571,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             assert hasattr(cls, "humming_gemm_type")
             gemm_type = cls.humming_gemm_type().value.lower()
             preferred_gemm_type = get_humming_moe_gemm_type()
+            print(f"{preferred_gemm_type=}")
             supported = preferred_gemm_type.lower() == gemm_type
             if not supported:
                 reason = (
