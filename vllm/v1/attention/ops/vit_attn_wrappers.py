@@ -332,7 +332,7 @@ def flashinfer_wrapper(
 ) -> torch.Tensor:
     if q.numel() == 0:
         # FlashInfer's cuDNN prefill calls torch::stable::empty_like and
-        # fails on 0-token queries (seen with DP ViT empty ranks, #52654).
+        # fails on 0-token queries (#52654).
         return torch.empty_like(q, dtype=o_data_type or q.dtype)
 
     from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
