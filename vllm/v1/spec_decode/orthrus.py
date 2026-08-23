@@ -61,6 +61,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 
 logger = init_logger(__name__)
 
@@ -222,14 +223,25 @@ class OrthrusProposer(SpecDecodeBaseProposer):
         # block_size) -- see vllm/v1/worker/block_table.py's
         # _COMPUTE_SLOT_MAPPING_KERNEL for the general (DCP/CP-aware)
         # version this is a simplification of. ---
+        # Clamp before block-table lookup and mask out slots for any
+        # position that would exceed max_model_len: an un-clamped
+        # block_idx could read arbitrary GPU memory as a physical block id
+        # once a proposed block runs past the end of a request's allocated
+        # blocks, which would then get used for KV-cache reads/writes --
+        # potentially touching another request's data. Same pattern as
+        # compute_new_slot_mapping / the Eagle proposer's clamping.
         block_size = self.block_size
-        block_idx = block_positions // block_size  # [batch_size, block_len]
-        block_offset = block_positions % block_size
+        max_model_len = self.vllm_config.model_config.max_model_len
+        clamped_positions = torch.clamp(block_positions, max=max_model_len - 1)
+        block_idx = clamped_positions // block_size  # [batch_size, block_len]
+        block_offset = clamped_positions % block_size
         req_idx = torch.arange(batch_size, device=self.device).unsqueeze(1).expand(
             -1, block_len
         )
         physical_block_ids = cad.block_table_tensor[req_idx, block_idx]
         slot_mapping = (physical_block_ids * block_size + block_offset).reshape(-1)
+        exceeds_max_len = (block_positions >= max_model_len).reshape(-1)
+        slot_mapping = slot_mapping.masked_fill(exceeds_max_len, PADDING_SLOT_ID)
 
         new_seq_lens = (seq_lens + block_len).to(torch.int32)
         new_query_start_loc = self.arange[: batch_size + 1] * block_len
