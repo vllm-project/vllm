@@ -288,19 +288,6 @@ class DeepseekV32Attention(MLAAttention):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if isinstance(self.o_proj, PCPOProjRowParallelLinear):
-            attn_metadata_raw = get_forward_context().attn_metadata
-            if isinstance(attn_metadata_raw, dict):
-                o_proj_attn_metadata = attn_metadata_raw.get(self.layer_name)
-            elif isinstance(attn_metadata_raw, list):
-                o_proj_attn_metadata = attn_metadata_raw[0].get(self.layer_name)
-            else:
-                o_proj_attn_metadata = attn_metadata_raw
-            self.o_proj.prefetch_full_weight_if_needed(
-                o_proj_attn_metadata is not None
-                and getattr(o_proj_attn_metadata, "num_prefills", 0) > 0
-            )
-
         # Captured: A-projections (+ indexer A-GEMM on indexer layers).
         qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
         q_c, kv_c, k_pe = qkv_lora.split(
@@ -394,6 +381,14 @@ class DeepseekV32Attention(MLAAttention):
             k_pe_out=k_pe_out,
             index_k_out=index_k_out,
         )
+
+        # Keep the weight gather off fused_norm_rope while retaining the Q
+        # projection, indexer, and main attention as overlap candidates.
+        if isinstance(self.o_proj, PCPOProjRowParallelLinear):
+            self.o_proj.prefetch_full_weight_if_needed(
+                attn_metadata is not None
+                and getattr(attn_metadata, "num_prefills", 0) > 0
+            )
 
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
