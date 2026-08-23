@@ -24,7 +24,7 @@ pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
-pub use hy_v3::HyV3ToolParser;
+pub(crate) use hy_v3::{HyV3ToolMarkers, HyV3ToolParser};
 pub use json::{
     Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
     MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser,
@@ -36,7 +36,7 @@ pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub use xgrammar_structural_tag::Model as StructuralTagModel;
+pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
 
 use crate::utils;
 
@@ -187,8 +187,8 @@ pub trait ToolParser: Send {
         false
     }
 
-    /// Return the xgrammar structural-tag model used for strict tool calling.
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+    /// Return the xgrammar structural-tag builder used for strict tool calling.
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
     }
 

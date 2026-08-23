@@ -13,6 +13,7 @@ use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{
     ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode,
+    ResolvedToolContext,
 };
 use crate::{ChatRenderer, ChatRole};
 
@@ -59,7 +60,7 @@ fn fixture_request(input_name: &str) -> ChatRequest {
 
 fn deepseek_fixture_options() -> FixtureRequestOptions {
     FixtureRequestOptions {
-        enable_thinking: true,
+        enable_thinking: Some(true),
         no_generation_prompt_when_last_assistant: true,
     }
 }
@@ -86,6 +87,14 @@ fn renders_vllm_parity_prompt_for_request_level_tools_fixture() {
 }
 
 #[test]
+fn renders_developer_tools_like_hf_python() {
+    assert_fixture(
+        "test_input_developer_tools.json",
+        expect_file!["fixtures/test_output_developer_tools.txt"],
+    );
+}
+
+#[test]
 fn renders_official_search_fixture_without_date() {
     assert_fixture(
         "test_input_search_wo_date.json",
@@ -103,27 +112,29 @@ fn renders_official_search_fixture_with_date() {
 
 #[test]
 fn request_level_tools_are_lowered_as_synthetic_leading_system_message() {
+    let messages = vec![
+        ChatMessage::system("System prompt."),
+        ChatMessage::text(ChatRole::User, "Hello"),
+    ];
+    let tools = vec![ChatTool {
+        name: "lookup".to_string(),
+        description: Some("Look things up".to_string()),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string"
+                }
+            },
+            "required": ["query"]
+        }),
+        strict: None,
+    }];
     let mut request = ChatRequest {
         request_id: "deepseek-v32-tools".to_string(),
-        messages: vec![
-            ChatMessage::system("System prompt."),
-            ChatMessage::text(ChatRole::User, "Hello"),
-        ],
-        tools: vec![ChatTool {
-            name: "lookup".to_string(),
-            description: Some("Look things up".to_string()),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string"
-                    }
-                },
-                "required": ["query"]
-            }),
-            strict: None,
-        }],
-        tool_choice: ChatToolChoice::Auto,
+        tool_context: ResolvedToolContext::new(&messages, tools, Some(ChatToolChoice::Auto), true)
+            .expect("tool context should resolve"),
+        messages,
         ..ChatRequest::for_test()
     };
     request

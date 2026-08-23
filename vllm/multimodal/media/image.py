@@ -25,9 +25,11 @@ class ImageMediaIO(MediaIO[Image.Image]):
     error handling.
     """
 
-    def __init__(self, image_mode: str = "RGB", **kwargs) -> None:
+    def __init__(self, image_mode: str | None = "RGB", **kwargs) -> None:
         super().__init__()
 
+        # Target mode for loaded images; `None` keeps the original mode
+        # (i.e. no conversion, alpha channel is preserved as-is).
         self.image_mode = image_mode
         # `kwargs` contains custom arguments from
         # --media-io-kwargs for this modality, merged with
@@ -62,7 +64,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
         """Convert image mode with custom background color."""
         if isinstance(image, MediaWithBytes):
             image = image.media
-        if image.mode == self.image_mode:
+        if self.image_mode is None or image.mode == self.image_mode:
             return image
         elif image.mode == "RGBA" and self.image_mode == "RGB":
             return rgba_to_rgb(image, self.rgba_background_color)
@@ -84,10 +86,17 @@ class ImageMediaIO(MediaIO[Image.Image]):
                 )
             image = normalize_image(image)
             image.load()
-            image = self._convert_image_mode(image)
+            converted = self._convert_image_mode(image)
         except (OSError, Image.UnidentifiedImageError) as e:
             raise ValueError(f"Failed to load image: {e}") from e
-        return MediaWithBytes(image, data)
+
+        io_config = None
+        if converted is not image:
+            io_config = {
+                "image_mode": self.image_mode,
+                "rgba_background_color": self.rgba_background_color,
+            }
+        return MediaWithBytes(converted, data, io_config)
 
     def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
         return self.load_bytes(pybase64.b64decode(data, validate=True))

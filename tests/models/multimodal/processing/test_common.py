@@ -87,7 +87,9 @@ MM_DATA_PATCHES = {
 _XPU_EXCLUDED_MODEL_IDS = {
     "baidu/Unlimited-OCR",
     "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+    "moonshotai/Kimi-K3",
     "Qwen/Qwen2.5-Omni-7B-AWQ",
+    "thinkingmachines/Inkling-NVFP4",
 }
 
 
@@ -132,10 +134,21 @@ def get_model_ids_to_test():
     return _get_model_ids_to_test(vllm_only_archs)
 
 
-def get_text_token_prompts(
+def get_transformers_backend_model_ids_to_test():
+    return sorted(
+        {
+            model_id
+            for arch, info in _TRANSFORMERS_BACKEND_MODELS.items()
+            if "MultiModal" in arch
+            for model_id in (info.default, *info.extras.values())
+        }
+    )
+
+
+def get_token_prompt(
     processor: BaseMultiModalProcessor,
     mm_data: MultiModalDataDict,
-):
+) -> list[int]:
     dummy_inputs = processor.dummy_inputs
     tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
@@ -165,21 +178,10 @@ def get_text_token_prompts(
             mm_options={},
         )
 
-    text_prompt: str | None
-    token_prompt: list[int]
-    if isinstance(inputs.prompt, list):
-        text_prompt = None
-        token_prompt = inputs.prompt
-    elif isinstance(inputs.prompt, str):
-        text_prompt = inputs.prompt
-        token_prompt = tokenizer.encode(
-            text_prompt,
-            **processor.info.get_default_tok_params().get_encode_kwargs(),
-        )
-    else:
+    if not isinstance(inputs.prompt, list):
         raise TypeError(type(inputs.prompt))
 
-    return text_prompt, token_prompt
+    return inputs.prompt
 
 
 def random_vision_chunk(
@@ -209,6 +211,7 @@ def _test_processing_correctness(
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
+    model_impl: str = "auto",
 ):
     if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
         # Use model architecture to get the default model id
@@ -236,6 +239,7 @@ def _test_processing_correctness(
         enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
+        model_impl=model_impl,
     )
     # Ensure that the cache can fit all of the data
     # (set after because ModelConfig would set it to 0 for encoder-decoder models)
@@ -343,7 +347,7 @@ def _test_processing_correctness_one(
 ):
     model_type = model_config.hf_config.model_type
 
-    text_prompt, token_prompt = get_text_token_prompts(baseline_processor, mm_data)
+    token_prompt = get_token_prompt(baseline_processor, mm_data)
     mm_items = baseline_processor.info.parse_mm_data(mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
@@ -366,54 +370,9 @@ def _test_processing_correctness_one(
         msg=(
             f"Failed ({batch_idx=}, {hit_rate=}, "
             f"{num_batches=}, {simplify_rate=}, "
-            f"{text_prompt=}, {token_prompt=}, {mm_data=})"
+            f"{token_prompt=}, {mm_data=})"
         ),
     )
-
-    if text_prompt is not None:
-        baseline_text_result = baseline_processor(
-            text_prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs={},
-        )
-        cached_text_result = cached_processor(
-            text_prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs={},
-        )
-
-        _assert_inputs_equal(
-            baseline_text_result,
-            cached_text_result,
-            ignore_mm_keys=ignore_mm_keys,
-            msg=(
-                f"Failed ({batch_idx=}, {hit_rate=}, "
-                f"{num_batches=}, {simplify_rate=}, "
-                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
-            ),
-        )
-
-        _assert_inputs_equal(
-            baseline_text_result,
-            baseline_tokenized_result,
-            ignore_mm_keys=ignore_mm_keys,
-            msg=(
-                f"Failed ({batch_idx=}, {hit_rate=}, "
-                f"{num_batches=}, {simplify_rate=}, "
-                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
-            ),
-        )
-
-        _assert_inputs_equal(
-            cached_text_result,
-            cached_tokenized_result,
-            ignore_mm_keys=ignore_mm_keys,
-            msg=(
-                f"Failed ({batch_idx=}, {hit_rate=}, "
-                f"{num_batches=}, {simplify_rate=}, "
-                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
-            ),
-        )
 
 
 @pytest.mark.parametrize("model_id", get_model_ids_to_test())
@@ -452,6 +411,14 @@ def test_processing_correctness(
             "audio placeholders from processed audio lengths. Its vLLM "
             "processor paths are covered by test_moss_audio.py."
         )
+    # TODO: Remove when transformers 5.15.0 is released, which contains
+    # https://github.com/huggingface/transformers/pull/47483.
+    if model_id == "microsoft/VibeVoice-ASR-HF":
+        pytest.skip(
+            "VibeVoice ASR requires audio as a positional argument and hence "
+            "cannot pass the processing correctness test as is. Its generation "
+            "is covered by test_transformers_audio.py."
+        )
     if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
         pytest.skip(
             "LLaVA-OneVision-2 video processing routes frames through custom "
@@ -467,6 +434,25 @@ def test_processing_correctness(
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
+    )
+
+
+@pytest.mark.parametrize("model_id", get_transformers_backend_model_ids_to_test())
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+def test_processing_correctness_transformers(
+    model_id: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    _test_processing_correctness(
+        model_id,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+        model_impl="transformers",
     )
 
 

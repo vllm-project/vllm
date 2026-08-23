@@ -3,8 +3,6 @@
 
 use std::fmt;
 
-use clap::Parser;
-
 /// Backend type for the benchmark endpoint.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
@@ -77,7 +75,7 @@ pub enum DatasetName {
     ShareGpt,
     #[value(name = "sonnet")]
     Sonnet,
-    #[value(name = "speed-bench")]
+    #[value(name = "speed-bench", alias = "speed_bench")]
     SpeedBench,
     #[value(name = "hf")]
     Hf,
@@ -144,13 +142,8 @@ impl fmt::Display for SpeedBenchConfig {
 }
 
 /// High-performance benchmark client for vLLM serving endpoints.
-#[derive(Parser, Debug, Clone)]
-#[command(
-    name = "vllm-bench",
-    about = "Benchmark online serving throughput",
-    version
-)]
-pub struct Cli {
+#[derive(clap::Args, Debug, Clone)]
+pub struct BenchServeArgs {
     /// The type of backend or endpoint to use for the benchmark.
     #[arg(long, default_value = "openai")]
     pub backend: BackendKind,
@@ -183,7 +176,8 @@ pub struct Cli {
     #[arg(long)]
     pub tokenizer: Option<String>,
 
-    /// Tokenizer mode (auto, hf, slow, mistral).
+    /// Tokenizer mode (auto, hf, slow, mistral). Accepted for Python CLI
+    /// compatibility; non-auto values are ignored with a warning.
     #[arg(long, default_value = "auto")]
     pub tokenizer_mode: String,
 
@@ -542,8 +536,16 @@ pub struct Cli {
 
     /// SPEED-Bench config/split (qualitative, throughput_1k, throughput_2k, throughput_8k,
     /// throughput_16k, throughput_32k).
-    #[arg(long, default_value = "qualitative")]
+    #[arg(
+        long,
+        visible_alias = "speed-bench-dataset-subset",
+        default_value = "qualitative"
+    )]
     pub speed_bench_config: SpeedBenchConfig,
+
+    /// Number of output tokens per request (SPEED-Bench dataset).
+    #[arg(long, default_value_t = 4096)]
+    pub speed_bench_output_len: usize,
 
     /// Filter SPEED-Bench by category (e.g. low_entropy, high_entropy, coding, math).
     #[arg(long)]
@@ -659,7 +661,7 @@ pub struct Cli {
     pub lora_assignment: LoraAssignment,
 }
 
-impl Cli {
+impl BenchServeArgs {
     /// Resolve the base URL from explicit --base-url or from --host/--port.
     pub fn resolve_base_url(&self) -> String {
         if let Some(ref base) = self.base_url {

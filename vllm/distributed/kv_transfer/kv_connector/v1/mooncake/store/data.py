@@ -6,13 +6,15 @@
 """Data classes for MooncakeStoreConnector."""
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
+import numpy as np
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -196,22 +198,58 @@ class ChunkedTokenDatabase:
     def prepare_value(
         self, start: int, end: int, block_ids: list[int]
     ) -> tuple[list[int], list[int], int]:
-        """Compute memory addresses and sizes for a token range.
+        """Compute memory addresses and sizes for a single token range.
 
         Returns:
             (addr_list, size_list, block_id)
         """
+        addr_lists, size_lists, chunk_block_ids = self.prepare_values(
+            ((start, end),), block_ids
+        )
+        return addr_lists[0], size_lists[0], chunk_block_ids[0]
+
+    def prepare_values(
+        self,
+        chunks: Sequence[tuple[int, int]],
+        block_ids: list[int],
+    ) -> tuple[list[list[int]], list[list[int]], list[int]]:
+        """Compute memory addresses and sizes for multiple token ranges.
+
+        Returns:
+            (addr_lists, size_lists, chunk_block_ids), one entry per chunk.
+        """
+        if not chunks:
+            return [], [], []
+        base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
+        length = len(self.block_len)
+        blen = np.asarray(
+            [self.block_len[i % length] for i in range(base.shape[0])],
+            dtype=np.int64,
+        )
+        n = len(chunks)
+        starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
+        spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
+        assert not (spans % self.hash_block_size).any()
+        bids = np.fromiter(
+            (block_ids[i] for i in (starts // self.block_size).tolist()),
+            dtype=np.int64,
+            count=n,
+        )
+        addrs = base[None, :] + bids[:, None] * blen[None, :]
+        block_counts = (spans + self.block_size - 1) // self.block_size
+        sizes = blen[None, :] * block_counts[:, None]
+        return addrs.tolist(), sizes.tolist(), bids.tolist()
+
+    def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
+        """Return addresses and sizes for one physical block slot."""
         addr_list = []
         size_list = []
-        block_id = block_ids[start // self.block_size]
         length = len(self.block_len)
         for index, base_addr in enumerate(self.kv_caches_base_addr):
             addr = base_addr + block_id * self.block_len[index % length]
-            assert (end - start) % self.block_size == 0
-            size = self.block_len[index % length] * cdiv(end - start, self.block_size)
             addr_list.append(addr)
-            size_list.append(size)
-        return addr_list, size_list, block_id
+            size_list.append(self.block_len[index % length])
+        return addr_list, size_list
 
     def process_tokens(
         self,
@@ -231,7 +269,8 @@ class ChunkedTokenDatabase:
         rank regardless of where the processed suffix begins.
 
         Args:
-            token_len: Total number of tokens.
+            token_len: Total number of tokens. Must be hash-block aligned and
+                covered by ``block_hashes`` when hashes are present.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
                 When ``block_size > hash_block_size`` each group's ``block_size`` chunk
                 is keyed by its last sub-hash via ``chunk_hashes_for_block_size``.
@@ -244,11 +283,10 @@ class ChunkedTokenDatabase:
         assert put_step > 0
         if not block_hashes:
             return
-        chunk_hashes: Sequence[BlockHash] = chunk_hashes_for_block_size(
-            block_hashes, self.hash_block_size, self.block_size
-        )
+        assert token_len % self.hash_block_size == 0
+        assert token_len // self.hash_block_size <= len(block_hashes)
         start_chunk = max(0, cdiv(mask_num, self.block_size))
-        max_chunks = min(len(chunk_hashes), cdiv(token_len, self.block_size))
+        max_chunks = cdiv(token_len, self.block_size)
         if chunk_mask is not None:
             max_chunks = min(max_chunks, start_chunk + len(chunk_mask))
         for chunk_id in range(start_chunk, max_chunks):
@@ -256,9 +294,9 @@ class ChunkedTokenDatabase:
                 continue
             if chunk_id % put_step != put_step_rank:
                 continue
-            h = chunk_hashes[chunk_id]
             start_idx = chunk_id * self.block_size
             end_idx = min(start_idx + self.block_size, token_len)
+            h = block_hashes[end_idx // self.hash_block_size - 1]
             yield start_idx, end_idx, h
 
 
@@ -281,6 +319,7 @@ class RequestTracker:
     allocated_block_ids: tuple[list[int], ...]
     num_saved_tokens: int = 0
     token_ids: list[int] | None = None
+    has_pending_offload: bool = False
     # Snapshot of the prefill range length at tracker creation time.
     # For a fresh request this is len(prompt). For a resumed-from-preemption
     # request it includes previously-generated tokens, which are re-prefilled.
@@ -291,6 +330,7 @@ class RequestTracker:
         self.allocated_block_ids = ()
         self.num_saved_tokens = 0
         self.token_ids = None
+        self.has_pending_offload = False
         self.prefill_end_tokens = 0
 
     def update(
@@ -322,11 +362,21 @@ class ReqMeta:
 
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
-    is_last_chunk: bool | None = None
     current_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
+    # Absolute request offset represented by token_ids[0].
+    token_ids_start: int = 0
     num_prompt_tokens: int | None = None
+    # Identifies this store job for the engine's lifetime. A request id cannot
+    # serve that purpose: it is reused once a preempted request resumes, so it
+    # would release the wrong job's blocks.
+    store_job_id: int | None = None
+    # Core-provided per-mamba-group
+    # (group_id, cow_block_id, boundary_tokens) for this request's partial tail.
+    # Present only on the producer's CoW step; drives the connector's offload
+    # (the FA group's block is derived from block_ids and boundary_tokens).
+    partial_tail_offloads: list[tuple[int, int, int]] | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -335,14 +385,14 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
-        is_last_chunk: bool | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
 
-        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
+        token_ids_start = tracker.num_saved_tokens
+        chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
@@ -359,8 +409,10 @@ class ReqMeta:
             tracker.num_saved_tokens = num_tokens_to_save
 
         token_ids = None
-        if tracker.token_ids:
-            token_ids = tracker.token_ids
+        if tracker.token_ids and not skip_save:
+            # Scheduler tracking continues while this job is handled by an
+            # asynchronous worker, so metadata must own a stable snapshot.
+            token_ids = tracker.token_ids[token_ids_start:num_tokens_to_save]
 
         if load_spec is not None and load_spec.can_load:
             logger.debug(
@@ -384,10 +436,27 @@ class ReqMeta:
             can_save=not skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,
-            is_last_chunk=is_last_chunk,
             token_ids=token_ids,
+            token_ids_start=token_ids_start,
             num_prompt_tokens=tracker.prefill_end_tokens,
         )
+
+
+@dataclass
+class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
+    """Maps ``ReqMeta.store_job_id`` to the number of ranks done with that job."""
+
+    completed_saves: dict[int, int] = field(default_factory=dict)
+
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "MooncakeStoreWorkerMetadata":
+        assert isinstance(other, MooncakeStoreWorkerMetadata)
+        for store_job_id, count in other.completed_saves.items():
+            self.completed_saves[store_job_id] = (
+                self.completed_saves.get(store_job_id, 0) + count
+            )
+        return self
 
 
 class MooncakeStoreConnectorMetadata(KVConnectorMetadata):

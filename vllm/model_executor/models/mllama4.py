@@ -594,13 +594,11 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         processor = self.info.get_hf_processor(**mm_kwargs)
@@ -653,8 +651,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", patches_per_image
             ),
-            patches_per_image=MultiModalFieldConfig.batched("image"),
-            aspect_ratios=MultiModalFieldConfig.batched("image"),
+            patches_per_image=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            aspect_ratios=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(

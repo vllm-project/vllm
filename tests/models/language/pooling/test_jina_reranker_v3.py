@@ -45,8 +45,10 @@ INSTRUCTION = (
 )
 
 
-def test_offline(vllm_runner):
+def test_offline(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     with vllm_runner(model_name, runner="pooling") as llm_runner:
+        assert llm_runner.llm.llm_engine.vllm_config.use_v2_model_runner
         llm = llm_runner.get_llm()
         _test_offline_1_v_1(llm)
         _test_offline_1_v_n(llm)

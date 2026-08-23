@@ -257,25 +257,6 @@ class FunAudioChatAudioEncoder(nn.Module):
     def dtype(self) -> torch.dtype:
         return self.conv1.weight.dtype
 
-    def _prepare_attention_mask(
-        self, inputs_tensor: torch.Tensor, cu_seqlens: torch.Tensor
-    ) -> torch.Tensor | None:
-        if getattr(self.config, "_attn_implementation", "eager") == "flash_attention_2":
-            return None
-
-        seq_length = inputs_tensor.shape[0]
-        attention_mask = torch.full(
-            (1, 1, seq_length, seq_length),
-            torch.finfo(inputs_tensor.dtype).min,
-            device=inputs_tensor.device,
-            dtype=inputs_tensor.dtype,
-        )
-        for i in range(1, len(cu_seqlens)):
-            start = int(cu_seqlens[i - 1].item())
-            end = int(cu_seqlens[i].item())
-            attention_mask[..., start:end, start:end] = 0
-        return attention_mask
-
     def forward(
         self,
         input_features: torch.Tensor,
@@ -538,12 +519,17 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
 
     @cached_property
     def feature_extractor(self) -> WhisperFeatureExtractor:
-        return WhisperFeatureExtractor.from_pretrained(self.model_id)
+        return WhisperFeatureExtractor.from_pretrained(
+            self.model_id,
+            revision=self.ctx.model_config.revision,
+        )
 
     @cached_property
     def speech_tokenizer(self) -> TokenizersBackend:
         return TokenizersBackend.from_pretrained(
-            self.model_id, subfolder="speech_tokenizer"
+            self.model_id,
+            subfolder="speech_tokenizer",
+            revision=self.ctx.model_config.tokenizer_revision,
         )
 
     def get_feature_extractor(self) -> WhisperFeatureExtractor:
@@ -631,10 +617,9 @@ class FunAudioChatMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
-        input_ids = torch.tensor([tokenizer.encode(prompt, **tok_kwargs)])
+        input_ids = torch.tensor([tokenizer.encode(prompt)])
 
         audios = mm_data.get("audios", [])
         if not audios:
@@ -693,15 +678,6 @@ class FunAudioChatMultiModalProcessor(
 
         return BatchFeature({"input_ids": input_ids, **mm_inputs})
 
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -709,7 +685,9 @@ class FunAudioChatMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "speech_ids": MultiModalFieldConfig.batched("audio"),
-            "speech_attention_mask": MultiModalFieldConfig.batched("audio"),
+            "speech_attention_mask": MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
             "input_features": MultiModalFieldConfig.batched("audio"),
             "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
             "feature_exist_mask": MultiModalFieldConfig.batched("audio"),
@@ -772,6 +750,8 @@ class FunAudioChatMultiModalProcessor(
     dummy_inputs=FunAudioChatDummyInputsBuilder,
 )
 class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"audio_invert_tower.": None})
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -981,5 +961,5 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_invert_tower."])
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

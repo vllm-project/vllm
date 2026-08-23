@@ -419,8 +419,7 @@ def test_mla_attention_quant_pattern(
     model_class: type[MLAAttentionQuantPatternModel],
     backend: AttentionBackendEnum,
     dist_init,
-    monkeypatch,
-    use_fresh_inductor_cache,
+    disable_vllm_compile_cache,
 ):
     """Test MLA AttentionQuantPattern fusion pass"""
     if (
@@ -428,8 +427,6 @@ def test_mla_attention_quant_pattern(
         and not is_nvfp4_supported()
     ):
         pytest.skip("NVFP4 is not supported on this GPU (requires SM 100+).")
-
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
@@ -484,6 +481,12 @@ def test_mla_attention_quant_pattern(
             device=device,
             vllm_config=vllm_config_unfused,
         )
+        if (
+            model_class is TestMLAAttentionFp8GroupQuantPatternModel
+            and type(model_unfused.block_fp8_linear.kernel)
+            is not CutlassFp8BlockScaledMMKernel
+        ):
+            pytest.skip("CUTLASS FP8 block kernel is not supported on this platform")
         model_unfused = model_unfused.to(device)
         # HACK: See #131044
         result_unfused_0 = model_unfused(q, kv_c_normed, k_pe)  # noqa: F841
