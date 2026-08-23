@@ -937,6 +937,21 @@ class HYV4ToolParser(ToolParser):
         if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
             return None
 
+        # Only constrain required / forced tool choice with the structural tag.
+        # For "auto", tool calling is optional and most requests never emit a
+        # tool call, so applying the grammar to every auto request would make
+        # the whole stream pay the output inflation and the per-token
+        # bitmask/accept overhead for a minority benefit. Skip it here so auto
+        # falls through to free generation; the HYV4 parser still reads back
+        # any tool calls the model emits.
+        tool_choice = request.tool_choice
+        if (
+            tool_choice is None
+            or tool_choice == "auto"
+            or getattr(tool_choice, "mode", None) == "auto"
+        ):
+            return None
+
         from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 
         try:

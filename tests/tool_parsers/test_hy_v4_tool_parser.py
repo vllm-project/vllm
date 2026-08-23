@@ -763,3 +763,10 @@ class TestToolParserWrapper:
     def test_structural_tag_is_none_without_tools(self, parser):
         request = ChatCompletionRequest(model="m", messages=[], tools=None)
         assert parser.get_structural_tag(request, reasoning=False) is None
+
+    def test_structural_tag_is_skipped_for_auto(self, parser):
+        """Auto tool calling stays unconstrained, even for strict tools."""
+        request = ChatCompletionRequest(
+            model="m", messages=[], tools=TOOLS, tool_choice="auto"
+        )
+        assert parser.get_structural_tag(request, reasoning=False) is None
