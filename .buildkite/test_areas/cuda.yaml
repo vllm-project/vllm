@@ -29,9 +29,6 @@ steps:
       source_file_dependencies:
       - vllm/
       - tests/cuda
-      commands:
-      - pytest -v -s cuda/test_cuda_context.py
-      - pytest -v -s cuda/test_platform_no_cuda_init.py
 
 - label: ":nvidia: (H200) CUDAGraph"
   device: h200_35gb

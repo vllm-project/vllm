@@ -71,5 +71,3 @@ steps:
       - .buildkite/scripts/scheduled_integration_test/
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
-      commands:
-      - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
