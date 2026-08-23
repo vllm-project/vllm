@@ -55,10 +55,27 @@ _PARAM_RE = re.compile(
     rf"(.*?)</{_ESCAPED_DSML}parameter>",
     re.DOTALL,
 )
-_PARTIAL_PARAM_RE = re.compile(
-    rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    rf"((?:(?!</?{_ESCAPED_DSML}).)*)",
+_PARTIAL_PARAM_START_RE = re.compile(
+    rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">',
     re.DOTALL,
+)
+
+# A list of possible tag prefixes that should not be leaked into the value.
+# We include both opening and closing tag prefixes.
+_TAG_PREFIXES = sorted(
+    [
+        f"<{_DSML}",
+        f"</{_DSML}",
+        DSML_THINK_START,
+        DSML_THINK_END,
+        DSML_TOOL_START,
+        DSML_TOOL_END,
+        DSML_INVOKE_PREFIX,
+        DSML_INVOKE_END,
+        DSML_PARAM_CLOSE,
+    ],
+    key=len,
+    reverse=True,
 )
 
 
@@ -78,9 +95,24 @@ def _dsml_arg_converter(raw_args: str, partial: bool) -> str:
         last_end = m.end()
 
     if partial:
-        pm = _PARTIAL_PARAM_RE.search(raw_args, last_end)
+        pm = _PARTIAL_PARAM_START_RE.search(raw_args, last_end)
         if pm:
-            name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
+            name, is_str = pm.group(1), pm.group(2)
+            value = raw_args[pm.end():]
+
+            # To avoid leaking partial closing tags into the value,
+            # we truncate the value at the first occurrence of a tag prefix.
+            found_prefix = False
+            for prefix in _TAG_PREFIXES:
+                for i in range(len(prefix), 0, -1):
+                    sub = prefix[:i]
+                    if value.endswith(sub):
+                        value = value[:-i]
+                        found_prefix = True
+                        break
+                if found_prefix:
+                    break
+
             if is_str == "true":
                 params[name] = value
             else:
