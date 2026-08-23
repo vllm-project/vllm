@@ -476,9 +476,7 @@ class InputBatch:
 
             self.pooling_params[req_id] = pooling_params
             self.pooling_states[req_id] = pooling_states
-            self.logits_processing_needs_token_ids[req_index] = (
-                pooling_params.requires_token_ids_gpu
-            )
+            self.logits_processing_needs_token_ids[req_index] = False
         else:
             raise NotImplementedError("Unrecognized request type")
 
@@ -976,15 +974,10 @@ class InputBatch:
         prompt_token_ids_cpu = None
         if any(p.requires_token_ids for p in pooling_params):
             prompt_token_ids_cpu = self._make_prompt_token_ids_cpu_tensor()
-        prompt_token_ids = (
-            self.sampling_metadata.prompt_token_ids
-            if any(p.requires_token_ids_gpu for p in pooling_params)
-            else None
-        )
 
         return PoolingMetadata(
             prompt_lens=self.num_prompt_tokens_cpu_tensor[: self.num_reqs].clone(),
-            prompt_token_ids=prompt_token_ids,
+            prompt_token_ids=None,
             prompt_token_ids_cpu=prompt_token_ids_cpu,
             pooling_params=pooling_params,
             pooling_states=pooling_states,

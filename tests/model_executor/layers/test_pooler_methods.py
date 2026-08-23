@@ -127,15 +127,12 @@ def test_build_pooling_cursor_caches_cpu_status() -> None:
 
 
 def test_pooling_params_update_combines_token_id_requirements() -> None:
-    update = PoolingParamsUpdate(requires_token_ids=True) | PoolingParamsUpdate(
-        requires_token_ids_gpu=True
-    )
+    update = PoolingParamsUpdate() | PoolingParamsUpdate(requires_token_ids=True)
     params = PoolingParams(task="embed")
 
     update.apply(params)
 
     assert params.requires_token_ids is True
-    assert params.requires_token_ids_gpu is True
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +522,6 @@ class TestStepPool:
         pooler = self._make_step_pool()
         update = pooler.get_pooling_updates("token_classify")
         assert update.requires_token_ids is True
-        assert update.requires_token_ids_gpu is False
 
 
 # ---------------------------------------------------------------------------

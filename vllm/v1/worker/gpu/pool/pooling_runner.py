@@ -76,7 +76,7 @@ class PoolingRunner:
         self.late_interaction_runner.register_request(req_id, pooling_params)
         self.pooling_params[req_index] = pooling_params
         self.pooling_states[req_index] = PoolingStates()
-        if pooling_params.requires_token_ids or pooling_params.requires_token_ids_gpu:
+        if pooling_params.requires_token_ids:
             self.prompt_token_ids[req_index] = torch.tensor(
                 prompt_token_ids, dtype=torch.int64
             )
@@ -106,38 +106,23 @@ class PoolingRunner:
             req_states.prompt_len.np[input_batch.idx_mapping_np]
         )
 
-        prompt_token_ids_cpu_staging = None
         prompt_token_ids_cpu = None
-        prompt_token_ids = None
-        needs_token_ids_cpu = any(
-            params.requires_token_ids for params in pooling_params
-        )
-        needs_token_ids_gpu = any(
-            params.requires_token_ids_gpu for params in pooling_params
-        )
-        if needs_token_ids_cpu or needs_token_ids_gpu:
+        if any(params.requires_token_ids for params in pooling_params):
             max_prompt_len = int(prompt_lens.max())
-            prompt_token_ids_cpu_staging = torch.zeros(
+            prompt_token_ids_cpu = torch.zeros(
                 (input_batch.num_reqs, max_prompt_len),
                 dtype=torch.int64,
                 pin_memory=PIN_MEMORY and device.type != "cpu",
             )
             for i, (req_index, params) in enumerate(zip(req_indices, pooling_params)):
-                if not (params.requires_token_ids or params.requires_token_ids_gpu):
+                if not params.requires_token_ids:
                     continue
                 token_ids = self.prompt_token_ids[req_index]
-                prompt_token_ids_cpu_staging[i, : token_ids.numel()] = token_ids
-            if needs_token_ids_cpu:
-                prompt_token_ids_cpu = prompt_token_ids_cpu_staging
-        if needs_token_ids_gpu:
-            assert prompt_token_ids_cpu_staging is not None
-            prompt_token_ids = prompt_token_ids_cpu_staging.to(
-                device, non_blocking=True
-            )
+                prompt_token_ids_cpu[i, : token_ids.numel()] = token_ids
 
         return PoolingMetadata(
             prompt_lens=prompt_lens,
-            prompt_token_ids=prompt_token_ids,
+            prompt_token_ids=None,
             prompt_token_ids_cpu=prompt_token_ids_cpu,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
@@ -187,23 +172,15 @@ class PoolingRunner:
         pooling_params = PoolingParams(task=task)
         pooling_params.verify(self.model_config)
         self.model.pooler.get_pooling_updates(task).apply(pooling_params)
-        prompt_token_ids_cpu_staging = None
         prompt_token_ids_cpu = None
-        prompt_token_ids = None
-        if pooling_params.requires_token_ids or pooling_params.requires_token_ids_gpu:
-            prompt_token_ids_cpu_staging = torch.zeros(
+        if pooling_params.requires_token_ids:
+            prompt_token_ids_cpu = torch.zeros(
                 (num_reqs, int(prompt_lens.max())),
                 dtype=torch.int64,
             )
-            if pooling_params.requires_token_ids:
-                prompt_token_ids_cpu = prompt_token_ids_cpu_staging
-            if pooling_params.requires_token_ids_gpu:
-                prompt_token_ids = prompt_token_ids_cpu_staging.to(
-                    hidden_states.device, non_blocking=True
-                )
         pooling_metadata = PoolingMetadata(
             prompt_lens=prompt_lens,
-            prompt_token_ids=prompt_token_ids,
+            prompt_token_ids=None,
             prompt_token_ids_cpu=prompt_token_ids_cpu,
             pooling_params=[pooling_params] * num_reqs,
             pooling_states=[PoolingStates() for _ in range(num_reqs)],

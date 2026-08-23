@@ -106,9 +106,7 @@ class PoolingMetadata:
         if prompt_token_ids is None:
             raise ValueError(
                 "prompt_token_ids is required but was not set. "
-                "Please set `requires_token_ids=True` for CPU token IDs or "
-                "`requires_token_ids_gpu=True` for model-device token IDs in "
-                "`get_pooling_updates`"
+                "Please set `requires_token_ids=True` in `get_pooling_updates`"
             )
         return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
