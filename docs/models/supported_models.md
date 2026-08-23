@@ -476,9 +476,12 @@ th {
 | `Zamba2ForCausalLM` | Zamba2 | `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc. | | |
 
 !!! note
-    Orthrus checkpoints are served through vLLM's standard autoregressive path. The
-    Orthrus diffusion decoding mode (driven by the `block_size` and `mask_token_id`
-    config fields) is not exposed yet, so those fields are parsed but unused.
+    Orthrus checkpoints are served through vLLM's standard autoregressive path by
+    default. An experimental, unvalidated diffusion decoding mode (driven by the
+    `block_size` and `mask_token_id` config fields) can be enabled via
+    `speculative_config={"method": "orthrus", ...}`; see the discussion on the
+    originating PR for its current limitations (single-request only, not yet
+    confirmed working end-to-end against a running engine).
 
 !!! note
     Grok2 requires `tokenizer.tok.json` with `tiktoken` installed. You can optionally override MoE router renormalization with `moe_router_renormalize`.
