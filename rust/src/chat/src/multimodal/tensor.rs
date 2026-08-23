@@ -77,7 +77,23 @@ pub(super) fn collect_tensors(
 
     let primary_value = {
         let shape = encoder_input.shape().to_vec();
-        let data = encoder_input.into_iter().collect();
+        // `into_iter()` on dynamically-dimensioned arrays walks a slow
+        // per-element path; take the raw buffer instead when the layout
+        // allows it.
+        let data = if encoder_input.is_standard_layout() {
+            let len = encoder_input.len();
+            let (data, offset) = encoder_input.into_raw_vec_and_offset();
+            let start = offset.unwrap_or(0);
+            if start == 0 && data.len() == len {
+                data
+            } else {
+                // Buffer with unused head/tail: copy the used range, which
+                // standard strides place contiguously in logical order.
+                data[start..start + len].to_vec()
+            }
+        } else {
+            encoder_input.into_iter().collect()
+        };
         KwargValue::from_f32_tensor(data, shape, float_dtype)?
     };
 
@@ -316,6 +332,45 @@ fn raw_tensor_bytes(tensor: &WireTensor, element_size: usize) -> Result<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::Array2;
+
+    #[test]
+    fn collect_tensors_lowering_matches_logical_order_for_both_layouts() {
+        // Row-major layout: collect_tensors takes the raw buffer.
+        let standard =
+            Array2::from_shape_vec((2, 3), (1..=6).map(|v| v as f32).collect::<Vec<f32>>())
+                .unwrap();
+        // reversed_axes keeps the same data buffer but non-standard strides,
+        // exercising the per-element fallback path.
+        let strided =
+            Array2::from_shape_vec((2, 3), (1..=6).map(|v| v as f32).collect::<Vec<f32>>())
+                .unwrap()
+                .reversed_axes();
+
+        for (name, array) in [("standard", standard), ("strided", strided)] {
+            // The wire data must always follow the array's logical
+            // (row-major iteration) order, whatever the memory layout.
+            let expected: Vec<u8> = array.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            let shape = array.shape().to_vec();
+            let preprocessed = PreprocessedEncoderInputs::new(array, vec![6], vec![(3, 2)]);
+            let tensors =
+                collect_tensors(preprocessed, "pixel_values", ModelDtype::Float32).unwrap();
+
+            let ProtocolKwargValue::Tensor(tensor) =
+                ProtocolKwargValue::try_from(&tensors["pixel_values"]).unwrap()
+            else {
+                panic!("expected tensor for {name} layout");
+            };
+
+            assert_eq!(tensor.shape, shape, "{name} layout shape");
+            assert_eq!(tensor.dtype, "float32", "{name} layout dtype");
+            assert_eq!(
+                tensor.data.into_raw_view().unwrap(),
+                expected,
+                "{name} layout data"
+            );
+        }
+    }
 
     #[test]
     fn batched_wire_value_at_drops_first_axis() {
