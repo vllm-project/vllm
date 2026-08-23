@@ -33,21 +33,23 @@ engine due to persistent Modal-side infrastructure failures during testing
 (see PR discussion) -- treat as an unverified, best-effort attempt for
 review, not a confirmed-working implementation.
 
-Masking: within each request's proposed block, this uses plain causal
-masking (`causal=True`) rather than the reference implementation's
-non-causal "attend everywhere in the block" scheme (see
-`generate_dual_pass_mask` in the reference `modeling_orthrus.py`). This is
-a deliberate simplification, not a shortcut on correctness: vLLM's
-speculative-decode rejection sampling verifies every proposed token
-against a real AR forward regardless of how the draft produced it, so a
-weaker (causal) proposer is still exactly lossless -- it may just accept
-fewer tokens per round than the paper's design. Matching the reference's
-exact non-causal masking would need the target's own attention backend to
-support a custom hybrid causal+bidirectional mask_mod (vLLM's
-FlexAttentionBackend already supports the general mechanism -- see its
-`get_prefix_lm_mask_mod` for a structurally similar causal-prefix +
-bidirectional-region mask), which is a larger, separate change left for a
-follow-up once this simpler version is confirmed working.
+Masking: within each request's proposed block, this now uses non-causal
+(bidirectional) masking matching the reference implementation's
+`generate_dual_pass_mask` in `modeling_orthrus.py`, reusing vLLM's
+existing prefix-LM masking mechanism (FlexAttentionBackend's
+`mm_req_doc_ranges` -> `get_prefix_lm_mask_mod`, normally used for
+vision-language bidirectional token spans) rather than writing new
+mask_mod code -- see `set_inputs_first_pass` and
+`_create_draft_vllm_config`. Note that even the earlier plain-causal
+version was already exactly lossless (vLLM's rejection sampling verifies
+every proposed token against a real AR forward regardless of how the
+draft produced it); this masking change is about matching the reference's
+proposer *quality* (higher expected acceptance rate per round), not about
+fixing a correctness issue. Reusing existing, presumably-tested masking
+infrastructure lowers the risk here relative to writing a bespoke
+mask_mod, but this specific combination (forcing FlexAttentionBackend
+onto a draft model's KV-shared layers, with per-request doc ranges built
+from a live block table) is still unvalidated against a running engine.
 """
 
 import torch
@@ -57,6 +59,7 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CompilationConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 
 logger = init_logger(__name__)
@@ -97,7 +100,19 @@ class OrthrusProposer(SpecDecodeBaseProposer):
         KV-cache-group setup needs to resolve kv_sharing_target_layer_name.
         """
         base = super()._create_draft_vllm_config()
-        return replace(base, compilation_config=CompilationConfig())
+        base = replace(base, compilation_config=CompilationConfig())
+        # Force FlexAttentionBackend for the draft's attn_diff layers so the
+        # non-causal-within-block mask (see set_inputs_first_pass's
+        # mm_req_doc_ranges below) is actually honored -- vLLM's other
+        # paged backends (FlashAttention/Triton) only support causal or
+        # sliding-window masks, not this hybrid causal-prefix +
+        # bidirectional-region shape.
+        return replace(
+            base,
+            attention_config=replace(
+                base.attention_config, backend=AttentionBackendEnum.FLEX_ATTENTION
+            ),
+        )
 
     @override
     def load_model(self, target_model: torch.nn.Module) -> None:
@@ -219,6 +234,23 @@ class OrthrusProposer(SpecDecodeBaseProposer):
         new_seq_lens = (seq_lens + block_len).to(torch.int32)
         new_query_start_loc = self.arange[: batch_size + 1] * block_len
 
+        # Non-causal-within-block masking (matching the reference
+        # implementation's diffusion pass, see generate_dual_pass_mask in
+        # modeling_orthrus.py): each request's proposed block should attend
+        # bidirectionally among its own new positions, on top of the usual
+        # causal view of everything before it. Reusing vLLM's existing
+        # prefix-LM masking mechanism (FlexAttentionBackend's mm_prefix_range
+        # -> get_prefix_lm_mask_mod, normally used for vision-language
+        # bidirectional token spans) does exactly this: it ORs a
+        # bidirectional mask over each listed (start, end) logical position
+        # range on top of the base causal mask. Requires attn_diff to be on
+        # FlexAttentionBackend -- see _create_draft_vllm_config above.
+        seq_lens_list = seq_lens.tolist()
+        mm_req_doc_ranges = {
+            req: [(seq_lens_list[req], seq_lens_list[req] + block_len - 1)]
+            for req in range(batch_size)
+        }
+
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
             query_start_loc_cpu=new_query_start_loc.cpu(),
@@ -230,6 +262,7 @@ class OrthrusProposer(SpecDecodeBaseProposer):
             block_table_tensor=cad.block_table_tensor,
             slot_mapping=slot_mapping,
             causal=True,
+            mm_req_doc_ranges=mm_req_doc_ranges,
         )
 
         # This proposer predicts one token per position from block-local
