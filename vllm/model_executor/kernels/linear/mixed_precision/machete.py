@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import partial
 
 import torch
+
+from vllm.model_executor.reload_arena import get_reload_arena
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.machete_utils import (
@@ -72,15 +73,23 @@ class MacheteLinearKernel(MPLinearKernel):
 
         if c.has_g_idx:
             assert self.w_gidx_name is not None
-            perm = torch.argsort(getattr(layer, self.w_gidx_name)).to(torch.int)
+            perm = get_reload_arena(layer).put(
+                "machete_act_perm",
+                torch.argsort(getattr(layer, self.w_gidx_name)).to(torch.int))
 
-            self.act_perm = lambda x: x[:, perm]
+            # Resolved through the layer at CALL time, never captured in a
+            # kernel-held callable: a closure binds the tensor object alive
+            # at PWAL time, which is exactly the object each reload
+            # replaces -- captured graphs then permute activations with the
+            # OLD model's act order. (A registered-param variant that still
+            # closed over the tensor failed live validation for this
+            # reason.) The arena keeps the storage itself stable.
+            layer.machete_act_perm = perm
             # use `ops.permute_cols` if possible
-            if (
+            self.use_permute_cols = (
                 c.act_type in [torch.float16, torch.bfloat16]
                 and c.partition_weight_shape[0] % 8 == 0
-            ):
-                self.act_perm = partial(ops.permute_cols, perm=perm)
+            )
 
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
@@ -137,7 +146,11 @@ class MacheteLinearKernel(MPLinearKernel):
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)
 
         if c.has_g_idx:
-            x_2d = self.act_perm(x_2d)
+            perm = layer.machete_act_perm
+            if self.use_permute_cols:
+                x_2d = ops.permute_cols(x_2d, perm)
+            else:
+                x_2d = x_2d[:, perm]
 
         if c.zero_points:
             assert w_zp is not None

@@ -9,6 +9,7 @@ from typing import ClassVar
 
 import numpy as np
 import torch
+from vllm.model_executor.reload_arena import ReloadArena
 from flashinfer import (
     BatchAttentionWithAttentionSinkWrapper,
     BatchDecodeWithPagedKVCacheWrapper,
@@ -1765,6 +1766,7 @@ class FlashInferImpl(AttentionImpl):
         self.sinks: torch.Tensor | None = None
         # Keep the source so RL weight updates can refresh the runtime tensor.
         self._sinks_source = sinks
+        self._sinks_arena = ReloadArena("FlashInferImpl")
         if sinks is not None:
             if sinks.shape[0] != num_heads:
                 raise ValueError(
@@ -1835,12 +1837,9 @@ class FlashInferImpl(AttentionImpl):
         source_sinks = self._sinks_source
         if source_sinks is None:
             return
-        if source_sinks.dtype == torch.float32:
-            self.sinks = source_sinks
-        elif self.sinks is None or self.sinks.dtype != torch.float32:
-            self.sinks = source_sinks.to(torch.float32)
-        else:
-            self.sinks.copy_(source_sinks)
+        self.sinks = self._sinks_arena.put(
+            "sinks_f32", source_sinks.to(torch.float32)
+        )
 
     def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
         bmm1_scale = self.scale

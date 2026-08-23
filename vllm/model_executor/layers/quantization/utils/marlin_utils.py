@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.reload_arena import InitPolicy, get_reload_arena
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.math_utils import round_up
@@ -431,6 +432,22 @@ def marlin_make_workspace_new(
             )
         return existing.zero_()
     return torch.zeros(size, dtype=torch.int, device=device, requires_grad=False)
+
+
+def marlin_get_workspace(
+    layer: torch.nn.Module,
+    device: torch.device,
+    max_blocks_per_sm: int = 1,
+) -> torch.Tensor:
+    """Return the layer-owned, zeroed Marlin workspace."""
+    sms = num_compute_units(device.index)
+    return get_reload_arena(layer).get_or_alloc(
+        "marlin.workspace",
+        (sms * max_blocks_per_sm,),
+        torch.int,
+        device,
+        init=InitPolicy.ZERO,
+    )
 
 
 def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
