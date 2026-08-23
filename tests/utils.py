@@ -848,10 +848,12 @@ def _resolve_vllm_rs_binary() -> str:
         candidates = [Path(env_path)]
     else:
         repo_root = Path(__file__).resolve().parent.parent
+        # Prefer local dev builds; the wheel-packaged binary may be older
+        # than the working tree (e.g. built from a main snapshot).
         candidates = [
-            Path(envs.__file__).resolve().parent / "vllm-rs",  # packaged wheel
             repo_root / "rust" / "target" / "release" / "vllm-rs",
             repo_root / "rust" / "target" / "debug" / "vllm-rs",
+            Path(envs.__file__).resolve().parent / "vllm-rs",  # packaged wheel
         ]
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):

@@ -120,7 +120,19 @@ async def _render_chat(rust_client: httpx.AsyncClient, chat_request: dict) -> di
 
 
 async def _generate(gpu_client: httpx.AsyncClient, generate_request: dict) -> dict:
-    resp = await gpu_client.post("/inference/v1/generate", json=generate_request)
+    # The Rust render server serializes unset sampling params as explicit
+    # nulls, which the Python /inference/v1/generate msgspec validation
+    # rejects (a pre-existing render-side wire incompatibility, unrelated to
+    # derender). Strip them before the generate hop.
+    stripped = {
+        key: (
+            {k: v for k, v in value.items() if v is not None}
+            if isinstance(value, dict)
+            else value
+        )
+        for key, value in generate_request.items()
+    }
+    resp = await gpu_client.post("/inference/v1/generate", json=stripped)
     assert resp.status_code == 200, resp.text
     return resp.json()
 
@@ -188,7 +200,9 @@ async def test_e2e_chat_roundtrip(gpu_client, rust_client):
     choice = derendered["choices"][0]
     output_ids = generate_response["choices"][0]["token_ids"]
     assert choice["message"]["role"] == "assistant"
-    assert choice["message"]["content"]
+    # A reasoning parser is configured, so output may land in `reasoning`.
+    message = choice["message"]
+    assert message["content"] or message.get("reasoning")
     assert derendered["usage"]["prompt_tokens"] == len(generate_request["token_ids"])
     assert derendered["usage"]["completion_tokens"] == len(output_ids)
 
