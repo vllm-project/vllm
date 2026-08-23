@@ -407,7 +407,7 @@ class MuseGlimmerMultiModalProcessor(
         video_end_id = vocab["<|vid_end|>"]
         video_separator_id = vocab["<|vid_frame_separator|>"]
 
-        def image_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def image_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["image"][item_idx]
             num_tokens = int(out_item["image_feature_sizes"].data)
             replacement = (
@@ -417,7 +417,7 @@ class MuseGlimmerMultiModalProcessor(
                 replacement, config.image_token_id
             )
 
-        def video_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def video_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["video"][item_idx]
             pixel_values = out_item["video_pixel_values"].data
             num_groups = len(pixel_values)
