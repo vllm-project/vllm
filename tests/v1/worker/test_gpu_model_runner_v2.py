@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -19,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import post_update
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -163,6 +165,233 @@ def test_rewind_sampled_state_drops_unaccepted_suffix(track_penalties: bool):
         assert output_bin_counts[req_idx, 20].item() == 0
         assert output_bin_counts[req_idx, 21].item() == 0
         assert output_bin_counts[req_idx].min().item() == 0
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rewind_converges_emulated_worker_ranks() -> None:
+    """Rank-local states converge without pretending to exercise NCCL."""
+    device = torch.device("cuda")
+    cached = CachedRequestData(
+        req_ids=["req"],
+        resumed_req_ids=set(),
+        new_token_ids=[],
+        all_token_ids={},
+        new_block_ids=[None],
+        num_computed_tokens=[3],
+        num_output_tokens=[1],
+        rewound_req_ids={"req"},
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=cached,
+        new_block_ids_to_zero=None,
+        kv_cache_block_copies=None,
+    )
+
+    rank_states = []
+    for rank, (sampled_tokens, num_sampled) in enumerate(
+        [([20, 21], 2), ([30, 31], 1)]
+    ):
+        req_states = RequestState(
+            max_num_reqs=2,
+            max_model_len=16,
+            max_num_batched_tokens=8,
+            num_speculative_steps=2,
+            vocab_size=64,
+            device=device,
+        )
+        req_states.add_request(
+            req_id="req",
+            prompt_len=2,
+            all_token_ids=[1, 2, 10],
+            num_computed_tokens=3,
+            max_tokens=8,
+        )
+        req_states.apply_staged_writes()
+        req_idx = req_states.req_id_to_index["req"]
+
+        penalties = PenaltiesState(req_states)
+        penalties.add_request(req_idx, SamplingParams(frequency_penalty=1.0))
+        penalties.apply_staged_writes()
+        post_update(
+            idx_mapping=torch.tensor([req_idx], dtype=torch.int32, device=device),
+            num_computed_tokens=req_states.num_computed_tokens.gpu,
+            last_sampled_tokens=req_states.last_sampled_tokens,
+            output_bin_counts=penalties.output_bin_counts,
+            sampled_tokens=torch.tensor(
+                [sampled_tokens], dtype=torch.int64, device=device
+            ),
+            num_sampled=torch.tensor([num_sampled], dtype=torch.int32, device=device),
+            num_rejected=torch.zeros(1, dtype=torch.int32, device=device),
+            query_start_loc=None,
+            all_token_ids=req_states.all_token_ids.gpu,
+            total_len=req_states.total_len.gpu,
+        )
+        req_states.draft_tokens[req_idx].fill_(40 + rank)
+        req_states.next_prefill_tokens[:, req_idx].fill_(50 + rank)
+
+        model_state = object.__new__(MambaHybridModelState)
+        model_state.device = device
+        model_state.cache_config = SimpleNamespace(block_size=8)
+        model_state._align_mode = True
+        model_state.num_accepted_tokens_gpu = torch.full(
+            (2,), 9, dtype=torch.int32, device=device
+        )
+        model_state.num_accepted_tokens_gpu[req_idx] = 7 + rank
+        model_state._mamba_state_idx_gpu = torch.full(
+            (2,), 9, dtype=torch.int32, device=device
+        )
+        model_state._mamba_state_idx_gpu[req_idx] = 5 + rank
+        model_state._mamba_src_col_gpu = torch.full(
+            (2,), 19, dtype=torch.int32, device=device
+        )
+        model_state._mamba_src_col_gpu[req_idx] = 15 + rank
+        model_state._mamba_src_off_gpu = torch.full(
+            (2,), 29, dtype=torch.int32, device=device
+        )
+        model_state._mamba_src_off_gpu[req_idx] = 25 + rank
+        sampler_rewind = Mock()
+        runner = SimpleNamespace(
+            req_states=req_states,
+            sampler=SimpleNamespace(
+                penalties_state=penalties,
+                rewind_requests=sampler_rewind,
+            ),
+            adaptive_verification=None,
+            model_state=model_state,
+            block_tables=SimpleNamespace(
+                append_block_ids=lambda *_args, **_kwargs: None
+            ),
+        )
+
+        GPUModelRunner.update_requests(runner, scheduler_output)
+        rank_states.append((req_states, penalties, model_state, sampler_rewind))
+
+    torch.accelerator.synchronize()
+    for req_states, penalties, model_state, sampler_rewind in rank_states:
+        req_idx = req_states.req_id_to_index["req"]
+        assert req_states.num_computed_tokens.gpu[req_idx].item() == 3
+        assert req_states.total_len.gpu[req_idx].item() == 3
+        assert req_states.last_sampled_tokens[req_idx].item() == 10
+        assert req_states.all_token_ids.gpu[req_idx, :5].tolist() == [1, 2, 10, 0, 0]
+        assert not req_states.draft_tokens[req_idx].any()
+        assert not req_states.next_prefill_tokens[:, req_idx].any()
+        assert penalties.output_bin_counts[req_idx, 10].item() == 1
+        assert penalties.output_bin_counts[req_idx, 20:32].sum().item() == 0
+        assert model_state.num_accepted_tokens_gpu[req_idx].item() == 1
+        assert model_state._mamba_state_idx_gpu[req_idx].item() == 0
+        assert model_state._mamba_src_col_gpu[req_idx].item() == -1
+        assert model_state._mamba_src_off_gpu[req_idx].item() == 0
+        other_idx = 1 - req_idx
+        assert model_state.num_accepted_tokens_gpu[other_idx].item() == 9
+        assert model_state._mamba_state_idx_gpu[other_idx].item() == 9
+        assert model_state._mamba_src_col_gpu[other_idx].item() == 19
+        assert model_state._mamba_src_off_gpu[other_idx].item() == 29
+        sampler_rewind.assert_called_once_with([req_idx])
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
+    """Emulate non-last-rank PP delivery while using real request-state kernels."""
+    device = torch.device("cuda")
+    req_states = RequestState(
+        max_num_reqs=2,
+        max_model_len=16,
+        max_num_batched_tokens=8,
+        num_speculative_steps=2,
+        vocab_size=64,
+        device=device,
+    )
+    req_states.add_request(
+        req_id="req",
+        prompt_len=2,
+        all_token_ids=[1, 2, 10],
+        num_computed_tokens=3,
+        max_tokens=8,
+    )
+    req_states.apply_staged_writes()
+    req_idx = req_states.req_id_to_index["req"]
+
+    events: list[tuple[str, int, list[int]]] = []
+
+    class ModelStateProbe:
+        def postprocess_state(self, _idx_mapping, num_sampled, _computed) -> None:
+            events.append(
+                (
+                    "postprocess",
+                    req_states.total_len.gpu[req_idx].item(),
+                    num_sampled.tolist(),
+                )
+            )
+
+        def rewind_requests(self, _req_indices, num_computed_tokens) -> None:
+            events.append(
+                (
+                    "rewind",
+                    req_states.total_len.gpu[req_idx].item(),
+                    list(num_computed_tokens),
+                )
+            )
+
+    runner = object.__new__(GPUModelRunner)
+    runner.req_states = req_states
+    runner.is_last_pp_rank = False
+    runner.sampler = None
+    runner.model_state = ModelStateProbe()
+    runner.adaptive_verification = None
+    runner.pooling_runner = None
+    runner.encoder_cache = None
+    runner.pp_handler = SimpleNamespace(
+        get_prev_sampled_outputs=lambda: {
+            "idx_mapping": torch.tensor([req_idx], dtype=torch.int32, device=device),
+            "sampled_tokens": torch.tensor(
+                [[20, 21]], dtype=torch.int64, device=device
+            ),
+            "num_sampled": torch.tensor([2], dtype=torch.int32, device=device),
+            "num_rejected": torch.zeros(1, dtype=torch.int32, device=device),
+        }
+    )
+    runner.block_tables = SimpleNamespace(
+        append_block_ids=lambda *_args, **_kwargs: None,
+        apply_staged_writes=lambda: None,
+    )
+    no_forward_output = object()
+    runner.kv_connector = SimpleNamespace(
+        no_forward=lambda _scheduler_output: no_forward_output
+    )
+    runner._merge_ec_connector_no_forward = lambda _scheduler_output, output: output
+
+    cached = CachedRequestData(
+        req_ids=["req"],
+        resumed_req_ids=set(),
+        new_token_ids=[],
+        all_token_ids={},
+        new_block_ids=[None],
+        num_computed_tokens=[3],
+        num_output_tokens=[1],
+        rewound_req_ids={"req"},
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=cached,
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        free_encoder_mm_hashes=[],
+        new_block_ids_to_zero=None,
+        kv_cache_block_copies=None,
+        total_num_scheduled_tokens=0,
+    )
+
+    output = runner.execute_model(scheduler_output)
+    torch.accelerator.synchronize()
+
+    assert output is no_forward_output
+    assert events == [("postprocess", 5, [2]), ("rewind", 3, [3])]
+    assert req_states.num_computed_tokens.gpu[req_idx].item() == 3
+    assert req_states.total_len.gpu[req_idx].item() == 3
+    assert req_states.last_sampled_tokens[req_idx].item() == 10
+    assert req_states.all_token_ids.gpu[req_idx, :5].tolist() == [1, 2, 10, 0, 0]
 
 
 @pytest.mark.parametrize(
