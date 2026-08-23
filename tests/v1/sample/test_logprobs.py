@@ -1143,6 +1143,15 @@ def test_spec_decode_logprobs(
         ignore_eos=False,
         presence_penalty=-1.0,
     )
+    custom_sampling_params = SamplingParams(
+        temperature=0,
+        presence_penalty=-1.0,
+        logprob_token_ids=[0, 1, 2],
+        max_tokens=10,
+        ignore_eos=False,
+    )
+    prompts = [prompt] * 3
+    requests = [sampling_params, penalty_sampling_params, custom_sampling_params]
 
     max_model_len = 256
     llm_kwargs = dict(
@@ -1164,9 +1173,7 @@ def test_spec_decode_logprobs(
         model=model_name,
         **llm_kwargs,
     )
-    ref_results = ref_llm.generate(
-        [prompt, prompt], [sampling_params, penalty_sampling_params]
-    )
+    ref_results = ref_llm.generate(prompts, requests)
     # Collect logprobs outputs from reference LLM.
     ref_logprobs = []
     for results in ref_results:
@@ -1185,9 +1192,7 @@ def test_spec_decode_logprobs(
         speculative_config=spec_config_with_len,
         **llm_kwargs,
     )
-    spec_results = spec_llm.generate(
-        [prompt, prompt], [sampling_params, penalty_sampling_params]
-    )
+    spec_results = spec_llm.generate(prompts, requests)
     # Collect logprobs outputs from spec decode LLM.
     spec_logprobs = []
     for results in spec_results:
