@@ -1,55 +1,77 @@
 # Paged Shared Memory Storage
 
-## Shared Memory
+## Overview
 
-Shared memory enables multiple processes to access the same memory region, allowing efficient data sharing without
-serialization overhead.
+Shared memory allows multiple processes to access the same physical memory region, enabling zero-copy data exchange 
+without serialization. In vLLM V1, the multi‑process architecture (API Server, Engine Core, GPU Workers) benefits 
+greatly from this mechanism for passing large multimodal tensors.
 
-vLLM V1 adopts a multi-process architecture to separate concerns and maximize throughput:
+**Why paged shared memory?**
+- Multimodal data (images, video frames) vary widely in size; per‑request allocation/deallocation causes fragmentation 
+- and overhead.
+- Using system‑level `shm_open`/`mmap` and `pin_memory`/`unpin_memory` repeatedly adds latency.
+- **Paged SHM** pre‑allocates a large, fixed pool divided into pages (default: 1MB, chosen to saturate H2D bandwidth) 
+- and manages blocks via a server, avoiding fragmentation and reducing per‑operation overhead.
 
-- **API Server Process**: Handles HTTP requests (e.g., the OpenAI-compatible API), performs input processing
-- (tokenization, multi-modal data loading), and streams results back to clients. It communicates with the engine core
-- process(es) via ZMQ sockets.
+## Architecture
 
-- **Engine Core Process**: Runs the scheduler, manages KV cache, and coordinates model execution across GPU workers. It
-- maintains a busy loop that continuously schedules requests and dispatches work to the GPU workers.
+### Processes and Data Paths
 
-- **GPU Worker Processes**: Each GPU is managed by a dedicated worker process. The worker loads model weights, executes
-- forward passes, and manages GPU memory. Workers communicate with the engine core process that owns them.
+- **API Server**: Handles HTTP requests, tokenization, multimodal input loading. It writes multimodal tensors into SHM 
+- and sends lightweight metadata (UUID, block list, shape, dtype) to the Engine Core over ZMQ.
+- **Engine Core**: Schedules requests and dispatches work to GPU Workers.
+- **GPU Workers**: Each GPU process executes model forward passes. It reads tensor data from SHM (to GPU or CPU) and 
+- releases the SHM blocks when done.
 
-Additionally, shared memory supports `pin_memory`, which enables faster CPU–GPU data transfers.
+Data flows:
 
-The data transfer paths are as follows:
+```
+ZMQ Path (small metadata only):
+[API Server] --ZMQ IPC--> [GPU Worker]  (metadata, no tensor data)
 
-```text
-ZMQ IPC Path:
-[Multi-modal Tensor] ─ZMQ IPC→ [CPU Buffer] ─Pin Memory ─→ [GPU]
-    (API Server)               (GPU Worker)            (H2D)
-
-Shared Memory Path:
-[Multi-modal Tensor] ─Shared Memory→ [swap_blocks_batch] ─→ [GPU]
-    (API Server)                           (GPU Worker) (H2D)
+Shared Memory Path (tensor data):
+[API Server] --SHM write--> [PagedShmServer] --SHM read--> [GPU Worker] --H2D--> [GPU]
 ```
 
-## Paged Shared Memory
+The actual tensor bytes are **offloaded** from the ZMQ hot path, eliminating serialization and large‑message overhead.
 
-Multimodal data sizes are not uniform, which can lead to memory fragmentation. Using the system's allocation and
-deallocation functions, along with pin_memory and unpin_memory, also incurs some overhead. Therefore, we pre-allocate a
-large shared memory pool and divide it into pages. The default page size is 1 MB, as it saturates the H2D transfer
-bandwidth.
+### PagedShmServer & Client
 
-We use a centralized PagedShmServer to manage the paged shared memory. It allocates the shared memory segment at startup
-and releases it during shutdown. Other processes read from and write to the shared memory but do not own it, which
-eliminates the risk of shared memory leaks.
+- **PagedShmServer**: A standalone process that owns the SHM pool. It handles block allocation, reference counting, LRU 
+- eviction, and client requests via ZMQ RPCs.
+- **PagedShmClient**: A lightweight client that connects to the server. It provides `open_write`/`close_write` 
+- (write lock) and `open_read`/`close_read` (read lock) primitives, plus high‑level helpers for bytes/NumPy/PyTorch.
 
-To avoid race conditions caused by multiple processes simultaneously reading from and writing to paged shared memory,
-the client must first request permission from the Server before performing any read or write operations.
+**Typical Write Flow (API Server):**
+1. Call `open_write(items)` to atomically allocate blocks for a batch of tensors.
+2. Copy tensor data into the allocated SHM blocks (e.g., via `storage.write()`).
+3. Call `close_write(uuid)` to finalize the write, making the item readable. If `generate_read_token=True`, a read token 
+4. is created and a read reference is automatically held.
 
-A typical workflow is as follows:
+**Typical Read Flow (GPU Worker):**
+1. Call `open_read(uuid_or_token)` to acquire a read lock and obtain block information. If the item is still being written, the call may wait (with timeout).
+2. Read the data from SHM into CPU or GPU memory.
+3. Call `close_read(uuid_or_token)` to release the lock and, if a token is used, destroy it. The server will then cache the item (if cacheable) or free the blocks.
 
-1. The API Server uses `open_write` to allocate blocks for a batch of items to be written.
-2. The API Server writes the multimodal data into the paged shared memory.
-3. The API Server uses `close_write` to indicate that the write operation is complete, allowing other clients to read the data.
-4. The GPU Worker uses `open_read` to wait for the write operation to complete.
-5. The GPU Worker reads the data from the shared memory.
-6. The GPU Worker uses `close_read` to release the shared memory
+## Integration with Multimodal Tensor IPC
+
+The `PagedShmTensorIPC` class wraps the client to automatically handle large tensors in `mm_inputs` during request processing.
+
+- **`write()`**: Scans `mm_inputs` for tensors larger than `block_size`, batches `open_write` requests, submits asynchronous copies to SHM, and replaces the original tensor with a `PagedShmTensor` metadata object (containing the read token, shape, dtype, and block list). The metadata is small enough to be sent via ZMQ.
+- **`read()`**: On the worker side, extracts `PagedShmTensor` from the received metadata, waits for the write to complete (with timeout), reads the tensor data from SHM to the target device, and reconstructs the full tensor. By default, it also destroys the read token (`auto_release=True`). For TP, set `auto_release=False` and call `release_token()` once after all ranks have finished reading.
+
+This design ensures that only the metadata traverses the ZMQ path, while the heavy tensor data stays in SHM, drastically reducing latency and CPU overhead under load.
+
+## Thread Safety & Performance
+
+- The server uses a ZMQ ROUTER socket and handles concurrent requests; clients use a pool of REQ sockets for thread‑safe access.
+- Asynchronous writes overlap SHM copy with ZMQ round‑trip, further hiding latency.
+- LRU eviction on the server keeps memory usage bounded; frequently accessed items remain cached.
+
+## Configuration
+
+Enabled via `multimodal_config.enable_paged_shm = True`. Key parameters:
+- `paged_shm_size`: Total size of the SHM pool (in bytes).
+- `paged_shm_block_size`: Page size (default 1MB). Must be large enough to amortize H2D transfer overhead.
+
+The server is started automatically when the `ModelConfig` indicates SHM is enabled; clients connect to the published IPC address.

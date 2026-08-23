@@ -4,10 +4,32 @@
 """
 Paged shared memory client.
 
-Provides a ZMQ-based client for the PagedShmServer that manages a pool
-of REQ sockets for thread-safe concurrent access.  The client attaches
-to a shared memory segment and offers high-level read/write operations
-with automatic block allocation and lock management via context managers.
+This module provides a ZMQ-based client for the PagedShmServer, enabling
+remote processes to read and write large binary data (bytes, NumPy arrays,
+PyTorch tensors) to a shared memory pool managed by the server.  The client
+automatically handles block allocation, reference counting, and LRU caching
+on the server side, while offering a convenient Pythonic interface.
+
+Key Features:
+  - **Write and Read**: Transparently write Python objects to shared memory
+    and read them back as NumPy arrays or PyTorch tensors (CPU/GPU).
+  - **Context Managers**: Simplified write/read contexts that handle allocation,
+    commit/rollback, and lock release automatically.
+  - **Thread‑Safe**: Maintains a pool of ZMQ REQ sockets for concurrent access
+    from multiple threads.
+  - **Read Tokens**: Generate an opaque token during write that can be used
+    to read the data without exposing the UUID.  The token holds a read
+    reference automatically.  It can be **open_read** multiple times (e.g.,
+    by multiple Tensor Parallelism workers) without being consumed, but it
+    can be **close_read** only once – subsequent calls will fail.  This design
+    ensures that the underlying UUID's reference count is never accidentally
+    decremented more than once, preventing premature release.  It is ideal
+    for TP deployments where an API server (Renderer) writes a single copy
+    and each GPU worker (EncoderRunner) reads the same data via the token;
+    the token is released exactly once after all workers have finished.
+  - **Asynchronous Writes**: Offload data copy and finalization (close_write)
+    to a thread pool, overlapping shared memory transfer with ZMQ IPC
+    round‑trip latency, improving throughput for large data.
 """
 
 import contextlib
