@@ -164,8 +164,22 @@ class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
         first_expert = num_local_experts * self.rank
         last_expert = first_expert + num_local_experts
 
-        # Vectorized weighted scatter-add (single nonzero sync instead of a
-        # per-expert loop; mirrors the dispatch path).
+        # Vectorized weight application and deterministic reduction.
+        #
+        # Previously this used index_add_ to scatter-add gathered expert
+        # outputs directly to their source tokens.  When multiple experts
+        # route to the same token (the common case with top_k > 1), CUDA
+        # index_add_ performs atomic floating-point adds whose order of
+        # accumulation is non-deterministic across runs.  This makes the
+        # BF16 output differ run-to-run, which can change the greedy argmax
+        # token and break determinism for temperature=0 / fixed-seed
+        # inference.
+        #
+        # Instead, we scatter gathered contributions into a (T, topk, K)
+        # buffer where each (token, topk-slot) position is written at most
+        # once (no atomics), then reduce with moe_sum — the same kernel used
+        # by TopKWeightAndReduceContiguous, which accumulates in fixed
+        # top-k order with an FP32 accumulator.
         local_ids = torch.arange(
             first_expert, last_expert, device=topk_ids.device
         ).view(-1, 1, 1)
@@ -174,10 +188,19 @@ class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
         slots = hits.to(torch.int32).cumsum(dim=1) - 1  # [E_local, T]
         e_idx, t_idx = hits.nonzero(as_tuple=True)
         gathered = fused_expert_output[e_idx, slots[e_idx, t_idx], :]
+        # Recover the topk slot index for each (expert, token) pair so each
+        # contribution lands at a unique (token, slot) position in the buffer.
+        route_slots = matching[e_idx, t_idx].to(torch.int32).argmax(dim=1)
         if not apply_router_weight_on_input:
             # weight of token t at expert e: the topk weight on the matching slot
             weights = (matching * topk_weights.unsqueeze(0)).sum(dim=2)  # [E_local, T]
             gathered = gathered * weights[e_idx, t_idx].unsqueeze(1).to(gathered.dtype)
-        output.index_add_(0, t_idx, gathered.to(output.dtype))
+        reduction_input = torch.zeros(
+            (num_tokens, topk_ids.size(1), K),
+            device=output.device,
+            dtype=output.dtype,
+        )
+        reduction_input[t_idx, route_slots] = gathered.to(output.dtype)
+        ops.moe_sum(reduction_input, output)
 
         return output
