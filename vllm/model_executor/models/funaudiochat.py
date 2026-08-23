@@ -26,7 +26,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -600,6 +600,7 @@ class FunAudioChatDummyInputsBuilder(
         num_audios = int(mm_counts.get("audio", 0))
 
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
@@ -635,6 +636,7 @@ class FunAudioChatMultiModalProcessor(
             processed_data = BatchFeature({"input_ids": input_ids})
             processed_data.update(passthrough_data)
             return processed_data
+        assert isinstance(audios, Sequence)
 
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         sr = int(feature_extractor.sampling_rate)
@@ -751,7 +753,7 @@ class FunAudioChatMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_funaudiochat,
             )
         ]
