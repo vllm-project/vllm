@@ -254,7 +254,6 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         if (
             is_batch_invariant_quant_kernel_enabled()
             and activation == MoEActivation.SILU
-            and self.gemm1_clamp_limit is None
             and self.gemm1_alpha == 1.0
             and self.gemm1_beta == 0.0
         ):
@@ -272,6 +271,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
                 output_q=output,
                 use_ue8m0=scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
                 round_scale=scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
+                clamp_limit=self.gemm1_clamp_limit,
                 masked_m=None,
                 group_size=block_k,
             )

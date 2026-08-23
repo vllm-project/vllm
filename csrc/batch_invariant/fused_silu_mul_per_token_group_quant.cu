@@ -357,7 +357,8 @@ __global__ void per_token_group_quant_8bit_kernel(
     const int scale_expert_stride,
     const int scale_hidden_stride,
     const int num_tokens_per_expert,
-    const float max_8bit) {
+    const float max_8bit,
+    const float clamp_limit) {
   using dst_dtype_info = DtypeInfo<DST_DTYPE>;
   using scale_element_t = std::conditional_t<SCALE_UE8M0, uint8_t, float>;
   static_assert(sizeof(scale_packed_t) % sizeof(scale_element_t) == 0);
@@ -438,11 +439,19 @@ __global__ void per_token_group_quant_8bit_kernel(
         for (uint32_t j = 0; j < INPUT_PRIMARY_VEC_SIZE; ++j) {
           float val;
           if constexpr (FUSE_SILU_AND_MUL) {
+            float gate = static_cast<float>(input_primary_vec[j]);
+            float up = static_cast<float>(input_secondary_vec[j]);
+            if (clamp_limit > 0.0f) {
+              input_primary_vec[j] = static_cast<T>(fminf(gate, clamp_limit));
+              input_secondary_vec[j] =
+                  static_cast<T>(fminf(fmaxf(up, -clamp_limit), clamp_limit));
+              gate = static_cast<float>(input_primary_vec[j]);
+              up = static_cast<float>(input_secondary_vec[j]);
+            }
             // Keep the same single visible low-precision boundary as the
             // contiguous activation path.  Rounding SiLU before multiplying
             // changes the second MoE GEMM's FP8 inputs.
-            T val_lowprec = static_cast<T>(
-                silu(static_cast<float>(input_primary_vec[j])) * static_cast<float>(input_secondary_vec[j]));
+            T val_lowprec = static_cast<T>(silu(gate) * up);
             val = static_cast<float>(val_lowprec);
             input_primary_vec[j] = val_lowprec;
           } else {
@@ -534,6 +543,7 @@ void fused_silu_mul_per_token_group_quant(
     double eps,
     double min_8bit,
     double max_8bit,
+    double clamp_limit,
     bool round_scale,
     bool scale_ue8m0,
     bool fuse_silu_and_mul,
@@ -593,7 +603,8 @@ void fused_silu_mul_per_token_group_quant(
         scale_expert_stride,                                                                                         \
         scale_hidden_stride,                                                                                         \
         num_tokens_per_expert,                                                                                       \
-        static_cast<float>(max_8bit));                                                                               \
+        static_cast<float>(max_8bit),                                                                                \
+        static_cast<float>(clamp_limit));                                                                            \
   } while (0)
 
 #define LAUNCH_KERNEL(GROUP_SIZE, T, DST_DTYPE)                                                                     \
