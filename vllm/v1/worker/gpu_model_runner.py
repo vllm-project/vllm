@@ -5366,10 +5366,23 @@ class GPUModelRunner(
                         target_hidden_states = hidden_states[:total_num_tokens]
 
             if self.supports_mm_inputs and self.drafter.supports_mm_inputs:
-                mm_embed_inputs = self._gather_mm_embeddings(
-                    scheduler_output,
-                    shift_computed_tokens=1,
-                )
+                try:
+                    mm_embed_inputs = self._gather_mm_embeddings(
+                        scheduler_output,
+                        shift_computed_tokens=1,
+                    )
+                except RuntimeError as e:
+                    if "Encoder cache miss" not in str(e):
+                        raise
+                    # The cache can evict an entry the drafter still needs
+                    # (vllm-project/vllm#38551); unlike the target forward
+                    # pass this is not an invariant violation, because every
+                    # draft is verified by the target model — draft without
+                    # the mm embeddings rather than kill the engine.
+                    logger.warning(
+                        "%s Drafting without mm embeddings for this step.", e
+                    )
+                    mm_embed_inputs = None
             else:
                 mm_embed_inputs = None
 
