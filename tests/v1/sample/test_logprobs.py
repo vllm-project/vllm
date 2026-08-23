@@ -1143,6 +1143,14 @@ def test_spec_decode_logprobs(
         ignore_eos=False,
         presence_penalty=-1.0,
     )
+    active_sampling_params = SamplingParams(
+        temperature=0.7,
+        top_k=1,
+        seed=0,
+        logprobs=0,
+        max_tokens=10,
+        ignore_eos=False,
+    )
     custom_sampling_params = SamplingParams(
         temperature=0,
         presence_penalty=-1.0,
@@ -1150,8 +1158,13 @@ def test_spec_decode_logprobs(
         max_tokens=10,
         ignore_eos=False,
     )
-    prompts = [prompt] * 3
-    requests = [sampling_params, penalty_sampling_params, custom_sampling_params]
+    prompts = [prompt] * 4
+    requests = [
+        sampling_params,
+        penalty_sampling_params,
+        active_sampling_params,
+        custom_sampling_params,
+    ]
 
     max_model_len = 256
     llm_kwargs = dict(

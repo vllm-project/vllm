@@ -17,7 +17,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.reader import Metric
+from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 
 DEEPSEEK_MTP_MAIN_RANDOM = "luccafong/deepseek_mtp_main_random"
 DEEPSEEK_MTP_DRAFT_RANDOM = "luccafong/deepseek_mtp_draft_random"
@@ -119,12 +119,11 @@ def _generate_token_ids_inline(llm: LLM) -> tuple[int, ...]:
 
 
 def _spec_decode_num_drafts(metrics: list[Metric]) -> int:
-    name2metric = {m.name: m for m in metrics}
-    counter = name2metric.get("vllm:spec_decode_num_drafts")
-    assert counter is not None, (
+    counters = [m for m in metrics if m.name == "vllm:spec_decode_num_drafts"]
+    assert counters, (
         "spec_decode_num_drafts metric missing; check disable_log_stats=False"
     )
-    return int(counter.value)
+    return sum(int(counter.value) for counter in counters)  # type: ignore[attr-defined]
 
 
 def _enable_batch_invariance(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,6 +195,7 @@ def test_deepseek_mtp_load_inline(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(1300)
 @pytest.mark.parametrize(
     "dp_size",
     [
@@ -204,7 +204,7 @@ def test_deepseek_mtp_load_inline(
     ],
 )
 async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch, dp_size: int):
-    """MTP loads under DP (on and off) via AsyncLLM; spec matches no-spec greedy."""
+    """MTP under DP/EP matches no-spec for no-op and active processing."""
     if torch.accelerator.device_count() < dp_size:
         pytest.skip(f"dp{dp_size} requires at least {dp_size} GPUs")
 
@@ -215,11 +215,14 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch, dp_size: in
         tensor_parallel_size=1,
         data_parallel_size=dp_size,
         data_parallel_backend="mp",
+        enable_expert_parallel=dp_size > 1,
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=GPU_MEM_UTIL,
-        enforce_eager=True,
+        enforce_eager=dp_size == 1 or not current_platform.has_device_capability(90),
         trust_remote_code=True,
         enable_prefix_caching=False,
+        async_scheduling=True,
+        disable_log_stats=False,
     )
     spec_args = replace(
         base_args,
@@ -230,43 +233,93 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch, dp_size: in
         },
     )
 
-    sampling_params = SamplingParams(
-        max_tokens=MAX_TOKENS,
-        ignore_eos=True,
-        output_kind=RequestOutputKind.FINAL_ONLY,
-        temperature=0.0,
-    )
+    sampling_params = [
+        SamplingParams(
+            temperature=0.0,
+            max_tokens=MAX_TOKENS,
+            ignore_eos=True,
+            output_kind=RequestOutputKind.FINAL_ONLY,
+        )
+    ]
+    if dp_size == 2:
+        sampling_params.append(
+            SamplingParams(
+                temperature=0.7,
+                top_k=1,
+                seed=0,
+                max_tokens=MAX_TOKENS,
+                ignore_eos=True,
+                output_kind=RequestOutputKind.FINAL_ONLY,
+            )
+        )
 
-    async def _generate(args: AsyncEngineArgs, request_id: str) -> tuple[int, ...]:
+    async def _generate(
+        args: AsyncEngineArgs, request_prefix: str, check_drafts: bool
+    ) -> tuple[list[tuple[int, ...]], list[int]]:
         try:
             async with AsyncExitStack() as stack:
                 engine = AsyncLLM.from_engine_args(args)
-                stack.callback(engine.shutdown)
-                async for out in engine.generate(
-                    request_id=request_id,
-                    prompt=PROMPT,
-                    sampling_params=sampling_params,
-                ):
-                    token_ids = tuple(out.outputs[0].token_ids)
-                    assert len(token_ids) == MAX_TOKENS, (
-                        f"{request_id}: expected {MAX_TOKENS} generated tokens, "
-                        f"got {len(token_ids)}: {token_ids}"
+                stack.callback(engine.shutdown, timeout=30)
+
+                async def _one(
+                    request_id: str, params: SamplingParams
+                ) -> tuple[int, ...]:
+                    async for out in engine.generate(
+                        request_id=request_id,
+                        prompt=PROMPT,
+                        sampling_params=params,
+                    ):
+                        token_ids = tuple(out.outputs[0].token_ids)
+                        assert len(token_ids) == MAX_TOKENS, (
+                            f"{request_id}: expected {MAX_TOKENS} generated "
+                            f"tokens, got {len(token_ids)}: {token_ids}"
+                        )
+                        return token_ids
+                    raise AssertionError(f"{request_id}: AsyncLLM produced no output")
+
+                outputs = []
+                wave_drafts = []
+                for wave, params in enumerate(sampling_params):
+                    drafts_before = (
+                        _spec_decode_num_drafts(get_metrics_snapshot())
+                        if check_drafts
+                        else 0
                     )
-                    return token_ids
-            raise AssertionError("AsyncLLM produced no output")
+                    outputs.extend(
+                        await asyncio.gather(
+                            *(
+                                _one(f"{request_prefix}-{wave}-{i}", params)
+                                for i in range(4)
+                            )
+                        )
+                    )
+                    drafts_after = (
+                        _spec_decode_num_drafts(get_metrics_snapshot())
+                        if check_drafts
+                        else 0
+                    )
+                    wave_drafts.append(drafts_after - drafts_before)
+                return outputs, wave_drafts
         finally:
             torch.accelerator.empty_cache()
             cleanup_dist_env_and_memory()
 
-    spec_tokens = await asyncio.wait_for(
-        _generate(spec_args, f"deepseek-mtp-dp{dp_size}-spec"), timeout=600
+    (spec_tokens, wave_drafts) = await asyncio.wait_for(
+        _generate(spec_args, f"deepseek-mtp-dp{dp_size}-spec", True), timeout=600
     )
-    no_spec_tokens = await asyncio.wait_for(
-        _generate(base_args, f"deepseek-mtp-dp{dp_size}-no-spec"), timeout=600
+    (no_spec_tokens, _) = await asyncio.wait_for(
+        _generate(base_args, f"deepseek-mtp-dp{dp_size}-no-spec", False), timeout=600
     )
 
-    match_ratio = _token_match_ratio(spec_tokens, no_spec_tokens)
-    print(f"\ndp{dp_size}: spec/no-spec match_ratio={match_ratio:.3f}")
+    # Every wave must draft on its own, so the active-processing wave cannot
+    # pass on drafts produced by the greedy wave.
+    for wave, n_drafts in enumerate(wave_drafts):
+        assert n_drafts > 0, f"MTP drafter never fired under DP in wave {wave}"
+    match_ratio = min(
+        _token_match_ratio(spec, no_spec)
+        for spec, no_spec in zip(spec_tokens, no_spec_tokens, strict=True)
+    )
+    print(f"\ndp{dp_size}: minimum spec/no-spec match_ratio={match_ratio:.3f}")
     assert match_ratio >= MIN_MATCH_RATIO, (
         f"Spec / no-spec output divergence under dp{dp_size}: "
         f"match_ratio={match_ratio:.2f} < {MIN_MATCH_RATIO}.\n"
