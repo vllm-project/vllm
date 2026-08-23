@@ -32,6 +32,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
     replace_token_matches,
 )
 from vllm.sequence import IntermediateTensors
@@ -165,7 +166,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Gemma3Processor,
         mm_kwargs: Mapping[str, object],
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         boi_token = processor.boi_token
 
         num_crops = self.get_num_crops(
@@ -189,8 +190,9 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         tokenizer = processor.tokenizer
         vocab = tokenizer.get_vocab()
         image_token_id = vocab[tokenizer.image_token]
+        repl_full_ids = cached_encode(tokenizer, repl_full, add_special_tokens=False)
 
-        return PromptUpdateDetails.select_token_id(repl_full, image_token_id)
+        return PromptUpdateDetails.select_token_id(repl_full_ids, image_token_id)
 
     def get_num_image_tokens(
         self,
@@ -313,7 +315,8 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token = hf_processor.boi_token
+        tokenizer = self.info.get_tokenizer()
+        boi_token_id = tokenizer.get_vocab()[hf_processor.boi_token]
 
         def get_replacement_gemma3(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -329,7 +332,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[boi_token_id],
                 replacement=get_replacement_gemma3,
             )
         ]
