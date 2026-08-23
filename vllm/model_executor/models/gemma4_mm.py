@@ -332,7 +332,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Gemma4Processor | None,
         max_soft_tokens: int | None = None,
-    ) -> PromptUpdateDetails[list[int]]:
+    ) -> PromptUpdateDetails:
         """Return the dynamic image token sequence for this image.
 
         Computes the exact number of soft tokens the vision tower will
@@ -386,7 +386,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         *,
         audio_len: int,
         processor: Gemma4Processor | None,
-    ) -> PromptUpdateDetails[list[int]]:
+    ) -> PromptUpdateDetails:
         """Return the dynamic audio token sequence for this audio.
 
         Computes the number of soft tokens from the audio waveform
@@ -414,7 +414,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         timestamps: list[float],
         num_soft_tokens_per_frame: list[int],
         processor: Gemma4Processor,
-    ) -> PromptUpdateDetails[list[int]]:
+    ) -> PromptUpdateDetails:
         """Build the full token replacement for one video.
 
         Produces the same interleaved sequence as the HF Gemma4Processor:
@@ -818,7 +818,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             # one image_token exists per image in the token stream.
             # The replacement expands it to the full image sequence
             # (boi + N×image_token + eoi, where N = max_soft_tokens).
-            image_token = hf_processor.image_token
+            image_token_id = hf_processor.image_token_id
 
             def get_replacement_image(item_idx: int):
                 images = mm_items.get_items("image", ImageProcessorItems)
@@ -848,13 +848,13 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             prompt_updates.append(
                 PromptReplacement(
                     modality="image",
-                    target=image_token,
+                    target=[image_token_id],
                     replacement=get_replacement_image,
                 )
             )
 
         if "video" in mm_items:
-            video_token = hf_processor.video_token
+            video_token_id = hf_processor.video_token_id
 
             def get_replacement_video(item_idx: int):
                 out_item = out_mm_kwargs["video"][item_idx]
@@ -869,13 +869,13 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             prompt_updates.append(
                 PromptReplacement(
                     modality="video",
-                    target=video_token,
+                    target=[video_token_id],
                     replacement=get_replacement_video,
                 )
             )
 
         if "audio" in mm_items:
-            audio_token = hf_processor.audio_token
+            audio_token_id = hf_processor.audio_token_id
 
             def get_replacement_audio(item_idx: int):
                 audios = mm_items.get_items("audio", AudioProcessorItems)
@@ -888,7 +888,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             prompt_updates.append(
                 PromptReplacement(
                     modality="audio",
-                    target=audio_token,
+                    target=[audio_token_id],
                     replacement=get_replacement_audio,
                 )
             )

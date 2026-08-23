@@ -43,6 +43,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.internvl import (
@@ -264,6 +265,8 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor: InternVLProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
+        tokenizer = self.info.get_tokenizer()
+
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -298,7 +301,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return PromptReplacement(
             modality="image",
-            target="<image>",
+            target=cached_encode(tokenizer, "<image>", add_special_tokens=False),
             replacement=get_replacement_internvl,
         )
 
@@ -498,6 +501,8 @@ class InternVLMultiModalProcessor(
         hf_processor: InternVLProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
+        tokenizer = self.info.get_tokenizer()
+
         if "video_num_patches" in out_mm_data:
             video_num_patches = out_mm_data["video_num_patches"]
             assert isinstance(video_num_patches, torch.Tensor)
@@ -514,7 +519,7 @@ class InternVLMultiModalProcessor(
 
         return PromptReplacement(
             modality="video",
-            target="<video>",
+            target=cached_encode(tokenizer, "<video>", add_special_tokens=False),
             replacement=get_video_replacement_internvl,
         )
 

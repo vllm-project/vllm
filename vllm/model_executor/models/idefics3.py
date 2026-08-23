@@ -49,6 +49,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -315,7 +316,8 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token, _, _ = self.info._get_image_token(hf_processor)
+        image_token_id = hf_processor.image_token_id
+        tokenizer = self.info.get_tokenizer()
 
         def get_replacement_idefics3(item_idx: int) -> PromptUpdateDetails:
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -329,15 +331,18 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
                 mm_kwargs=hf_processor_mm_kwargs,
             )
 
-            return PromptUpdateDetails.select_text(
-                image_repl,
-                embed_text=image_token,
+            image_repl_ids = cached_encode(
+                tokenizer, image_repl, add_special_tokens=False
+            )
+            return PromptUpdateDetails.select_token_id(
+                image_repl_ids,
+                image_token_id,
             )
 
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[image_token_id],
                 replacement=get_replacement_idefics3,
             )
         ]

@@ -1393,7 +1393,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         def get_replacement(
             item_idx: int,
             suffix_token_ids: list[int] | None = None,
-        ) -> PromptUpdateDetails[list[int]]:
+        ) -> PromptUpdateDetails:
             num_tokens = audio_token_lens[item_idx]
             if num_tokens == 0:
                 raise ValueError("The audio is too short to be represented.")
@@ -1410,7 +1410,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
                     processor.audio_end_id,
                     *suffix_token_ids,
                 ],
-                is_embed=lambda _tokenizer, _seq: torch.cat(
+                is_embed=lambda _seq: torch.cat(
                     [
                         torch.tensor([False]),
                         is_embed,

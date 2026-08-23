@@ -51,6 +51,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
     replace_token_matches,
 )
 from vllm.sequence import IntermediateTensors
@@ -183,31 +184,37 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         processor: Gemma3nProcessor,
-    ) -> str:
+    ) -> PromptUpdateDetails:
         """
-        Get the replacement text for image tokens.
+        Get the replacement metadata for image tokens.
 
         For Gemma3n, this should return the full_image_sequence which includes
         BOI token, repeated image tokens, and EOI token.
         """
+        full_token_ids = cached_encode(
+            processor.tokenizer, processor.full_image_sequence, add_special_tokens=False
+        )
         return PromptUpdateDetails.select_token_id(
-            processor.full_image_sequence, processor.image_token_id
+            full_token_ids, processor.image_token_id
         )
 
     def get_audio_repl(
         self,
         *,
         processor: Gemma3nProcessor,
-    ) -> str:
+    ) -> PromptUpdateDetails:
         """
-        Get the replacement text for audio tokens.
+        Get the replacement metadata for audio tokens.
 
         For Gemma3n, this should return the full_audio_sequence which includes
         BOA token, repeated audio tokens, and EOA token.
         """
         # Return the full audio sequence as defined by the processor
+        full_token_ids = cached_encode(
+            processor.tokenizer, processor.full_audio_sequence, add_special_tokens=False
+        )
         return PromptUpdateDetails.select_token_id(
-            processor.full_audio_sequence, processor.audio_token_id
+            full_token_ids, processor.audio_token_id
         )
 
 
@@ -345,7 +352,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
 
         # Handle image tokens
         if "image" in mm_items:
-            image_token = hf_processor.image_token
+            image_token_id = hf_processor.image_token_id
 
             def get_replacement_image(item_idx: int):
                 images = mm_items.get_items("image", ImageProcessorItems)
@@ -359,14 +366,14 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
             prompt_updates.append(
                 PromptReplacement(
                     modality="image",
-                    target=image_token,
+                    target=[image_token_id],
                     replacement=get_replacement_image,
                 )
             )
 
         # Handle audio tokens
         if "audio" in mm_items:
-            audio_token = hf_processor.audio_token
+            audio_token_id = hf_processor.audio_token_id
 
             def get_replacement_audio(item_idx: int):
                 return self.info.get_audio_repl(
@@ -376,7 +383,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
             prompt_updates.append(
                 PromptReplacement(
                     modality="audio",
-                    target=audio_token,
+                    target=[audio_token_id],
                     replacement=get_replacement_audio,
                 )
             )
