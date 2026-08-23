@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.run_batch import (
     BatchRequestOutput,
     download_bytes_from_url,
 )
+from vllm.exceptions import VLLMValidationError
 
 CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -788,15 +789,27 @@ async def test_download_bytes_data_url_bypasses_domain_check():
 async def test_download_bytes_rejects_disallowed_domain():
     """HTTP URLs whose hostname is not in the allowlist must be rejected."""
     url = "https://evil.internal/secret"
-    with pytest.raises(ValueError, match="allowed domains"):
+    with pytest.raises(VLLMValidationError, match="allowed domains") as exc_info:
         await download_bytes_from_url(url, allowed_media_domains=["example.com"])
+    # URL validation failures carry structured metadata for the frontend.
+    assert exc_info.value.parameter == "url"
+    assert exc_info.value.value == "evil.internal"
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_rejects_unsupported_scheme():
+    """Unsupported URL schemes are rejected with structured metadata."""
+    with pytest.raises(VLLMValidationError, match="Unsupported URL scheme") as exc_info:
+        await download_bytes_from_url("ftp://example.com/file")
+    assert exc_info.value.parameter == "url"
+    assert exc_info.value.value == "ftp"
 
 
 @pytest.mark.asyncio
 async def test_download_bytes_rejects_cloud_metadata_ip():
     """Cloud metadata endpoints must be blocked when an allowlist is set."""
     url = "http://169.254.169.254/latest/meta-data/"
-    with pytest.raises(ValueError, match="allowed domains"):
+    with pytest.raises(VLLMValidationError, match="allowed domains"):
         await download_bytes_from_url(url, allowed_media_domains=["example.com"])
 
 
@@ -808,7 +821,7 @@ async def test_download_bytes_rejects_internal_ip():
         "http://192.168.1.1/admin",
         "http://127.0.0.1:8080/internal",
     ]:
-        with pytest.raises(ValueError, match="allowed domains"):
+        with pytest.raises(VLLMValidationError, match="allowed domains"):
             await download_bytes_from_url(
                 internal_url, allowed_media_domains=["example.com"]
             )
@@ -850,17 +863,17 @@ async def test_download_bytes_no_allowlist_permits_any_domain():
 async def test_download_bytes_empty_allowlist_denies_all():
     """An empty allowlist must deny all HTTP URLs (least privilege)."""
     url = "https://any-domain.example.org/file.wav"
-    with pytest.raises(ValueError, match="allowed domains"):
+    with pytest.raises(VLLMValidationError, match="allowed domains"):
         await download_bytes_from_url(url, allowed_media_domains=[])
 
 
 @pytest.mark.asyncio
 async def test_download_bytes_unsupported_scheme():
     """Unsupported URL schemes must be rejected regardless of allowlist."""
-    with pytest.raises(ValueError, match="Unsupported URL scheme"):
+    with pytest.raises(VLLMValidationError, match="Unsupported URL scheme"):
         await download_bytes_from_url("ftp://example.com/file.wav")
 
-    with pytest.raises(ValueError, match="Unsupported URL scheme"):
+    with pytest.raises(VLLMValidationError, match="Unsupported URL scheme"):
         await download_bytes_from_url(
             "ftp://example.com/file.wav",
             allowed_media_domains=["example.com"],
@@ -875,7 +888,7 @@ async def test_download_bytes_backslash_bypass():
     The fix normalizes through urllib3 before handing to aiohttp.
     """
     bypass_url = "http://allowed.example.com\\@evil.internal/secret"
-    with pytest.raises(ValueError, match="allowed domains"):
+    with pytest.raises(VLLMValidationError, match="allowed domains"):
         await download_bytes_from_url(
             bypass_url, allowed_media_domains=["evil.internal"]
         )
