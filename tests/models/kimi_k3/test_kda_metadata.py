@@ -614,6 +614,25 @@ def _build_non_spec(batch, is_prefilling, full_cuda_graph=False):
     return builder, common_attn_metadata, builder.build(0, common_attn_metadata)
 
 
+def test_one_token_first_chunk_excludes_trailing_padding():
+    """Trailing cudagraph padding must not be counted as prefill requests.
+
+    `split_decodes_and_prefills` counts the whole suffix after the first
+    prefill, so once a stateless first chunk promotes a row, zero-length
+    padding rows behind it would otherwise inflate `num_prefills`."""
+    # Two real rows (a resuming decode, then a stateless first chunk) followed
+    # by two zero-length cudagraph padding rows.
+    _, _, actual = _build_non_spec(
+        BatchSpec(seq_lens=[100, 1, 0, 0], query_lens=[1, 1, 0, 0]),
+        is_prefilling=[False, True, False, False],
+    )
+
+    assert actual.num_decodes == 1
+    assert actual.num_prefills == 1, "padding rows counted as prefills"
+    assert actual.num_prefill_tokens == 1
+    assert actual.num_decode_tokens == 1
+
+
 def test_one_token_first_chunk_is_not_a_decode():
     """A request being forwarded for the first time owns no KDA state, so its
     one-token chunk must be a prefill: only the prefill path masks the state

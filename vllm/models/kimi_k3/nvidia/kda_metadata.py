@@ -427,6 +427,13 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     treat_short_extends_as_decodes=False,
                 )
             )
+            # `split_decodes_and_prefills` counts the whole suffix after the
+            # first prefill, so trailing cudagraph padding lands in
+            # `num_prefills` once a stateless first chunk promotes a row ahead
+            # of it. The padding rows carry no tokens, so only the request
+            # count needs correcting.
+            if num_prefills:
+                num_prefills -= int((query_lens_cpu[num_decodes:] == 0).sum())
             num_spec_decode_tokens = 0
             spec_token_indx = None
             non_spec_token_indx = None
