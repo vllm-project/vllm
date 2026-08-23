@@ -335,6 +335,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    operation_name="chat",
                 )
             else:
                 if not request.include_reasoning:

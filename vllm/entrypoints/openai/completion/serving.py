@@ -203,6 +203,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    operation_name="text_completion",
                 )
             else:
                 generator = self.engine_client.generate(

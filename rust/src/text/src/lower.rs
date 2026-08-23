@@ -60,6 +60,7 @@ pub fn lower_text_request(
         priority: request.priority,
         data_parallel_rank: request.data_parallel_rank,
         session_id: request.session_id.clone(),
+        operation_name: None,
         reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
         lora_request: request.lora_request.clone(),
         arrival_time: request.arrival_time,

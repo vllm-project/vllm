@@ -22,7 +22,11 @@ class _Renderer:
 
 
 class _EngineClient:
+    def __init__(self) -> None:
+        self.generate_kwargs: list[dict] = []
+
     async def generate(self, prompt, *args, **kwargs):
+        self.generate_kwargs.append(kwargs)
         yield RequestOutput(
             request_id=kwargs.get("request_id", "test-request"),
             prompt=prompt.get("prompt"),
@@ -51,8 +55,9 @@ class _EngineClient:
 
 
 class _Serving(BeamSearchOnlineMixin):
-    renderer = _Renderer()
-    engine_client = _EngineClient()
+    def __init__(self) -> None:
+        self.renderer = _Renderer()
+        self.engine_client = _EngineClient()
 
 
 @pytest.mark.asyncio
@@ -72,3 +77,27 @@ async def test_beam_search_handles_extra_logprob_candidates() -> None:
     assert outputs[0].outputs[0].finish_reason == "stop"
     assert outputs[0].outputs[0].token_ids == []
     assert outputs[0].outputs[0].cumulative_logprob == pytest.approx(-0.1)
+
+
+@pytest.mark.asyncio
+async def test_beam_search_forwards_operation_name() -> None:
+    prompt = {
+        "type": "token",
+        "prompt": "prompt",
+        "prompt_token_ids": [1],
+    }
+    params = BeamSearchParams(beam_width=1, max_tokens=1)
+    serving = _Serving()
+
+    _ = [
+        output
+        async for output in serving.beam_search(
+            prompt, "request", params, operation_name="chat"
+        )
+    ]
+
+    assert serving.engine_client.generate_kwargs
+    assert all(
+        kwargs.get("operation_name") == "chat"
+        for kwargs in serving.engine_client.generate_kwargs
+    )

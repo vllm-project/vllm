@@ -48,6 +48,8 @@ pub struct GenerateRequest {
     pub data_parallel_rank: Option<u32>,
     /// Stable session identity shared by related requests.
     pub session_id: Option<String>,
+    /// OTel GenAI operation name for Prometheus latency histogram labels.
+    pub operation_name: Option<String>,
     /// Optional reasoning-parser kwargs forwarded to engine-side structured
     /// output logic.
     pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
@@ -79,6 +81,7 @@ impl GenerateRequest {
             priority,
             data_parallel_rank,
             session_id,
+            operation_name,
             reasoning_parser_kwargs,
             lora_request,
         } = self;
@@ -109,6 +112,7 @@ impl GenerateRequest {
                 trace_headers,
                 resumable: false,
                 session_id,
+                operation_name,
                 external_req_id: Some(external_request_id),
                 // Rust parser doesn't expose this information, leave it unset and let the
                 // reasoning logic in engine-sided structured output manager handle it.
@@ -155,6 +159,7 @@ mod tests {
             priority: 3,
             data_parallel_rank: Some(2),
             session_id: Some("session-1".to_string()),
+            operation_name: Some("chat".to_string()),
             reasoning_parser_kwargs: Some(ReasoningParserKwargs {
                 chat_template_kwargs: [(
                     "chat_template_kwargs".to_string(),
@@ -183,6 +188,7 @@ mod tests {
         assert_eq!(request.cache_salt.as_deref(), Some("salt"));
         assert_eq!(request.data_parallel_rank, Some(2));
         assert_eq!(request.session_id.as_deref(), Some("session-1"));
+        assert_eq!(request.operation_name.as_deref(), Some("chat"));
         assert_eq!(
             request.trace_headers,
             Some(BTreeMap::from([(
