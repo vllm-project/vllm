@@ -3,7 +3,9 @@
 
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
+use vllm_server::{
+    Config, GenerationConfigMode, HttpListenerMode, ParserSelection, RendererSelection,
+};
 
 use super::{BenchCommand, Cli, Command};
 
@@ -88,6 +90,7 @@ fn serve_args_forward_python_flags_with_separator() {
                     uds: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
+                        generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
@@ -733,6 +736,24 @@ fn serve_args_reject_unsupported_flag_arg() {
 }
 
 #[test]
+fn serve_args_reject_custom_generation_config_source() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--generation-config",
+        "/tmp/custom-config",
+    ])
+    .unwrap_err();
+
+    expect![[r#"
+        error: invalid value '/tmp/custom-config' for '--generation-config <GENERATION_CONFIG>': generation config source `/tmp/custom-config` is not implemented yet (expected one of: auto, vllm)
+
+        For more information, try '--help'.
+    "#]].assert_eq(&error.to_string());
+}
+
+#[test]
 fn serve_args_reject_unsupported_no_flag_alias() {
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -788,6 +809,7 @@ fn frontend_args_accept_json() {
                     data_parallel_size: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
+                        generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: None,
                         reasoning_parser: None,
@@ -858,6 +880,7 @@ fn frontend_args_json_applies_defaults() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.runtime.generation_config, GenerationConfigMode::Auto);
     assert_eq!(args.runtime.engine_ready_timeout_secs, 600);
     assert_eq!(args.runtime.tool_call_parser, ParserSelection::None);
     assert_eq!(args.runtime.reasoning_parser, ParserSelection::None);
@@ -901,7 +924,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -909,6 +932,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.engine_ready_timeout_secs, 42);
+    assert_eq!(args.runtime.generation_config, GenerationConfigMode::Vllm);
     assert_eq!(
         args.runtime.tool_call_parser,
         ParserSelection::Explicit("hermes".to_string())
@@ -1379,6 +1403,7 @@ fn serve_args_accept_handshake_aliases() {
                     uds: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
+                        generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
@@ -1523,6 +1548,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
+            generation_config: Auto,
             served_model_name: [],
             listener_mode: BindTcp {
                 host: "127.0.0.1",
@@ -1608,6 +1634,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
+            generation_config: Auto,
             served_model_name: [],
             listener_mode: BindTcp {
                 host: "127.0.0.1",
@@ -1715,6 +1742,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 address: "tcp://127.0.0.1:7000",
             },
             model: "Qwen/Qwen3-0.6B",
+            generation_config: Auto,
             served_model_name: [],
             listener_mode: InheritedFd {
                 fd: 3,

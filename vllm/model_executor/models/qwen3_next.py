@@ -727,6 +727,9 @@ class Qwen3NextForCausalLM(
     IsHybrid,
     SupportsEagle3,
 ):
+    # MTP weights are loaded by the draft model, not this one.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"mtp.": None})
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -833,5 +836,5 @@ class Qwen3NextForCausalLM(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["mtp."])
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -83,6 +83,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -1067,7 +1068,7 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1078,6 +1079,9 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer]
         ):
@@ -1096,12 +1100,17 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                     hidden_states
                     + deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"]
                 )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
@@ -1195,82 +1204,95 @@ Qwen3OmniMoeThinkerDummyInputsBuilder = Qwen2_5OmniThinkerDummyInputsBuilder
 class Qwen3OmniMoeThinkerMultiModalProcessor(
     Qwen2_5OmniThinkerMultiModalProcessor,
 ):
-    def _call_hf_processor(
+    def _get_hf_mm_data(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+        mm_items: MultiModalDataItems,
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
 
-        def pad_to_hop_length(x: np.ndarray, hop_length: int) -> np.ndarray:
-            length = x.shape[-1]
-            if length % hop_length != 0:
-                pad_length = hop_length - (length % hop_length)
-                x = np.pad(x, (0, pad_length), mode="constant", constant_values=0)
-            return x
-
-        # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        hop_length = feature_extractor.hop_length
+        audios = processor_data.get("audios")
         if audios:
-            # NOTE: Qwen3-Omni processor accept "audio"
+            feature_extractor = self.info.get_feature_extractor()
+            hop_length = feature_extractor.hop_length
+
+            def pad_to_hop_length(x: np.ndarray) -> np.ndarray:
+                length = x.shape[-1]
+                if length % hop_length != 0:
+                    pad_length = hop_length - (length % hop_length)
+                    x = np.pad(x, (0, pad_length), mode="constant", constant_values=0)
+                return x
+
             # To make sure the cache works with padding=True, we pre-padded
-            # the audio to multiple of hop_length.
-            mm_data["audio"] = [
-                pad_to_hop_length(audio, hop_length)
+            # the audio to a multiple of hop_length.
+            processor_data = dict(processor_data)
+            processor_data["audios"] = [
+                pad_to_hop_length(audio)
                 if isinstance(audio, np.ndarray)
-                else (pad_to_hop_length(audio[0], hop_length), audio[1])
+                else (pad_to_hop_length(audio[0]), audio[1])
                 for audio in audios
             ]
 
+        return processor_data, passthrough_data
+
+    def _apply_hf_processor_main(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if mm_items.get_all_counts().get("audio", 0):
             # TODO(Isotr0py): Remove this patch after upstream fix PR
             # released and Transformers version update:
             # https://github.com/huggingface/transformers/pull/41473
-            mm_kwargs = dict(mm_kwargs)
-            tok_kwargs = dict(tok_kwargs)
-            mm_kwargs["audio_kwargs"] = dict(mm_kwargs.get("audio_kwargs") or {})
-            mm_kwargs["text_kwargs"] = dict(mm_kwargs.get("text_kwargs") or {})
-        elif mm_kwargs.get("use_audio_in_video") and mm_data.get("videos"):
-            # mm_data can be empty on a multimodal-processor-cache hit, where
-            # there's nothing to (re-)process this call and the real result
-            # comes from the cache — not a genuine "no audio" case.
-            raise ValueError(
-                "Video doesn't have audio track with `audio_in_video=True`"
+            hf_processor_mm_kwargs = dict(hf_processor_mm_kwargs)
+            hf_processor_mm_kwargs["audio_kwargs"] = dict(
+                hf_processor_mm_kwargs.get("audio_kwargs") or {}
+            )
+            hf_processor_mm_kwargs["text_kwargs"] = dict(
+                hf_processor_mm_kwargs.get("text_kwargs") or {}
             )
 
-        hf_inputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        processed_data = super()._apply_hf_processor_main(
+            mm_items,
+            hf_processor_mm_kwargs,
         )
 
         if (
-            "audio_feature_lengths" in hf_inputs
-            and "feature_attention_mask" in hf_inputs
-            and (audios := mm_data.get("audio", []))
+            "audio_feature_lengths" in processed_data
+            and "feature_attention_mask" in processed_data
         ):
-            audio_num_frames = []
-            for _, audio in enumerate(audios):
-                audio_length = len(audio[0]) if isinstance(audio, tuple) else len(audio)
-                num_frame = (
-                    (audio_length // hop_length)
-                    if audio_length % hop_length == 0
-                    else (audio_length // hop_length - 1)
+            valid_mm_items = mm_items.select(
+                {k for k, c in mm_items.get_all_counts().items() if c > 0}
+            )
+            processor_data, _ = self._get_hf_mm_data(valid_mm_items)
+            audios = processor_data.get("audios", [])
+            if audios:
+                feature_extractor = self.info.get_feature_extractor(
+                    **hf_processor_mm_kwargs
                 )
-                if mm_kwargs.get("truncation", False):
-                    num_frame = min(
-                        num_frame, feature_extractor.n_samples // hop_length
+                hop_length = feature_extractor.hop_length
+
+                audio_num_frames = []
+                for audio in audios:
+                    audio_length = (
+                        len(audio[0]) if isinstance(audio, tuple) else len(audio)
                     )
-                audio_num_frames.append(num_frame)
-            hf_inputs["feature_attention_mask"] = [
-                torch.ones(num_frame) for num_frame in audio_num_frames
-            ]
-            hf_inputs["audio_feature_lengths"] = torch.tensor(audio_num_frames)
-        return hf_inputs
+                    num_frame = (
+                        (audio_length // hop_length)
+                        if audio_length % hop_length == 0
+                        else (audio_length // hop_length - 1)
+                    )
+                    if hf_processor_mm_kwargs.get("truncation", False):
+                        num_frame = min(
+                            num_frame, feature_extractor.n_samples // hop_length
+                        )
+                    audio_num_frames.append(num_frame)
+
+                processed_data["feature_attention_mask"] = [
+                    torch.ones(num_frame) for num_frame in audio_num_frames
+                ]
+                processed_data["audio_feature_lengths"] = torch.tensor(audio_num_frames)
+
+        return processed_data
 
     def _maybe_apply_prompt_updates(
         self,
@@ -1278,8 +1300,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         prompt_ids: list[int],
         mm_kwargs: MultiModalKwargsItems,
         mm_prompt_updates: MultiModalPromptUpdates,
-        is_update_applied: bool,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """
         Qwen3-Omni reimplements this function to handle `use_audio_in_video`.
         """
@@ -1305,39 +1326,25 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 if video_audio_item_num != video_updates_num + audio_updates_num:
                     use_audio_in_video = True
 
-        # normal case with `use_audio_in_video=False`
-        if is_update_applied:
-            mm_placeholders = self._find_mm_placeholders(
+        if use_audio_in_video and "audio" in mm_prompt_updates:
+            filtered_updates = {
+                k: v for k, v in mm_prompt_updates.items() if k != "audio"
+            }
+            prompt_ids, mm_placeholders = self._apply_prompt_updates(
+                prompt_ids,
+                filtered_updates,
+            )
+            # Derive audio placeholders from video placeholders
+            mm_placeholders = self._derive_audio_from_video_placeholders(
+                mm_placeholders, mm_prompt_updates
+            )
+        else:
+            prompt_ids, mm_placeholders = self._apply_prompt_updates(
                 prompt_ids,
                 mm_prompt_updates,
             )
-            self._validate_mm_placeholders(
-                mm_placeholders,
-                mm_item_counts,
-            )
-        else:
-            if use_audio_in_video and "audio" in mm_prompt_updates:
-                filtered_updates = {
-                    k: v for k, v in mm_prompt_updates.items() if k != "audio"
-                }
-                prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                    prompt_ids,
-                    filtered_updates,
-                )
-                # Derive audio placeholders from video placeholders
-                mm_placeholders = self._derive_audio_from_video_placeholders(
-                    mm_placeholders, mm_prompt_updates
-                )
-            else:
-                prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                    prompt_ids,
-                    mm_prompt_updates,
-                )
 
-            self._validate_mm_placeholders(
-                mm_placeholders,
-                mm_item_counts,
-            )
+        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         return prompt_ids, mm_placeholders
 
@@ -1486,17 +1493,17 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_qwen2_audio,
             ),
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[image_token_id],
                 replacement=partial(get_replacement_qwen2_vision, modality="image"),
             ),
             PromptReplacement(
                 modality="video",
-                target=video_token,
+                target=[video_token_id],
                 replacement=video_replacement_fn,
             ),
         ]
@@ -1579,6 +1586,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     SupportsMultiModal,
     SupportsPP,
     SupportsMRoPE,
+    SupportsEagle3,
     Qwen3OmniMoeConditionalGenerationMixin,
     SupportsTranscription,
 ):
@@ -1587,6 +1595,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             "thinker.lm_head.": "language_model.lm_head.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
+            "talker.": None,
+            "code2wav.": None,
         }
     )
 
@@ -1943,10 +1953,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["talker.", "code2wav."],
-        )
+        loader = AutoWeightsLoader(self)
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
         return loaded_weights
