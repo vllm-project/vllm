@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Latency metrics with token bundling</title>
+  <desc id="desc">The client receives token 1 at 100 milliseconds, tokens 2 through 4 together at 140 milliseconds, and token 5 at 180 milliseconds. The two observed ITL gaps average 40 milliseconds. TPOT divides the 80 millisecond generation span by the four tokens after the first, giving 20 milliseconds per token.</desc>
+  <defs>
+    <marker id="axis-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#94a3b8"/>
+    </marker>
+    <marker id="itl-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#30a2ff"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="560" rx="18" fill="#f8fafc"/>
+  <text x="56" y="48" fill="#454545" font-family="Inter, system-ui, sans-serif" font-size="21" font-weight="600">Latency with token bundling</text>
+  <text x="1144" y="48" text-anchor="end" fill="#64748b" font-family="Inter, system-ui, sans-serif" font-size="14">5 tokens · 3 stream outputs</text>
+
+  <line x1="88" y1="210" x2="1118" y2="210" stroke="#94a3b8" stroke-width="2" marker-end="url(#axis-arrow)"/>
+
+  <text x="100" y="153" text-anchor="middle" fill="#454545" font-family="Inter, system-ui, sans-serif" font-size="15" font-weight="600">Request</text>
+  <line x1="100" y1="170" x2="100" y2="225" stroke="#64748b" stroke-width="2"/>
+  <circle cx="100" cy="210" r="6" fill="#64748b"/>
+  <text x="100" y="246" text-anchor="middle" fill="#64748b" font-family="Inter, system-ui, sans-serif" font-size="14">0 ms</text>
+
+  <text x="350" y="92" text-anchor="middle" fill="#454545" font-family="Inter, system-ui, sans-serif" font-size="15" font-weight="600">Output 1</text>
+  <rect x="314" y="106" width="72" height="54" rx="10" fill="#ffffff" stroke="#30a2ff" stroke-width="2"/>
+  <rect x="328" y="117" width="44" height="32" rx="6" fill="#eaf6ff"/>
+  <text x="350" y="139" text-anchor="middle" fill="#1769aa" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="600">T1</text>
+  <line x1="350" y1="160" x2="350" y2="225" stroke="#30a2ff" stroke-width="2"/>
+  <circle cx="350" cy="210" r="6" fill="#30a2ff"/>
+  <text x="350" y="246" text-anchor="middle" fill="#64748b" font-family="Inter, system-ui, sans-serif" font-size="14">100 ms</text>
+
+  <text x="700" y="80" text-anchor="middle" fill="#454545" font-family="Inter, system-ui, sans-serif" font-size="15" font-weight="600">Output 2 · bundled</text>
+  <rect x="610" y="94" width="180" height="66" rx="10" fill="#ffffff" stroke="#30a2ff" stroke-width="2"/>
+  <rect x="628" y="111" width="44" height="32" rx="6" fill="#eaf6ff"/>
+  <rect x="678" y="111" width="44" height="32" rx="6" fill="#eaf6ff"/>
+  <rect x="728" y="111" width="44" height="32" rx="6" fill="#eaf6ff"/>
+  <text x="650" y="133" text-anchor="middle" fill="#1769aa" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="600">T2</text>
+  <text x="700" y="133" text-anchor="middle" fill="#1769aa" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="600">T3</text>
+  <text x="750" y="133" text-anchor="middle" fill="#1769aa" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="600">T4</text>
+  <line x1="700" y1="160" x2="700" y2="225" stroke="#30a2ff" stroke-width="2"/>
+  <circle cx="700" cy="210" r="6" fill="#30a2ff"/>
+  <text x="700" y="246" text-anchor="middle" fill="#64748b" font-family="Inter, system-ui, sans-serif" font-size="14">140 ms</text>
+
+  <text x="1050" y="92" text-anchor="middle" fill="#454545" font-family="Inter, system-ui, sans-serif" font-size="15" font-weight="600">Output 3</text>
+  <rect x="1014" y="106" width="72" height="54" rx="10" fill="#ffffff" stroke="#30a2ff" stroke-width="2"/>
+  <rect x="1028" y="117" width="44" height="32" rx="6" fill="#eaf6ff"/>
+  <text x="1050" y="139" text-anchor="middle" fill="#1769aa" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="600">T5</text>
+  <line x1="1050" y1="160" x2="1050" y2="225" stroke="#30a2ff" stroke-width="2"/>
+  <circle cx="1050" cy="210" r="6" fill="#30a2ff"/>
+  <text x="1050" y="246" text-anchor="middle" fill="#64748b" font-family="Inter, system-ui, sans-serif" font-size="14">180 ms</text>
+
+  <path d="M100 274 H350" fill="none" stroke="#64748b" stroke-width="2"/>
+  <path d="M100 268 V280 M350 268 V280" fill="none" stroke="#64748b" stroke-width="2"/>
+  <text x="225" y="302" text-anchor="middle" fill="#64748b" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="600">TTFT 100 ms</text>
+
+  <line x1="365" y1="274" x2="685" y2="274" stroke="#30a2ff" stroke-width="3" marker-end="url(#itl-arrow)"/>
+  <text x="525" y="302" text-anchor="middle" fill="#1769aa" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="600">ITL 40 ms</text>
+  <line x1="715" y1="274" x2="1035" y2="274" stroke="#30a2ff" stroke-width="3" marker-end="url(#itl-arrow)"/>
+  <text x="875" y="302" text-anchor="middle" fill="#1769aa" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="600">ITL 40 ms</text>
+
+  <path d="M350 326 V338 H1050 V326" fill="none" stroke="#ebb431" stroke-width="3"/>
+  <text x="700" y="365" text-anchor="middle" fill="#8a6500" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="600">80 ms generation span</text>
+
+  <rect x="56" y="398" width="520" height="124" rx="12" fill="#edf7ff" stroke="#b8ddfa"/>
+  <rect x="56" y="398" width="6" height="124" rx="3" fill="#30a2ff"/>
+  <text x="86" y="431" fill="#1769aa" font-family="Inter, system-ui, sans-serif" font-size="16" font-weight="600">Mean ITL</text>
+  <text x="86" y="473" fill="#454545" font-family="Inter, system-ui, sans-serif" font-size="20">(40 ms + 40 ms) ÷ 2</text>
+  <text x="546" y="468" text-anchor="end" fill="#1769aa" font-family="Inter, system-ui, sans-serif" font-size="30" font-weight="600">40 ms</text>
+  <text x="86" y="500" fill="#64748b" font-family="Inter, system-ui, sans-serif" font-size="13">2 observed gaps between stream outputs</text>
+
+  <rect x="624" y="398" width="520" height="124" rx="12" fill="#fff9e8" stroke="#ead79c"/>
+  <rect x="624" y="398" width="6" height="124" rx="3" fill="#ebb431"/>
+  <text x="654" y="431" fill="#8a6500" font-family="Inter, system-ui, sans-serif" font-size="16" font-weight="600">TPOT</text>
+  <text x="654" y="473" fill="#454545" font-family="Inter, system-ui, sans-serif" font-size="20">(180 − 100) ms ÷ (5 − 1)</text>
+  <text x="1114" y="468" text-anchor="end" fill="#8a6500" font-family="Inter, system-ui, sans-serif" font-size="30" font-weight="600">20 ms/token</text>
+  <text x="654" y="500" fill="#64748b" font-family="Inter, system-ui, sans-serif" font-size="13">4 output tokens after the first</text>
+</svg>

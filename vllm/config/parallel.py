@@ -13,6 +13,7 @@ from torch.distributed import ProcessGroup, ReduceOp, Store
 from typing_extensions import Self
 
 import vllm.envs as envs
+from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.config.fault_tolerance import FaultToleranceConfig
     from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
@@ -138,8 +140,8 @@ class ParallelConfig:
     """Local rank of the data parallel group, set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
-    data_parallel_rpc_port: int = 29550
-    """Port for data parallel messaging."""
+    data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
+    """Fixed port for data parallel messaging, shared by all nodes."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     data_parallel_backend: DataParallelBackend = "mp"
@@ -349,12 +351,26 @@ class ParallelConfig:
     and will be deprecated when PCP is fully supported.
 
     """
-    dcp_comm_backend: DCPCommBackend = "ag_rs"
+    dcp_comm_backend: DCPCommBackend | None = None
     """Communication backend for Decode Context Parallel (DCP).
-    - "ag_rs": AllGather + ReduceScatter (default, existing behavior)
+    - "ag_rs": AllGather + ReduceScatter (existing behavior)
     - "a2a": All-to-All exchange of partial outputs + LSE, then
       combine with Triton kernel. Reduces NCCL calls from 3 to 2
       per layer for MLA models.
+
+    `None` selects the model default, which is "ag_rs" unless the model
+    overrides it via [`set_dcp_defaults`][vllm.config.ParallelConfig.set_dcp_defaults].
+    """
+
+    dcp_q_replicate: bool | None = None
+    """Replicate the MLA query projection within each DCP group so decode can skip the
+    query all-gather.
+
+    With DCP the KV cache is sharded across the group, so the standard MLA decode path
+    all-gathers the query every step. Replicating the (small) query projection at load
+    time lets each rank materialize the full group-local head set and skip that 
+    collective, at the cost of computing the projection redundantly on every rank 
+    in the group.
     """
 
     cp_kv_cache_interleave_size: int = 1
@@ -392,6 +408,16 @@ class ParallelConfig:
         This is an internal config that is only valid for and
         should only be set by API server scale-out.
     """
+
+    enable_fault_tolerance: bool = False
+    """Enable fault tolerance for detailed error recovery,
+    such as scaling down fault DPEngineCore.
+    """
+
+    fault_tolerance_config: FaultToleranceConfig = Field(
+        default_factory=FaultToleranceConfig
+    )
+    """The configurations for fault tolerance."""
 
     @field_validator("disable_nccl_for_dp_synchronization", mode="wrap")
     @classmethod
@@ -443,6 +469,13 @@ class ParallelConfig:
                 "Invalid value of `_api_process_rank`. "
                 f"Expected to be `-1` or `[0, {self._api_process_count})`, "
                 f"but found: {self._api_process_rank}"
+            )
+
+        if self.enable_fault_tolerance and self._api_process_count > 1:
+            raise ValueError(
+                "Fault tolerance requires a single API server process "
+                f"(--api-server-count=1), but got {self._api_process_count}. "
+                "The FT system assumes one AsyncMPClient manages all engines."
             )
 
         if self.all2all_backend in ["pplx", "naive"]:
@@ -519,12 +552,22 @@ class ParallelConfig:
                 f"{sorted({1, pcp, tp * pcp})}."
             )
 
-        if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
-            raise ValueError(
-                "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
-            )
-
         return self
+
+    def set_dcp_defaults(
+        self,
+        comm_backend: DCPCommBackend = "ag_rs",
+        q_replicate: bool = False,
+    ) -> None:
+        """Fill in the DCP options the user left unset.
+
+        Models can set their preferred DCP settings by calling this from their
+        `verify_and_update_config` hook.
+        """
+        if self.dcp_comm_backend is None:
+            self.dcp_comm_backend = comm_backend
+        if self.dcp_q_replicate is None:
+            self.dcp_q_replicate = q_replicate
 
     @property
     def world_size_across_dp(self) -> int:
@@ -658,6 +701,7 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "flashinfer_nvlink_one_sided",
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",
@@ -665,6 +709,14 @@ class ParallelConfig:
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
             and self.data_parallel_size > 1
+        )
+
+    @property
+    def use_all2all(self) -> bool:
+        return (
+            self.data_parallel_size > 1
+            or self.use_sequence_parallel_moe
+            or (self.enable_expert_parallel and self.prefill_context_parallel_size > 1)
         )
 
     @property
@@ -767,6 +819,7 @@ class ParallelConfig:
             "data_parallel_master_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
+            "_coord_store_port",
             "data_parallel_rpc_port",
             "rank",
             "master_addr",
@@ -944,7 +997,7 @@ class ParallelConfig:
 
         if self.enable_eplb and self.eplb_config.communicator is None:
             # Prefer NIXL when available: zero-copy RDMA reads, compatible
-            # with both async EPLB and elastic EP (deferred remote setup).
+            # with both async EPLB and elastic EP.
             # Fallbacks: pynccl for elastic EP (stateless groups need it),
             # torch_gloo for static EP.  torch_nccl is avoided because NCCL
             # is incompatible with async EPLB (multi-stream conflicts) and
@@ -1000,14 +1053,20 @@ class ParallelConfig:
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform."
             )
-        if self.nnodes > 1:
-            self.disable_custom_all_reduce = True
-            logger.debug(
-                "Disabled the custom all-reduce since we are running on multi-node."
-            )
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(
                 "Unable to use nsight profiling unless workers run with Ray."
             )
 
         return self
+
+    def reconfigure_for_independent_dp_rank(self) -> None:
+        """Reconfigure for a single independent non-MoE DP rank."""
+        # Capture these before changing DP fields.
+        nnodes = self.nnodes_within_dp
+        node_rank = self.node_rank_within_dp
+        self.data_parallel_size = 1
+        self.data_parallel_size_local = 1
+        self.data_parallel_rank = 0
+        self.nnodes = nnodes
+        self.node_rank = node_rank

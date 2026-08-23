@@ -122,6 +122,7 @@ class IrOpPriorityConfig:
 MoEBackend = Literal[
     "auto",
     "triton",
+    "batched_triton",
     "deep_gemm",
     "deep_gemm_mega_moe",
     "cutlass",
@@ -129,6 +130,7 @@ MoEBackend = Literal[
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "flashinfer_b12x",
+    "b12x",
     "marlin",
     "humming",
     "triton_unfused",
@@ -146,6 +148,7 @@ LinearBackend = Literal[
     "flashinfer_trtllm",
     "flashinfer_cudnn",
     "flashinfer_b12x",
+    "b12x",
     "marlin",
     "humming",
     "triton",
@@ -179,7 +182,7 @@ class KernelConfig:
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
     enable_cutedsl_warmup: bool = True
-    """If True, run CuTeDSL compile warmup during kernel warmup."""
+    """Deprecated: run legacy CuTeDSL warmup providers."""
 
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
@@ -192,6 +195,8 @@ class KernelConfig:
 
     - "auto": Automatically select the best backend based on model and hardware
     - "triton": Use Triton-based fused MoE kernels
+    - "batched_triton": Use batched Triton experts (moe_mmk) on the batched
+      activation format ([E_local, max_num_tokens, K])
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
     - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels
@@ -200,6 +205,7 @@ class KernelConfig:
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
+    - "b12x": Use b12x FP4 MoE kernels on SM12x
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
@@ -220,6 +226,7 @@ class KernelConfig:
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
     - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)
+    - "b12x": Use native B12X FP8 and FP4 linear kernels on SM12x
     - "marlin": Use Marlin kernels
     - "triton": Use Triton-based kernels
     - "deep_gemm": Use DeepGEMM kernels

@@ -179,6 +179,7 @@ class RequestRunner:
         async_scheduling: bool = True,
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
         extra_config_overrides: dict[str, Any] | None = None,
+        worker_count: int = 1,
     ):
         assert blocks_per_chunk == 1 or kv_cache_groups is None, (
             "blocks_per_chunk > 1 requires all groups to have the same "
@@ -198,6 +199,7 @@ class RequestRunner:
             disable_hybrid_kv_cache_manager=False,
         )
         vllm_config.scheduler_config.async_scheduling = async_scheduling
+        vllm_config.parallel_config.world_size = worker_count
 
         extra_config: dict[str, Any] = {
             "spec_name": "MockOffloadingSpec",
@@ -239,13 +241,19 @@ class RequestRunner:
                 )
             ]
 
+        # Groups overlay one allocation, sized by the largest group.
+        block_stride = max(
+            group.kv_cache_spec.page_size_bytes * len(group.layer_names)
+            for group in kv_cache_groups
+        )
         kv_cache_tensors = [
             KVCacheTensor(
-                size=group.kv_cache_spec.page_size_bytes * num_gpu_blocks,
-                shared_by=[layer_name],
+                size=block_stride * num_gpu_blocks,
+                layers=list(group.layer_names),
+                layer_stride=group.kv_cache_spec.page_size_bytes * num_gpu_blocks,
+                block_stride=group.kv_cache_spec.page_size_bytes,
             )
             for group in kv_cache_groups
-            for layer_name in group.layer_names
         ]
 
         kv_cache_config = KVCacheConfig(
@@ -275,7 +283,6 @@ class RequestRunner:
         )
 
         # register worker kv_caches to enable OffloadingWorker creations
-        # set_current_vllm_config is needed for get_kv_cache_layout() to work
         kv_caches: dict[str, torch.Tensor] = {}
         for group in kv_cache_groups:
             spec = group.kv_cache_spec
@@ -482,8 +489,13 @@ class RequestRunner:
             # Strict-always-False frees the request immediately on EOS, but
             # the worker may still have a deferred store queued. In production
             # the next request's step drains it; in single-request tests we
-            # must keep stepping until the scheduler sees no in-flight jobs.
-            if not self.scheduler.requests and not self.connector_scheduler._jobs:
+            # must keep stepping until the scheduler sees no in-flight jobs
+            # and no pending finished_req_ids awaiting build_connector_meta.
+            if (
+                not self.scheduler.requests
+                and not self.connector_scheduler._jobs
+                and not self.scheduler.finished_req_ids
+            ):
                 break
 
             scheduler_output = self.scheduler.schedule()
@@ -544,19 +556,30 @@ class RequestRunner:
             if (
                 prev_token_id == EOS_TOKEN_ID
                 and prev_token_id != token_id
-                and (self.scheduler.requests or self.connector_scheduler._jobs)
+                and (
+                    self.scheduler.requests
+                    or self.connector_scheduler._jobs
+                    or self.scheduler.finished_req_ids
+                )
             ):
                 # continue for one more step to allow offloading to kick off
                 continue
 
             if token_id is None:
                 if self.async_scheduling:
-                    # sample last token
+                    # Flush the previous step's output.
                     engine_outputs = self.scheduler.update_from_output(
                         prev_scheduler_output, prev_model_runner_output
                     )
                     self._record_kv_connector_stats(engine_outputs)
-                break
+                    prev_model_runner_output = None
+                if self.scheduler.requests:
+                    # Request still running, just exhausted decoded_tokens.
+                    break
+                if not self.scheduler.finished_req_ids and (
+                    not complete_transfers or not self.connector_scheduler._jobs
+                ):
+                    break
 
         self._parse_transfers()
 
@@ -652,6 +675,7 @@ def request_runner():
         blocks_per_chunk=1,
         kv_cache_groups=None,
         extra_config_overrides=None,
+        worker_count=1,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -660,6 +684,7 @@ def request_runner():
             async_scheduling=async_scheduling,
             kv_cache_groups=kv_cache_groups,
             extra_config_overrides=extra_config_overrides,
+            worker_count=worker_count,
         )
         runners.append(runner)
         return runner
