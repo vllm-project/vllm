@@ -28,7 +28,6 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
-    TQFullAttentionSpec,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
@@ -561,6 +560,11 @@ class SingleTypeKVCacheManager(ABC):
         return an empty list.
         If eagle is enabled, drop the last matched block to force recompute the
         last block to get the required hidden states for eagle drafting head.
+        For multi-module MTP, this recompute also rewrites the dropped block's
+        draft-layer KVs, which depend on up to num_speculative_tokens - 1
+        tokens past the matched prefix (i.e. on the cache writer's
+        continuation, which the block hash does not cover); the coordinator
+        asserts the block size covers that window.
         Need to be customized for each attention type.
 
         Args:
@@ -877,6 +881,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
+        # Extra trailing tokens to retain below the window (never attended) so a
+        # multi-module MTP store-side lag can still reconstruct the window from
+        # cached blocks.
+        self.extra_retained_tokens = kv_cache_spec.extra_retained_tokens
 
     @classmethod
     def _contiguous_blocks_for_hit(
@@ -1072,13 +1080,22 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         attention computation since they are outside the sliding window.
         Thus, get_num_skipped_tokens(7) == 4.
 
+        The trailing edge of the window is extended by ``extra_retained_tokens``
+        so that those extra trailing tokens' blocks are retained (but not
+        attended). This is needed for multi-module spec decoding which can
+        re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
+        of the sequence, and thus needs to delay freeing/caching of blocks.
+
         Args:
             num_computed_tokens: The number of tokens that have been computed.
 
         Returns:
             The number of tokens that will be skipped for attention computation.
         """
-        return max(0, num_computed_tokens - self.sliding_window + 1)
+        return max(
+            0,
+            num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
+        )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
@@ -1268,6 +1285,9 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx: dict[str, int] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
+            # Number of internal checkpoint blocks required by each request's
+            # current allocation.
+            self._num_checkpoint_blocks: dict[str, int] = {}
             # Requests that registered their own last-prompt-boundary partial
             # tail (producers). On the next step's CoW the boundary state moves
             # into a private cow_block; we record that block for connector
@@ -1447,6 +1467,23 @@ class MambaManager(SingleTypeKVCacheManager):
         """
         return 0
 
+    def _needs_internal_checkpoint(
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_computed_tokens: int,
+    ) -> bool:
+        assert isinstance(self.kv_cache_spec, MambaSpec)
+        checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
+        blocks = self.req_to_blocks[request_id]
+        return (
+            self.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+            and num_tokens % self.block_size != 0
+            and num_computed_tokens % self.block_size == 0
+            and checkpoint_idx >= 0
+            and (checkpoint_idx >= len(blocks) or blocks[checkpoint_idx].is_null)
+        )
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -1509,18 +1546,17 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             if has_partial_hit:
                 num_new_blocks = max(num_new_blocks, 0) + 1
+            checkpoint_block = int(
+                self._needs_internal_checkpoint(
+                    request_id, num_tokens, total_computed_tokens
+                )
+            )
+            if not apply_admission_cap:
+                self._num_checkpoint_blocks[request_id] = checkpoint_block
             if num_new_blocks > 0:
-                if request_id in self._allocated_block_reqs:
-                    # Old request. Needs at most 1 more blocks as we can reuse the
-                    # speculative blocks in previous step.
-                    num_new_blocks = 1 + int(has_partial_hit)
-                else:
-                    # First prefill. Allocate 1 block for running state, the
-                    # speculative blocks, and one extra block if a partial cache
-                    # hit must be copy-on-written before the new tokens run.
-                    num_new_blocks = (
-                        1 + self.num_speculative_blocks + int(has_partial_hit)
-                    )
+                num_new_blocks = 1 + int(has_partial_hit) + checkpoint_block
+                if request_id not in self._allocated_block_reqs:
+                    num_new_blocks += self.num_speculative_blocks
 
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
                 new_computed_blocks
@@ -1552,6 +1588,7 @@ class MambaManager(SingleTypeKVCacheManager):
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
+            checkpoint_block = self._num_checkpoint_blocks.get(request_id, 0)
             partial_hit = self._partial_hit_reqs.get(request_id)
             has_partial_hit = partial_hit is not None
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
@@ -1579,11 +1616,11 @@ class MambaManager(SingleTypeKVCacheManager):
                 )
                 # null blocks
                 if prev_block_len < num_skipped_blocks:
+                    # minus the internal checkpoint block
+                    # so we don't set null for that block
+                    null_end = num_skipped_blocks - checkpoint_block
                     req_blocks.extend(
-                        [
-                            self._null_block
-                            for _ in range(prev_block_len, num_skipped_blocks)
-                        ]
+                        [self._null_block for _ in range(prev_block_len, null_end)]
                     )
 
                 if blocks_allocated:
@@ -1599,12 +1636,10 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_new_blocks = num_required_blocks - len(req_blocks)
                 if has_partial_hit:
                     num_new_blocks = max(num_new_blocks, 0) + 1
-                if blocks_allocated:
-                    assert num_new_blocks <= 1 + int(has_partial_hit)
-                else:
-                    assert num_new_blocks <= self.num_speculative_blocks + 1 + int(
-                        has_partial_hit
-                    )
+                max_new_blocks = 1 + int(has_partial_hit) + checkpoint_block
+                if not blocks_allocated:
+                    max_new_blocks += self.num_speculative_blocks
+                assert num_new_blocks <= max_new_blocks
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
                 returned_blocks = req_blocks[prev_block_len:]
                 if partial_hit is not None:
@@ -1653,6 +1688,7 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
+            self._num_checkpoint_blocks.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
             # A hand-off whose request died in this same scheduling pass must
             # not reach the connector: its unpin hook (free) has already run.
@@ -1911,11 +1947,6 @@ def register_all_kvcache_specs(vllm_config):
     )
 
     # FullAttentionSpec subclasses — grouped with FullAttentionSpec
-    KVCacheSpecRegistry.register(
-        TQFullAttentionSpec,
-        FullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec,
-    )
     KVCacheSpecRegistry.register(
         MLAAttentionSpec, FullAttentionManager, uniform_type_base_spec=FullAttentionSpec
     )

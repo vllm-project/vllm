@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn.functional as F
@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
@@ -121,11 +122,14 @@ def _moe_forward(
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer._forward_impl(
-        hidden_states,
-        router_logits,
-        shared_experts_input,
-        input_ids,
+    return cast(
+        torch.Tensor,
+        layer._forward_impl(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+        ),
     )
 
 
@@ -155,11 +159,14 @@ def _moe_forward_shared(
     hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer._forward_impl(
-        hidden_states,
-        router_logits,
-        shared_experts_input,
-        input_ids,
+    return cast(
+        tuple[torch.Tensor, torch.Tensor],
+        layer._forward_impl(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+        ),
     )
 
 
@@ -207,8 +214,10 @@ direct_register_custom_op(
 
 
 def _unpack(
-    result: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-) -> tuple[torch.Tensor | None, torch.Tensor]:
+    result: torch.Tensor
+    | UnfinalizedMoEOutput
+    | tuple[torch.Tensor, torch.Tensor | UnfinalizedMoEOutput],
+) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
     if isinstance(result, tuple):
         return result
     else:
@@ -573,17 +582,12 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
-        shared_experts_overlapping: bool = False,
-    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
         Orchestrates shared expert execution (before/after), expert selection
         via the router, and the actual fused MoE computation. Returns
         (shared_expert_output, fused_expert_output).
-
-        `shared_experts_overlapping` should be True only if using multi-stream
-        overlap. Then the shared expert was already launched in a separate
-        stream, so the results only have to be awaited here.
         """
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
@@ -613,9 +617,10 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input=shared_experts_input,
             )
 
-        if shared_experts_overlapping:
-            assert self._shared_experts is not None
-            self._shared_experts.wait()
+        self._maybe_apply_shared_experts(
+            shared_experts_input,
+            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
+        )
 
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
@@ -636,6 +641,18 @@ class MoERunner(MoERunnerInterface):
             if ctx.dp_metadata
             else nullcontext()
         )
+
+    def _maybe_sync_shared_experts_stream(
+        self,
+        shared_experts_input: torch.Tensor | None,
+    ):
+        # If router/gate provided, then apply it here.
+        # (Note: This code runs only when "overlapped mode" is on to allow
+        #        parallel execution of shared experts with the RoutedExperts via
+        #        separate cuda stream)
+        if self._shared_experts is not None:
+            assert shared_experts_input is not None
+            self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
     def _maybe_add_zero_expert_output(
         self,
@@ -725,6 +742,7 @@ class MoERunner(MoERunnerInterface):
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
+        fused_output = cast(torch.Tensor, fused_output)
 
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
@@ -800,18 +818,25 @@ class MoERunner(MoERunnerInterface):
     def _maybe_combine(
         self,
         shared_output: torch.Tensor | None,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor | None, torch.Tensor]:
+        hidden_states: torch.Tensor | UnfinalizedMoEOutput,
+    ) -> (
+        torch.Tensor
+        | UnfinalizedMoEOutput
+        | tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]
+    ):
         if self.do_naive_dispatch_combine:
             hidden_states = get_ep_group().combine(
-                hidden_states, self.moe_config.is_sequence_parallel
+                cast(torch.Tensor, hidden_states),
+                self.moe_config.is_sequence_parallel,
             )
 
         if (
             self.moe_config.pcp_size > 1
             and not self.moe_config.moe_parallel_config.use_all2all_kernels
         ):
-            hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
+            hidden_states = get_pcp_group().reduce_scatter(
+                cast(torch.Tensor, hidden_states), dim=0
+            )
 
         if self.shared_experts is not None:
             assert shared_output is not None
@@ -825,7 +850,11 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> (
+        torch.Tensor
+        | UnfinalizedMoEOutput
+        | tuple[torch.Tensor, torch.Tensor | UnfinalizedMoEOutput]
+    ):
         """Entry point called by the custom op to run the MoE computation.
 
         Handles pre-dispatch setup (gate application, external shared expert
@@ -836,18 +865,14 @@ class MoERunner(MoERunnerInterface):
         - fused MoE kernel execution
         - shared expert computation.
 
-        Returns a single tensor of combined fused and shared output (if present).
+        Returns routed output, optionally paired with shared-expert output. A
+        fused consumer may request the routed output in deferred-finalize form.
         """
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
 
-        # If using multi-stream overlap for shared experts, we must launch it
-        # before routed expert dispatch.
-        shared_experts_overlapping = False
-        if self._shared_experts is not None:
-            shared_experts_overlapping = self._shared_experts.maybe_forward_async(
-                shared_experts_input
-            )
+        # Sync aux and main stream for shared expert multi-stream overlap.
+        self._maybe_sync_shared_experts_stream(shared_experts_input)
 
         # If the Runner holds the gate, apply it after the stream sync,
         # so it can run overlapped with the
@@ -873,7 +898,6 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
-                shared_experts_overlapping=shared_experts_overlapping,
             )
 
             return self._maybe_combine(
