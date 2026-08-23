@@ -893,32 +893,42 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         merge_size = self.info.get_hf_config().vision_config.spatial_merge_size
         fields: dict[str, MultiModalFieldConfig] = dict(
             **_create_qwen2vl_field_factory(merge_size)(hf_inputs),
-            second_per_grid_ts=MultiModalFieldConfig.batched("video"),
-            video_start_times=MultiModalFieldConfig.batched("video"),
+            second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            video_start_times=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             audio_features=MultiModalFieldConfig.batched("audio"),
-            audio_token_lens=MultiModalFieldConfig.batched("audio"),
+            audio_token_lens=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
         # video_audio fields: only present when video_audio content was processed
         if "video_audio_n_segs" in hf_inputs:
-            fields["video_audio_n_segs"] = MultiModalFieldConfig.batched("video")
+            fields["video_audio_n_segs"] = MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            )
         # video_audio_seg_lens: list of per-video 1D tensors, batched("video")
         if "video_audio_seg_lens" in hf_inputs:
-            fields["video_audio_seg_lens"] = MultiModalFieldConfig.batched("video")
+            fields["video_audio_seg_lens"] = MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            )
         if "va_audio_features" in hf_inputs:
             fields["va_audio_features"] = MultiModalFieldConfig.batched("va_audio")
         return fields
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo.
         Also remap 'audios' → 'audio' since MiMoOmniProcessor.__call__ uses
         the singular form.
         """
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
         # Remap audios → audio (MiMoOmniProcessor uses singular param name)
         if "audios" in mm_data:
             mm_data = {**mm_data, "audio": mm_data["audios"]}
@@ -996,7 +1006,13 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
             mm_data = {**mm_data, "videos": converted}
 
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            mm_data,
+            hf_processor_mm_kwargs,
+        )
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -1185,6 +1201,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             # mapping for original checkpoint
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
+            "audio_tokenizer.": None,
         }
     )
 
@@ -1486,6 +1503,6 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         audio_loaded: set[str] = set()
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_tokenizer."])
+        loader = AutoWeightsLoader(self)
         auto_loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return audio_loaded | auto_loaded
