@@ -209,14 +209,8 @@ def test_silu_block_quant_int32_offset_overflow(default_vllm_config):
     )
     torch.cuda.synchronize()
 
-    last = x[-1:].contiguous()
-    ref_out, ref_scales = ref_silu_and_mul_per_block_quant(
-        last, quant_dtype, group_size
+    expected_out, expected_scales = ops.silu_and_mul_per_block_quant(
+        x[-1:].contiguous(), group_size, quant_dtype, None, False
     )
-    torch.testing.assert_close(scales[-1:], ref_scales, rtol=1e-5, atol=1e-5)
-    torch.testing.assert_close(
-        out[-1:].float() * scales[-1:].repeat_interleave(group_size, dim=1),
-        ref_out.float() * ref_scales.repeat_interleave(group_size, dim=1),
-        rtol=5e-2,
-        atol=5e-2,
-    )
+    assert torch.equal(scales[-1:], expected_scales)
+    assert torch.equal(out[-1:], expected_out)
