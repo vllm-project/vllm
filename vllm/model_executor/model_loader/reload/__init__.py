@@ -23,6 +23,7 @@ __all__ = [
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
     "ExpertShardLoader",
+    "ReloadAwareWeightLoader",
     "ModelwiseReloader",
     "ModelwiseReloadSession",
     "record_modelwise_reload_metadata",
@@ -47,7 +48,12 @@ from .modelwise import (
     record_modelwise_reload_metadata,
 )
 from .runtime import RuntimeReloadSession
-from .sharding import RankShard, RankShardingManifest, get_rank_sharding_manifest
+from .sharding import (
+    RankShard,
+    RankShardingManifest,
+    ReloadAwareWeightLoader,
+    get_rank_sharding_manifest,
+)
 from .torchao_decorator import (
     set_torchao_reload_attrs,
     support_quantized_model_reload_from_hp_weights,

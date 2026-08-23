@@ -100,7 +100,7 @@ def _discover_manifest_expert_trackers(
         has_expert_loader = (
             any(
                 getattr(param, "weight_loader", None).__class__.__name__
-                == "ExpertShardLoader"
+                in {"ExpertShardLoader", "ReloadAwareWeightLoader"}
                 for param in module._parameters.values()
                 if param is not None
             )

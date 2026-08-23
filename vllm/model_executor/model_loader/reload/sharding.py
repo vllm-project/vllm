@@ -15,6 +15,7 @@ import torch
 from vllm.model_executor.load_receipt import LoadFragment, LoadReceipt
 
 from .source import get_current_source_name
+from .units import TRACKER_ATTR
 
 _FRAGMENT_ARGUMENTS = ("loaded_shard_id", "shard_id", "expert_id", "weight_name")
 _ACTIVE_MODEL: ContextVar[torch.nn.Module | None] = ContextVar(
@@ -64,7 +65,18 @@ _MANIFESTS: WeakKeyDictionary[torch.nn.Module, set[RankShard]] = WeakKeyDictiona
 _CAPTURED: WeakKeyDictionary[torch.nn.Module, bool] = WeakKeyDictionary()
 
 
-class _ShardingLoader:
+class ReloadAwareWeightLoader:
+    """Record successful parameter-loader calls during checkpoint loading.
+
+    ``install_sharding_recorders`` replaces each parameter's ``weight_loader``
+    with this wrapper. The wrapper keeps the original loader contract intact:
+    it forwards all arguments, then records the source-to-target mapping only
+    when the original loader consumed the tensor and a ``capture_rank_sharding``
+    context is active. The recorded fragment fields (for example
+    ``expert_id`` and ``shard_id``) describe the rank-local shard needed by a
+    later streaming reload.
+    """
+
     def __init__(self, model: torch.nn.Module, target_name: str, inner: Callable):
         self.model = weakref.ref(model)
         self.target_name = target_name
@@ -79,13 +91,44 @@ class _ShardingLoader:
             self.signature = None
 
     def __call__(self, *args, **kwargs):
+        """Invoke the original loader and record a successfully consumed shard.
+
+        The active source name is supplied by the checkpoint-loading source
+        context, while loader arguments provide optional expert/shard metadata.
+        Calls outside ``capture_rank_sharding`` are intentionally transparent;
+        this allows the wrapper to be installed for the whole load lifecycle.
+        """
         bound = None
         if self.signature is not None:
             bound = self.signature.bind(*args, **kwargs)
             bound.apply_defaults()
-        result = self.inner(*args, **kwargs)
         model = self.model()
         source_name = get_current_source_name()
+        if model is not None and self.signature is not None:
+            fragment = {
+                name: bound.arguments[name]
+                for name in _FRAGMENT_ARGUMENTS
+                if name in bound.arguments
+                and isinstance(bound.arguments[name], (str, int, float, bool))
+            }
+            if "expert_id" in fragment and "shard_id" in fragment:
+                module_name, _, parameter_name = self.target_name.rpartition(".")
+                module = dict(model.named_modules()).get(module_name)
+                tracker = getattr(module, TRACKER_ATTR, None) if module else None
+                if tracker is not None:
+                    expert_id = int(fragment["expert_id"])
+                    mapper = getattr(
+                        module, "_map_global_expert_id_to_local_expert_id", None
+                    )
+                    local_expert = mapper(expert_id) if mapper is not None else -1
+                    key = (parameter_name, local_expert, str(fragment["shard_id"]))
+                    parameter = bound.arguments.get("param")
+                    if parameter is not None:
+                        bound.arguments["param"] = tracker.target(key, parameter)
+                        args = bound.args
+                        kwargs = bound.kwargs
+
+        result = self.inner(*args, **kwargs)
         if model is None or source_name is None or _ACTIVE_MODEL.get() is not model:
             return result
         if isinstance(result, LoadReceipt):
@@ -112,6 +155,10 @@ class _ShardingLoader:
         return result
 
 
+# Compatibility for code importing the old private name.
+_ShardingLoader = ReloadAwareWeightLoader
+
+
 def install_sharding_recorders(model: torch.nn.Module) -> None:
     """Wrap direct parameter loaders without changing their call contract."""
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -123,12 +170,12 @@ def install_sharding_recorders(model: torch.nn.Module) -> None:
                 continue
             seen.add(id(param))
             loader = getattr(param, "weight_loader", None)
-            if isinstance(loader, _ShardingLoader):
+            if isinstance(loader, ReloadAwareWeightLoader):
                 continue
             if loader is None:
                 loader = default_weight_loader
             target_name = f"{module_name}.{name}" if module_name else name
-            param.weight_loader = _ShardingLoader(model, target_name, loader)
+            param.weight_loader = ReloadAwareWeightLoader(model, target_name, loader)
 
 
 def uninstall_sharding_recorders(model: torch.nn.Module) -> None:
@@ -138,7 +185,7 @@ def uninstall_sharding_recorders(model: torch.nn.Module) -> None:
             if param is None:
                 continue
             loader = getattr(param, "weight_loader", None)
-            if isinstance(loader, _ShardingLoader):
+            if isinstance(loader, ReloadAwareWeightLoader):
                 param.weight_loader = loader.original
 
 
