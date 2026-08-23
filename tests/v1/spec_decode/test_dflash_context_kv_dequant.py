@@ -141,5 +141,23 @@ def test_unreadable_packed_layout_is_rejected(scale, input_size):
         weight_scale=scale,
         input_size=input_size,
     )
-    with pytest.raises(ValueError, match="cannot read a packed weight"):
+    with pytest.raises(ValueError, match="cannot read a .* packed weight"):
+        dequant_kv_slice(attn, ACT_DTYPE)
+
+
+def test_nvfp4_style_uint8_packing_is_rejected():
+    """A uint8 container is the case the bit-width arithmetic cannot see.
+
+    NVFP4 exports pack two 4-bit values per uint8, so half as many columns as the
+    int32 assumption predicts. For real geometry (5120 input features, 2560
+    columns) that yields bits=16 with no remainder -- clean, and wrong. Only the
+    container dtype distinguishes it.
+    """
+    packed = torch.zeros(OUT_SIZE, HIDDEN // 2, dtype=torch.uint8)
+    attn = _attn(
+        weight_packed=packed,
+        weight_scale=torch.rand(OUT_SIZE, HIDDEN // 16, dtype=ACT_DTYPE),
+    )
+    assert divmod(32 * packed.shape[1], HIDDEN) == (16, 0)  # the trap, pinned
+    with pytest.raises(ValueError, match="torch.uint8 packed weight"):
         dequant_kv_slice(attn, ACT_DTYPE)
