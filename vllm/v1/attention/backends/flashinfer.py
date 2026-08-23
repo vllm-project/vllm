@@ -637,7 +637,7 @@ class FlashInferBackend(AttentionBackend):
 
 
 @dataclass
-class FIPrefillMMGroup:
+class FIPrefillGroup:
     """One partition of an mm-prefix prefill batch (Gemma 3 / Gemma 4
     multimodal: requests whose image-token span intersects the current
     query window need span-level bidirectional masking; plain requests
@@ -655,6 +655,22 @@ class FIPrefillMMGroup:
 
     num_tokens: int
 
+    is_mm: bool
+    """Whether this group's requests carry image spans needing bidirectional
+    masking. Part of the group key, not the plan."""
+
+    req_causal: bool
+    """The attention semantics this group's requests actually want. Part of
+    the group key, not the plan: a masked group encodes causality inside its
+    packed mask and is still planned causal=False."""
+
+    causal: bool
+    """The causal flag the wrapper was planned with. The impl asserts that
+    the plan is a valid ENCODING of (is_mm, req_causal) -- an unmasked group
+    must plan its own semantics directly, a masked group must plan
+    causal=False with the window disabled -- so a mis-planned wrapper is
+    caught rather than silently mis-attending."""
+
 
 @dataclass
 class FIPrefill:
@@ -662,7 +678,7 @@ class FIPrefill:
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
 
-    mm_groups: list[FIPrefillMMGroup] | None = None
+    prefill_groups: list[FIPrefillGroup] | None = None
     """mm-prefix wrapper grouping when image-token spans intersect the
     query window of at least one prefill request; None on the scalar
     causal fast path (no mm requests => byte-identical legacy path)."""
@@ -805,9 +821,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._noncausal_prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = (
             None  # Wrapper for non-causal prefill (DFlash)
         )
-        # Second prefill wrapper for mm-prefix custom-mask requests
-        # (Gemma 3 / Gemma 4 multimodal image spans); lazily created.
-        self._mm_prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
+        # Secondary prefill wrappers for batches whose requests do not all
+        # share the same attention semantics, keyed by (is_mm, causal):
+        #   (True,  True )  mm spans, causal base    -> packed custom mask
+        #   (True,  False)  mm spans, non-causal     -> packed custom mask
+        #   (False, False)  plain non-causal (DiffusionGemma denoise)
+        # The (False, True) plain-causal key reuses self._prefill_wrapper, so
+        # the legacy scalar-causal no-mm path is untouched. Lazily created.
+        self._grouped_prefill_wrappers: dict[
+            tuple[bool, bool], BatchPrefillWithPagedKVCacheWrapper
+        ] = {}
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
         if envs.VLLM_BATCH_INVARIANT:
@@ -1437,24 +1460,39 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
-    def _get_mm_prefill_wrapper(self) -> BatchPrefillWithPagedKVCacheWrapper:
-        # Second paged prefill wrapper for the mm-prefix custom-mask group.
-        # Built the same way as the plain prefill wrapper (the VO split and
-        # NVFP4 jit module are applied at plan()/run() time, not here);
-        # only reachable on the mm-prefix path, which rejects DCP.
-        if self._mm_prefill_wrapper is None:
+    def _get_group_prefill_wrapper(
+        self, is_mm: bool, causal: bool
+    ) -> BatchPrefillWithPagedKVCacheWrapper:
+        # Paged prefill wrapper for one (is_mm, causal) partition. Built the
+        # same way as the plain prefill wrapper (the VO split and NVFP4 jit
+        # module are applied at plan()/run() time, not here); only reachable
+        # on the grouped path, which rejects DCP, cascade and sinks.
+        #
+        # Note this deliberately does NOT go through
+        # _get_prefill_wrapper(causal=False): that builds a backend="auto"
+        # wrapper and rejects NVFP4 outright. Every grouped wrapper is
+        # nvfp4-aware, which is what lets a DiffusionGemma denoise group run
+        # the sm12x FA2 VO-split path.
+        if not is_mm and causal:
+            wrapper = self._get_prefill_wrapper()
+            assert isinstance(wrapper, BatchPrefillWithPagedKVCacheWrapper)
+            return wrapper
+        key = (is_mm, causal)
+        wrapper = self._grouped_prefill_wrappers.get(key)
+        if wrapper is None:
             if self.use_fa2_nvfp4_kv:
                 backend = "fa2"
             elif self.is_kvcache_nvfp4:
                 backend = "trtllm-gen"
             else:
                 backend = "auto"
-            self._mm_prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            wrapper = BatchPrefillWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
                 get_flashinfer_layout_string(self.kv_cache_layout),
                 backend=backend,
             )
-        return self._mm_prefill_wrapper
+            self._grouped_prefill_wrappers[key] = wrapper
+        return wrapper
 
     def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
         if use_cudagraph:
@@ -1611,6 +1649,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         qo_lens: list[int],
         kv_lens: list[int],
         span_lists: list[list[tuple[int, int]]],
+        causal_base: bool = True,
     ) -> torch.Tensor:
         """Boolean (qo_len x kv_len)-per-request mask, flattened row-major
         and concatenated in group order; FlashInfer's plan() bit-packs it
@@ -1627,9 +1666,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 kv_len - qo_len, kv_len, device=self.device, dtype=torch.int32
             )
             k_abs = torch.arange(kv_len, device=self.device, dtype=torch.int32)
-            mask = k_abs[None, :] <= q_abs[:, None]
-            if self.window_left >= 0:
-                mask &= (q_abs[:, None] - k_abs[None, :]) <= self.window_left
+            if causal_base:
+                mask = k_abs[None, :] <= q_abs[:, None]
+                if self.window_left >= 0:
+                    mask &= (q_abs[:, None] - k_abs[None, :]) <= self.window_left
+            else:
+                # Non-causal base (DiffusionGemma denoise): every KV position
+                # is visible, and a sliding window becomes symmetric around
+                # the query -- the same rule FlashAttention applies in
+                # _maybe_symmetrize_window() for tensor/False causal.
+                mask = torch.ones(
+                    (qo_len, kv_len), device=self.device, dtype=torch.bool
+                )
+                if self.window_left >= 0:
+                    mask &= (q_abs[:, None] - k_abs[None, :]).abs() <= self.window_left
             for start, end in spans:
                 q_in = (q_abs >= start) & (q_abs <= end)
                 k_in = (k_abs >= start) & (k_abs <= end)
@@ -1637,19 +1687,22 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             masks.append(mask.reshape(-1))
         return torch.cat(masks)
 
-    def _plan_prefill_mm_groups(
+    def _plan_prefill_groups(
         self,
-        prefill_mm_spans: list[list[tuple[int, int]]],
+        prefill_mm_spans: list[list[tuple[int, int]]] | None,
+        causal_prefill_cpu: torch.Tensor | None,
         qo_indptr_prefill_cpu: torch.Tensor,
         paged_kv_indptr_prefill_cpu: torch.Tensor,
         paged_kv_last_page_len_prefill_cpu: torch.Tensor,
         paged_kv_indices: torch.Tensor,
         seq_lens_prefill_cpu: torch.Tensor,
         o_dtype: torch.dtype,
-    ) -> list[FIPrefillMMGroup]:
-        """Plan one prefill wrapper per partition of an mm-prefix batch:
+    ) -> list[FIPrefillGroup]:
+        """Plan one prefill wrapper per ``(is_mm, causal)`` partition of a
+        prefill batch whose requests do not all share attention semantics:
         requests with image spans intersecting the query window run on a
-        custom-mask wrapper; the rest stay on the fast causal wrapper.
+        custom-mask wrapper, DiffusionGemma denoise requests run non-causal,
+        and plain causal requests stay on the fast primary wrapper.
 
         Each request's tokens and KV pages are contiguous ranges of the
         batch-level arrays, so a group is fully described by per-request
@@ -1659,18 +1712,40 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         device fix because the mask lives on GPU while the indptr arrays
         stay on CPU.
         """
-        is_mm = torch.tensor([bool(s) for s in prefill_mm_spans])
+        num_prefill_reqs = qo_indptr_prefill_cpu.numel() - 1
+        is_mm_list = (
+            [bool(sp) for sp in prefill_mm_spans]
+            if prefill_mm_spans is not None
+            else [False] * num_prefill_reqs
+        )
+        causal_list = (
+            [bool(c) for c in causal_prefill_cpu.tolist()]
+            if causal_prefill_cpu is not None
+            else [True] * num_prefill_reqs
+        )
         qo_lens_cpu = qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
         # paged_kv_indptr is NOT rebased to 0 (its offsets index the full
         # paged_kv_indices array), so deltas are taken before regrouping.
         kv_page_counts_cpu = (
             paged_kv_indptr_prefill_cpu[1:] - paged_kv_indptr_prefill_cpu[:-1]
         )
-        groups: list[FIPrefillMMGroup] = []
-        for group_mm in (False, True):
-            req_indices = (is_mm if group_mm else ~is_mm).nonzero(as_tuple=True)[0]
-            if req_indices.numel() == 0:
+        groups: list[FIPrefillGroup] = []
+        # Plain-causal first: groups[0].wrapper is then the primary wrapper in
+        # the common case, matching the ungrouped path's metadata.
+        for group_mm, group_causal in (
+            (False, True),
+            (False, False),
+            (True, True),
+            (True, False),
+        ):
+            members = [
+                i
+                for i in range(num_prefill_reqs)
+                if is_mm_list[i] == group_mm and causal_list[i] == group_causal
+            ]
+            if not members:
                 continue
+            req_indices = torch.tensor(members, dtype=torch.int64)
             group_qo_indptr = torch.zeros(req_indices.numel() + 1, dtype=torch.int32)
             torch.cumsum(qo_lens_cpu[req_indices], dim=0, out=group_qo_indptr[1:])
             group_kv_indptr = torch.zeros(req_indices.numel() + 1, dtype=torch.int32)
@@ -1700,23 +1775,51 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             group_kv_indices = torch.index_select(
                 paged_kv_indices, 0, page_gather_cpu.to(self.device)
             )
+            wrapper = self._get_group_prefill_wrapper(group_mm, group_causal)
             if group_mm:
-                wrapper = self._get_mm_prefill_wrapper()
+                assert prefill_mm_spans is not None
                 custom_mask = self._build_mm_prefix_custom_mask(
                     [int(qo_lens_cpu[i]) for i in req_indices.tolist()],
                     [int(seq_lens_prefill_cpu[i]) for i in req_indices.tolist()],
                     [prefill_mm_spans[i] for i in req_indices.tolist()],
+                    causal_base=group_causal,
                 )
-                # The mask carries causal/SW/span composition wholesale.
-                group_causal = False
-                group_window_left = -1
+                # The mask carries causal/SW/span composition wholesale, so
+                # the plan itself is non-causal with the window disabled.
+                plan_causal = False
+                plan_window_left = -1
+            elif not group_causal and self.window_left >= 0:
+                # FlashInfer's window_left is a LEFT bound only (kv_idx +
+                # qo_len + window_left >= kv_len + q_idx), so planning a
+                # non-causal group with it would leave future context
+                # unbounded. A non-causal request wants a SYMMETRIC window,
+                # the same rule FlashAttention applies in
+                # _maybe_symmetrize_window(); carry it in a spanless custom
+                # mask and disable the in-kernel window.
+                custom_mask = self._build_mm_prefix_custom_mask(
+                    [int(qo_lens_cpu[i]) for i in req_indices.tolist()],
+                    [int(seq_lens_prefill_cpu[i]) for i in req_indices.tolist()],
+                    [[] for _ in req_indices.tolist()],
+                    causal_base=False,
+                )
+                plan_causal = False
+                plan_window_left = -1
             else:
-                maybe_wrapper = self._get_prefill_wrapper()
-                assert isinstance(maybe_wrapper, BatchPrefillWithPagedKVCacheWrapper)
-                wrapper = maybe_wrapper
                 custom_mask = None
-                group_causal = True
-                group_window_left = self.window_left
+                plan_causal = group_causal
+                plan_window_left = self.window_left
+            if custom_mask is not None and getattr(wrapper, "_backend", None) == (
+                "trtllm-gen"
+            ):
+                # trtllm-gen's paged_run ignores the packed mask and treats
+                # mask_mode==CUSTOM as plain causal, which would silently run
+                # this group with the wrong attention. Only the FA2 reader
+                # honours custom masks.
+                raise NotImplementedError(
+                    "FlashInfer custom-mask prefill groups (mm-prefix or "
+                    "per-request causal) require the FA2 paged reader; the "
+                    "trtllm-gen backend ignores packed masks."
+                )
             wrapper.plan(
                 qo_indptr=group_qo_indptr,
                 paged_kv_indptr=group_kv_indptr,
@@ -1729,10 +1832,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # impl runs each group's wrapper once per V slice.
                 head_dim_vo=self.head_dim // self.vo_split,
                 page_size=self.page_size,
-                causal=group_causal,
+                causal=plan_causal,
                 custom_mask=custom_mask,
                 sm_scale=self.sm_scale,
-                window_left=group_window_left,
+                window_left=plan_window_left,
                 logits_soft_cap=self.logits_soft_cap,
                 q_data_type=self.q_data_type_prefill,
                 kv_data_type=self.kv_cache_dtype,
@@ -1743,10 +1846,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             wrapper.vllm_prefill_fixed_split_size = self.prefill_fixed_split_size
             wrapper.vllm_disable_split_kv = self.disable_split_kv
             groups.append(
-                FIPrefillMMGroup(
+                FIPrefillGroup(
                     wrapper=wrapper,
                     token_indices=token_indices_cpu.to(self.device),
                     num_tokens=int(token_indices_cpu.numel()),
+                    is_mm=group_mm,
+                    req_causal=group_causal,
+                    causal=plan_causal,
                 )
             )
         return groups
@@ -1760,7 +1866,53 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
-        route_decode = causal or self.use_dedicated_xqa
+        # DiffusionGemma hands over a per-request causal tensor (encoder /
+        # commit causal, denoise bidirectional, mixed within one batch). For
+        # dispatch the batch behaves like the non-causal whole-batch case --
+        # all FI-native prefill, no TRTLLM, no decode split -- and the
+        # per-request flags are consumed by the grouped planner instead.
+        # Collapsing to a scalar also keeps every boolean site below from
+        # doing a truth-test on a multi-element tensor.
+        per_request_causal = isinstance(causal, torch.Tensor)
+        causal_dispatch = False if per_request_causal else causal
+        if per_request_causal and self.is_kvcache_nvfp4 and not self.use_fa2_nvfp4_kv:
+            # The config gate only sees an explicitly-requested backend;
+            # FlashInfer can still be auto-selected. Refuse here, where the
+            # resolved backend is actually known: a non-causal group needs
+            # the FA2 paged reader, and trtllm-gen would ignore its mask.
+            raise NotImplementedError(
+                "Per-request causal flags (DiffusionGemma) with an NVFP4 KV "
+                "cache require the sm12x FlashInfer FA2 paged reader."
+            )
+        if (
+            per_request_causal
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            # The grouped prefill partition is data-dependent Python control
+            # flow, so a full graph would bake in one batch's partition and
+            # replay it against another. The DiffusionGemma config gate forces
+            # PIECEWISE, but it only sees an explicitly requested backend --
+            # FlashInfer can still be auto-selected, so enforce it here too,
+            # where the resolved mode is known.
+            raise NotImplementedError(
+                "Per-request causal flags (DiffusionGemma) are not supported "
+                "under full CUDA graphs; the grouped prefill partition is "
+                "data-dependent. Use --cudagraph-mode PIECEWISE."
+            )
+        if per_request_causal and (
+            self.use_dcp or self.has_sinks or self.reorder_batch_threshold > 1
+        ):
+            raise NotImplementedError(
+                "Per-request causal flags (DiffusionGemma) require the "
+                "FlashInfer-native prefill pathway: no DCP, attention sinks, "
+                "or speculative batch reordering."
+            )
+        # Mixed causality must not split decodes off the batch: a decode row
+        # planned scalar-causal would attend with the wrong mask. Force the
+        # whole batch through the grouped prefill path.
+        route_decode = (not per_request_causal) and (
+            causal_dispatch or self.use_dedicated_xqa
+        )
         if route_decode:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
                 split_decodes_and_prefills(
@@ -1787,12 +1939,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Prefill (FI native or TRTLLM)
         # - Decode (FI native, XQA, or trtllm-gen)
         use_cascade = common_prefix_len > 0
+        if per_request_causal and use_cascade:
+            raise NotImplementedError(
+                "Per-request causal flags (DiffusionGemma) are not supported "
+                "with cascade attention; the shared-prefix wrapper is planned "
+                "with a single causal flag for the whole batch."
+            )
         uses_spec_reorder = self.reorder_batch_threshold > 1
         # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
         prefill_force_trtllm = (
             True if page_size >= 128 else self.attention_config.use_trtllm_attention
         )
-        prefill_use_trtllm = causal and use_trtllm_attention(
+        prefill_use_trtllm = causal_dispatch and use_trtllm_attention(
             self.num_qo_heads,
             self.num_kv_heads,
             num_prefill_tokens,
@@ -1806,14 +1964,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_spec=uses_spec_reorder,
         )
         decode_with_flashinfer_trtllm_api = self.use_trtllm_decode_attention and (
-            causal or self.use_dedicated_xqa
+            causal_dispatch or self.use_dedicated_xqa
         )
 
-        if not causal and self.use_dcp:
+        if not causal_dispatch and self.use_dcp:
             raise NotImplementedError(
                 "FlashInfer non-causal prefill is not supported with DCP yet."
             )
-        if not causal and self.use_trtllm_decode_attention:
+        if not causal_dispatch and self.use_trtllm_decode_attention:
             logger.warning_once(
                 "Using FlashInfer for draft model non-causal attention; TRTLLM "
                 "can still be used for target model causal attention."
@@ -1829,7 +1987,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if prefill_mm_spans is not None:
                 prefill_use_trtllm = False
 
-        all_uses_trtllm = causal and (
+        all_uses_trtllm = causal_dispatch and (
             (num_prefills == 0 or prefill_use_trtllm)
             and (num_decodes == 0 or decode_with_flashinfer_trtllm_api)
         )
@@ -1869,7 +2027,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
-            causal=causal,
+            # The collapsed scalar: FlashInferMetadata.causal is typed bool,
+            # and the per-request tensor is consumed by the grouped planner.
+            causal=causal_dispatch,
             use_cascade=use_cascade,
             prefill=None,
             decode=None,
@@ -2041,7 +2201,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     max_seq_len=max_seq_len,
                 )
             else:
-                prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
+                # Placeholder only: overwritten by prefill_groups[0].wrapper
+                # when the grouped planner runs. Ask for the causal wrapper on
+                # the grouped path -- attn_metadata.causal is the collapsed
+                # scalar False there, and _get_prefill_wrapper(causal=False)
+                # rejects NVFP4 outright, which would kill the very config
+                # this stack exists to enable.
+                prefill_wrapper = self._get_prefill_wrapper(
+                    causal=True if per_request_causal else attn_metadata.causal
+                )
                 # Slicing CPU buffers that are only needed for FI native prefills
                 paged_kv_last_page_len_prefill_cpu = self.paged_kv_last_page_len.cpu[
                     prefill_start:num_reqs
@@ -2073,7 +2241,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 if PIN_MEMORY:
                     kv_lens_prefill_cpu = kv_lens_prefill_cpu.pin_memory()
-                mm_groups: list[FIPrefillMMGroup] | None = None
+                prefill_groups: list[FIPrefillGroup] | None = None
                 if self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     prefill_wrapper.plan(
@@ -2108,10 +2276,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         if (self.is_kvcache_nvfp4 and not self.use_fa2_nvfp4_kv)
                         else self.model_config.dtype
                     )
-                    if prefill_mm_spans is not None:
+                    if prefill_mm_spans is not None or per_request_causal:
                         assert seq_lens_cpu is not None
-                        mm_groups = self._plan_prefill_mm_groups(
+                        causal_prefill_cpu = None
+                        if per_request_causal:
+                            with gpu_sync_allowed():
+                                causal_prefill_cpu = causal[
+                                    prefill_start:num_reqs
+                                ].cpu()
+                        prefill_groups = self._plan_prefill_groups(
                             prefill_mm_spans,
+                            causal_prefill_cpu,
                             qo_indptr_prefill_cpu,
                             paged_kv_indptr_prefill_cpu,
                             paged_kv_last_page_len_prefill_cpu,
@@ -2119,9 +2294,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             seq_lens_cpu[prefill_start:num_reqs],
                             o_dtype,
                         )
-                        # The impl's forward dispatches on mm_groups; this
+                        # The impl's forward dispatches on prefill_groups; this
                         # field only feeds its isinstance/identity asserts.
-                        prefill_wrapper = mm_groups[0].wrapper
+                        prefill_wrapper = prefill_groups[0].wrapper
                     else:
                         prefill_wrapper.plan(
                             qo_indptr=qo_indptr_prefill_cpu,
@@ -2150,7 +2325,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             disable_split_kv=self.disable_split_kv,
                         )
                 attn_metadata.prefill = FIPrefill(
-                    wrapper=prefill_wrapper, mm_groups=mm_groups
+                    wrapper=prefill_wrapper, prefill_groups=prefill_groups
                 )
 
         ## DECODE PATHWAY
@@ -2184,7 +2359,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         q_len_per_req,
                         ragged_q_lens,
                         num_decodes,
-                        bool(causal),
+                        bool(causal_dispatch),
                     )
                 elif self.use_trtllm_gen_varlen_decode:
                     # CPU lens are only an upper bound, device qo_indptr is
@@ -2746,26 +2921,40 @@ class FlashInferImpl(AttentionImpl):
                     assert isinstance(
                         prefill_wrapper, BatchPrefillWithPagedKVCacheWrapper
                     )
-                    mm_groups = attn_metadata.prefill.mm_groups
+                    prefill_groups = attn_metadata.prefill.prefill_groups
                     assert prefill_wrapper._logits_soft_cap == (
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._sm_scale == self.scale
-                    if mm_groups is None:
+                    if prefill_groups is None:
                         assert prefill_wrapper._window_left == self.window_left
                         assert prefill_wrapper._causal == attn_metadata.causal
+                        # attn_metadata.causal is the collapsed scalar; the
+                        # per-request tensor only ever reaches the grouped path.
                     else:
                         # The mm group's wrapper carries the sliding window
                         # and causality inside its packed custom mask
                         # (planned non-causal, window_left=-1); the plain
                         # group keeps the scalar-causal plan.
-                        for group in mm_groups:
+                        for group in prefill_groups:
+                            assert group.wrapper._causal == group.causal
                             if group.wrapper._custom_mask_buf is None:
-                                assert group.wrapper._causal
-                                assert group.wrapper._window_left == self.window_left
+                                # Unmasked: the plan must carry the group's
+                                # own semantics directly, and an unmasked
+                                # non-causal group is only sound with the
+                                # in-kernel (left-only) window disabled.
+                                assert group.causal == group.req_causal
+                                assert not group.is_mm
+                                assert group.wrapper._window_left == (
+                                    self.window_left if group.req_causal else -1
+                                )
                             else:
-                                assert not group.wrapper._causal
+                                # Masked: causality and the window live in the
+                                # packed mask, so the plan is always
+                                # non-causal with the window disabled.
+                                assert not group.causal
                                 assert group.wrapper._window_left == -1
+                                assert group.is_mm or not group.req_causal
 
                     if self.is_kvcache_nvfp4:
                         kv_cache_for_fi = nvfp4_kv_data
@@ -2788,16 +2977,17 @@ class FlashInferImpl(AttentionImpl):
                     else:
                         out_prefill = output[num_decode_tokens:]
 
-                    if mm_groups is not None:
-                        # mm-prefix grouping: each partition runs its own
-                        # planned wrapper (plain causal vs packed custom
-                        # mask) over a gathered copy of its query rows,
-                        # then scatters back. Gather/scatter is by token
-                        # index because the groups may interleave within
-                        # the batch.
+                    if prefill_groups is not None:
+                        # Prefill grouping: each (is_mm, causal) partition
+                        # runs its own planned wrapper (plain causal, plain
+                        # non-causal, or packed custom mask) over a gathered
+                        # copy of its query rows, then scatters back.
+                        # Gather/scatter is by token index because the groups
+                        # may interleave within the batch.
                         if self.is_kvcache_nvfp4:
                             assert isinstance(kv_cache_for_fi, tuple)
-                        for group in mm_groups:
+                            assert isinstance(kv_cache_sf, tuple)
+                        for group in prefill_groups:
                             group_query = torch.index_select(
                                 prefill_query, 0, group.token_indices
                             )
