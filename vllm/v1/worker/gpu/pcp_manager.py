@@ -318,7 +318,20 @@ class PCPManager:
         )
         return segments_by_rank, per_rank_num_tokens
 
-    def partition_batch(self, input_batch: InputBatch) -> InputBatch:
+    @staticmethod
+    def _get_cudagraph_padded_num_tokens(
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+    ) -> int | None:
+        if cudagraph_mode == CUDAGraphMode.NONE:
+            return None
+        return input_batch.num_tokens_after_padding
+
+    def partition_batch(
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> InputBatch:
         assert self._req_states is not None
         assert self._input_buffers is not None
         req_states = self._req_states
@@ -329,10 +342,9 @@ class PCPManager:
         global_batch = input_batch
         self._global_batch = global_batch
 
-        num_tokens_after_padding = (
-            global_batch.num_tokens_after_padding
-            if global_batch.num_tokens_after_padding > global_batch.num_tokens
-            else None
+        num_tokens_after_padding = self._get_cudagraph_padded_num_tokens(
+            global_batch,
+            cudagraph_mode,
         )
 
         num_scheduled_tokens = global_batch.num_scheduled_tokens
@@ -635,10 +647,14 @@ class PCPManager:
 def maybe_partition_pcp_batch(
     manager: PCPManager | None,
     input_batch: InputBatch,
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ) -> InputBatch:
     if manager is None:
         return input_batch
-    return manager.partition_batch(input_batch)
+    return manager.partition_batch(
+        input_batch,
+        cudagraph_mode=cudagraph_mode,
+    )
 
 
 def maybe_get_pcp_dummy_slot_mappings(

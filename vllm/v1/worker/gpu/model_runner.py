@@ -1300,7 +1300,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else None
             ),
         )
-        return pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+        return pcp.maybe_partition_pcp_batch(
+            self.pcp_manager,
+            input_batch,
+            cudagraph_mode=batch_desc.cg_mode,
+        )
 
     def prepare_attn(
         self, input_batch: InputBatch

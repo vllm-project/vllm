@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
@@ -45,4 +48,33 @@ def test_replicated_decode_piecewise_graph_padding(monkeypatch):
     assert torch.equal(
         manager._gathered_kv_write_mask,
         torch.tensor([True, True, True, False, False, False, False, False]),
+    )
+
+
+def test_global_cudagraph_padding_is_disabled_for_none():
+    input_batch = SimpleNamespace(num_tokens=3, num_tokens_after_padding=4)
+
+    assert (
+        PCPManager._get_cudagraph_padded_num_tokens(input_batch, CUDAGraphMode.NONE)
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "cudagraph_mode",
+    [
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ],
+)
+def test_graph_modes_use_global_cudagraph_padding(cudagraph_mode):
+    input_batch = SimpleNamespace(num_tokens=3, num_tokens_after_padding=4)
+    assert PCPManager._get_cudagraph_padded_num_tokens(input_batch, cudagraph_mode) == 4
+
+    input_batch.num_tokens_after_padding = input_batch.num_tokens
+    assert (
+        PCPManager._get_cudagraph_padded_num_tokens(input_batch, cudagraph_mode)
+        == input_batch.num_tokens
     )
