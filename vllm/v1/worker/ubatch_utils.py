@@ -232,6 +232,27 @@ def _make_metadata_with_slice(
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
 
+    # mm-prefix ranges are keyed by request index: re-key them to this
+    # ubatch's local indices. A request split across ubatches keeps its
+    # ranges on both sides — the bounds are absolute prompt positions
+    # (fill_mm_prefix_query_ranges resolves them against each side's own
+    # context length), so they carry over unchanged.
+    mm_req_doc_ranges = None
+    if attn_metadata.mm_req_doc_ranges is not None:
+        mm_req_doc_ranges = {
+            req_idx - request_slice.start: ranges
+            for req_idx, ranges in attn_metadata.mm_req_doc_ranges.items()
+            if request_slice.start <= req_idx < request_slice.stop
+        }
+
+    # is_prefilling feeds short-extend reclassification
+    # (split_decodes_and_prefills with treat_short_extends_as_decodes=False);
+    # dropping it would either trip that path's assert or misclassify a
+    # chunked-prefill tail inside a bidirectional range as a decode.
+    is_prefilling = attn_metadata.is_prefilling
+    if is_prefilling is not None:
+        is_prefilling = is_prefilling[request_slice]
+
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
@@ -243,6 +264,8 @@ def _make_metadata_with_slice(
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+        is_prefilling=is_prefilling,
+        mm_req_doc_ranges=mm_req_doc_ranges,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=num_computed_tokens_cpu,
     )

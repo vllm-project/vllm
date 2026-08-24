@@ -131,6 +131,39 @@ def test_make_metadata_with_slice_mixed_batch(mixed_small_metadata):
     assert torch.equal(result.seq_lens, torch.tensor([40, 48]))
 
 
+def test_make_metadata_with_slice_preserves_mm_prefix_fields(
+    mixed_small_metadata,
+):
+    """DBO slicing must re-key mm ranges and carry is_prefilling.
+
+    mm_req_doc_ranges is keyed by request index, so each ubatch needs local
+    keys; the absolute [start, end] bounds carry over unchanged because
+    fill_mm_prefix_query_ranges resolves them against each side's own context
+    length. is_prefilling feeds short-extend reclassification
+    (treat_short_extends_as_decodes=False), which asserts on its presence.
+    """
+    num_reqs = mixed_small_metadata.num_reqs
+    mixed_small_metadata.mm_req_doc_ranges = {0: [(1, 4)], 2: [(8, 30)]}
+    is_prefilling = torch.zeros(num_reqs, dtype=torch.bool)
+    is_prefilling[1:] = True
+    mixed_small_metadata.is_prefilling = is_prefilling
+
+    ubatch_slice = UBatchSlice(slice(1, 3), slice(1, 7))
+    result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
+
+    # Request 0 falls outside the slice; request 2 becomes local index 1 with
+    # its absolute bounds untouched.
+    assert result.mm_req_doc_ranges == {1: [(8, 30)]}
+    assert torch.equal(result.is_prefilling, is_prefilling[1:3])
+
+    # Metadata without the fields keeps them absent.
+    mixed_small_metadata.mm_req_doc_ranges = None
+    mixed_small_metadata.is_prefilling = None
+    result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
+    assert result.mm_req_doc_ranges is None
+    assert result.is_prefilling is None
+
+
 def test_split_attn_metadata_decode_batch(large_decode_metadata):
     """Test splitting decode batch into two equal parts"""
     num_tokens = large_decode_metadata.num_reqs
