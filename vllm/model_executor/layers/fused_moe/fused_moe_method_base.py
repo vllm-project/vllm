@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
@@ -173,7 +174,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             shared_experts_input: Input for shared experts (if any)
 
         Returns:
-            Output tensor from routed experts
+            Output tensor from routed experts.
         """
         raise NotImplementedError
 
@@ -183,7 +184,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """
         Apply the MoE operation using monolithic kernels.
 
@@ -193,6 +194,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             router_logits: Router logits (routing done internally)
 
         Returns:
-            Output tensor from routed experts
+            Finalized routed states or a deferred-finalize output.
         """
         raise NotImplementedError

@@ -3,6 +3,7 @@
 
 from typing import TYPE_CHECKING
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -21,6 +22,32 @@ logger = init_logger(__name__)
 
 XPU_WNA16_SUPPORTED_BITS = {2, 4}
 
+# Backends selectable through VLLM_XPU_INC_WNA16_BACKEND that are served by the
+# oneDNN int4 GEMMs rather than by ARK. These only cover int4.
+XPU_ONEDNN_BACKENDS = ("w4a16", "w4a8")
+
+
+def _check_xpu_w4a8_supported(layer_config: "INCLayerConfig", prefix: str) -> None:
+    """Raise unless ``int4_gemm_w4a8`` can serve this layer.
+
+    The backend is requested explicitly, so an unusable configuration is an
+    error rather than something to silently fall back from.
+    """
+    import torch
+
+    if not hasattr(torch.ops._xpu_C, "int4_gemm_w4a8"):
+        raise NotImplementedError(
+            "VLLM_XPU_INC_WNA16_BACKEND=w4a8 requires the int4_gemm_w4a8 op, "
+            "which this build of vllm-xpu-kernels does not provide. "
+            f"Layer: {prefix}."
+        )
+    if layer_config.group_size <= 0 or layer_config.group_size % 32 != 0:
+        raise NotImplementedError(
+            "VLLM_XPU_INC_WNA16_BACKEND=w4a8 requires a group size that is a "
+            f"positive multiple of 32, got {layer_config.group_size}. "
+            f"Layer: {prefix}."
+        )
+
 
 class INCWna16Scheme(INCScheme):
     @staticmethod
@@ -38,12 +65,31 @@ class INCWna16Scheme(INCScheme):
         if current_platform.is_xpu():
             if layer_config.bits in XPU_WNA16_SUPPORTED_BITS and layer_config.sym:
                 from .inc_ark_ops import get_ark_state
+                from .inc_w4a8_linear import INCXPUW4A8LinearMethod
                 from .inc_wna16_linear import (
                     INCARKLinearMethod,
                     INCXPULinearMethod,
                 )
 
+                backend = envs.VLLM_XPU_INC_WNA16_BACKEND
+                if backend in XPU_ONEDNN_BACKENDS:
+                    if layer_config.bits != 4:
+                        raise NotImplementedError(
+                            f"VLLM_XPU_INC_WNA16_BACKEND={backend} only supports "
+                            f"int4, got int{layer_config.bits}. Layer: {prefix}."
+                        )
+                    if backend == "w4a8":
+                        _check_xpu_w4a8_supported(layer_config, prefix)
+                        return INCLinearMethod(INCXPUW4A8LinearMethod(layer_config))
+                    return INCLinearMethod(INCXPULinearMethod(layer_config))
+
                 is_ark_available, ark_error, _, _ = get_ark_state()
+                if backend == "ark" and not is_ark_available:
+                    raise NotImplementedError(
+                        "VLLM_XPU_INC_WNA16_BACKEND=ark was requested but "
+                        f"auto_round_kernel is unavailable: "
+                        f"{ark_error or 'unknown error'}. Layer: {prefix}."
+                    )
                 if is_ark_available:
                     return INCLinearMethod(INCARKLinearMethod(layer_config))
                 elif layer_config.bits == 2:
