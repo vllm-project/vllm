@@ -172,6 +172,7 @@ class SimpleCPUOffloadScheduler:
         self._reqs_to_store: dict[str, StoreRequestState] = {}
         self._store_event_to_reqs: dict[int, list[str]] = {}
         self._in_flight_store_gpu_blocks: set[int] = set()
+        self._pending_finished_stores: list[TransferMeta] = []
         self._abandoned_reqs_to_load: dict[str, LoadRequestState] = {}
 
         # Event counters
@@ -412,6 +413,11 @@ class SimpleCPUOffloadScheduler:
         # --- Stores ---
         store_event = -1
         store_gpu, store_cpu, store_req_ids = self.prepare_store_specs(scheduler_output)
+        for transfer in self._pending_finished_stores:
+            store_gpu.extend(transfer.gpu_block_ids)
+            store_cpu.extend(transfer.cpu_block_ids)
+        self._pending_finished_stores.clear()
+
         if store_gpu:
             store_event = self._store_event_counter
             self._store_event_counter += 1
@@ -734,14 +740,22 @@ class SimpleCPUOffloadScheduler:
 
         cpu_blocks = [self.cpu_block_pool.blocks[bid] for bid in cpu_block_ids]
 
-        for cpu_block in cpu_blocks:
+        assert self._gpu_block_pool is not None
+        for gpu_block_id, cpu_block in zip(gpu_block_ids, cpu_blocks):
             bhash = cpu_block.block_hash
             assert bhash is not None
-            self.cpu_block_pool.cached_block_hash_to_block.insert(bhash, cpu_block)
+            block_hashes = [bhash]
+            block_hashes.extend(
+                self._gpu_block_pool.cached_block_hashes_by_block.get(gpu_block_id, ())
+            )
+            cpu_block.reset_hash()
+            for block_hash in block_hashes:
+                self.cpu_block_pool._insert_block_hash(
+                    block_hash, cpu_block, num_tokens=None
+                )
 
         # Free CPU and GPU blocks' ref counts to turn them into prefix cache
         self.cpu_block_pool.free_blocks(cpu_blocks)
-        assert self._gpu_block_pool is not None
         self._gpu_block_pool.free_blocks(
             self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids
         )
@@ -758,9 +772,11 @@ class SimpleCPUOffloadScheduler:
         )
 
     def has_pending_stores(self) -> bool:
-        """Return True if there are in-flight store transfers."""
+        """Return True if a store transfer is queued or in flight."""
         return bool(
-            self._store_event_to_blocks or self._abandoned_store_event_to_blocks
+            self._pending_finished_stores
+            or self._store_event_to_blocks
+            or self._abandoned_store_event_to_blocks
         )
 
     def request_finished(
@@ -802,7 +818,48 @@ class SimpleCPUOffloadScheduler:
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        self._queue_finished_eager_store(request, block_ids)
         return self.request_finished(request, block_ids=[])
+
+    def _queue_finished_eager_store(
+        self, request: "Request", block_ids: tuple[list[int], ...]
+    ) -> None:
+        """Queue confirmed eager blocks omitted after a request enters decode."""
+        state = self._reqs_to_store.get(request.request_id)
+        gpu_pool = self._gpu_block_pool
+        if state is None or gpu_pool is None:
+            return
+        confirmed = request.num_computed_tokens - request.num_output_placeholders
+        aligned = confirmed // self.block_size * self.block_size
+        gpu_ids: list[int] = []
+        num_free = self.cpu_block_pool.get_num_free_blocks()
+        for g, group_ids in enumerate(block_ids):
+            if len(gpu_ids) >= num_free:
+                break
+            group_size = (
+                self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
+                * self.cp_world_size
+            )
+            ready = min(len(group_ids), aligned // group_size)
+            for gpu_id in group_ids[state.num_stored_blocks[g] : ready]:
+                if len(gpu_ids) >= num_free:
+                    break
+                gpu_block = gpu_pool.blocks[gpu_id]
+                if gpu_block.is_null or gpu_block.block_hash is None:
+                    continue
+                if gpu_id in self._in_flight_store_gpu_blocks:
+                    continue
+                gpu_ids.append(gpu_id)
+        if not gpu_ids:
+            return
+        cpu_blocks = self.cpu_block_pool.get_new_blocks(len(gpu_ids))
+        for cpu_block, gpu_id in zip(cpu_blocks, gpu_ids):
+            cpu_block._block_hash = gpu_pool.blocks[gpu_id].block_hash
+        self._pending_finished_stores.append(
+            TransferMeta(gpu_ids, [b.block_id for b in cpu_blocks])
+        )
+        self._in_flight_store_gpu_blocks.update(gpu_ids)
+        gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
 
     def _free_pending_cpu_hit(self, pending: tuple) -> None:
         """Release the temporary CPU block pin taken in get_num_new_matched_tokens()."""
@@ -877,6 +934,10 @@ class SimpleCPUOffloadScheduler:
         """
 
         self._abandoned_store_event_to_blocks.update(self._store_event_to_blocks)
+        for transfer in self._pending_finished_stores:
+            self._release_transfer_refs(transfer)
+        self._pending_finished_stores.clear()
+
         self._store_event_to_blocks.clear()
         self._in_flight_store_gpu_blocks.clear()
 
