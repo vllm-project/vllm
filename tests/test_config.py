@@ -2157,12 +2157,23 @@ def test_spec_model_declaration_fills_missing_settings(
     assert speculative_config == expected
 
 
-def test_spec_model_without_declaration_stays_unresolved():
+@pytest.mark.parametrize(
+    ("architecture", "method"),
+    [
+        ("DFlash2DraftModel", "dflash"),
+        ("Qwen3OmniDSparkModel", "dspark"),
+        ("EagleDeepSeekMTPModel", "eagle"),
+        ("PEagleDraftModel", "eagle3"),
+        ("DeepSeekMTPModel", "mtp"),
+        ("MedusaModel", "medusa"),
+    ],
+)
+def test_spec_model_architecture_infers_method(architecture, method):
     from vllm.transformers_utils.config import maybe_override_with_speculators
 
     configs = {
         "target/model": {"architectures": ["LlamaForCausalLM"]},
-        "draft/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {"architectures": [architecture]},
     }
 
     with patch(
@@ -2176,7 +2187,61 @@ def test_spec_model_without_declaration_stays_unresolved():
             vllm_speculative_config={"model": "draft/model"},
         )
 
-    assert speculative_config == {"model": "draft/model"}
+    assert speculative_config == {"model": "draft/model", "method": method}
+
+
+def test_explicit_method_takes_precedence_over_draft_architecture():
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {"architectures": ["Qwen3DSparkModel"]},
+    }
+    explicit = {"model": "draft/model", "method": "draft_model"}
+
+    with patch(
+        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        side_effect=lambda model, **kwargs: (configs[model], {}),
+    ):
+        _, _, speculative_config = maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config=explicit,
+        )
+
+    assert speculative_config == explicit
+
+
+@pytest.mark.parametrize(
+    "architectures",
+    [
+        ["LlamaForCausalLM"],
+        ["DFlashDraftModel", "Qwen3DSparkModel"],
+    ],
+)
+def test_unrecognized_or_ambiguous_architecture_requires_method(architectures):
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    draft_model = "/checkpoints/eagle3-dflash-dspark"
+    configs = {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        draft_model: {"architectures": architectures},
+    }
+
+    with (
+        patch(
+            "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+            side_effect=lambda model, **kwargs: (configs[model], {}),
+        ),
+        pytest.raises(ValueError, match="Could not infer.*Set `method`"),
+    ):
+        maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config={"model": draft_model},
+        )
 
 
 @pytest.fixture

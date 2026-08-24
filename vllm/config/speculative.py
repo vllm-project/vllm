@@ -387,9 +387,8 @@ class SpeculativeConfig:
     """The external draft model, eagle head, additional weights, or custom
     proposer path, if required by the selected method."""
     method: SpeculativeMethod | None = None
-    """The name of the speculative method to use. This must be provided in an
-    explicit speculative configuration. Known checkpoint formats may populate
-    it from a method declaration in their schema.
+    """The name of the speculative method to use. Known checkpoint formats or
+    recognized draft architectures may populate it when omitted.
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
