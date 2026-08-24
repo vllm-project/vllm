@@ -447,7 +447,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     )
 
                     _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
-                    if not has_cutedsl():
+                    if has_cutedsl():
+                        from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (  # noqa: E501
+                            _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
+                        )
+
+                        _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL.register_warmup()
+                    else:
                         _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL.register_warmup()
                 elif backend_name == "FLASHINFER_MLA_SPARSE_DSV4":
                     from vllm.models.deepseek_v4.common.ops.cache_utils import (

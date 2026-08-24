@@ -311,7 +311,33 @@ class DeepseekCompressor(nn.Module):
                 head_dim=self.head_dim,
                 compress_ratio=self.compress_ratio,
             )
-            if self.head_dim != 512:
+            if self.head_dim == 512:
+                from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
+                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL,
+                    _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL,
+                    _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
+                )
+
+                store_full_kv = vllm_config.cache_config.cache_dtype != "fp8_ds_mla"
+                if self.compress_ratio == 4:
+                    (
+                        _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL
+                        if store_full_kv
+                        else _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL
+                    ).register_warmup()
+                else:
+                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL.register_warmup()
+                    if store_full_kv:
+                        _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL.register_warmup()
+                    else:
+                        _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL.register_warmup(
+                            vllm_config,
+                            k_cache_prefix=self.k_cache_prefix,
+                            compress_ratio=self.compress_ratio,
+                        )
+            else:
                 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
                     _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
                 )
