@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
+
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
 from ..base.io_processor import PoolingIOProcessor
-from ..base.serving import PoolingServingBase
+from ..base.serving import PoolingBaseServing
 from ..factories import init_pooling_io_processors
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from ..utils import (
@@ -30,7 +33,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-class ServingPooling(PoolingServingBase):
+class ServingPooling(PoolingBaseServing):
     request_id_prefix = "pooling"
 
     def __init__(
@@ -52,13 +55,15 @@ class ServingPooling(PoolingServingBase):
         self.json_response_cls = get_json_response_cls()
 
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
-        assert isinstance(request, PoolingRequest)
+        request = cast(PoolingRequest, request)
         pooling_task = self._verify_pooling_task(request)
         return self.io_processors[pooling_task]
 
     def _verify_pooling_task(self, request: PoolingRequest) -> str:
         if getattr(request, "dimensions", None) is not None:
-            raise ValueError("dimensions is currently not supported")
+            raise VLLMValidationError(
+                "dimensions is currently not supported", parameter="dimensions"
+            )
 
         if request.task is None:
             request.task = self.pooling_task
@@ -72,22 +77,25 @@ class ServingPooling(PoolingServingBase):
         # plugin task uses io_processor.parse_request to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
             if pooling_task not in self.supported_tasks:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Unsupported task: {pooling_task!r} "
-                    f"Supported tasks: {self.supported_tasks}"
+                    f"Supported tasks: {self.supported_tasks}",
+                    parameter="task",
                 )
             else:
-                raise ValueError(
+                raise VLLMValidationError(
                     "Try switching the model's pooling_task "
-                    f"via --pooler-config.task {request.task}."
+                    f"via --pooler-config.task {request.task}.",
+                    parameter="task",
                 )
 
         if pooling_task == "plugin" and "plugin" not in self.io_processors:
-            raise ValueError(
+            raise VLLMValidationError(
                 "No IOProcessor plugin installed. Please refer "
                 "to the documentation and to the "
                 "'prithvi_geospatial_mae_io_processor' "
-                "offline inference example for more details."
+                "offline inference example for more details.",
+                parameter="task",
             )
 
         return pooling_task

@@ -15,13 +15,17 @@ Register a lazy module mapping.
 Example:
     ToolParserManager.register_lazy_module(
         name="kimi_k2",
-        module_path="vllm.tool_parsers.kimi_k2_parser",
+        module_path="vllm.tool_parsers.kimi_k2_tool_parser",
         class_name="KimiK2ToolParser",
     )
 """
 
 
 _TOOL_PARSERS_TO_REGISTER = {
+    "dots": (
+        "dots_tool_parser",
+        "DotsToolParser",
+    ),
     "deepseek_v3": (  # name
         "deepseekv3_tool_parser",  # filename
         "DeepSeekV3ToolParser",  # class_name
@@ -31,12 +35,12 @@ _TOOL_PARSERS_TO_REGISTER = {
         "DeepSeekV31ToolParser",
     ),
     "deepseek_v32": (
-        "deepseekv32_tool_parser",
-        "DeepSeekV32ToolParser",
+        "deepseekv32_engine_tool_parser",
+        "DeepSeekV32EngineToolParser",
     ),
     "deepseek_v4": (
-        "deepseekv4_tool_parser",
-        "DeepSeekV4ToolParser",
+        "deepseekv4_engine_tool_parser",
+        "DeepSeekV4EngineToolParser",
     ),
     "cohere_command3": (
         "cohere_command_tool_parser",
@@ -57,6 +61,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "glm47": (
         "glm47_moe_tool_parser",
         "Glm47MoeModelToolParser",
+    ),
+    "ling3": (
+        "ling3_tool_parser",
+        "Ling3ToolParser",
     ),
     "granite-20b-fc": (
         "granite_20b_fc_tool_parser",
@@ -102,6 +110,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "kimi_k2_tool_parser",
         "KimiK2ToolParser",
     ),
+    "kimi_k3": (
+        "kimi_k3_tool_parser",
+        "KimiK3ToolParser",
+    ),
     "llama3_json": (
         "llama_tool_parser",
         "Llama3JsonToolParser",
@@ -130,10 +142,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "minimax_m3_tool_parser",
         "MinimaxM3ToolParser",
     ),
-    "minimax": (
-        "minimax_tool_parser",
-        "MinimaxToolParser",
-    ),
     "minicpm5": (
         "minicpm5xml_tool_parser",
         "MiniCPM5XMLToolParser",
@@ -145,6 +153,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "olmo3": (
         "olmo3_tool_parser",
         "Olmo3PythonicToolParser",
+    ),
+    "muse_glimmer": (
+        "muse_glimmer_tool_parser",
+        "MuseGlimmerToolParser",
     ),
     "openai": (
         "gptoss_tool_parser",
@@ -167,8 +179,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Qwen3EngineToolParser",
     ),
     "seed_oss": (
-        "seed_oss_tool_parser",
-        "SeedOssToolParser",
+        "seed_oss_engine_tool_parser",
+        "SeedOssEngineToolParser",
     ),
     "step3": (
         "step3_tool_parser",
@@ -177,6 +189,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "step3p5": (
         "step3p5_tool_parser",
         "Step3p5ToolParser",
+    ),
+    "inkling": (
+        "inkling_tool_parser",
+        "InklingEngineToolParser",
     ),
     "xlam": (
         "xlam_tool_parser",

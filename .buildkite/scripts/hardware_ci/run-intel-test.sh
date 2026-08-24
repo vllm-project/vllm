@@ -18,7 +18,14 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 # Export Python path
+# Remove VLLM_DISABLE_COMPILE_CACHE=1 once intel/intel-xpu-backend-for-triton#7682 is fixed
 export PYTHONPATH=".."
+export VLLM_DISABLE_COMPILE_CACHE=1
+
+if [[ "${BUILDKITE_PARALLEL_JOB_COUNT:-1}" -gt 1 ]]; then
+  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--num-shards=${BUILDKITE_PARALLEL_JOB_COUNT} --shard-id=${BUILDKITE_PARALLEL_JOB:-0}"
+  export PYTEST_ADDOPTS
+fi
 
 ###############################################################################
 # Helper Functions
@@ -342,7 +349,7 @@ if [[ -z "${ZE_AFFINITY_MASK:-}" ]]; then
 fi
 
 export CMDS="${commands}"
-export HF_TOKEN ZE_AFFINITY_MASK
+export HF_TOKEN ZE_AFFINITY_MASK VLLM_DISABLE_COMPILE_CACHE
 
 {
   flock 9
@@ -360,12 +367,14 @@ export HF_TOKEN ZE_AFFINITY_MASK
     --ipc=host \
     --privileged \
     -v /dev/dri/by-path:/dev/dri/by-path \
-    -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
+    -v "/data/huggingface:/root/.cache/huggingface" \
     --entrypoint='' \
     -e HF_TOKEN \
     -e ZE_AFFINITY_MASK \
+    -e VLLM_DISABLE_COMPILE_CACHE \
     -e BUILDKITE_PARALLEL_JOB \
     -e BUILDKITE_PARALLEL_JOB_COUNT \
+    -e PYTEST_ADDOPTS \
     -e CMDS \
     --name "${container_name}" \
     "${IMAGE}" \

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
@@ -92,6 +95,7 @@ impl HfSpecialTokens {
 pub struct ModelConfig {
     model_type: Option<String>,
     vocab_size: Option<u32>,
+    eos_token_id: Option<OneOrManyTokenIds>,
     num_experts: Option<OneOrManyExpertCount>,
     moe_num_experts: Option<OneOrManyExpertCount>,
     n_routed_experts: Option<OneOrManyExpertCount>,
@@ -107,10 +111,30 @@ pub(super) struct GenerationConfig {
     pub eos_token_id: Option<OneOrManyTokenIds>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    #[serde(deserialize_with = "deserialize_top_k")]
     pub top_k: Option<u32>,
     pub min_p: Option<f32>,
     pub repetition_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
+}
+
+/// Deserialize vLLM-compatible `top_k` values from generation configs.
+///
+/// Both `-1` and `0` disable top-k sampling and become `None`; positive values
+/// are preserved.
+fn deserialize_top_k<'de, D>(deserializer: D) -> std::result::Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<i64>::deserialize(deserializer)? {
+        None | Some(-1) | Some(0) => Ok(None),
+        Some(value) if value > 0 => {
+            u32::try_from(value).map(Some).map_err(serde::de::Error::custom)
+        }
+        Some(value) => Err(serde::de::Error::custom(format!(
+            "top_k must be -1, 0, or a positive integer, got {value}"
+        ))),
+    }
 }
 
 /// HF generation configs allow either one EOS id or a list of EOS ids.
@@ -122,11 +146,15 @@ pub(super) enum OneOrManyTokenIds {
 }
 
 impl OneOrManyTokenIds {
-    pub(super) fn into_set(self) -> BTreeSet<u32> {
+    pub(super) fn as_slice(&self) -> &[u32] {
         match self {
-            Self::One(id) => BTreeSet::from([id]),
-            Self::Many(ids) => ids.into_iter().collect(),
+            Self::One(id) => std::slice::from_ref(id),
+            Self::Many(ids) => ids.as_slice(),
         }
+    }
+
+    pub(super) fn into_set(self) -> BTreeSet<u32> {
+        self.as_slice().iter().copied().collect()
     }
 }
 
@@ -189,6 +217,18 @@ impl ModelConfig {
             Err(Error::Tokenizer(
                 "the model config does not define `vocab_size`".to_string(),
             ))
+        }
+    }
+
+    /// Return the effective model-side EOS token ids, following the same
+    /// simplified text-config selection as `vocab_size`.
+    pub(super) fn eos_token_ids(&self) -> &[u32] {
+        if let Some(eos_token_id) = self.eos_token_id.as_ref() {
+            eos_token_id.as_slice()
+        } else if let Some(text_config) = self.text_config.as_deref() {
+            text_config.eos_token_ids()
+        } else {
+            &[]
         }
     }
 
@@ -274,7 +314,24 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::ModelConfig;
+    use super::{GenerationConfig, ModelConfig};
+
+    #[test]
+    fn generation_config_normalizes_vllm_top_k_values() {
+        for (input, expected) in [
+            (r#"{"top_k":null}"#, None),
+            (r#"{"top_k":-1}"#, None),
+            (r#"{"top_k":0}"#, None),
+            (r#"{"top_k":20}"#, Some(20)),
+        ] {
+            let config: GenerationConfig = serde_json::from_str(input).unwrap();
+            assert_eq!(config.top_k, expected, "input={input}");
+        }
+
+        for input in [r#"{"top_k":-2}"#, r#"{"top_k":4294967296}"#] {
+            assert!(serde_json::from_str::<GenerationConfig>(input).is_err());
+        }
+    }
 
     #[test]
     fn model_config_detects_moe_from_named_expert_fields() {
@@ -349,6 +406,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.vocab_size().unwrap(), 151936);
+    }
+
+    #[test]
+    fn model_config_reads_top_level_eos_token_ids() {
+        let single: ModelConfig = serde_json::from_str(r#"{"eos_token_id":151645}"#).unwrap();
+        let many: ModelConfig =
+            serde_json::from_str(r#"{"eos_token_id":[128001,128008,128009]}"#).unwrap();
+        let null: ModelConfig = serde_json::from_str(r#"{"eos_token_id":null}"#).unwrap();
+
+        assert_eq!(single.eos_token_ids(), &[151645]);
+        assert_eq!(many.eos_token_ids(), &[128001, 128008, 128009]);
+        assert!(null.eos_token_ids().is_empty());
+    }
+
+    #[test]
+    fn model_config_uses_nested_eos_token_ids_when_top_level_is_absent() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "text_config": {
+                    "eos_token_id": [59246, 59253, 59255]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.eos_token_ids(), &[59246, 59253, 59255]);
     }
 
     #[test]

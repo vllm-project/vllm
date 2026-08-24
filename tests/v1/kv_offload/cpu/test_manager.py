@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -8,17 +9,20 @@ import pytest
 
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
+    LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import (
+    CPULoadStoreSpec,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-
-STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 
 
 def make_req_context(
@@ -34,6 +38,7 @@ _EMPTY_REQ_CTX = make_req_context()
 def make_cpu_manager(
     num_blocks: int = 4,
     cache_policy: str = "lru",
+    cache_policy_module_path: str | None = None,
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
@@ -41,6 +46,7 @@ def make_cpu_manager(
     return CPUOffloadingManager(
         num_blocks=num_blocks,
         cache_policy=cache_policy,
+        cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
@@ -52,6 +58,17 @@ class ExpectedPrepareStoreOutput:
     keys_to_store: list[int]
     store_block_ids: list[int]
     evicted_keys: list[int]
+
+
+class _CountingOrderedDict(OrderedDict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.items_yielded = 0
+
+    def items(self):
+        for item in super().items():
+            self.items_yielded += 1
+            yield item
 
 
 def to_key(int_hash: int) -> OffloadKey:
@@ -89,6 +106,21 @@ def verify_load_output(
     assert np.array_equal(expected_array, prepare_load_output.block_ids)
 
 
+def check_split_usage_stats(
+    manager: CPUOffloadingManager, write: float, read: float, total: float
+):
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC] == pytest.approx(
+        write
+    )
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC] == pytest.approx(
+        read
+    )
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC] == pytest.approx(total)
+
+
 def verify_events(
     events: Iterable[OffloadingEvent],
     expected_stores: tuple[set[int], ...] = (),
@@ -97,7 +129,7 @@ def verify_events(
     stores: list[set[OffloadKey]] = []
     evictions: list[set[OffloadKey]] = []
     for event in events:
-        assert event.medium == CPULoadStoreSpec.medium()
+        assert event.medium == Medium.CPU
         if event.removed:
             evictions.append(set(event.keys))
         else:
@@ -110,6 +142,25 @@ def verify_events(
 
     assert tuple(evictions) == to_key_sets(expected_evictions)
     assert tuple(stores) == to_key_sets(expected_stores)
+
+
+def test_cpu_eviction_removed_precedes_stored():
+    """An eviction is announced before the store that reuses its capacity."""
+    manager = make_cpu_manager(num_blocks=2, enable_events=True)
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    list(manager.take_events())
+
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+
+    events = list(manager.take_events())
+    removed_idx = [i for i, event in enumerate(events) if event.removed]
+    stored_idx = [i for i, event in enumerate(events) if not event.removed]
+    assert removed_idx and stored_idx, events
+    assert max(removed_idx) < min(stored_idx)
+    assert all(event.medium == manager.medium for event in events)
 
 
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
@@ -159,7 +210,7 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     manager.complete_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
 
     # block 2 must still be present in the cache
-    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
+    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
 
 
 def test_filter_reused_manager_reports_stores_skipped_counter():
@@ -181,10 +232,137 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     )
     stats = manager.get_stats()
     assert stats is not None
-    assert stats.reduce()[STORES_SKIPPED] == 3
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 3
     stats = manager.get_stats()
     assert stats is not None
-    assert stats.reduce()[STORES_SKIPPED] == 0
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
+
+
+def test_cpu_manager_reports_cache_usage_gauge():
+    def check_usage_stats(manager: CPUOffloadingManager, value: float):
+        stats = manager.get_stats()
+        assert stats is not None
+        assert stats.reduce()[
+            CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC
+        ] == pytest.approx(value)
+
+    # Zero-capacity manager always reports 0.0
+    manager = make_cpu_manager(num_blocks=0)
+    check_usage_stats(manager, 0.0)
+
+    # Empty manager (4 blocks, none allocated): usage = 0.0
+    manager = make_cpu_manager(num_blocks=4)
+    check_usage_stats(manager, 0.0)
+
+    # After allocating 2 of 4 blocks: usage = 0.5
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_usage_stats(manager, 0.5)
+
+    # After filling all 4 blocks: usage = 1.0
+    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    check_usage_stats(manager, 1.0)
+
+    # After completing store, the blocks becomes evictable as it is not actively used
+    # and usage drops.
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_usage_stats(manager, 0.5)
+
+    # After completing store, the blocks becomes evictable as it is not actively used
+    # and usage drops.
+    manager.complete_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    check_usage_stats(manager, 0.0)
+
+
+def test_cpu_manager_reports_allocation_size_histogram():
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 2
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 3
+
+    # The cache-usage gauge is always reported, so get_stats() never returns
+    # None, but the histogram has nothing new once its samples are consumed.
+    second_stats = manager.get_stats()
+    assert second_stats is not None
+    assert f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count" not in (
+        second_stats.reduce()
+    )
+
+
+def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+
+    def fail_allocate_blocks(keys):
+        raise RuntimeError("allocation failed")
+
+    monkeypatch.setattr(manager, "_allocate_blocks", fail_allocate_blocks)
+
+    with pytest.raises(RuntimeError, match="allocation failed"):
+        manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 1
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 3
+
+
+def test_cpu_manager_reports_allocation_size_on_eviction_failure():
+    manager = make_cpu_manager(num_blocks=1, cache_policy="lru")
+
+    manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
+    manager.get_stats()
+
+    assert manager.prepare_store(to_keys([2]), _EMPTY_REQ_CTX) is None
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 1
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 1
+
+
+def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
+    manager = make_cpu_manager(num_blocks=4)
+
+    # Store path: pins write usage until complete_store.
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
+
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+
+    # Load path: pins read usage until complete_load.
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
+    manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.25, total=0.25)
+
+    manager.complete_load(to_keys([1]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+
+    # Concurrent write + read pins are both reflected and additive.
+    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    manager.prepare_load(to_keys([2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.25, total=0.75)
+
+
+def test_cpu_manager_clears_write_usage_after_failed_store():
+    manager = make_cpu_manager(num_blocks=4)
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
+
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
 
 
 def test_cpu_manager():
@@ -206,8 +384,8 @@ def test_cpu_manager():
     )
 
     # lookup [1, 2] -> write in-flight, not yet ready
-    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is None
-    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is None
+    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT_PENDING
+    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT_PENDING
 
     # no events so far
     assert list(cpu_manager.take_events()) == []
@@ -217,9 +395,9 @@ def test_cpu_manager():
     verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
     # lookup [1, 2]
-    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is True
-    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
-    assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is False
+    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is LookupResult.MISS
 
     # prepare store [2, 3, 4, 5] -> evicts [1]
     prepare_store_output = cpu_manager.prepare_store(
@@ -244,12 +422,12 @@ def test_cpu_manager():
     cpu_manager.complete_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
 
     # lookup (now that we have [2, 3, 4, 5])
-    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
-    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
-    assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is True
-    assert cpu_manager.lookup(to_key(4), _EMPTY_REQ_CTX) is True
-    assert cpu_manager.lookup(to_key(5), _EMPTY_REQ_CTX) is True
-    assert cpu_manager.lookup(to_key(0), _EMPTY_REQ_CTX) is False
+    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
+    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert cpu_manager.lookup(to_key(4), _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert cpu_manager.lookup(to_key(5), _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert cpu_manager.lookup(to_key(0), _EMPTY_REQ_CTX) is LookupResult.MISS
 
     # prepare load [2, 3]
     prepare_load_output = cpu_manager.prepare_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
@@ -258,25 +436,25 @@ def test_cpu_manager():
     # prepare store with no space ([2, 3] is being loaded)
     assert cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX) is None
 
-    # complete load [2, 3]
+    # complete load [2, 3]. Load changes the eviction list, making 2, 3 recent.
     cpu_manager.complete_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
 
-    # prepare store [6, 7, 8] -> evicts [2, 3, 4] (oldest)
+    # prepare store [6, 7, 8] -> evicts [4, 5, 2] (oldest)
     prepare_store_output = cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[6, 7, 8],
-            store_block_ids=[3, 2, 1],
-            evicted_keys=[2, 3, 4],
+            store_block_ids=[1, 0, 3],
+            evicted_keys=[4, 5, 2],
         ),
     )
 
     # complete store [6, 7, 8]
     cpu_manager.complete_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
 
-    # touch [5, 6, 7] (move to end of LRU order)
-    cpu_manager.touch(to_keys([5, 6, 7]), _EMPTY_REQ_CTX)
+    # touch [3, 6, 7] (move to end of LRU order)
+    cpu_manager.touch(to_keys([3, 6, 7]), _EMPTY_REQ_CTX)
 
     # prepare store [7, 9] -> evicts [8] (oldest following previous touch)
     prepare_store_output = cpu_manager.prepare_store(to_keys([9]), _EMPTY_REQ_CTX)
@@ -284,7 +462,7 @@ def test_cpu_manager():
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[9],
-            store_block_ids=[1],
+            store_block_ids=[3],
             evicted_keys=[8],
         ),
     )
@@ -293,13 +471,13 @@ def test_cpu_manager():
     cpu_manager.complete_store(to_keys([7, 9]), _EMPTY_REQ_CTX, success=False)
 
     # assert [7] is still stored, but [9] is not
-    assert cpu_manager.lookup(to_key(7), _EMPTY_REQ_CTX) is True
-    assert cpu_manager.lookup(to_key(9), _EMPTY_REQ_CTX) is False
+    assert cpu_manager.lookup(to_key(7), _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert cpu_manager.lookup(to_key(9), _EMPTY_REQ_CTX) is LookupResult.MISS
 
     verify_events(
         cpu_manager.take_events(),
         expected_stores=({3, 4, 5}, {6, 7, 8}),
-        expected_evictions=({2, 3, 4}, {8}),
+        expected_evictions=({4, 5, 2}, {8}),
     )
 
 
@@ -376,8 +554,8 @@ class TestARCPolicy:
         )
 
         # lookup [1, 2] -> write in-flight, not yet ready
-        assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is None
-        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is None
+        assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT_PENDING
+        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT_PENDING
 
         # no events so far
         assert list(cpu_manager.take_events()) == []
@@ -387,9 +565,9 @@ class TestARCPolicy:
         verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
         # lookup [1, 2]
-        assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is True
-        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
-        assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is False
+        assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
+        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
+        assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is LookupResult.MISS
 
         # blocks should be in T1 (recent)
         assert len(arc_policy.t1) == 2
@@ -520,6 +698,106 @@ class TestARCPolicy:
         # block 5 should be in T1
         assert to_keys([5])[0] in arc_policy.t1
 
+    def test_batch_eviction_scans_t1_and_t2_once(self):
+        """ARC batch eviction must preserve order without restarting scans."""
+        cpu_manager, arc_policy = self._make_manager(
+            num_blocks=256, enable_events=False
+        )
+        keys = to_keys(list(range(256)))
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+        cpu_manager.touch(keys[128:], _EMPTY_REQ_CTX)
+        arc_policy.target_t1_size = 64
+
+        protected = {keys[0], keys[2], keys[255]}
+        arc_policy.t1[keys[1]].ref_cnt = 1
+        arc_policy.t2[keys[254]].ref_cnt = 1
+
+        num_evictions = 124
+        num_t1_evictions = len(arc_policy.t1) - int(arc_policy.target_t1_size) + 1
+        num_t2_evictions = num_evictions - num_t1_evictions
+        t1_order = list(arc_policy.t1)
+        t2_order = list(arc_policy.t2)
+        expected_t1 = [
+            key
+            for key, block in arc_policy.t1.items()
+            if block.ref_cnt == 0 and key not in protected
+        ][:num_t1_evictions]
+        expected_t2 = [
+            key
+            for key, block in arc_policy.t2.items()
+            if block.ref_cnt == 0 and key not in protected
+        ][:num_t2_evictions]
+        expected_t1_scans = t1_order.index(expected_t1[-1]) + 1
+        expected_t2_scans = t2_order.index(expected_t2[-1]) + 1
+
+        counting_t1 = _CountingOrderedDict(arc_policy.t1)
+        counting_t2 = _CountingOrderedDict(arc_policy.t2)
+        arc_policy.t1 = counting_t1
+        arc_policy.t2 = counting_t2
+
+        evicted = arc_policy.evict(num_evictions, protected)
+
+        assert evicted is not None
+        assert [key for key, _ in evicted] == expected_t1 + expected_t2
+        assert counting_t1.items_yielded == expected_t1_scans
+        assert counting_t2.items_yielded == expected_t2_scans
+
+    def test_batch_eviction_falls_back_after_t1_iterator_exhausted(self):
+        """An exhausted T1 scan must keep falling back to T2."""
+        cpu_manager, arc_policy = self._make_manager(num_blocks=8, enable_events=False)
+        keys = to_keys(list(range(8)))
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+        cpu_manager.touch(keys[6:], _EMPTY_REQ_CTX)
+        arc_policy.target_t1_size = 4
+
+        t1_order = list(arc_policy.t1)
+        t2_order = list(arc_policy.t2)
+        protected = set(t1_order[1:3])
+        for key in t1_order[3:]:
+            arc_policy.t1[key].ref_cnt = 1
+
+        # Selecting the sole eligible T1 entry leaves virtual_t1_size above
+        # the target, so each remaining selection must retry T1 then use T2.
+        eligible_t1 = [
+            key
+            for key, block in arc_policy.t1.items()
+            if block.ref_cnt == 0 and key not in protected
+        ]
+        assert eligible_t1 == t1_order[:1]
+        assert len(t1_order) - 1 >= int(arc_policy.target_t1_size)
+
+        counting_t1 = _CountingOrderedDict(arc_policy.t1)
+        counting_t2 = _CountingOrderedDict(arc_policy.t2)
+        arc_policy.t1 = counting_t1
+        arc_policy.t2 = counting_t2
+
+        evicted = arc_policy.evict(3, protected)
+
+        assert evicted is not None
+        assert [key for key, _ in evicted] == [t1_order[0], *t2_order]
+        assert counting_t1.items_yielded == len(t1_order)
+        assert counting_t2.items_yielded == len(t2_order)
+
+    def test_batch_eviction_failure_is_atomic(self):
+        """Finding only some candidates must not partially evict the cache."""
+        cpu_manager, arc_policy = self._make_manager(num_blocks=4, enable_events=False)
+        keys = to_keys(list(range(4)))
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+        before_t1 = list(arc_policy.t1.items())
+        protected = set(keys[1:])
+
+        assert arc_policy.evict(2, protected) is None
+        assert list(arc_policy.t1.items()) == before_t1
+        assert not arc_policy.t2
+        assert not arc_policy.b1
+        assert not arc_policy.b2
+
     def test_ghost_list_bounds(self):
         """
         Tests that ghost lists (B1, B2) don't grow unbounded.
@@ -593,7 +871,7 @@ class TestARCPolicy:
         cpu_manager.complete_store(to_keys([5]), _EMPTY_REQ_CTX, success=False)
 
         # block 5 should not be in cache
-        assert cpu_manager.lookup(to_key(5), _EMPTY_REQ_CTX) is False
+        assert cpu_manager.lookup(to_key(5), _EMPTY_REQ_CTX) is LookupResult.MISS
         # block 5 should not be in T1 or T2
         assert to_keys([5])[0] not in arc_policy.t1
         assert to_keys([5])[0] not in arc_policy.t2
@@ -634,8 +912,8 @@ class TestARCPolicy:
         cpu_manager.complete_store(to_keys([6]), _EMPTY_REQ_CTX)
 
         # verify blocks 2, 3 (in T2) are still present
-        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
-        assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is True
+        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
+        assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is LookupResult.HIT
 
         # verify events
         events = list(cpu_manager.take_events())
@@ -655,8 +933,8 @@ def test_filter_reused_manager():
     )
 
     # Lookup [1, 2] -> 1st time, added to tracker but not eligible for store yet
-    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
-    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is False
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
+    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
 
     # prepare store [1, 2] -> should be filtered
     prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -664,7 +942,7 @@ def test_filter_reused_manager():
     assert prepare_store_output.keys_to_store == []
 
     # Lookup [1] -> 2nd time, eligible now
-    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
 
     # prepare store [1, 2] -> [1] should be eligible, [2] should be filtered
     prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -673,13 +951,13 @@ def test_filter_reused_manager():
 
     # Lookup [3, 4] -> 1st time
     # (evicts [2] from tracker since max_size is 3 and tracker has [1])
-    assert manager.lookup(to_key(3), _EMPTY_REQ_CTX) is False
-    assert manager.lookup(to_key(4), _EMPTY_REQ_CTX) is False
+    assert manager.lookup(to_key(3), _EMPTY_REQ_CTX) is LookupResult.MISS
+    assert manager.lookup(to_key(4), _EMPTY_REQ_CTX) is LookupResult.MISS
     # Verify [2] was evicted from the tracker (tracker now has: [1], [3], [4])
     assert to_keys([2])[0] not in manager.counts
 
     # Lookup [2] again -> (this adds [2] back to the tracker as 1st time)
-    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is False
+    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
     # Verify [2] was re-added with count=1 (not eligible yet)
     assert manager.counts.get(to_keys([2])[0]) == 1
 
@@ -782,3 +1060,26 @@ def test_evictable_cache_block_count():
     manager.complete_store(to_keys([14, 15]), _EMPTY_REQ_CTX)
     # cache state [10, 11, 14, 15] <- all blocks idle
     assert manager._num_evictable_cache_blocks == 4
+
+
+def test_touch_forwards_req_context_to_policy(monkeypatch):
+    """Regression: CPUOffloadingManager.touch forwards ReqContext to policy."""
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    received = []
+
+    def spy_touch(keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
+        received.append((list(keys), req_context))
+
+    monkeypatch.setattr(manager._policy, "touch", spy_touch)
+
+    keys = to_keys([1, 2])
+    ctx = make_req_context(
+        req_id="test-req",
+        kv_transfer_params={"test_param": "test_value"},
+    )
+
+    manager.touch(keys, ctx)
+
+    assert len(received) == 1
+    assert received[0][0] == keys
+    assert received[0][1] is ctx

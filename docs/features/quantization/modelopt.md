@@ -19,6 +19,25 @@ following `quantization.quant_algo` values:
 - `NVFP4`: ModelOpt NVFP4 checkpoints (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
 
+!!! note
+    For NVFP4 checkpoints, vLLM selects a GEMM kernel automatically at load
+    time from the backends available on the current platform (CUTLASS,
+    FlashInfer, Marlin, and others). On GPUs without a supported native FP4
+    GEMM kernel, vLLM falls back to weight-only (W4A16) execution via Marlin
+    and logs a warning; this may reduce throughput for compute-heavy
+    workloads. Use `--linear-backend` to override the automatic selection
+    (this replaces the deprecated `VLLM_NVFP4_GEMM_BACKEND` environment
+    variable). Values relevant to NVFP4 include `cutlass`,
+    `flashinfer_cutlass`, `flashinfer_trtllm`, `flashinfer_cudnn`, and
+    `marlin`; the full list is documented under `KernelConfig` on the
+    [Engine Arguments](../../configuration/engine_args.md) page and shown by
+    `vllm serve --help=KernelConfig`.
+
+!!! note
+    For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,
+    use `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
+    GEMM backend.
+
 ## Quantizing HuggingFace Models with PTQ
 
 You can quantize HuggingFace models using the example scripts provided in the Model Optimizer repository. The primary script for LLM PTQ is typically found within the `examples/llm_ptq` directory.

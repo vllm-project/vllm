@@ -44,14 +44,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
+    get_draft_quant_config,
     maybe_prefix,
 )
 
@@ -183,14 +184,14 @@ class Gemma4MTPAttention(nn.Module):
             hidden_size,
             self.total_num_heads * self.head_dim,
             bias=config.attention_bias,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.q_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=config.attention_bias,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -271,21 +272,9 @@ class Gemma4MTPDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         layer_idx = extract_layer_index(prefix)
-        layer_type = config.layer_types[layer_idx]
-        is_full_attention = layer_type == "full_attention"
-        head_dim = (
-            getattr(config, "global_head_dim", config.head_dim)
-            if is_full_attention
-            else config.head_dim
-        )
-
-        use_k_eq_v = is_full_attention and getattr(config, "attention_k_eq_v", False)
-        if use_k_eq_v:
-            num_kv_heads = getattr(
-                config, "num_global_key_value_heads", config.num_key_value_heads
-            )
-        else:
-            num_kv_heads = config.num_key_value_heads
+        layer_config = gemma4_layer_config(config, layer_idx)
+        head_dim = layer_config.head_dim
+        num_kv_heads = layer_config.num_key_value_heads
 
         self.self_attn = Gemma4MTPAttention(
             config=config,
@@ -305,7 +294,7 @@ class Gemma4MTPDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             intermediate_size=text_config.intermediate_size,
             hidden_activation=text_config.hidden_activation,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -358,7 +347,9 @@ class Gemma4MultiTokenPredictor(nn.Module):
 
         config = vllm_config.speculative_config.draft_model_config.hf_config
         text_config = _get_text_config(config)
+        quant_config = get_draft_quant_config(vllm_config)
         self.config = text_config
+        self.quant_config = quant_config
 
         self.hidden_size = text_config.hidden_size
         self.backbone_hidden_size = getattr(
@@ -370,6 +361,8 @@ class Gemma4MultiTokenPredictor(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             self.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         self.pre_projection = ColumnParallelLinear(
@@ -377,6 +370,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
             self.hidden_size,
             bias=False,
             gather_output=True,
+            quant_config=quant_config,
             prefix=f"{prefix}.pre_projection",
         )
 
@@ -385,6 +379,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
             self.backbone_hidden_size,
             bias=False,
             input_is_parallel=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.post_projection",
         )
 
@@ -392,7 +387,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
             Gemma4MTPDecoderLayer(
                 text_config,
                 cache_config=vllm_config.cache_config,
-                quant_config=vllm_config.quant_config,
+                quant_config=quant_config,
                 prefix=f"{prefix}.layers.{idx}",
             )
             for idx in range(self.num_mtp_layers)
@@ -411,44 +406,6 @@ class Gemma4MultiTokenPredictor(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids) * self.normalizer
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        params_dict.update(dict(self.named_buffers()))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
 
     def forward(
         self,
@@ -502,12 +459,17 @@ class Gemma4MTP(nn.Module):
             "pre_projection.": "model.pre_projection.",
             "post_projection.": "model.post_projection.",
         },
+        orig_to_new_stacked={
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.speculative_config.draft_model_config.hf_config
         text_config = _get_text_config(config)
+        self.quant_config = get_draft_quant_config(vllm_config)
         self.config = config
         self._stable_full_lm_head_weight: torch.Tensor | None = None
 
@@ -523,10 +485,11 @@ class Gemma4MTP(nn.Module):
         self.lm_head = ParallelLMHead(
             text_config.vocab_size,
             text_config.hidden_size,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if getattr(config, "tie_word_embeddings", True):
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(
             text_config.vocab_size,

@@ -145,7 +145,7 @@ def _generate_fake_sampling_metadata(
         vllm_config.scheduler_config.max_num_seqs,
         num_spec,
         device,
-        PIN_MEMORY_AVAILABLE,
+        is_pin_memory=False,
     )
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size,), 0.0),
@@ -880,7 +880,7 @@ def test_maybe_create_thinking_budget_holder_without_reasoning():
             cfg.scheduler_config.max_num_seqs,
             0,
             torch.device("cpu"),
-            False,
+            is_pin_memory=False,
         )
         is None
     )
@@ -1228,3 +1228,560 @@ def test_thinking_budget_invalid_budget_rejected(invalid_budget):
 
     with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
         SamplingParams(thinking_token_budget=invalid_budget)
+
+
+def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index():
+    """Test thinking budget enforced for a long thinking run,
+    then a natural end marker."""
+    h = ThinkingBudgetStateHolder(
+        MockReasoningConfig(), 8, 0, torch.device("cpu"), False
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, SamplingParams(thinking_token_budget=10_000), None, [])],
+            moved=(),
+        )
+    )
+    start = MockReasoningConfig.reasoning_start_token_ids
+    end = MockReasoningConfig.reasoning_end_token_ids
+
+    out: list[int] = list(start)
+    h.update_state([out], None, None)
+    for tok in range(500):  # 500 filler thinking tokens, one decode step each
+        out.append(tok)
+        h.update_state([out], None, None)
+        assert h._state[0]["end_thinking"] == -1  # not present yet
+    out.extend(end)
+    h.update_state([out], None, None)
+
+    # After a natural exit, start_thinking and end_thinking are reset to -1
+    # (state machine prepared for next block). Verify the exit happened at the
+    # correct position by checking scan_offset (set to len(output) after exit).
+    assert not h._state[0]["in_think"], "Should have exited think mode after </think>"
+    assert h._state[0]["start_thinking"] == -1, (
+        "start_thinking should be reset after natural exit"
+    )
+    assert h._state[0]["scan_offset"] == len(out), (
+        f"scan_offset should point past the end marker; "
+        f"expected {len(out)}, got {h._state[0]['scan_offset']}"
+    )
+
+
+# --- Thinking budget re-entry tests (issue #43708) ---
+# Regression tests: after budget forces end-of-thinking token sequence,
+# the state machine must detect and enforce budget on subsequent blocks.
+
+
+class TestThinkingBudgetReentry:
+    THINK_START = 100
+    THINK_END_SINGLE = [200]
+    THINK_END_MULTI = [200, 201, 202]
+    BUDGET = 5
+    CONTENT_TOKEN = 50
+    THINK_TOKEN = 60
+
+    @staticmethod
+    def _make_holder(end_token_ids: list[int]) -> ThinkingBudgetStateHolder:
+        class FakeReasoningConfig:
+            reasoning_start_token_ids = [TestThinkingBudgetReentry.THINK_START]
+            reasoning_end_token_ids: list[int] = []
+            enabled = True
+
+        cfg = FakeReasoningConfig()
+        cfg.reasoning_end_token_ids = end_token_ids
+        return ThinkingBudgetStateHolder(
+            reasoning_config=cfg,
+            max_num_seqs=8,
+            num_spec_tokens=0,
+            device=torch.device("cpu"),
+            is_pin_memory=False,
+        )
+
+    @staticmethod
+    def _sync_batch(holder: ThinkingBudgetStateHolder, budget: int) -> None:
+        holder.sync_batch(
+            BatchUpdate(
+                batch_size=1,
+                removed=(),
+                added=[(0, SamplingParams(thinking_token_budget=budget), None, [])],
+                moved=(),
+            )
+        )
+
+    @staticmethod
+    def _step(holder: ThinkingBudgetStateHolder, output_tok_ids: list[int]) -> None:
+        holder.update_state(
+            output_token_ids=[output_tok_ids],
+            spec_token_ids=None,
+            repeat_indices=None,
+        )
+
+    def _exhaust_budget(self, holder: ThinkingBudgetStateHolder) -> list[int]:
+        output = [self.THINK_START]
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"]
+        return output
+
+    def _accept_end_tokens(
+        self,
+        holder: ThinkingBudgetStateHolder,
+        output: list[int],
+        end_token_ids: list[int],
+    ) -> None:
+        for tok in end_token_ids:
+            output.append(tok)
+            self._step(holder, list(output))
+
+    def test_single_token_end_reentry(self):
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = self._exhaust_budget(holder)
+        self._accept_end_tokens(holder, output, self.THINK_END_SINGLE)
+
+        for _ in range(3):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Second thinking block must also be budget-enforced"
+        )
+
+    def test_multi_token_end_reentry(self):
+        holder = self._make_holder(self.THINK_END_MULTI)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = self._exhaust_budget(holder)
+        self._accept_end_tokens(holder, output, self.THINK_END_MULTI)
+
+        assert not holder._state[0]["in_end"]
+
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Immediate re-entry after multi-token end must be enforced"
+        )
+
+    def test_single_block_not_broken(self):
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = self._exhaust_budget(holder)
+        self._accept_end_tokens(holder, output, self.THINK_END_SINGLE)
+
+        for _ in range(20):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        assert not holder._state[0]["in_end"]
+        assert not holder._state[0]["in_think"]
+
+
+# --- Thinking budget natural-end re-entry tests (issue #45974) ---
+# After a model naturally emits </think> before exhausting its budget,
+# subsequent <think> blocks must still be tracked and budget-enforced.
+
+
+class TestThinkingBudgetNaturalEndReentry:
+    """Tests for thinking budget enforcement across multiple think blocks.
+
+    Covers both natural-end re-entry (issue #45974) and forced-end re-entry
+    (issue #43708).
+    """
+
+    THINK_START = 100
+    THINK_END_SINGLE = [200]
+    THINK_END_MULTI = [200, 201, 202]
+    BUDGET = 10
+    CONTENT_TOKEN = 50
+    THINK_TOKEN = 60
+
+    @staticmethod
+    def _make_holder(end_token_ids):
+        from dataclasses import dataclass
+
+        from vllm.v1.sample.thinking_budget_state import (
+            ThinkingBudgetStateHolder,
+        )
+
+        @dataclass
+        class FakeReasoningConfig:
+            reasoning_start_token_ids: list[int]
+            reasoning_end_token_ids: list[int]
+            enabled: bool = True
+
+        cfg = FakeReasoningConfig(
+            reasoning_start_token_ids=[TestThinkingBudgetNaturalEndReentry.THINK_START],
+            reasoning_end_token_ids=end_token_ids,
+        )
+        return ThinkingBudgetStateHolder(
+            reasoning_config=cfg,
+            max_num_seqs=8,
+            num_spec_tokens=0,
+            device=torch.device("cpu"),
+            is_pin_memory=False,
+        )
+
+    @staticmethod
+    def _sync_batch(holder, budget):
+        from unittest.mock import MagicMock
+
+        params = MagicMock()
+        params.thinking_token_budget = budget
+        batch_update = MagicMock(
+            removed=[],
+            added=[(0, params, None, [])],
+            moved=[],
+        )
+        holder.sync_batch(batch_update)
+
+    @staticmethod
+    def _step(holder, output_tok_ids):
+        holder.update_state(
+            output_token_ids=[output_tok_ids],
+            spec_token_ids=None,
+            repeat_indices=None,
+        )
+
+    # --- Natural-end re-entry tests ---
+
+    def test_natural_end_reentry_single_token(self):
+        """After natural </think>, a new <think> block must be enforced."""
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = []
+
+        # Block 1: 6 tokens (under budget) + natural </think>
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(6):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+        output.append(self.THINK_END_SINGLE[0])
+        self._step(holder, list(output))
+
+        assert not holder._state[0]["in_end"]
+        assert not holder._state[0]["in_think"]
+
+        # Some content
+        for _ in range(3):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        # Block 2: re-entry — should be budget-tracked
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET + 1):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Second thinking block after natural end must be budget-enforced"
+        )
+
+    def test_natural_end_reentry_multi_token(self):
+        """Multi-token </think> natural end still allows Block 2 enforcement."""
+        holder = self._make_holder(self.THINK_END_MULTI)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = []
+
+        # Block 1: 4 tokens + natural multi-token </think>
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(4):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+        for tok in self.THINK_END_MULTI:
+            output.append(tok)
+            self._step(holder, list(output))
+
+        assert not holder._state[0]["in_think"]
+
+        # Content
+        for _ in range(5):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        # Block 2: re-entry
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET + 1):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Second block after multi-token natural end must be enforced"
+        )
+
+    def test_natural_end_immediate_reentry(self):
+        """Natural </think> followed immediately by <think> with no content."""
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = []
+
+        # Block 1: 5 tokens + natural end
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(5):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+        output.append(self.THINK_END_SINGLE[0])
+        self._step(holder, list(output))
+
+        # Immediate re-entry — NO content between blocks
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET + 1):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Immediate re-entry after natural end must be budget-enforced"
+        )
+
+    def test_multiple_natural_reentries(self):
+        """Block 1 natural -> Block 2 natural -> Block 3 must be enforced."""
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = []
+
+        # Block 1: 4 tokens + natural end
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(4):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+        output.append(self.THINK_END_SINGLE[0])
+        self._step(holder, list(output))
+
+        # Content
+        for _ in range(2):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        # Block 2: 3 tokens + natural end
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(3):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+        output.append(self.THINK_END_SINGLE[0])
+        self._step(holder, list(output))
+
+        # Content
+        for _ in range(2):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        # Block 3: exceed budget
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET + 1):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Third block after two natural ends must be budget-enforced"
+        )
+
+    def test_natural_then_forced_in_block_2(self):
+        """Block 1 ends naturally, Block 2 exceeds budget -> forced end."""
+        budget = 5
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, budget)
+
+        output = []
+
+        # Block 1: 3 tokens + natural end (under budget)
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(3):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+        output.append(self.THINK_END_SINGLE[0])
+        self._step(holder, list(output))
+
+        assert not holder._state[0]["in_end"]
+
+        # Content
+        for _ in range(3):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        # Block 2: exceed budget
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(budget + 1):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Block 2 must trigger forced end after natural end in Block 1"
+        )
+
+    def test_budget_one_natural_end_reentry(self):
+        """Budget = 1: natural end with 0 think tokens, re-entry enforced."""
+        budget = 1
+        holder = self._make_holder(self.THINK_END_SINGLE)
+        self._sync_batch(holder, budget)
+
+        output = []
+
+        # Block 1: immediate natural end (0 think tokens)
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        output.append(self.THINK_END_SINGLE[0])
+        self._step(holder, list(output))
+
+        assert not holder._state[0]["in_end"]
+
+        # Content
+        for _ in range(3):
+            output.append(self.CONTENT_TOKEN)
+            self._step(holder, list(output))
+
+        # Block 2: 2 think tokens (should be enforced at budget=1)
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        output.append(self.THINK_TOKEN)
+        self._step(holder, list(output))
+        output.append(self.THINK_TOKEN)
+        self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Budget=1 must enforce after 1 token in re-entry block"
+        )
+
+    def test_partial_end_sequence_in_content(self):
+        """Partial end sequence in content shouldn't trigger false exit."""
+        holder = self._make_holder(self.THINK_END_MULTI)
+        self._sync_batch(holder, self.BUDGET)
+
+        output = []
+
+        # Block 1: natural end with full sequence [200, 201, 202]
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(3):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+        for tok in self.THINK_END_MULTI:
+            output.append(tok)
+            self._step(holder, list(output))
+
+        # Content with partial end sequence [200, 201] but not [200, 201, 202]
+        output.append(self.CONTENT_TOKEN)
+        self._step(holder, list(output))
+        output.append(200)
+        self._step(holder, list(output))
+        output.append(201)
+        self._step(holder, list(output))
+        output.append(self.CONTENT_TOKEN)
+        self._step(holder, list(output))
+
+        # Block 2: re-entry must still be enforced
+        output.append(self.THINK_START)
+        self._step(holder, list(output))
+        for _ in range(self.BUDGET + 1):
+            output.append(self.THINK_TOKEN)
+            self._step(holder, list(output))
+
+        assert holder._state[0]["in_end"], (
+            "Partial end tokens in content must not prevent Block 2 enforcement"
+        )
+
+    def test_continue_thinking_natural_end_reentry(self):
+        """Prompt-prefill inside <think>: after natural end, Block 2 must be enforced.
+
+        When a request arrives with the prompt already inside a <think> block,
+        continue_thinking is set to True. This test verifies that after a
+        natural </think> exit, continue_thinking is cleared and Block 2
+        enforcement works correctly.
+        """
+        from dataclasses import dataclass
+        from unittest.mock import MagicMock
+
+        from vllm.v1.sample.thinking_budget_state import ThinkingBudgetStateHolder
+
+        @dataclass
+        class FakeReasoningConfig:
+            reasoning_start_token_ids: list[int]
+            reasoning_end_token_ids: list[int]
+            enabled: bool = True
+
+        cfg = FakeReasoningConfig(
+            reasoning_start_token_ids=[self.THINK_START],
+            reasoning_end_token_ids=self.THINK_END_SINGLE,
+        )
+        holder = ThinkingBudgetStateHolder(
+            reasoning_config=cfg,
+            max_num_seqs=8,
+            num_spec_tokens=0,
+            device=torch.device("cpu"),
+            is_pin_memory=False,
+        )
+
+        # Simulate: prompt already inside <think> (sets continue_thinking=True)
+        prompt_tok_ids = [self.THINK_START]
+        params = MagicMock()
+        params.thinking_token_budget = self.BUDGET
+        batch_update = MagicMock(
+            removed=[],
+            added=[(0, params, prompt_tok_ids, [])],
+            moved=[],
+        )
+        holder.sync_batch(batch_update)
+        assert holder._state[0]["continue_thinking"], (
+            "Prompt inside <think> must set continue_thinking=True"
+        )
+
+        # Block 1: emit some think tokens then natural </think>
+        output = list(prompt_tok_ids)
+        for _ in range(4):
+            output.append(self.THINK_TOKEN)
+            holder.update_state([output], None, None)
+        output.append(self.THINK_END_SINGLE[0])
+        holder.update_state([output], None, None)
+
+        assert not holder._state[0]["in_think"], "Should have exited think mode"
+        assert not holder._state[0]["continue_thinking"], (
+            "continue_thinking must be cleared after natural end"
+        )
+
+        # Content tokens
+        for _ in range(3):
+            output.append(self.CONTENT_TOKEN)
+            holder.update_state([output], None, None)
+
+        # Block 2: re-entry must be detected and budget enforced
+        output.append(self.THINK_START)
+        holder.update_state([output], None, None)
+        for _ in range(self.BUDGET + 1):
+            output.append(self.THINK_TOKEN)
+            holder.update_state([output], None, None)
+
+        assert holder._state[0]["in_end"], (
+            "Block 2 after natural end of prompt-prefill session must be enforced"
+        )
+
+    # --- Forced-end re-entry tests ---

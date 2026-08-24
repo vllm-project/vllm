@@ -337,7 +337,6 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             # Avoid warning from HF logger for text-only input
@@ -349,7 +348,6 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
         hf_processor = self.info.get_hf_processor()
 
@@ -402,12 +400,11 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
+        hf_processor = self.info.get_hf_processor()
 
         placeholder = {
-            "image": vocab[IMAGE_TOKEN],
-            "video": vocab[VIDEO_TOKEN],
+            "image": hf_processor.get_token_value("image_token"),
+            "video": hf_processor.get_token_value("video_token"),
         }
 
         def get_replacement_ovis(item_idx, modality: str):
