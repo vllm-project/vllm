@@ -400,7 +400,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                         int(cache_config.num_gpu_blocks) * self.kernel_block_size
                     )
                 if kv_capacity:
-                    flat_pages = min(flat_pages, int(kv_capacity))
+                    # A cudagraph padding request holds no KV, so the pool
+                    # capacity does not account for it, but _build_decode's
+                    # pad_uniform_mtp path raises its seq_len from 0 to
+                    # max_qo_len so the kernel sees a uniform block. Its rows
+                    # are discarded, yet they still consume entries here.
+                    # Reserve for a whole batch of them. max_num_pages needs no
+                    # such allowance: it already assumes every request is
+                    # max_model_len long.
+                    kv_capacity = (
+                        int(kv_capacity) + max_num_reqs * self._flat_max_qo_len
+                    )
+                    flat_pages = min(flat_pages, kv_capacity)
             self.flat_kv_indptr = torch.zeros(
                 max_num_reqs * self._flat_max_qo_len + 1,
                 dtype=torch.int32,
@@ -919,18 +930,27 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         min_kv_seq_len = 1
         if self._flat_kv_enabled and max_qo_len > 1:
             qlen = int(max_qo_len)
-            assert qlen <= self._flat_max_qo_len, (
-                f"verify block {qlen} exceeds the reserved maximum "
-                f"{self._flat_max_qo_len}"
-            )
+            # Raise rather than assert: both this and the entry-count check
+            # below guard writes into the persistent buffers, so they have to
+            # survive `python -O`.
+            if qlen > self._flat_max_qo_len:
+                raise ValueError(
+                    f"verify block {qlen} exceeds the reserved maximum "
+                    f"{self._flat_max_qo_len}"
+                )
             num_rows = num_kernel_reqs * qlen
             # Row r * qlen + t is request r's verify token t. seq_lens counts
             # the tokens scheduled in this step, so a request's KV range already
             # spans its whole verify block and context_r = seq_len_r - qlen.
             # Causal masking lets token t attend to KV positions
             # [0, context_r + t], i.e. seq_len_r - (qlen - 1) + t entries, so
-            # only the last row of a block may see the full range. Rows clamp to
-            # zero for cudagraph padding requests, whose seq_len is 0.
+            # only the last row of a block may see the full range. A cudagraph
+            # padding request left at seq_len 0 clamps all of its rows to empty;
+            # under pad_uniform_mtp its seq_len was raised to max_qo_len above,
+            # so its rows run 1..qlen instead, over whatever block ids the
+            # padding slot happens to hold. Either way the rows are discarded,
+            # but the second case still consumes entries, which is what the
+            # padding allowance in __init__ reserves for.
             per_req_len = paged_kv_indptr[1:] - paged_kv_indptr[:-1]
             row_len = (
                 (
@@ -964,10 +984,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # flat_kv_indices is reserved from the KV pool's token capacity,
             # which bounds this sum. Check it rather than let a bound that is
             # wrong for some future layout corrupt memory silently.
-            assert total_entries <= self.flat_kv_indices.numel(), (
-                f"verify KV view needs {total_entries} entries but only "
-                f"{self.flat_kv_indices.numel()} are reserved"
-            )
+            if total_entries > self.flat_kv_indices.numel():
+                raise ValueError(
+                    f"verify KV view needs {total_entries} entries but only "
+                    f"{self.flat_kv_indices.numel()} are reserved"
+                )
             # No need to clear flat_kv_indices: the kernel writes exactly the
             # [flat_kv_indptr[row], flat_kv_indptr[row + 1]) range that
             # mla_gluon reads back for that row.
