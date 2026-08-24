@@ -202,9 +202,11 @@ def inkling_config() -> ParserEngineConfig:
             ParserState.REASONING,
             (EventType.REASONING_START,),
         ),
+        # A tool block confirms the same boundary, and is the one opener that
+        # can start a turn with no visible block ahead of it.
         (ParserState.CONTENT, "TOOL_START"): Transition(
             ParserState.TOOL_ARGS,
-            (EventType.TOOL_CALL_START,),
+            (EventType.REASONING_END, EventType.TOOL_CALL_START),
         ),
         # Raw / error tool blocks render as visible text.
         (ParserState.CONTENT, "TOOL_TEXT"): Transition(
@@ -231,7 +233,7 @@ def inkling_config() -> ParserEngineConfig:
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_START"): Transition(
             ParserState.TOOL_ARGS,
-            (EventType.TOOL_CALL_START,),
+            (EventType.REASONING_END, EventType.TOOL_CALL_START),
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_TEXT"): Transition(
             ParserState.CONTENT,
