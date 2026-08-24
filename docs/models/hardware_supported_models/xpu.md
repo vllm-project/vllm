@@ -10,6 +10,8 @@
 
 ### Text-only Language Models
 
+Note: Online FP8 = [Online Quantization](https://docs.vllm.ai/en/latest/features/quantization/online/) to FP8.
+
 | Model                                           | Architecture                                     | Dtype                 |
 | ----------------------------------------------- | ------------------------------------------------ | --------------------- |
 | openai/gpt-oss-20b                              | GPTForCausalLM                                   | MXFP4                 |
