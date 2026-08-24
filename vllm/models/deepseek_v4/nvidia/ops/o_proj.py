@@ -20,6 +20,11 @@ def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:
     """
     cap = current_platform.get_device_capability()
     assert cap is not None, "DeepseekV4 attention requires a CUDA device"
+    # Packed INT32 UE8M0 + TMA-aligned scales are SM100. SM12x (GB10) has
+    # no TMA; fused_inv_rope_fp8_quant must emit Hopper FP32 128x128 scales
+    # or the Python fp8_einsum fallback dequants packed ints as floats.
+    if cap.major == 12:
+        return (1, 128, 128), False
     einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
     tma_aligned_scales = cap.major >= 10
     return einsum_recipe, tma_aligned_scales
