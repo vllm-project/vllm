@@ -15,6 +15,10 @@ group: CRCR Report
 steps:
   - label: ":satellite: Report nightly results to CRCR"
     key: crcr-report
+    # Belt and braces with the script's own TORCH_NIGHTLY check: this keeps the
+    # step out of non-nightly builds entirely, while the script gate still holds
+    # if the generator ever drops this key.
+    if: build.env("TORCH_NIGHTLY") == "1"
     # Reporting is observability, never a gate: a relay outage, an expired
     # pipeline mapping or a missing secret must not turn the nightly red.
     soft_fail: true
