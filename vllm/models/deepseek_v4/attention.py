@@ -384,13 +384,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     if self.compress_ratio == 4:
                         _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
                     _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
-                    if has_cutedsl():
-                        from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (  # noqa: E501
-                            DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
-                        )
-
-                        DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL.register_warmup()
-                    else:
+                    if not has_cutedsl():
                         _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL.register_warmup()
                 elif backend_name == "FLASHINFER_MLA_SPARSE_DSV4":
                     from vllm.models.deepseek_v4.common.ops.cache_utils import (
@@ -932,18 +926,8 @@ class DeepseekV4Indexer(nn.Module):
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.platforms import current_platform
             from vllm.utils.import_utils import has_cutedsl
-            if has_cutedsl():
-                from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (  # noqa: E501
-                    _INDEXER_Q_FP8_KERNEL,
-                    _INDEXER_Q_MXFP4_KERNEL,
-                )
 
-                (
-                    _INDEXER_Q_MXFP4_KERNEL
-                    if self.use_fp4_kv
-                    else _INDEXER_Q_FP8_KERNEL
-                ).register_warmup()
-            elif not current_platform.is_xpu():
+            if not has_cutedsl() and not current_platform.is_xpu():
                 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (
                     _FUSED_INDEXER_Q_ROPE_MXFP4_TRITON_KERNEL,
                     _FUSED_INDEXER_Q_ROPE_QUANT_TRITON_KERNEL,

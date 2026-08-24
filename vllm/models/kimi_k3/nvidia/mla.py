@@ -70,7 +70,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.utils import replace_parameter
-from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops import _FUSED_Q_KV_RMSNORM_KERNEL
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_decode_q_concat_kv_cache_insert,
     fused_mla_key_concat_ds_mla_insert,
@@ -499,7 +499,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             q_c, kv_c, k_pe = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
-            q_c, kv_c_normed = fused_q_kv_rmsnorm(
+            q_c, kv_c_normed = _FUSED_Q_KV_RMSNORM_KERNEL(
                 q_c,
                 kv_c,
                 self.q_a_layernorm.weight.data,

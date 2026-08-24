@@ -185,12 +185,11 @@ class FusedInvRopeFP8QuantKernel(
         nope_dim: int,
         rope_dim: int,
         quant_group_size: int,
-        tma_aligned_scales: bool,
-        use_gdc: bool,
         runtime_fp8_max: float | None = None,
         runtime_chunks_per_head: int | None = None,
         runtime_rope_start: int | None = None,
         runtime_half_rope: int | None = None,
+        **compile_key_fields: bool,
     ) -> CompileKey:
         fp8_max = (
             runtime_fp8_max
@@ -211,14 +210,13 @@ class FusedInvRopeFP8QuantKernel(
             runtime_half_rope if runtime_half_rope is not None else rope_dim // 2
         )
         return self.CompileKey(
+            **compile_key_fields,
             heads_per_group=heads_per_group,
             fp8_max=fp8_max,
             quant_group_size=quant_group_size,
             chunks_per_head=chunks_per_head,
             rope_start=rope_start,
             half_rope=half_rope,
-            tma_aligned_scales=tma_aligned_scales,
-            use_gdc=use_gdc,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:

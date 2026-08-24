@@ -142,7 +142,6 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         )
 
         if vllm_config.kernel_config.enable_jit_warmup:
-
             _FUSED_MTP_INPUT_RMSNORM_KERNEL.register_warmup()
             _MTP_SHARED_HEAD_RMSNORM_KERNEL.register_warmup()
 
