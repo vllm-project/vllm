@@ -284,19 +284,19 @@ module_name -> set[RankShard]
 
 ```mermaid
 flowchart LR
-    E[expected: set[RankShard]] --> S1[RankShard]
-    S1 --> N[source_name: str]
-    S1 --> T[target_name: str]
-    S1 --> F[fragment: LoadFragment]
-    F --> FI[expert_id / shard_id / weight_name ...]
+    E["expected: set of RankShard"] --> S1["RankShard"]
+    S1 --> N["source_name: str"]
+    S1 --> T["target_name: str"]
+    S1 --> F["fragment: LoadFragment"]
+    F --> FI["expert_id / shard_id / weight_name"]
 
-    E --> I1[_source_targets]
-    I1 --> K1[source_name]
-    K1 --> V1[set[target_name]]
+    E --> I1["_source_targets"]
+    I1 --> K1["source_name"]
+    K1 --> V1["set of target names"]
 
-    E --> I2[_module_shards]
-    I2 --> K2[module_name from target_name parent]
-    K2 --> V2[set[RankShard]]
+    E --> I2["_module_shards"]
+    I2 --> K2["module name from target parent path"]
+    K2 --> V2["set of RankShard"]
 ```
 
 例如，一个 fused MoE expert 的 manifest 可能包含：
