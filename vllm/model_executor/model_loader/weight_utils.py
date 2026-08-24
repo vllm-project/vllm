@@ -8,6 +8,7 @@ import fnmatch
 import glob
 import hashlib
 import json
+import math
 import os
 import tempfile
 import threading
@@ -834,6 +835,7 @@ def safetensors_weights_iterator(
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    verify_weights: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
@@ -923,6 +925,8 @@ def safetensors_weights_iterator(
                 state_dict = load(f.read())
             for name, param in state_dict.items():
                 if not should_skip_weight(name, local_expert_ids):
+                    if verify_weights:
+                        verify_weight_tensor(name, param)
                     yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
@@ -953,6 +957,9 @@ def safetensors_weights_iterator(
                 unflattened_state_dict, leftover_state_dict = (
                     unflatten_tensor_state_dict(state_dict, metadata)
                 )
+            if verify_weights:
+                for name, param in unflattened_state_dict.items():
+                    verify_weight_tensor(name, param)
             yield from unflattened_state_dict.items()
         else:
             with safe_open(st_file, framework="pt") as f:
@@ -960,6 +967,8 @@ def safetensors_weights_iterator(
                     if should_skip_weight(name, local_expert_ids):
                         continue
                     param = f.get_tensor(name)
+                    if verify_weights:
+                        verify_weight_tensor(name, param)
                     yield name, param
 
 
@@ -1217,6 +1226,59 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     if not isinstance(x, torch.Tensor):
         x = x[:]
     return x
+
+
+def verify_weight_tensor(name: str, tensor: torch.Tensor) -> None:
+    """Verify a loaded weight tensor for signs of corruption.
+
+    Uses a single ``tensor.abs().max()`` reduction to detect:
+    - NaN values (result is NaN; NaN propagates through max)
+    - Inf values (result is Inf)
+    - All-zero tensors (result is 0.0; only flagged for large tensors)
+
+    Raises ValueError if NaN/Inf is detected.
+    Logs warnings for all-zero tensors.
+
+    Note: This cannot detect valid-but-incorrect values (e.g., bit flips
+    that change a scale from 0.5 to 50.0). Use external sha256 verification
+    for full integrity checking.
+    """
+    if not tensor.is_floating_point() or tensor.numel() == 0:
+        return
+
+    # Single-pass: abs().max() covers NaN, Inf, and all-zero in one reduction.
+    # - NaN in tensor -> max_abs is NaN (NaN propagates through max)
+    # - Inf in tensor -> max_abs is Inf
+    # - All zeros     -> max_abs is 0.0
+    # - Normal        -> max_abs is a positive finite float
+    max_abs = tensor.abs().max().item()
+
+    if math.isnan(max_abs):
+        raise ValueError(
+            f"Weight tensor '{name}' contains NaN values. "
+            f"This indicates the checkpoint file may be corrupted. "
+            f"Please verify the file integrity (e.g., sha256) and "
+            f"re-download if necessary."
+        )
+
+    if math.isinf(max_abs):
+        raise ValueError(
+            f"Weight tensor '{name}' contains Inf values. "
+            f"This indicates the checkpoint file may be corrupted. "
+            f"Please verify the file integrity (e.g., sha256) and "
+            f"re-download if necessary."
+        )
+
+    # All-zero check — catches truncated or zeroed files.
+    # Skip small tensors (e.g., biases, norms) where zero is valid.
+    if tensor.numel() > 1024 and max_abs == 0.0:
+        logger.warning(
+            "Weight tensor '%s' is all zeros (numel=%d). "
+            "This may indicate a corrupted or truncated checkpoint. "
+            "If this is unexpected, verify the file integrity.",
+            name,
+            tensor.numel(),
+        )
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
