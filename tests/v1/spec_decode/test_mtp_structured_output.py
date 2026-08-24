@@ -24,7 +24,8 @@ def _make_manager_and_request(backend: str, prompt_str: str = '{"a": "b"}'):
         model_config=ModelConfig(tokenizer=TOKENIZER),
         structured_outputs_config=StructuredOutputsConfig(backend=backend),
         speculative_config=SpeculativeConfig(
-            model="[ngram]", num_speculative_tokens=NUM_SPEC_TOKENS
+            method="ngram",
+            num_speculative_tokens=NUM_SPEC_TOKENS,
         ),
     )
     manager = StructuredOutputManager(vllm_config)

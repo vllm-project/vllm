@@ -125,7 +125,7 @@ number: "1" | "2"
 """
 
 NGRAM_SPEC_CONFIG = {
-    "model": "[ngram]",
+    "method": "ngram",
     "num_speculative_tokens": 5,
     "prompt_lookup_max": 5,
     "prompt_lookup_min": 1,

@@ -368,6 +368,11 @@ def _validate_qwen3_omni_dspark(
         )
 
 
+_MODEL_FREE_METHODS = frozenset(
+    ("extract_hidden_states", "ngram", "ngram_gpu", "suffix")
+)
+
+
 @config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
@@ -379,13 +384,12 @@ class SpeculativeConfig:
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
-    """The name of the draft model, eagle head, or additional weights, if
-    provided."""
+    """The external draft model, eagle head, additional weights, or custom
+    proposer path, if required by the selected method."""
     method: SpeculativeMethod | None = None
-    """The name of the speculative method to use. If users provide and set the
-    `model` param, the speculative method type will be detected automatically
-    if possible, if `model` param is not provided, the method name must be
-    provided.
+    """The name of the speculative method to use. This must be provided in an
+    explicit speculative configuration. Known checkpoint formats may populate
+    it from a method declaration in their schema.
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
@@ -627,6 +631,7 @@ class SpeculativeConfig:
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+        """Normalize a checkpoint config for an MTP-backed draft loader."""
         initial_architecture = hf_config.architectures[0]
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
@@ -907,9 +912,6 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
 
-        if initial_architecture == "MistralLarge3ForCausalLM":
-            hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
-
         if hf_config.model_type == "hy_v3":
             hf_config.model_type = "hy_v3_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -980,70 +982,135 @@ class SpeculativeConfig:
         return hf_config
 
     @staticmethod
+    def eagle_hf_config_override(
+        hf_config: PretrainedConfig,
+    ) -> PretrainedConfig:
+        initial_architecture = hf_config.architectures[0]
+        hf_config = SpeculativeConfig.hf_config_override(hf_config)
+        if initial_architecture == "MistralLarge3ForCausalLM":
+            hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
+        return hf_config
+
+    @staticmethod
+    def identity_hf_config_override(
+        hf_config: PretrainedConfig,
+    ) -> PretrainedConfig:
+        return hf_config
+
+    @staticmethod
+    def dspark_hf_config_override(
+        hf_config: PretrainedConfig,
+    ) -> PretrainedConfig:
+        if hf_config.model_type == "deepseek_v4":
+            hf_config.update({"architectures": ["DSparkDraftModel"]})
+        return hf_config
+
+    @staticmethod
+    def _block_drafter_tokens(
+        method: SpeculativeMethod,
+        hf_config: PretrainedConfig,
+    ) -> tuple[int, str] | None:
+        if method not in ("dflash", "dspark"):
+            return None
+        dflash_config = getattr(hf_config, "dflash_config", None)
+        nested_block_size = (
+            dflash_config.get("block_size")
+            if isinstance(dflash_config, Mapping)
+            else getattr(dflash_config, "block_size", None)
+        )
+        candidates = (
+            (
+                (nested_block_size, "dflash_config.block_size"),
+                (getattr(hf_config, "block_size", None), "block_size"),
+            )
+            if method == "dflash"
+            else (
+                (
+                    getattr(hf_config, "dspark_block_size", None),
+                    "dspark_block_size",
+                ),
+                (getattr(hf_config, "block_size", None), "block_size"),
+                (nested_block_size, "dflash_config.block_size"),
+            )
+        )
+        block_size, source = next(
+            ((value, name) for value, name in candidates if value is not None),
+            (None, "block_size"),
+        )
+        if not isinstance(block_size, int) or isinstance(block_size, bool):
+            return None
+        if method == "dflash":
+            tokens = block_size - 1
+            reason = f"{source}={block_size} with a bonus anchor"
+        else:
+            sample_from_anchor = getattr(hf_config, "sample_from_anchor", True)
+            tokens = block_size if sample_from_anchor else block_size - 1
+            reason = (
+                f"{source}={block_size} with sample_from_anchor={sample_from_anchor}"
+            )
+        return (tokens, reason) if tokens > 0 else None
+
+    @staticmethod
+    def _validate_block_drafter_tokens(
+        method: SpeculativeMethod,
+        hf_config: PretrainedConfig,
+        num_speculative_tokens: int,
+    ) -> None:
+        block_tokens = SpeculativeConfig._block_drafter_tokens(method, hf_config)
+        if block_tokens is None:
+            return
+        max_tokens, reason = block_tokens
+        if num_speculative_tokens > max_tokens:
+            raise ValueError(
+                f"num_speculative_tokens={num_speculative_tokens} exceeds the "
+                f"{method} checkpoint proposal limit of {max_tokens} "
+                f"derived from {reason}."
+            )
+
+    @staticmethod
     def _apply_composed_hf_override(
+        draft_hf_override: Callable[[PretrainedConfig], PretrainedConfig],
         target_hf_overrides: Callable[[PretrainedConfig], PretrainedConfig],
         hf_config: PretrainedConfig,
     ) -> PretrainedConfig:
-        hf_config = SpeculativeConfig.hf_config_override(hf_config)
+        hf_config = draft_hf_override(hf_config)
         return target_hf_overrides(hf_config)
 
     @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
+        method: SpeculativeMethod,
     ) -> Callable[[PretrainedConfig], PretrainedConfig]:
-        """Build the ``hf_overrides`` for the draft ``ModelConfig``.
+        """Build method-selected overrides for the draft ``ModelConfig``.
 
-        Callable overrides on the target are config-to-config transforms
-        (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
-        reach the draft config — otherwise a draft belonging to a large
-        target is instantiated at full size even when the target is shrunk.
-        Dict overrides are target-specific key patches and are not applied
-        to the draft.
-
-        The composed override must stay picklable: the draft ``ModelConfig``
-        is sent to spawned engine-core processes, so a local closure would
-        fail with ``Can't get local object`` during pickling. Bind the
-        target via ``functools.partial`` over a module-referenceable static
-        method instead.
+        Callable target transforms run after method normalization; dict
+        overrides remain target-only. Composed callables use
+        ``functools.partial`` so they stay picklable.
         """
+        draft_hf_override = {
+            "mtp": SpeculativeConfig.hf_config_override,
+            "dspark": SpeculativeConfig.dspark_hf_config_override,
+            "eagle": SpeculativeConfig.eagle_hf_config_override,
+            "eagle3": SpeculativeConfig.hf_config_override,
+            "dflash": SpeculativeConfig.hf_config_override,
+        }.get(method, SpeculativeConfig.identity_hf_config_override)
         if not callable(target_hf_overrides):
-            return SpeculativeConfig.hf_config_override
+            return draft_hf_override
 
         return functools.partial(
-            SpeculativeConfig._apply_composed_hf_override, target_hf_overrides
+            SpeculativeConfig._apply_composed_hf_override,
+            draft_hf_override,
+            target_hf_overrides,
         )
 
-    @staticmethod
-    def _is_custom_proposer_path(model: str | None) -> bool:
-        """True if ``model`` is a dotted import path (e.g. ``pkg.MyProposer``)."""
-        if model is None:
-            return False
-        if model.startswith(("http://", "https://", "file://")):
-            return False
-        if "/" in model:
-            return False
-        parts = model.split(".")
-        return len(parts) >= 2 and all(part.isidentifier() for part in parts)
-
     def __post_init__(self):
-        # Note: "method" is a new parameter that helps to extend the
-        # configuration of non-model-based proposers, and the "model" parameter
-        # will be used to set the draft model, eagle head, or additional weight
-        # when needed. If users do not specify "method", the speculative method
-        # will be detected automatically if possible. If the speculative method
-        # can not be detected, it will be considered as the "draft_model" by
-        # default.
-
-        # infer method from user args
-        if self.method is None and SpeculativeConfig._is_custom_proposer_path(
-            self.model
-        ):
-            self.method = "custom_class"
-        elif self.method is None:
-            if self.model in ("ngram", "[ngram]"):
-                self.method = "ngram"
-            else:
-                self.method = "draft_model"
+        if self.method is None:
+            raise ValueError(
+                "Speculative decoding requires an explicit `method`. Set it "
+                "in --speculative-config or pass --spec-method. For a generic "
+                "autoregressive draft "
+                "model, use method='draft_model'."
+            )
 
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
@@ -1051,7 +1118,18 @@ class SpeculativeConfig:
             )
             self.method = "mtp"
 
-        if self.model is None and self.num_speculative_tokens is not None:
+        if self.method in _MODEL_FREE_METHODS:
+            if self.model is not None:
+                raise ValueError(
+                    f"method='{self.method}' does not use `model`; omit it."
+                )
+        elif self.method == "custom_class":
+            if self.model is None:
+                raise ValueError(
+                    "method='custom_class' requires 'model' to contain the "
+                    "custom proposer module path (e.g., 'my_module.MyProposer')."
+                )
+        elif self.model is None:
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
@@ -1075,29 +1153,11 @@ class SpeculativeConfig:
                 self.model = self.target_model_config.model
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
-            elif self.method in ("ngram", "[ngram]"):
-                self.model = "ngram"
-            elif self.method == "ngram_gpu":
-                self.model = "ngram_gpu"
-            elif self.method == "suffix":
-                self.model = "suffix"
-            elif self.method == "extract_hidden_states":
-                self.model = "extract_hidden_states"
-            elif self.method == "custom_class":
-                # method was set explicitly, but model should already contain the
-                # custom module path. If not, this is a configuration error.
-                if self.model is None:
-                    raise ValueError(
-                        "method='custom_class' requires 'model' to contain the "
-                        "custom proposer module path (e.g., 'my_module.MyProposer')."
-                    )
             else:
                 raise ValueError(
-                    "num_speculative_tokens was provided but without speculative model."
+                    f"method='{self.method}' requires `model` to identify its "
+                    "external draft source."
                 )
-
-        if self.method in ("ngram", "[ngram]"):
-            self.method = "ngram"
 
         if self.method in ("ngram", "ngram_gpu"):
             # Set default values if not provided
@@ -1151,9 +1211,9 @@ class SpeculativeConfig:
                 ExtractHiddenStatesConfig,
             )
 
-            # ExtractHiddenStatesModel is instantiated manually in load_model()
-            # We just need to store the target model config for KV cache shape info
-            self.model = "extract_hidden_states"
+            # This extraction-only mode does not perform speculation. It reuses the
+            # proposer path and target geometry to export hidden states for speculator
+            # training.
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
 
@@ -1187,11 +1247,12 @@ class SpeculativeConfig:
                 if self.method == "medusa":
                     draft_hf_overrides = {"model_type": "medusa"}
                 else:
-                    # Compose any callable hf_overrides set on the target so the
-                    # draft config receives the same transform (e.g. the test
-                    # shrink). Dict overrides stay target-only.
+                    # Select loader normalization from the explicit method, then
+                    # compose any callable target override. Dict overrides stay
+                    # target-only.
                     draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-                        self.target_model_config.hf_overrides
+                        self.target_model_config.hf_overrides,
+                        self.method,
                     )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
@@ -1229,61 +1290,6 @@ class SpeculativeConfig:
                     if draft_hf.vocab_size != target_vocab:
                         draft_hf.vocab_size = target_vocab
                         draft_hf.truncated_vocab_size = target_vocab
-
-                # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
-                    pass
-                # examples:
-                # yuhuili/EAGLE-LLaMA3-Instruct-8B
-                # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
-                # AngelSlim/Qwen3-8B_eagle3
-                # deepseek-ai/dspark_qwen3_8b_block7
-                elif "eagle-" in self.draft_model_config.model.lower():
-                    self.method = "eagle"
-                elif "eagle3" in self.draft_model_config.model.lower():
-                    self.method = "eagle3"
-                elif (
-                    "dflash" in self.draft_model_config.model.lower()
-                    or "MuseGlimmerAssistantModel"
-                    in self.draft_model_config.architectures
-                ):
-                    self.method = "dflash"
-                elif (
-                    "dspark" in self.draft_model_config.model.lower()
-                    or "Qwen3DSparkModel" in self.draft_model_config.architectures
-                    or _QWEN3_OMNI_DSPARK_ARCHITECTURE
-                    in self.draft_model_config.architectures
-                    or "Gemma4DSparkModel" in self.draft_model_config.architectures
-                    or (
-                        "DSparkDraftModel" in self.draft_model_config.architectures
-                        and self.draft_model_config.hf_config.model_type == "qwen3"
-                    )
-                ):
-                    self.method = "dspark"
-                elif self.draft_model_config.hf_config.model_type == "medusa":
-                    self.method = "medusa"
-                elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
-                    self.method = "mlp_speculator"
-                elif self.draft_model_config.hf_config.model_type in get_args(
-                    MTPModelTypes
-                ):
-                    self.method = "mtp"
-                    if (
-                        self.num_speculative_tokens > 1
-                        and self.draft_model_config.hf_config.model_type
-                        not in ("step3p5_mtp", "inkling_mtp")
-                    ):
-                        logger.warning(
-                            "Enabling num_speculative_tokens > 1 will run "
-                            "multiple times of forward on same MTP layer"
-                            ",which may result in lower acceptance rate"
-                        )
-                elif self.method == "draft_model":
-                    pass
-                else:
-                    raise NotImplementedError(
-                        f"Unsupported speculative method: '{self.method}'"
-                    )
 
                 if self.method in ("eagle", "eagle3"):
                     # EAGLE drafts share the target's positional space; a
@@ -1324,19 +1330,22 @@ class SpeculativeConfig:
                         "Qwen3DSparkModel"
                     ]
                     self.update_arch_()
-                elif self.method == "dspark" and (
-                    "Qwen3DSparkModel" not in self.draft_model_config.architectures
-                    and _QWEN3_OMNI_DSPARK_ARCHITECTURE
-                    not in self.draft_model_config.architectures
-                    and "Gemma4DSparkModel" not in self.draft_model_config.architectures
-                    and "K3DSparkModel" not in self.draft_model_config.architectures
+                elif self.method == "dspark" and not any(
+                    arch in self.draft_model_config.architectures
+                    for arch in (
+                        "DSparkDraftModel",
+                        "Gemma4DSparkModel",
+                        "K3DSparkModel",
+                        "Qwen3DSparkModel",
+                        _QWEN3_OMNI_DSPARK_ARCHITECTURE,
+                    )
                 ):
-                    # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
-                    # and its weights ship in the target checkpoint.
-                    self.draft_model_config.hf_config.model_type = "deepseek_v4"
-                    self.draft_model_config.hf_config.architectures = [
-                        "DSparkDraftModel"
-                    ]
+                    # An explicit DSpark method selects the embedded
+                    # DeepSeek-V4 loader even when the checkpoint does not
+                    # declare a dedicated draft architecture.
+                    hf_config = self.draft_model_config.hf_config
+                    hf_config.model_type = "deepseek_v4"
+                    hf_config.architectures = ["DSparkDraftModel"]
                     self.draft_model_config.quantization = (
                         self.target_model_config.quantization
                     )
@@ -1353,29 +1362,36 @@ class SpeculativeConfig:
                         and getattr(hf, "target_layer_ids", None) is not None
                     ):
                         hf.dspark_target_layer_ids = hf.target_layer_ids
-                    if (
-                        getattr(hf, "n_predict", None) is None
-                        and getattr(hf, "block_size", None) is not None
-                    ):
-                        hf.n_predict = hf.block_size
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
 
-                if self.num_speculative_tokens is not None and hasattr(
-                    self.draft_model_config.hf_config, "num_lookahead_tokens"
-                ):
-                    self.draft_model_config.hf_config.num_lookahead_tokens = (
-                        self.num_speculative_tokens
-                    )
-
                 n_predict = getattr(
                     self.draft_model_config.hf_config, "n_predict", None
                 )
+                default_source = None
                 if n_predict is not None:
+                    if (
+                        not isinstance(n_predict, int)
+                        or isinstance(n_predict, bool)
+                        or n_predict <= 0
+                    ):
+                        raise ValueError(
+                            "The draft checkpoint n_predict must be a positive "
+                            f"integer, got {n_predict!r}."
+                        )
                     if self.num_speculative_tokens is None:
-                        # Default to max value defined in draft model config.
                         self.num_speculative_tokens = n_predict
+                        default_source = f"draft checkpoint n_predict={n_predict}"
+                    elif (
+                        self.method in ("dflash", "dspark")
+                        and self.num_speculative_tokens > n_predict
+                    ):
+                        raise ValueError(
+                            f"num_speculative_tokens={self.num_speculative_tokens} "
+                            f"exceeds the {self.method} checkpoint n_predict="
+                            f"{n_predict}."
+                        )
                     elif (
                         self.num_speculative_tokens > n_predict
                         and self.num_speculative_tokens % n_predict != 0
@@ -1386,10 +1402,47 @@ class SpeculativeConfig:
                             f" must be divisible by {n_predict=}"
                         )
 
+                block_tokens = self._block_drafter_tokens(
+                    self.method, self.draft_model_config.hf_config
+                )
+                if self.num_speculative_tokens is None and block_tokens is not None:
+                    self.num_speculative_tokens, reason = block_tokens
+                    default_source = f"draft checkpoint {reason}"
+
                 if self.num_speculative_tokens is None:
                     raise ValueError(
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
+                    )
+
+                self._validate_block_drafter_tokens(
+                    self.method,
+                    self.draft_model_config.hf_config,
+                    self.num_speculative_tokens,
+                )
+
+                if default_source is not None:
+                    logger.info_once(
+                        "Defaulted num_speculative_tokens=%d from %s.",
+                        self.num_speculative_tokens,
+                        default_source,
+                    )
+
+                if hasattr(self.draft_model_config.hf_config, "num_lookahead_tokens"):
+                    self.draft_model_config.hf_config.num_lookahead_tokens = (
+                        self.num_speculative_tokens
+                    )
+
+                if (
+                    self.method == "mtp"
+                    and self.num_speculative_tokens > 1
+                    and self.draft_model_config.hf_config.model_type
+                    not in ("step3p5_mtp", "inkling_mtp")
+                ):
+                    logger.warning_once(
+                        "Enabling num_speculative_tokens > 1 will run "
+                        "multiple times of forward on same MTP layer"
+                        ", which may result in lower acceptance rate"
                     )
 
                 if self.dspark_draft_topk is not None and self.method != "dspark":
@@ -1822,17 +1875,7 @@ class SpeculativeConfig:
         return min(num_mtp_layers, self.num_speculative_tokens) > 1
 
     def __repr__(self) -> str:
-        method = self.method
-        model = (
-            None
-            if method
-            in (
-                "ngram",
-                "suffix",
-                "extract_hidden_states",
-                "custom_class",
-            )
-            else self.draft_model_config.model
+        return (
+            f"SpeculativeConfig(method={self.method!r}, model={self.model!r}, "
+            f"num_speculative_tokens={self.num_speculative_tokens!r})"
         )
-        num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

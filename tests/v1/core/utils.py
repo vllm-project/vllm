@@ -143,7 +143,8 @@ def create_scheduler(
     speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
         spec_kwargs: dict = dict(
-            model="ngram", num_speculative_tokens=num_speculative_tokens
+            method="ngram",
+            num_speculative_tokens=num_speculative_tokens,
         )
         if num_speculative_tokens_per_batch_size is not None:
             spec_kwargs["num_speculative_tokens_per_batch_size"] = (
