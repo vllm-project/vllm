@@ -2186,6 +2186,61 @@ def test_kv_buffer_to_nixl_memory_types(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
+def test_remote_descriptors_use_remote_nixl_memory_type(
+    default_vllm_config, dist_init
+):
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+    worker.nixl_memory_type = "VRAM"
+
+    block_len = 4096 * worker.block_size
+    worker.slot_size_per_layer = [4096]
+    worker.block_len_per_layer = [block_len]
+    worker.num_blocks = 1
+    worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+    worker.src_blocks_data = np.array(
+        [(0, block_len, worker.tp_rank)], dtype=np.uint64
+    )
+    worker.num_descs = len(worker.src_blocks_data)
+
+    wrapper = MagicMock()
+    wrapper.add_remote_agent.return_value = FakeNixlWrapper.REMOTE_AGENT_NAME
+    wrapper.get_xfer_descs.return_value = ["remote-desc"]
+    wrapper.prep_xfer_dlist.return_value = 1
+    worker.nixl_wrapper = wrapper
+
+    meta = NixlAgentMetadata(
+        engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+        agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+        kv_caches_base_addr=[0],
+        device_id=0,
+        num_blocks=1,
+        block_lens=[block_len],
+        block_strides=[block_len],
+        kv_cache_layout=worker.kv_cache_layout,
+        block_size=worker.block_size,
+        ssm_sizes=(0, 0),
+        attn_backend_name=worker.backend_name,
+        physical_blocks_per_logical_kv_block=1,
+        nixl_memory_type="DRAM",
+    )
+
+    worker.add_remote_agent(meta, remote_tp_size=worker.world_size)
+
+    _blocks_data, memory_type = wrapper.get_xfer_descs.call_args[0]
+    assert memory_type == "DRAM"
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
     """Test that shutdown() properly cleans up all resources."""
     vllm_config = create_vllm_config()

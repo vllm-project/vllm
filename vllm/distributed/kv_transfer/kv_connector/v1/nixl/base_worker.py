@@ -1245,6 +1245,7 @@ class NixlBaseConnectorWorker:
             ),
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
+            nixl_memory_type=self.nixl_memory_type,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1665,8 +1666,20 @@ class NixlBaseConnectorWorker:
             mamba = self._build_mamba_remote(nixl_agent_meta, tp_ratio, transfer_info)
             blocks_data = np.concatenate([blocks_data, mamba])
 
-        # Register with NIXL.
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
+        # Register with NIXL. Remote descriptors must use the remote agent's
+        # memory type when P/D workers use heterogeneous buffer devices.
+        remote_nixl_memory_type = (
+            nixl_agent_meta.nixl_memory_type or self.nixl_memory_type
+        )
+        logger.info(
+            "Preparing remote NIXL descriptors: local_memory_type=%s, "
+            "remote_memory_type=%s, local_buffer_device=%s, remote_device_id=%s",
+            self.nixl_memory_type,
+            remote_nixl_memory_type,
+            self.kv_buffer_device,
+            nixl_agent_meta.device_id,
+        )
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, remote_nixl_memory_type)
         self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
             self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
         )

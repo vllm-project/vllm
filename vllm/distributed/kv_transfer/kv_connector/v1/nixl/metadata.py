@@ -45,8 +45,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   7: Include NIXL transfer mode (push vs pull) in the compatibility hash
 #   8: Add dcp_size and pcp_size to NixlAgentMetadata
 #   9: Add block_strides
+#   10: Add NIXL memory type to NixlAgentMetadata for heterogeneous buffer devices
 #
-NIXL_CONNECTOR_VERSION: int = 9
+NIXL_CONNECTOR_VERSION: int = 10
 
 
 @dataclass
@@ -65,6 +66,7 @@ class NixlAgentMetadata:
     physical_blocks_per_logical_kv_block: int
     dcp_size: int = 1
     pcp_size: int = 1
+    nixl_memory_type: str = ""
 
 
 @dataclass
