@@ -895,7 +895,7 @@ pyzmq==27.1.0
     # via -r requirements/test/../common.txt
 rapidfuzz==3.12.1
     # via jiwer
-ray==2.48.0
+ray==2.56.1
     # via -r requirements/test/cuda.in
 redis==5.2.0
     # via tensorizer
