@@ -31,9 +31,7 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
     keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
 
     assert {key.compress_ratio for key in keys} == {1, 4, 128}
-    assert {
-        (key.query_slice_start, key.query_slice_stop) for key in keys
-    } == {
+    assert {(key.query_slice_start, key.query_slice_stop) for key in keys} == {
         (query_slice_start, query_slice_stop)
         for query_slice_start in (0, 1, 2)
         for query_slice_stop in (1, 15, 16)

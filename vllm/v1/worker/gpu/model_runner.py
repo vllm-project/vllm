@@ -384,7 +384,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Capture warmup providers selected while constructing the model.
             with self.jit_warmup_registry.activate():
                 self.model = model_loader.load_model(
-                    vllm_config=self.vllm_config, model_config=self.vllm_config.model_config
+                    vllm_config=self.vllm_config,
+                    model_config=self.vllm_config.model_config,
                 )
             if self.lora_config:
                 self.model = self.load_lora_model(

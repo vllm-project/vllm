@@ -11,7 +11,6 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
-    WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
